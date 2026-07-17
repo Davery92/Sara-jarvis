@@ -9,6 +9,8 @@ from datetime import datetime
 from typing import Dict, Optional
 from dataclasses import dataclass, asdict
 
+from app.core.timezone import now as local_now
+
 logger = logging.getLogger(__name__)
 
 # Allentown, PA coordinates (hardcoded)
@@ -195,7 +197,7 @@ class WeatherService:
             location=LOCATION_NAME,
             current=current_weather,
             forecast=forecasts,
-            fetched_at=datetime.now().isoformat()
+            fetched_at=local_now().isoformat()
         )
 
     def _parse_free_api_response(self, current_data: Dict, forecast_data: Optional[Dict]) -> WeatherData:
@@ -268,7 +270,7 @@ class WeatherService:
             location=LOCATION_NAME,
             current=current_weather,
             forecast=forecasts,
-            fetched_at=datetime.now().isoformat()
+            fetched_at=local_now().isoformat()
         )
 
     def format_for_brief(self, weather: WeatherData) -> str:

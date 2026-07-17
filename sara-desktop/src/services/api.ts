@@ -89,27 +89,57 @@ class ApiClient {
   }
 
   async streamChat(
-    message: string,
+    messagesOrText: string | Array<{ role: string; content: string }>,
     onChunk: (chunk: string) => void,
     onComplete: () => void,
-    onToolActivity?: (tool: string) => void
+    onToolActivity?: (tool: string) => void,
+    onUiCommand?: (command: { action: string; overlay?: string; screen?: string; payload?: any }) => void
   ): Promise<void> {
     const token = await this.getToken()
 
-    const response = await fetch(`${this.baseUrl}/chat/stream`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
-      },
-      credentials: 'include',  // Send cookies for auth
-      body: JSON.stringify({
-        messages: [{ role: 'user', content: message }]
-      }),
-    })
+    // Backward-compat: a single string becomes a one-turn user message;
+    // anything else is treated as the full conversation history.
+    const messages =
+      typeof messagesOrText === 'string'
+        ? [{ role: 'user', content: messagesOrText }]
+        : messagesOrText
+
+    let response: Response
+    try {
+      response = await fetch(`${this.baseUrl}/chat/stream`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+        },
+        credentials: 'include',  // Send cookies for auth
+        body: JSON.stringify({ messages }),
+      })
+    } catch (networkError) {
+      // fetch() itself throws (never got an HTTP response at all) when the
+      // configured backend URL is wrong or unreachable — distinct from a
+      // 401/500, and the single most common "chat just errors" cause, so
+      // name it explicitly rather than letting a generic catch swallow it.
+      throw new Error(`Can't reach ${this.baseUrl} — check the API URL in Settings.`)
+    }
 
     if (!response.ok) {
-      throw new Error(`Chat request failed: ${response.status}`)
+      if (response.status === 401) {
+        // Stored token is expired/rejected — surface the same re-login
+        // prompt the sidecar's WS-rejection path already triggers, instead
+        // of leaving the user staring at a generic error bubble with no
+        // path forward.
+        window.electronAPI?.notifyAuthInvalid()
+        throw new Error('Your session expired — please log in again.')
+      }
+      let detail = ''
+      try {
+        const body = await response.json()
+        detail = body?.detail ? ` — ${JSON.stringify(body.detail).slice(0, 200)}` : ''
+      } catch {
+        // response body wasn't JSON (or already consumed) — status code alone is still useful
+      }
+      throw new Error(`Chat request failed: ${response.status}${detail}`)
     }
 
     const reader = response.body?.getReader()
@@ -128,7 +158,7 @@ class ApiClient {
         if (done) {
           // Process any remaining buffer
           if (sseBuffer.trim()) {
-            this.processSSEEvent(sseBuffer, onChunk, onComplete, onToolActivity, fullContent)
+            this.processSSEEvent(sseBuffer, onChunk, onComplete, onToolActivity, fullContent, onUiCommand)
           }
           onComplete()
           break
@@ -145,7 +175,7 @@ class ApiClient {
 
         // Process complete events
         for (const part of parts) {
-          const result = this.processSSEEvent(part, onChunk, onComplete, onToolActivity, fullContent)
+          const result = this.processSSEEvent(part, onChunk, onComplete, onToolActivity, fullContent, onUiCommand)
           if (result.done) {
             return
           }
@@ -164,7 +194,8 @@ class ApiClient {
     onChunk: (chunk: string) => void,
     onComplete: () => void,
     onToolActivity?: (tool: string) => void,
-    currentContent: string = ''
+    currentContent: string = '',
+    onUiCommand?: (command: { action: string; overlay?: string; screen?: string; payload?: any }) => void
   ): { done: boolean; content?: string } {
     // Find the data line
     const lines = eventData.split('\n')
@@ -223,6 +254,14 @@ class ApiClient {
           // Processing status
           return { done: false }
 
+        case 'ui_command':
+          // Backend intercepted a "bring up my X" phrase — open the overlay
+          // instead of guessing from response text.
+          if (onUiCommand && parsed.data) {
+            onUiCommand(parsed.data)
+          }
+          return { done: false }
+
         case 'done':
           onComplete()
           return { done: true }
@@ -253,58 +292,6 @@ class ApiClient {
       }
       return { done: false }
     }
-  }
-
-  async transcribe(audioBlob: Blob): Promise<string> {
-    const token = await this.getToken()
-
-    const formData = new FormData()
-    formData.append('audio', audioBlob, 'recording.webm')
-
-    const response = await fetch(`${this.baseUrl}/api/voice-agent/transcribe`, {
-      method: 'POST',
-      headers: {
-        ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
-      },
-      body: formData,
-    })
-
-    if (!response.ok) {
-      throw new Error(`Transcription failed: ${response.status}`)
-    }
-
-    const data = await response.json()
-    return data.transcription || data.text || ''
-  }
-
-  async speak(text: string): Promise<ArrayBuffer> {
-    console.log('[API] speak() called, text length:', text.length)
-    const token = await this.getToken()
-    console.log('[API] speak() token present:', !!token)
-
-    const url = `${this.baseUrl}/api/voice-agent/speak`
-    console.log('[API] speak() URL:', url)
-
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
-      },
-      body: JSON.stringify({ text }),
-    })
-
-    console.log('[API] speak() response status:', response.status)
-
-    if (!response.ok) {
-      const errorText = await response.text()
-      console.error('[API] speak() error response:', errorText)
-      throw new Error(`TTS failed: ${response.status} - ${errorText}`)
-    }
-
-    const buffer = await response.arrayBuffer()
-    console.log('[API] speak() got buffer, size:', buffer.byteLength)
-    return buffer
   }
 
   async getNotes(): Promise<Array<{ id: string; title: string; content: string }>> {
@@ -422,6 +409,78 @@ class ApiClient {
     } catch (e) {
       console.error('[ApiClient] getActiveTimers error:', e)
       return []
+    }
+  }
+
+  async getAttentionCount(): Promise<number> {
+    try {
+      const headers = await this.getHeaders()
+      const response = await fetch(`${this.baseUrl}/autonomy/attention/count`, { headers, credentials: 'include' })
+      if (!response.ok) return 0
+      const data = await response.json()
+      return data.unread || 0
+    } catch {
+      return 0
+    }
+  }
+
+  async getNextCalendarEvent(): Promise<{ title: string; start_time: string; all_day: boolean } | null> {
+    try {
+      const headers = await this.getHeaders()
+      const now = new Date()
+      const start = now.toISOString()
+      const end = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59).toISOString()
+      const response = await fetch(`${this.baseUrl}/calendar/events?start_date=${start}&end_date=${end}`, {
+        headers,
+        credentials: 'include',
+      })
+      if (!response.ok) return null
+      const events = await response.json()
+      if (!Array.isArray(events) || events.length === 0) return null
+      return events[0]
+    } catch {
+      return null
+    }
+  }
+
+  async getSaraStatusLine(): Promise<string | null> {
+    try {
+      const headers = await this.getHeaders()
+      const response = await fetch(`${this.baseUrl}/api/sara/status`, { headers, credentials: 'include' })
+      if (!response.ok) return null
+      const data = await response.json()
+      return data.latest_thought || null
+    } catch {
+      return null
+    }
+  }
+
+  async setVoiceListening(enabled: boolean): Promise<boolean> {
+    try {
+      const headers = await this.getHeaders()
+      const response = await fetch(`${this.baseUrl}/api/sensory/voice-agent/listening`, {
+        method: 'POST',
+        headers,
+        credentials: 'include',
+        body: JSON.stringify({ enabled }),
+      })
+      if (!response.ok) return false
+      const data = await response.json()
+      return data.listening_enabled ?? enabled
+    } catch {
+      return false
+    }
+  }
+
+  async getVoiceListening(): Promise<boolean> {
+    try {
+      const headers = await this.getHeaders()
+      const response = await fetch(`${this.baseUrl}/api/sensory/voice-agent/listening`, { headers, credentials: 'include' })
+      if (!response.ok) return true
+      const data = await response.json()
+      return data.listening_enabled ?? true
+    } catch {
+      return true
     }
   }
 }

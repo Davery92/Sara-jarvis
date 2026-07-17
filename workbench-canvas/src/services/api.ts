@@ -102,6 +102,66 @@ export const notesApi = {
   },
 }
 
+export interface WorkspaceDocument {
+  id: string
+  filename: string
+  original_filename: string
+  title: string
+  file_size: number
+  mime_type: string
+  content_text: string
+  is_processed: string
+  created_at: string
+  updated_at: string
+}
+
+export interface WorkspaceDocumentSearchResult {
+  document_id: string
+  filename?: string
+  original_filename?: string
+  title?: string
+  chunk_text?: string
+  similarity?: number
+  relevance_score?: number
+}
+
+export const documentsApi = {
+  upload: async (file: File, chatContext = false): Promise<WorkspaceDocument> => {
+    const formData = new FormData()
+    formData.append('file', file)
+    const response = await api.post<WorkspaceDocument>('/documents', formData, {
+      params: { chat_context: chatContext },
+      headers: {
+        'Content-Type': 'multipart/form-data',
+      },
+    })
+    return response.data
+  },
+
+  list: async (): Promise<WorkspaceDocument[]> => {
+    const response = await api.get<WorkspaceDocument[]>('/documents')
+    return response.data || []
+  },
+
+  search: async (query: string, limit = 20): Promise<WorkspaceDocumentSearchResult[]> => {
+    const response = await api.get<{ query: string; count: number; results: WorkspaceDocumentSearchResult[] }>('/documents/search', {
+      params: { query, limit },
+    })
+    return response.data?.results || []
+  },
+
+  updateTitle: async (documentId: string, title: string): Promise<WorkspaceDocument> => {
+    const response = await api.put<WorkspaceDocument>(`/documents/${documentId}`, null, {
+      params: { title },
+    })
+    return response.data
+  },
+
+  getDownloadUrl: (documentId: string): string => {
+    return `${APP_CONFIG.apiUrl}/documents/${documentId}/file`
+  },
+}
+
 // Folder types
 export interface Folder {
   id: string
@@ -177,9 +237,16 @@ export interface ChatModelsResponse {
   default: string
 }
 
+export interface WorkspaceContext {
+  open_windows: { type: string; title: string }[]
+  active_scene: string | null
+  window_count: number
+}
+
 export interface ChatOptions {
   model?: string
   ephemeral?: boolean
+  workspace_context?: WorkspaceContext
 }
 
 // Chat functions with SSE streaming
@@ -207,6 +274,7 @@ export const chatApi = {
         model: options?.model,
         ephemeral: options?.ephemeral,
         source: 'workspace', // Identify as workspace chat for context-aware tools
+        ...(options?.workspace_context ? { workspace_context: options.workspace_context } : {}),
       }),
       signal,
       credentials: 'include', // Include cookies for auth
@@ -333,6 +401,8 @@ export interface Device {
   last_heartbeat_at: string | null
 }
 
+export interface AutonomyFlags {}
+
 // Settings functions
 export const settingsApi = {
   getAI: async (): Promise<AISettings> => {
@@ -373,6 +443,11 @@ export const settingsApi = {
   removeDevice: async (deviceId: string): Promise<void> => {
     await api.delete(`/api/devices/${encodeURIComponent(deviceId)}`)
   },
+
+  getAutonomyFlags: async (): Promise<AutonomyFlags> => {
+    const response = await api.get<AutonomyFlags>('/api/settings/autonomy-flags')
+    return response.data
+  },
 }
 
 // Fitness types
@@ -382,6 +457,7 @@ export interface FoodLogEntry {
   food_name: string
   meal_type: 'breakfast' | 'lunch' | 'dinner' | 'snack'
   servings: number
+  serving_unit?: string
   calories: number
   protein: number
   carbs: number
@@ -485,6 +561,7 @@ function transformFoodLog(raw: RawFoodLogEntry): FoodLogEntry {
     food_name: firstItem?.name || 'Unknown',
     meal_type: raw.meal_type,
     servings: firstItem?.quantity || 1,
+    serving_unit: firstItem?.unit || 'serving',
     calories: raw.calories || 0,
     protein: raw.protein || 0,
     carbs: raw.carbs || 0,
@@ -511,13 +588,24 @@ export const fitnessApi = {
   },
 
   logFood: async (data: {
-    food_id: string
     meal_type: string
-    servings: number
+    food_items: { name: string; quantity: number; unit: string }[]
+    calories?: number
+    protein?: number
+    carbs?: number
+    fats?: number
+    notes?: string
     logged_at?: string
   }): Promise<FoodLogEntry> => {
-    const response = await api.post<FoodLogEntry>('/api/fitness/food-log', data)
-    return response.data
+    const response = await api.post('/api/fitness/food-log', data)
+    // Transform the raw response
+    const raw = response.data as RawFoodLogEntry
+    return transformFoodLog(raw)
+  },
+
+  getRecentFoods: async (limit = 20): Promise<{ name: string; calories: number; protein: number; carbs: number; fats: number; unit: string }[]> => {
+    const response = await api.get(`/api/fitness/food-log/recent-foods?limit=${limit}`)
+    return response.data || []
   },
 
   deleteFoodLog: async (id: string): Promise<void> => {
@@ -780,11 +868,29 @@ export interface VisibleMapState {
   collapsed: boolean
 }
 
+export interface WorkspaceSceneState {
+  id: string
+  name: string
+  description?: string
+  windows: Array<{
+    type: string
+    title: string
+    position: { x: number; y: number }
+    size: { width: number; height: number }
+    data: any
+  }>
+  transform: CanvasTransform
+  isBuiltIn: boolean
+  suggestedTimePeriods?: string[]
+}
+
 export interface WorkspaceStateData {
   transform: CanvasTransform
   windows: WindowState[]
   sceneObjects?: SceneObjectState[]
   visibleMaps?: VisibleMapState[]
+  scenes?: WorkspaceSceneState[]
+  activeSceneId?: string | null
 }
 
 export interface WorkspaceStateResponse {
@@ -793,6 +899,51 @@ export interface WorkspaceStateResponse {
   state_data: WorkspaceStateData | null
   created_at: string | null
   updated_at: string | null
+}
+
+export interface WorkspacePartnerWindow {
+  id?: string
+  type: string
+  title?: string
+  z_index?: number
+  data?: Record<string, any>
+}
+
+export interface WorkspacePartnerAction {
+  type: string
+  target?: string
+  query?: string
+  window_type?: string
+  at?: string
+}
+
+export interface WorkspacePartnerContextUpdate {
+  session_id: string
+  active: boolean
+  focused_window_id?: string
+  focused_window_type?: string
+  active_scene_id?: string | null
+  windows: WorkspacePartnerWindow[]
+  map_count: number
+  recent_actions: WorkspacePartnerAction[]
+  transform?: { x: number; y: number; scale: number }
+  client_timestamp?: string
+}
+
+export interface WorkspacePartnerThought {
+  id: string
+  text: string
+  priority?: number
+  source?: string
+  action?: { label?: string; command?: Record<string, any> }
+}
+
+export interface WorkspacePartnerThoughtsResponse {
+  active: boolean
+  session_id?: string
+  generated_at?: string
+  thoughts: WorkspacePartnerThought[]
+  reason?: string
 }
 
 // Workspace State functions
@@ -816,6 +967,19 @@ export const workspaceApi = {
   // Get pending workspace commands from voice/non-SSE sources
   getPendingCommands: async (): Promise<{ commands: any[]; count: number }> => {
     const response = await api.get<{ commands: any[]; count: number }>('/api/workspace/pending-commands')
+    return response.data
+  },
+
+  updatePartnerContext: async (payload: WorkspacePartnerContextUpdate): Promise<{ success: boolean; active: boolean; updated_at?: string; error?: string }> => {
+    const response = await api.post<{ success: boolean; active: boolean; updated_at?: string; error?: string }>(
+      '/api/workspace/partner-context',
+      payload
+    )
+    return response.data
+  },
+
+  getPartnerThoughts: async (): Promise<WorkspacePartnerThoughtsResponse> => {
+    const response = await api.get<WorkspacePartnerThoughtsResponse>('/api/workspace/partner-thoughts')
     return response.data
   },
 }
@@ -1120,6 +1284,64 @@ export const researchApi = {
       query,
       content,
       sources,
+    })
+    return response.data
+  },
+}
+
+// Sara status API
+export const saraApi = {
+  getStatus: async (): Promise<any> => {
+    const response = await api.get('/api/sara/status')
+    return response.data
+  },
+
+  getBrief: async (): Promise<any> => {
+    const response = await api.get('/api/sara/brief')
+    return response.data
+  },
+
+  getActivity: async (limit = 10): Promise<any[]> => {
+    const response = await api.get(`/api/sara/activity?limit=${limit}`)
+    return response.data || []
+  },
+}
+
+// Attention items API
+export const attentionApi = {
+  getItems: async (status?: string, limit = 50): Promise<any[]> => {
+    const params = new URLSearchParams()
+    if (status) params.set('status', status)
+    params.set('limit', limit.toString())
+    const response = await api.get(`/autonomy/attention/items?${params}`)
+    return response.data?.items || response.data || []
+  },
+
+  getCount: async (): Promise<{ count: number }> => {
+    const response = await api.get('/autonomy/attention/count')
+    return response.data
+  },
+
+  markRead: async (id: string): Promise<void> => {
+    await api.patch(`/autonomy/attention/${id}/read`)
+  },
+
+  archive: async (id: string): Promise<void> => {
+    await api.patch(`/autonomy/attention/${id}/archive`)
+  },
+
+  archiveAll: async (): Promise<void> => {
+    await api.post('/autonomy/attention/archive-all')
+  },
+}
+
+// Voice API
+export const voiceApi = {
+  transcribe: async (audioBlob: Blob): Promise<{ transcription: string; filtered?: boolean }> => {
+    const formData = new FormData()
+    formData.append('file', audioBlob, 'recording.webm')
+    const response = await api.post('/api/pi-dashboard/voice/transcribe', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
     })
     return response.data
   },

@@ -1,0 +1,25 @@
+# Audio Pipeline Worker
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    libsndfile1 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir \
+    grpcio==1.60.0 \
+    grpcio-tools==1.60.0 \
+    httpx==0.26.0 \
+    redis==5.0.1 \
+    soundfile==0.12.1 \
+    numpy==1.26.3 \
+    pydub==0.25.1
+
+# Install Riva client
+RUN pip install --no-cache-dir nvidia-riva-client==2.14.0
+
+COPY audio_worker.py /app/
+
+CMD ["python", "audio_worker.py"]

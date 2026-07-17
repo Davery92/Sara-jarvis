@@ -111,7 +111,7 @@ interface Food {
   servings?: FoodServing[]
 }
 
-interface SelectedFoodItem extends Food {
+export interface SelectedFoodItem extends Food {
   quantity: number
   selected_serving?: FoodServing
   selected_unit?: string  // User-selected unit for conversion
@@ -146,7 +146,7 @@ export default function FoodItemSelector({ onFoodsSelected, initialFoods = [] }:
   const [showCustomForm, setShowCustomForm] = useState(false)
   const [loadingDetails, setLoadingDetails] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState<'recent' | 'yesterday' | 'recipes'>('recent')
-  const searchTimeout = useRef<NodeJS.Timeout>()
+  const searchTimeout = useRef<ReturnType<typeof setTimeout> | null>(null)
   const dropdownRef = useRef<HTMLDivElement>(null)
 
   // Load recent foods, yesterday's foods, and recipes on mount

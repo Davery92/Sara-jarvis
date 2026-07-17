@@ -18,21 +18,11 @@ from .chat import (
     UserSettings, ImageContent, TextContent,
     ChatMessage, ChatRequest, ChatResponse
 )
-from .documents import DocumentResponse, DocumentChunkResponse
+from .documents import DocumentResponse, Model3DResponse, DocumentChunkResponse
 from .memory import (
     ConversationResponse, ConversationTurnResponse,
     EpisodeMessageResponse, ConversationSummaryResponse,
     SetActiveConversationRequest
-)
-from .habits import (
-    HabitCreate, HabitResponse,
-    HabitItemCreate, HabitItemResponse,
-    HabitInstanceResponse, HabitTodayStats, HabitTodayResponse,
-    HabitInsightsOverview, HabitInsightsWeeklyStats,
-    HabitInsightsPerformance, HabitInsightsPatterns, HabitInsightsResponse,
-    HabitLogCreate, HabitLogResponse,
-    HabitStreakResponse, HabitLinkCreate, HabitLinkResponse,
-    HabitPauseRequest
 )
 from .insights import (
     UserProfileCreate, UserProfileResponse,
@@ -58,20 +48,11 @@ __all__ = [
     "UserSettings", "ImageContent", "TextContent",
     "ChatMessage", "ChatRequest", "ChatResponse",
     # Documents
-    "DocumentResponse", "DocumentChunkResponse",
+    "DocumentResponse", "Model3DResponse", "DocumentChunkResponse",
     # Memory
     "ConversationResponse", "ConversationTurnResponse",
     "EpisodeMessageResponse", "ConversationSummaryResponse",
     "SetActiveConversationRequest",
-    # Habits
-    "HabitCreate", "HabitResponse",
-    "HabitItemCreate", "HabitItemResponse",
-    "HabitInstanceResponse", "HabitTodayStats", "HabitTodayResponse",
-    "HabitInsightsOverview", "HabitInsightsWeeklyStats",
-    "HabitInsightsPerformance", "HabitInsightsPatterns", "HabitInsightsResponse",
-    "HabitLogCreate", "HabitLogResponse",
-    "HabitStreakResponse", "HabitLinkCreate", "HabitLinkResponse",
-    "HabitPauseRequest",
     # Insights
     "UserProfileCreate", "UserProfileResponse",
     "AutonomousInsightResponse", "InsightFeedbackRequest",

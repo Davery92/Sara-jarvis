@@ -7,7 +7,7 @@ Workers have READ-ONLY access to Sara's data and can write to the agent workspac
 
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
@@ -171,7 +171,7 @@ class WorkerToolExecutor:
                 user_id=self.user_id,
                 folder_id=self.workspace_folder_id,
                 title=f"📝 {title}",
-                content=f"*Agent note - {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}*\n\n{content}"
+                content=f"*Agent note - {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}*\n\n{content}"
             )
 
             self.db.add(note)

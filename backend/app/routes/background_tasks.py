@@ -36,9 +36,11 @@ class TaskResponse(BaseModel):
     workspace_folder_id: Optional[str] = None
     clarification_question: Optional[str] = None
     error_message: Optional[str] = None
+    status_label: Optional[str] = None  # friendly current-step label (e.g. code mode: "editing mul.py")
     created_at: str
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
+    updated_at: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -61,9 +63,11 @@ def _task_to_response(task) -> TaskResponse:
         workspace_folder_id=task.workspace_folder_id,
         clarification_question=task.clarification_question,
         error_message=task.error_message,
+        status_label=(task.task_metadata or {}).get("status_label"),
         created_at=task.created_at.isoformat() if task.created_at else None,
         started_at=task.started_at.isoformat() if task.started_at else None,
-        completed_at=task.completed_at.isoformat() if task.completed_at else None
+        completed_at=task.completed_at.isoformat() if task.completed_at else None,
+        updated_at=task.updated_at.isoformat() if getattr(task, 'updated_at', None) else None
     )
 
 

@@ -1,11 +1,9 @@
 import React from 'react';
-import { Text } from 'react-native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
-import HomeScreen from '../screens/home/HomeScreen';
-import ChatScreen from '../screens/chat/ChatScreen';
-import NotesListScreen from '../screens/notes/NotesListScreen';
+import { Ionicons } from '@expo/vector-icons';
+import SaraScreen from '../screens/sara/SaraScreen';
+import AssistantInboxScreen from '../screens/inbox/AssistantInboxScreen';
 import FitnessScreen from '../screens/fitness/FitnessScreen';
-import LearningScreen from '../screens/learning/LearningScreen';
 import MoreScreen from '../screens/more/MoreScreen';
 import CustomTabBar from '../components/CustomTabBar';
 import { MainTabParamList } from '../types/navigation';
@@ -29,48 +27,27 @@ export default function MainNavigator() {
       }}
     >
       <Tab.Screen
-        name="Home"
-        component={HomeScreen}
+        name="Sara"
+        component={SaraScreen}
         options={{
-          title: 'Home',
-          tabBarLabel: 'Home',
-          tabBarIcon: ({ color, size }) => (
-            <TabBarIcon name="🏠" color={color} size={size} />
-          ),
-        }}
-      />
-      <Tab.Screen
-        name="Chat"
-        component={ChatScreen}
-        options={{
-          title: 'Chat with Sara',
-          tabBarLabel: 'Chat',
-          tabBarIcon: ({ color, size }) => (
-            <TabBarIcon name="💬" color={color} size={size} />
-          ),
-        }}
-      />
-      <Tab.Screen
-        name="Notes"
-        component={NotesListScreen}
-        options={{
-          title: 'Notes',
-          tabBarLabel: 'Notes',
-          tabBarIcon: ({ color, size }) => (
-            <TabBarIcon name="📝" color={color} size={size} />
-          ),
-        }}
-      />
-      <Tab.Screen
-        name="Learning"
-        component={LearningScreen}
-        options={{
-          title: 'Learning',
-          tabBarLabel: 'Learn',
-          tabBarIcon: ({ color, size }) => (
-            <TabBarIcon name="📚" color={color} size={size} />
-          ),
+          title: 'Sara',
           headerShown: false,
+          tabBarLabel: 'Sara',
+          tabBarIcon: ({ color, size }) => (
+            <TabBarIcon name="sparkles" color={color} size={size} />
+          ),
+        }}
+      />
+      <Tab.Screen
+        name="AssistantInboxTab"
+        component={AssistantInboxScreen}
+        options={{
+          title: 'Inbox',
+          headerShown: false,
+          tabBarLabel: 'Inbox',
+          tabBarIcon: ({ color, size }) => (
+            <TabBarIcon name="file-tray-full-outline" color={color} size={size} />
+          ),
         }}
       />
       <Tab.Screen
@@ -79,8 +56,8 @@ export default function MainNavigator() {
         options={{
           title: 'Fitness',
           tabBarLabel: 'Fitness',
-          tabBarIcon: ({ color, size}) => (
-            <TabBarIcon name="💪" color={color} size={size} />
+          tabBarIcon: ({ color, size }) => (
+            <TabBarIcon name="barbell-outline" color={color} size={size} />
           ),
         }}
       />
@@ -91,7 +68,7 @@ export default function MainNavigator() {
           title: 'More',
           tabBarLabel: 'More',
           tabBarIcon: ({ color, size }) => (
-            <TabBarIcon name="⋯" color={color} size={size} />
+            <TabBarIcon name="grid-outline" color={color} size={size} />
           ),
         }}
       />
@@ -99,17 +76,16 @@ export default function MainNavigator() {
   );
 }
 
-// Simple emoji icon component
-function TabBarIcon({ name, color, size }: { name: string; color: string; size: number }) {
-  const isActive = color === colors.primary;
+function TabBarIcon({
+  name,
+  color,
+  size,
+}: {
+  name: React.ComponentProps<typeof Ionicons>['name'];
+  color: string;
+  size: number;
+}) {
   return (
-    <Text style={{
-      fontSize: 36,
-      opacity: isActive ? 1 : 0.5,
-      textAlign: 'center',
-      lineHeight: 40,
-    }}>
-      {name}
-    </Text>
+    <Ionicons name={name} color={color} size={size} />
   );
 }

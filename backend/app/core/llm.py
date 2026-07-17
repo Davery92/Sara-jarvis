@@ -13,6 +13,7 @@ import asyncio
 import httpx
 import json
 import logging
+import time
 from datetime import datetime
 from enum import Enum
 from dataclasses import dataclass, field
@@ -21,6 +22,41 @@ from typing import Dict, List, Any, Optional, Callable
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+def _load_persisted_ai_setting_overrides() -> Dict[str, str]:
+    """
+    Load persisted AI settings from app_settings.
+
+    Background workers (e.g., Celery) don't run the FastAPI startup hook that
+    hydrates runtime globals from the DB, so they can drift back to defaults.
+    Reading app_settings here keeps model selection consistent across processes.
+    """
+    try:
+        from sqlalchemy import text
+        from app.db.session import SessionLocal
+
+        db = SessionLocal()
+        try:
+            rows = db.execute(text("""
+                SELECT key, value
+                FROM app_settings
+                WHERE key IN (
+                    'bg_llm_primary_url',
+                    'bg_llm_primary_model',
+                    'bg_llm_fallback_url',
+                    'bg_llm_fallback_model',
+                    'bg_llm_request_timeout',
+                    'bg_llm_connect_timeout',
+                    'bg_llm_num_ctx'
+                )
+            """)).fetchall()
+            return {row[0]: row[1] for row in rows}
+        finally:
+            db.close()
+    except Exception as e:
+        logger.debug(f"Could not load persisted AI setting overrides: {e}")
+        return {}
 
 # Global callback for token usage logging (set by application)
 _token_usage_callback: Optional[Callable] = None
@@ -80,6 +116,7 @@ class LLMClientWithFailover:
         self.primary_url = settings.llm_primary_url
         self.fallback_url = settings.llm_fallback_url
         self.model = settings.openai_model
+        self.fallback_model = getattr(settings, 'llm_fallback_model', None) or self.model
         self.api_key = settings.openai_api_key
 
         # Timeout configuration
@@ -172,15 +209,20 @@ class LLMClientWithFailover:
 
     async def _health_check_loop(self):
         """Background loop for periodic health checks on primary endpoint"""
-        while self._running:
-            try:
-                await self._check_primary_health()
-                await asyncio.sleep(self.health_check_interval)
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Health check loop error: {e}")
-                await asyncio.sleep(self.health_check_interval)
+        # Reuse a single client to avoid connection churn
+        self._health_client = httpx.AsyncClient(timeout=self.health_check_timeout)
+        try:
+            while self._running:
+                try:
+                    await self._check_primary_health()
+                    await asyncio.sleep(self.health_check_interval)
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    logger.error(f"Health check loop error: {e}")
+                    await asyncio.sleep(self.health_check_interval)
+        finally:
+            await self._health_client.aclose()
 
     async def _check_primary_health(self):
         """Check primary endpoint health via /v1/models endpoint"""
@@ -188,13 +230,11 @@ class LLMClientWithFailover:
         previous_state = self.primary_status.state
 
         try:
-            # Use a separate client with short timeout for health checks
-            async with httpx.AsyncClient(timeout=self.health_check_timeout) as client:
-                response = await client.get(
-                    f"{self.primary_url}/models",
-                    headers=self._get_headers(self.primary_url)
-                )
-                response.raise_for_status()
+            response = await self._health_client.get(
+                f"{self.primary_url}/models",
+                headers=self._get_headers(self.primary_url)
+            )
+            response.raise_for_status()
 
             # Success
             self.primary_status.consecutive_failures = 0
@@ -251,7 +291,9 @@ class LLMClientWithFailover:
         tools: Optional[List[Dict]] = None,
         tool_choice: str = "auto",
         temperature: float = 0.7,
-        max_tokens: Optional[int] = None
+        max_tokens: Optional[int] = None,
+        timeout: Optional[float] = None,
+        extra_body: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
         Send chat completion with automatic failover.
@@ -270,7 +312,9 @@ class LLMClientWithFailover:
             )
 
         client, url = self._get_active_client_and_url()
-        payload = self._build_payload(messages, tools, tool_choice, temperature, max_tokens)
+        model_for_url = self.fallback_model if url == self.fallback_url else None
+        payload = self._build_payload(messages, tools, tool_choice, temperature, max_tokens, model_override=model_for_url, extra_body=extra_body)
+        req_timeout = timeout or self.request_timeout
 
         try:
             # Track request count for the endpoint being used
@@ -279,7 +323,7 @@ class LLMClientWithFailover:
             else:
                 self.fallback_status.total_requests += 1
 
-            response = await client.post("/chat/completions", json=payload)
+            response = await client.post("/chat/completions", json=payload, timeout=req_timeout)
             response.raise_for_status()
 
             result = response.json()
@@ -307,7 +351,11 @@ class LLMClientWithFailover:
                     self.primary_status.failover_events += 1
                     self.fallback_status.total_requests += 1
 
-                    response = await self._fallback_client.post("/chat/completions", json=payload)
+                    fallback_payload = self._build_payload(
+                        messages, tools, tool_choice, temperature, max_tokens,
+                        model_override=self.fallback_model, extra_body=extra_body
+                    )
+                    response = await self._fallback_client.post("/chat/completions", json=fallback_payload, timeout=req_timeout)
                     response.raise_for_status()
 
                     result = response.json()
@@ -335,11 +383,13 @@ class LLMClientWithFailover:
         tools: Optional[List[Dict]],
         tool_choice: str,
         temperature: float,
-        max_tokens: Optional[int]
+        max_tokens: Optional[int],
+        model_override: Optional[str] = None,
+        extra_body: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """Build request payload for OpenAI-compatible endpoint"""
         payload = {
-            "model": self.model,
+            "model": model_override or self.model,
             "messages": messages,
             "temperature": temperature,
         }
@@ -350,6 +400,9 @@ class LLMClientWithFailover:
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = tool_choice
+
+        if extra_body:
+            payload.update(extra_body)
 
         return payload
 
@@ -397,9 +450,17 @@ class LLMClientWithFailover:
         payload = {
             "model": self.model,
             "messages": filtered_messages,
-            "temperature": temperature,
             "max_tokens": max_tokens or 4096,
         }
+
+        # Reasoning-only Claude models (Sonnet 5, Opus 4.7/4.8, Fable 5) 400 on
+        # `temperature`; only include it for models that accept sampling params.
+        from app.core.text_utils import claude_rejects_sampling_params, claude_thinking_always_on
+        if claude_rejects_sampling_params(self.model):
+            if not claude_thinking_always_on(self.model):
+                payload["thinking"] = {"type": "disabled"}
+        else:
+            payload["temperature"] = temperature
 
         if system_content:
             payload["system"] = system_content
@@ -528,21 +589,35 @@ class LLMClientWithFailover:
         if not emb_base.endswith("/v1"):
             emb_base = emb_base + "/v1"
 
-        # Local Ollama endpoints don't require auth - skip header if api_key is empty
-        embedding_client = httpx.AsyncClient(
-            base_url=emb_base,
-            headers=self._get_headers(emb_base, skip_auth_if_empty=True),
-            timeout=60.0
-        )
+        # NOTE: routed through sync `requests` in a thread to dodge the httpx 0.25 +
+        # uvicorn ConnectError bug (see embedding_service.py for details).
+        import asyncio
+        import requests
 
+        headers = self._get_headers(emb_base, skip_auth_if_empty=True)
         payload = {
             "model": model or settings.embedding_model,
-            "input": text
+            "input": text,
         }
+        url = f"{emb_base}/embeddings"
+
+        def _post():
+            return requests.post(url, json=payload, headers=headers, timeout=60)
 
         try:
             logger.debug(f"Getting embedding for text: {text[:100]}...")
-            response = await embedding_client.post("/embeddings", json=payload)
+            response = None
+            last_exc: Optional[Exception] = None
+            for attempt in range(3):
+                try:
+                    response = await asyncio.to_thread(_post)
+                    break
+                except (requests.ConnectionError, requests.Timeout) as e:
+                    last_exc = e
+                    if attempt < 2:
+                        await asyncio.sleep(0.3 * (attempt + 1))
+            if response is None:
+                raise last_exc or RuntimeError("embedding request failed")
             response.raise_for_status()
 
             result = response.json()
@@ -569,16 +644,13 @@ class LLMClientWithFailover:
                         exc_info=True
                     )
 
-            await embedding_client.aclose()
             return embedding
 
-        except httpx.HTTPError as e:
+        except requests.HTTPError as e:
             logger.error(f"HTTP error in embedding: {e}")
-            await embedding_client.aclose()
             raise
         except Exception as e:
-            logger.error(f"Unexpected error in embedding: {e}")
-            await embedding_client.aclose()
+            logger.error(f"Unexpected error in embedding [{type(e).__name__}]: {e}")
             raise
 
     async def score_importance(self, content: str) -> float:
@@ -663,41 +735,245 @@ class BackgroundLLMClient:
     """
 
     def __init__(self):
-        self.primary_url = settings.bg_llm_primary_url
-        self.primary_model = settings.bg_llm_primary_model
-        self.fallback_url = settings.bg_llm_fallback_url
-        self.fallback_model = settings.bg_llm_fallback_model
+        self._load_config_from_settings()
 
         # HTTP clients (lazy initialization)
         self._primary_client: Optional[httpx.AsyncClient] = None
         self._fallback_client: Optional[httpx.AsyncClient] = None
         self._started = False
+        self._lesson_lock_group = "lesson_generation"
+        self._lesson_lock_poll_seconds = 5.0
+        self._lesson_lock_log_interval_seconds = 60.0
+
+    def _load_config_from_settings(self):
+        """Load current background LLM configuration from runtime settings."""
+        # Start from in-memory settings.
+        primary_url = settings.bg_llm_primary_url
+        primary_model = settings.bg_llm_primary_model
+        fallback_url = settings.bg_llm_fallback_url
+        fallback_model = settings.bg_llm_fallback_model
+        request_timeout = settings.bg_llm_request_timeout
+        connect_timeout = settings.bg_llm_connect_timeout
+        num_ctx = settings.bg_llm_num_ctx
+
+        # Override from persisted DB settings when available (important for
+        # Celery/background processes that don't run FastAPI startup hydration).
+        persisted = _load_persisted_ai_setting_overrides()
+        if persisted:
+            primary_url = persisted.get("bg_llm_primary_url", primary_url)
+            primary_model = persisted.get("bg_llm_primary_model", primary_model)
+            fallback_url = persisted.get("bg_llm_fallback_url", fallback_url)
+            fallback_model = persisted.get("bg_llm_fallback_model", fallback_model)
+            request_timeout = persisted.get("bg_llm_request_timeout", request_timeout)
+            connect_timeout = persisted.get("bg_llm_connect_timeout", connect_timeout)
+            num_ctx = persisted.get("bg_llm_num_ctx", num_ctx)
+
+            # Keep process-local settings object aligned so other code reading
+            # from settings sees the same values.
+            settings.bg_llm_primary_url = str(primary_url)
+            settings.bg_llm_primary_model = str(primary_model)
+            settings.bg_llm_fallback_url = str(fallback_url)
+            settings.bg_llm_fallback_model = str(fallback_model)
+            settings.bg_llm_request_timeout = float(request_timeout)
+            settings.bg_llm_connect_timeout = float(connect_timeout)
+            settings.bg_llm_num_ctx = int(num_ctx)
+
+        self.primary_url = str(primary_url)
+        self.primary_model = str(primary_model)
+        self.fallback_url = str(fallback_url)
+        self.fallback_model = str(fallback_model)
+        self.request_timeout = max(10.0, float(request_timeout))
+        self.connect_timeout = max(1.0, float(connect_timeout))
+        self.default_num_ctx = max(2048, int(num_ctx))
+        self.fallback_max_tokens = int(getattr(settings, 'bg_llm_fallback_max_tokens', 24000))
+
+        # Circuit breaker state
+        self._consecutive_primary_failures = 0
+        self._primary_degraded = False
+        self._primary_degraded_until: Optional[float] = None
+        self._total_requests = 0
+        self._total_failures = 0
+        self._failover_events = 0
+
+    @staticmethod
+    def _estimate_tokens(text: str) -> int:
+        """Rough token estimate: ~4 chars per token for English text."""
+        return len(text) // 4
+
+    def _truncate_messages_for_fallback(
+        self, messages: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Truncate message history to fit within the fallback model's context window.
+
+        Strategy:
+        - Always keep the system prompt (first message)
+        - Always keep the last 6 messages (recent context)
+        - In the middle section, prioritize "high-value" messages:
+          tool results, plan item context, and assistant messages with
+          tool_calls — these contain the actual work product
+        - Drop low-value middle messages oldest-first
+        - If still over budget, truncate the system prompt itself
+        """
+        max_tokens = self.fallback_max_tokens
+
+        def msg_tokens(msg: Dict[str, Any]) -> int:
+            content = msg.get("content") or ""
+            tc = msg.get("tool_calls")
+            tc_text = json.dumps(tc) if tc else ""
+            return self._estimate_tokens(content + tc_text)
+
+        def is_high_value(msg: Dict[str, Any]) -> bool:
+            """Identify messages that carry critical execution context."""
+            role = msg.get("role", "")
+            content = msg.get("content") or ""
+
+            # Tool results contain actual command output / work product
+            if role == "tool":
+                return True
+
+            # Assistant messages with tool_calls show what Sara did
+            if role == "assistant" and msg.get("tool_calls"):
+                return True
+
+            # Messages referencing plan items or execution context
+            if any(kw in content.lower() for kw in (
+                "plan item", "success criteria", "complete_plan_item",
+                "block_plan_item", "execution session",
+            )):
+                return True
+
+            return False
+
+        total = sum(msg_tokens(m) for m in messages)
+        if total <= max_tokens:
+            return messages
+
+        logger.warning(
+            f"Fallback context truncation: {total} estimated tokens > "
+            f"{max_tokens} limit, trimming message history"
+        )
+
+        if not messages:
+            return messages
+
+        # Separate: system prompt, middle messages, recent tail
+        system_msg = messages[0] if messages[0].get("role") == "system" else None
+        start_idx = 1 if system_msg else 0
+        tail_count = min(6, len(messages) - start_idx)
+        middle = messages[start_idx: len(messages) - tail_count] if tail_count > 0 else messages[start_idx:]
+        tail = messages[len(messages) - tail_count:] if tail_count > 0 else []
+
+        # Calculate token budget for middle section
+        system_tokens = msg_tokens(system_msg) if system_msg else 0
+        tail_tokens = sum(msg_tokens(m) for m in tail)
+        middle_budget = max_tokens - system_tokens - tail_tokens
+
+        if middle_budget <= 0:
+            # System + tail already exceeds budget — truncate system prompt
+            if system_msg:
+                system_content = system_msg.get("content", "")
+                available = max_tokens - tail_tokens - 500
+                if available > 0:
+                    char_limit = available * 4
+                    truncated_system = system_content[:char_limit] + "\n\n[System prompt truncated for context limits]"
+                    result = [{"role": "system", "content": truncated_system}] + tail
+                else:
+                    result = tail
+                logger.warning(
+                    f"Fallback truncation: system+tail exceeds budget, "
+                    f"truncated system prompt to ~{available} tokens"
+                )
+                return result
+            return tail
+
+        # Two-pass selection: high-value messages first, then recent low-value
+        high_value = [(i, m) for i, m in enumerate(middle) if is_high_value(m)]
+        low_value = [(i, m) for i, m in enumerate(middle) if not is_high_value(m)]
+
+        kept_indices = set()
+        running_tokens = 0
+
+        # Pass 1: keep high-value messages (most recent first)
+        for i, msg in reversed(high_value):
+            mt = msg_tokens(msg)
+            if running_tokens + mt <= middle_budget:
+                kept_indices.add(i)
+                running_tokens += mt
+
+        # Pass 2: fill remaining budget with low-value messages (most recent first)
+        for i, msg in reversed(low_value):
+            mt = msg_tokens(msg)
+            if running_tokens + mt <= middle_budget:
+                kept_indices.add(i)
+                running_tokens += mt
+
+        kept_middle = [m for i, m in enumerate(middle) if i in kept_indices]
+        dropped = len(middle) - len(kept_middle)
+        hv_kept = sum(1 for i, _ in high_value if i in kept_indices)
+
+        result = []
+        if system_msg:
+            result.append(system_msg)
+        if dropped > 0:
+            result.append({
+                "role": "user",
+                "content": f"[{dropped} earlier messages trimmed for context limits]",
+            })
+        result.extend(kept_middle)
+        result.extend(tail)
+
+        new_total = sum(msg_tokens(m) for m in result)
+        logger.info(
+            f"Fallback truncation complete: {total} → {new_total} estimated tokens, "
+            f"dropped {dropped} middle messages (kept {hv_kept} high-value)"
+        )
+        return result
 
     async def _ensure_started(self):
         """Initialize HTTP clients if not already started"""
         if self._started:
             return
 
+        request_timeout = httpx.Timeout(self.request_timeout, connect=self.connect_timeout)
         self._primary_client = httpx.AsyncClient(
             base_url=self.primary_url,
-            timeout=60.0  # Longer timeout for background tasks
+            timeout=request_timeout
         )
         self._fallback_client = httpx.AsyncClient(
             base_url=self.fallback_url,
-            timeout=60.0
+            timeout=request_timeout
         )
         self._started = True
-        logger.info(
+        logger.debug(
             f"Background LLM client started. Primary: {self.primary_url} ({self.primary_model}), "
-            f"Fallback: {self.fallback_url} ({self.fallback_model})"
+            f"Fallback: {self.fallback_url} ({self.fallback_model}), num_ctx={self.default_num_ctx}, "
+            f"timeouts(connect={self.connect_timeout}s, request={self.request_timeout}s)"
         )
+
+    async def _reset_clients(self):
+        """Tear down and recreate HTTP clients to recover from stale connections."""
+        try:
+            if self._primary_client:
+                await self._primary_client.aclose()
+            if self._fallback_client:
+                await self._fallback_client.aclose()
+        except Exception:
+            pass
+        self._started = False
+        await self._ensure_started()
+        logger.info("Background LLM HTTP clients reset")
 
     async def chat_completion(
         self,
         messages: List[Dict[str, str]],
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
-        model: Optional[str] = None  # Allow override for specific tasks
+        model: Optional[str] = None,  # Allow override for specific tasks
+        options: Optional[Dict[str, Any]] = None,
+        allow_during_lesson_generation: bool = False,
+        allow_fallback: bool = True,
+        request_timeout: Optional[float] = None,
+        extra_body: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Send chat completion with simple failover for background tasks.
@@ -706,7 +982,12 @@ class BackgroundLLMClient:
         1. Try primary model/endpoint first
         2. On failure, fall back to fallback model/endpoint
         """
+        if not allow_during_lesson_generation:
+            await self._wait_for_lesson_generation_window()
+
         await self._ensure_started()
+        req_timeout = float(request_timeout) if request_timeout is not None else float(self.request_timeout)
+        req_timeout = max(10.0, req_timeout)
 
         use_model = model or self.primary_model
         payload = {
@@ -716,33 +997,232 @@ class BackgroundLLMClient:
         }
         if max_tokens:
             payload["max_tokens"] = max_tokens
+        merged_options: Dict[str, Any] = {}
+        if options:
+            merged_options.update(options)
+        if "num_ctx" not in merged_options:
+            merged_options["num_ctx"] = self.default_num_ctx
+        if merged_options:
+            payload["options"] = merged_options
+        if extra_body:
+            payload.update(extra_body)
 
-        try:
-            logger.debug(f"Background LLM request to {self.primary_url} with model {use_model}")
-            response = await self._primary_client.post("/chat/completions", json=payload)
-            response.raise_for_status()
-            result = response.json()
-            logger.debug(f"Background LLM request successful via primary endpoint")
-            return result
+        self._total_requests += 1
 
-        except (httpx.TimeoutException, httpx.HTTPStatusError, httpx.ConnectError) as e:
-            logger.warning(f"Background LLM primary request failed: {e}, trying fallback")
+        # Circuit breaker: check if primary is degraded
+        import time as _time
+        _skip_primary = False
+        if self._primary_degraded and self._primary_degraded_until:
+            if _time.time() < self._primary_degraded_until:
+                _skip_primary = True
+            else:
+                # Recovery window — try primary again
+                self._primary_degraded = False
+                self._primary_degraded_until = None
+                self._consecutive_primary_failures = 0
+                logger.info("Background LLM: primary recovery window, attempting primary again")
 
-            # Try fallback
+        if not _skip_primary:
             try:
-                fallback_payload = {
-                    **payload,
-                    "model": self.fallback_model
-                }
-                logger.debug(f"Background LLM failover to {self.fallback_url} with model {self.fallback_model}")
-                response = await self._fallback_client.post("/chat/completions", json=fallback_payload)
-                response.raise_for_status()
-                result = response.json()
-                logger.info(f"Background LLM failover to {self.fallback_url} successful")
+                logger.debug(f"Background LLM request to {self.primary_url} with model {use_model}")
+                result = await self._request_chat_with_compat(
+                    client=self._primary_client,
+                    payload=payload,
+                    endpoint_url=self.primary_url,
+                    request_timeout=req_timeout,
+                )
+                # Success — reset failure counter
+                self._consecutive_primary_failures = 0
+                if self._primary_degraded:
+                    self._primary_degraded = False
+                    logger.info("Background LLM: primary recovered")
                 return result
-            except Exception as fallback_error:
-                logger.error(f"Background LLM fallback also failed: {fallback_error}")
-                raise
+
+            except (httpx.TimeoutException, httpx.HTTPStatusError, httpx.ConnectError) as e:
+                self._consecutive_primary_failures += 1
+                self._total_failures += 1
+
+                if isinstance(e, httpx.ConnectError):
+                    logger.warning(f"Connection error on primary, resetting HTTP clients: {e}")
+                    await self._reset_clients()
+
+                # Trip circuit breaker after 3 consecutive failures
+                if self._consecutive_primary_failures >= 3 and not self._primary_degraded:
+                    self._primary_degraded = True
+                    self._primary_degraded_until = _time.time() + 300  # 5 min cooldown
+                    self._failover_events += 1
+                    logger.warning(
+                        f"Background LLM: primary degraded after {self._consecutive_primary_failures} "
+                        f"failures, routing to fallback for 5 min"
+                    )
+
+                if not allow_fallback:
+                    logger.warning(f"Background LLM primary failed with fallback disabled ({type(e).__name__}): {e}")
+                    raise
+
+                logger.warning(f"Background LLM primary failed ({type(e).__name__}): {e}, trying fallback")
+        else:
+            # Circuit breaker is open — primary is degraded. If the caller has
+            # opted out of fallback, refuse the request entirely rather than
+            # silently redirecting to the smaller model.
+            if not allow_fallback:
+                logger.warning(
+                    "Background LLM: primary degraded and fallback disabled — refusing request"
+                )
+                raise RuntimeError(
+                    "Background LLM primary is degraded and fallback is disabled"
+                )
+            logger.debug("Background LLM: skipping degraded primary, going straight to fallback")
+
+        # Try fallback — truncate messages to fit smaller context window
+        try:
+            fallback_model = self.fallback_model if model in (None, self.primary_model) else model
+            truncated_messages = self._truncate_messages_for_fallback(
+                payload.get("messages", [])
+            )
+            fallback_payload = {
+                **payload,
+                "model": fallback_model,
+                "messages": truncated_messages,
+            }
+            result = await self._request_chat_with_compat(
+                client=self._fallback_client,
+                payload=fallback_payload,
+                endpoint_url=self.fallback_url,
+                request_timeout=req_timeout,
+            )
+            logger.info(f"Background LLM failover to {self.fallback_url} successful")
+            return result
+        except Exception as fallback_error:
+            self._total_failures += 1
+            logger.error(f"Background LLM fallback also failed: {fallback_error}")
+            raise
+
+    async def _request_chat_with_compat(
+        self,
+        client: httpx.AsyncClient,
+        payload: Dict[str, Any],
+        endpoint_url: str,
+        request_timeout: float,
+    ) -> Dict[str, Any]:
+        """
+        Request chat completion with compatibility fallback.
+
+        Normal path: OpenAI-compatible /chat/completions.
+        Compatibility path: if endpoint returns 404, try Ollama /api/chat
+        and convert response to OpenAI-like schema expected by callers.
+        """
+        try:
+            response = await client.post("/chat/completions", json=payload, timeout=request_timeout)
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code if e.response is not None else None
+            if status == 404:
+                logger.warning(
+                    f"Endpoint {endpoint_url} returned 404 for /chat/completions; "
+                    "trying Ollama compatibility at /api/chat"
+                )
+                return await self._ollama_chat_completion(
+                    client=client,
+                    payload=payload,
+                    request_timeout=request_timeout,
+                )
+            raise
+
+    async def _ollama_chat_completion(
+        self,
+        client: httpx.AsyncClient,
+        payload: Dict[str, Any],
+        request_timeout: float,
+    ) -> Dict[str, Any]:
+        """Call Ollama /api/chat and normalize output to OpenAI schema."""
+        options = dict(payload.get("options") or {})
+        temperature = payload.get("temperature")
+        max_tokens = payload.get("max_tokens")
+        if temperature is not None and "temperature" not in options:
+            options["temperature"] = temperature
+        if max_tokens is not None and "num_predict" not in options:
+            options["num_predict"] = max_tokens
+
+        ollama_payload: Dict[str, Any] = {
+            "model": payload.get("model"),
+            "messages": payload.get("messages", []),
+            "stream": False,
+        }
+        if options:
+            ollama_payload["options"] = options
+
+        response = await client.post("/api/chat", json=ollama_payload, timeout=request_timeout)
+        response.raise_for_status()
+        raw = response.json()
+
+        message = raw.get("message") if isinstance(raw, dict) else {}
+        content = ""
+        if isinstance(message, dict):
+            content = str(message.get("content") or "").strip()
+        if not content:
+            content = str(raw.get("response") or "").strip() if isinstance(raw, dict) else ""
+
+        prompt_tokens = int(raw.get("prompt_eval_count") or 0) if isinstance(raw, dict) else 0
+        completion_tokens = int(raw.get("eval_count") or 0) if isinstance(raw, dict) else 0
+        total_tokens = prompt_tokens + completion_tokens
+
+        return {
+            "id": str(raw.get("id") or f"ollama-{int(time.time() * 1000)}") if isinstance(raw, dict) else f"ollama-{int(time.time() * 1000)}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": str(raw.get("model") or payload.get("model") or "") if isinstance(raw, dict) else str(payload.get("model") or ""),
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": content,
+                },
+                "finish_reason": "stop",
+            }],
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": total_tokens,
+            },
+        }
+
+    async def _wait_for_lesson_generation_window(self) -> None:
+        """
+        Pause background LLM requests while high-context lesson generation is active.
+
+        This prevents periodic background model jobs from competing with
+        lesson generation and destabilizing the model process.
+        """
+        try:
+            from app.services.autonomy.coordination import get_coordinator
+
+            coordinator = get_coordinator()
+            waited_seconds = 0.0
+            next_log_at = 0.0
+            while True:
+                holder = await coordinator.get_lock_holder(self._lesson_lock_group)
+                if not holder:
+                    if waited_seconds > 0:
+                        logger.info(
+                            f"Background LLM resumed after waiting {int(waited_seconds)}s "
+                            "for lesson generation lock"
+                        )
+                    return
+
+                if waited_seconds >= next_log_at:
+                    logger.info(
+                        "Background LLM paused while lesson generation is active "
+                        f"(holder={holder}, waited={int(waited_seconds)}s)"
+                    )
+                    next_log_at = waited_seconds + self._lesson_lock_log_interval_seconds
+                await asyncio.sleep(self._lesson_lock_poll_seconds)
+                waited_seconds += self._lesson_lock_poll_seconds
+        except Exception as e:
+            # Fail-open: if lock coordination is unavailable, avoid breaking
+            # all background model traffic.
+            logger.debug(f"Lesson-generation pause check unavailable: {e}")
 
     async def close(self):
         """Close HTTP clients"""
@@ -750,17 +1230,46 @@ class BackgroundLLMClient:
             await self._primary_client.aclose()
         if self._fallback_client:
             await self._fallback_client.aclose()
+        self._primary_client = None
+        self._fallback_client = None
         self._started = False
         logger.info("Background LLM client closed")
 
+    async def refresh_config(self):
+        """
+        Hot-reload client configuration after settings changes.
+        Safe to call repeatedly.
+        """
+        old = (self.primary_url, self.primary_model, self.fallback_url, self.fallback_model)
+        self._load_config_from_settings()
+        new = (self.primary_url, self.primary_model, self.fallback_url, self.fallback_model)
+
+        # Force client recreation so base URLs/timeouts update immediately.
+        await self.close()
+
+        if old != new:
+            logger.info(
+                "Background LLM config refreshed. "
+                f"Primary: {self.primary_url} ({self.primary_model}), "
+                f"Fallback: {self.fallback_url} ({self.fallback_model})"
+            )
+
     def get_status(self) -> Dict[str, Any]:
-        """Get current configuration status"""
+        """Get current configuration and circuit breaker status."""
         return {
             "primary_url": self.primary_url,
             "primary_model": self.primary_model,
             "fallback_url": self.fallback_url,
             "fallback_model": self.fallback_model,
-            "started": self._started
+            "request_timeout": self.request_timeout,
+            "connect_timeout": self.connect_timeout,
+            "num_ctx": self.default_num_ctx,
+            "started": self._started,
+            "primary_degraded": self._primary_degraded,
+            "consecutive_primary_failures": self._consecutive_primary_failures,
+            "total_requests": self._total_requests,
+            "total_failures": self._total_failures,
+            "failover_events": self._failover_events,
         }
 
 

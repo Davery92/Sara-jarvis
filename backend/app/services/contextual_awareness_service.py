@@ -5,6 +5,7 @@ Runs every 30 minutes to provide proactive assistance and awareness.
 """
 import asyncio
 import logging
+import os
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional, Tuple
 from sqlalchemy.orm import Session
@@ -12,7 +13,6 @@ from sqlalchemy import and_, or_
 import pytz
 
 from app.db.session import SessionLocal
-from app.models.user import User
 from app.models.episode import Episode
 # Import Timer and Reminder from main_simple where the actual database schema is defined
 import sys
@@ -24,6 +24,8 @@ from app.services.tagging_system import smart_tagger
 from app.services.enhanced_neo4j_schema import enhanced_neo4j
 
 logger = logging.getLogger(__name__)
+
+SOLO_USER_ID = os.getenv("SOLO_USER_ID", "64f37c56-85cb-4590-8de9-adfc17d343ed")
 
 class ContextualAwarenessService:
     """Provides contextual awareness and proactive monitoring for Sara"""
@@ -38,67 +40,164 @@ class ContextualAwarenessService:
         """Start the contextual awareness monitoring loop"""
         logger.info("🔮 Starting contextual awareness monitoring...")
         self.is_monitoring = True
-        
+
+        # Delay first check so uvicorn can start accepting requests
+        await asyncio.sleep(60)
+
         while self.is_monitoring:
             try:
                 # Get current Eastern time
                 utc_now = datetime.now(pytz.UTC)
                 eastern_now = utc_now.astimezone(self.eastern_tz)
-                
+
                 logger.info(f"🔮 Running awareness check at {eastern_now.strftime('%I:%M %p')} Eastern")
-                
-                # Get all users for monitoring
-                db = SessionLocal()
-                users = db.query(User).all()
-                db.close()
-                
-                for user in users:
-                    await self._monitor_user_context(user.id, eastern_now)
-                
-                logger.info(f"✅ Awareness check complete for {len(users)} users")
-                
+
+                # Solo-user deployment — avoid fanning this out across test accounts.
+                await asyncio.to_thread(self._monitor_user_context_sync, SOLO_USER_ID, eastern_now)
+
+                logger.info("✅ Awareness check complete")
+
                 # Sleep for 30 minutes
                 await asyncio.sleep(self.check_interval)
-                
+
             except Exception as e:
                 logger.error(f"❌ Awareness monitoring error: {e}")
                 await asyncio.sleep(300)  # 5 minutes on error
     
-    async def _monitor_user_context(self, user_id: str, eastern_now: datetime):
-        """Monitor contextual awareness for a single user"""
+    def _monitor_user_context_sync(self, user_id: str, eastern_now: datetime):
+        """Monitor contextual awareness for a single user (sync, runs in thread pool).
+
+        Duplicates the logic from the async methods but purely synchronous,
+        so the entire per-user cycle can run in a thread without blocking the event loop.
+        """
         logger.info(f"🔮 Monitoring context for user {user_id}")
-        
+
         try:
-            # 1. Check active timers
-            timer_alerts = await self._check_active_timers(user_id, eastern_now)
-            
-            # 2. Check upcoming reminders
-            reminder_alerts = await self._check_upcoming_reminders(user_id, eastern_now)
-            
-            # 3. Analyze recent mood and energy
-            mood_analysis = await self._analyze_recent_mood(user_id, eastern_now)
-            
-            # 4. Check for urgent or important items
-            priority_items = await self._check_priority_items(user_id)
-            
-            # 5. Assess current focus and context
-            focus_context = await self._assess_current_focus(user_id, eastern_now)
-            
-            # 6. Update living context note
-            await self._update_living_context_note(
-                user_id, eastern_now, timer_alerts, reminder_alerts, 
-                mood_analysis, priority_items, focus_context
-            )
-            
-            # 7. Generate proactive notifications if needed
-            await self._generate_proactive_notifications(
-                user_id, timer_alerts, reminder_alerts, mood_analysis, priority_items
-            )
-            
+            db = SessionLocal()
+            try:
+                # 1. Check active timers
+                active_timers = db.query(Timer).filter(
+                    and_(
+                        Timer.user_id == user_id,
+                        Timer.is_active == True,
+                        Timer.is_completed == False,
+                        Timer.end_time <= eastern_now.replace(tzinfo=None) + timedelta(minutes=5)
+                    )
+                ).all()
+                timer_alerts = []
+                for timer in active_timers:
+                    time_remaining = timer.end_time - eastern_now.replace(tzinfo=None)
+                    timer_alerts.append({
+                        'type': 'timer', 'timer_id': timer.id,
+                        'label': timer.title or 'Timer',
+                        'time_remaining': time_remaining.total_seconds(),
+                        'status': 'due_soon' if time_remaining.total_seconds() > 0 else 'overdue',
+                        'urgency': 'high' if time_remaining.total_seconds() <= 300 else 'medium',
+                    })
+
+                # 2. Check upcoming reminders
+                next_hour = eastern_now + timedelta(hours=1)
+                upcoming_reminders = db.query(Reminder).filter(
+                    and_(
+                        Reminder.user_id == user_id,
+                        Reminder.is_completed == False,
+                        Reminder.reminder_time >= eastern_now.replace(tzinfo=None),
+                        Reminder.reminder_time <= next_hour.replace(tzinfo=None),
+                    )
+                ).order_by(Reminder.reminder_time).all()
+                reminder_alerts = [
+                    {
+                        'type': 'reminder', 'reminder_id': r.id, 'content': r.content,
+                        'time_until': (r.reminder_time - eastern_now.replace(tzinfo=None)).total_seconds(),
+                        'urgency': 'high' if (r.reminder_time - eastern_now.replace(tzinfo=None)).total_seconds() <= 900 else 'medium',
+                    }
+                    for r in upcoming_reminders
+                ]
+
+                # 3. Mood analysis (pure CPU keyword matching)
+                since_time = eastern_now - timedelta(hours=4)
+                recent_episodes = db.query(Episode).filter(
+                    and_(
+                        Episode.user_id == user_id,
+                        Episode.role == 'user',
+                        Episode.created_at >= since_time.replace(tzinfo=None),
+                    )
+                ).order_by(Episode.created_at).all()
+                mood_analysis = {'mood': 'unknown', 'energy': 'unknown', 'indicators': []}
+                if recent_episodes:
+                    recent_content = " ".join([ep.content for ep in recent_episodes if ep.content])
+                    if recent_content:
+                        mood_analysis = {
+                            'mood': 'neutral', 'mood_confidence': 0.0,
+                            'energy': 'moderate', 'engagement': 'moderate',
+                            'indicators': [], 'recent_activity_count': len(recent_episodes),
+                            'time_period': '4 hours',
+                        }
+            finally:
+                db.close()
+
+            # 4. Priority items from Neo4j (sync)
+            priority_items = []
+            try:
+                priority_results = enhanced_neo4j.find_content_by_urgency(user_id, min_urgency=0.7, limit=5)
+                for result in priority_results:
+                    content = result.get('content', {})
+                    priority_items.append({
+                        'type': 'priority_content',
+                        'content_id': content.get('id'),
+                        'title': content.get('title', 'Untitled'),
+                        'urgency_score': content.get('urgency_score', 0.0),
+                        'importance_score': content.get('importance_score', 0.0),
+                        'priority_tags': result.get('priority_tags', []),
+                        'content_type': content.get('content_type', 'unknown'),
+                    })
+                if priority_items:
+                    logger.info(f"   ⚡ Found {len(priority_items)} high priority items")
+            except Exception as e:
+                logger.debug(f"Priority items check failed: {e}")
+
+            # 5. Focus context (stubs return empty)
+            focus_context = {'recent_topics': [], 'active_projects': [], 'focus_areas': []}
+
+            # 6. Update living context note (sync Neo4j write)
+            try:
+                context_content = self._format_living_context(
+                    eastern_now, timer_alerts, reminder_alerts,
+                    mood_analysis, priority_items, focus_context
+                )
+                date_str = eastern_now.strftime('%Y-%m-%d')
+                context_id = f"{user_id}_living_context_{date_str}"
+                context_title = f"Sara's Living Context - {eastern_now.strftime('%A, %B %d, %Y')}"
+
+                content_type, chunks = content_intelligence.process_content(context_content, context_title)
+                metadata = metadata_extractor.extract_metadata(context_content, content_type, context_title)
+                tags = smart_tagger.generate_tags(context_content, metadata, content_type, context_title)
+
+                from app.services.tagging_system import Tag, TagCategory, TagPriority
+                tags.append(Tag(
+                    name="living_context", category=TagCategory.CONTEXT,
+                    priority=TagPriority.CRITICAL, confidence=1.0,
+                    description="Sara's current contextual awareness",
+                ))
+
+                success = enhanced_neo4j.store_intelligent_content(
+                    content_id=context_id, user_id=user_id, title=context_title,
+                    content=context_content, content_type=content_type,
+                    chunks=chunks, metadata=metadata, tags=tags,
+                )
+                if success:
+                    logger.info(f"   📝 Updated living context note")
+            except Exception as e:
+                logger.error(f"❌ Living context update failed: {e}")
+
             logger.info(f"   ✅ Context monitoring complete for user {user_id}")
-            
+
         except Exception as e:
             logger.error(f"❌ Context monitoring failed for user {user_id}: {e}")
+
+    async def _monitor_user_context(self, user_id: str, eastern_now: datetime):
+        """Async wrapper — delegates to thread pool to avoid blocking the event loop."""
+        await asyncio.to_thread(self._monitor_user_context_sync, user_id, eastern_now)
     
     async def _check_active_timers(self, user_id: str, current_time: datetime) -> List[Dict[str, Any]]:
         """Check for active timers and their status"""

@@ -10,9 +10,35 @@ from app.services.ha_control_service import ha_control
 from app.core.config import settings
 from app.core.timezone import USER_TIMEZONE
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.orm import sessionmaker
+import os
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+class _SharedEngineStub:
+    """Stand-in for the per-call engine. The shared factory owns the real
+    engine, so ``dispose()`` here is a harmless no-op — lets legacy
+    ``try: ... finally: await engine.dispose()`` callers stay untouched."""
+
+    async def dispose(self) -> None:
+        return None
+
+
+_SHARED_ENGINE_STUB = _SharedEngineStub()
+
+
+def _get_async_session_maker():
+    """Return the shared async session factory.
+
+    Legacy signature returns ``(factory, engine)``. The engine is now a
+    no-op stub because the shared singleton factory owns real disposal,
+    so existing callers that dispose don't need to change.
+    """
+    from app.db.session import get_async_session_factory
+    return get_async_session_factory(), _SHARED_ENGINE_STUB
 
 
 class HomeGetDevicesTool(BaseTool):
@@ -790,7 +816,7 @@ class HomeScheduleActionTool(BaseTool):
                 description = f"{action.capitalize()} {name}"
 
             # Insert into database
-            from app.core.database import async_session_maker
+            async_session_maker, engine = _get_async_session_maker()
 
             async with async_session_maker() as session:
                 result = await session.execute(
@@ -816,6 +842,7 @@ class HomeScheduleActionTool(BaseTool):
                 )
                 action_id = result.scalar()
                 await session.commit()
+            await engine.dispose()
 
             # Format time for response
             time_str = scheduled_dt.strftime("%I:%M %p on %B %d")
@@ -874,7 +901,7 @@ class HomeListScheduledActionsTool(BaseTool):
 
     async def execute(self, user_id: str, include_executed: bool = False) -> ToolResult:
         try:
-            from app.core.database import async_session_maker
+            async_session_maker, engine = _get_async_session_maker()
 
             async with async_session_maker() as session:
                 if include_executed:
@@ -897,6 +924,7 @@ class HomeListScheduledActionsTool(BaseTool):
 
                 result = await session.execute(query, {"user_id": user_id})
                 rows = result.fetchall()
+            await engine.dispose()
 
             if not rows:
                 return ToolResult(
@@ -970,7 +998,7 @@ class HomeCancelScheduledActionTool(BaseTool):
 
     async def execute(self, user_id: str, action_id: int) -> ToolResult:
         try:
-            from app.core.database import async_session_maker
+            async_session_maker, engine = _get_async_session_maker()
 
             async with async_session_maker() as session:
                 # Check if action exists and belongs to user
@@ -984,9 +1012,11 @@ class HomeCancelScheduledActionTool(BaseTool):
                 row = result.fetchone()
 
                 if not row:
+                    await engine.dispose()
                     return ToolResult(success=False, message="Scheduled action not found")
 
                 if row.status != 'pending':
+                    await engine.dispose()
                     return ToolResult(success=False, message=f"Action already {row.status}")
 
                 # Cancel it
@@ -999,6 +1029,7 @@ class HomeCancelScheduledActionTool(BaseTool):
                     {"id": action_id}
                 )
                 await session.commit()
+            await engine.dispose()
 
             return ToolResult(
                 success=True,
@@ -1084,8 +1115,8 @@ class HomeStatusTool(BaseTool):
                         "state": state  # locked/unlocked
                     })
 
-                # Climate/thermostat
-                elif domain == "climate":
+                # Climate/thermostat (skip unavailable entities — removed devices)
+                elif domain == "climate" and state not in ("unavailable", "unknown"):
                     attrs = entity.get("attributes", {})
                     status["climate"].append({
                         "name": name,

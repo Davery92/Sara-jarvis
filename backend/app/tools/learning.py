@@ -6,6 +6,8 @@ and autonomous research capabilities.
 from typing import Dict, Any, List
 from app.tools.base import BaseTool, ToolResult
 from app.models.learning import LearningTopic, TopicSource, TopicScratchpad, SourceChunk
+from app.models.tangent_queue import TangentQueue
+from app.models.known_domain import KnownDomain
 from app.db.session import get_db
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -1211,5 +1213,318 @@ class LearningFetchSourceTool(BaseTool):
         except Exception as e:
             logger.error(f"Source fetch failed: {e}")
             return ToolResult(success=False, message=f"Fetch failed: {str(e)}")
+        finally:
+            db.close()
+
+
+class LearningTangentCaptureTool(BaseTool):
+    """Tool for capturing tangents during learning sessions"""
+
+    @property
+    def name(self) -> str:
+        return "learning_tangent_capture"
+
+    @property
+    def description(self) -> str:
+        return "Capture a tangent or side question that came up during learning. Saves it for later exploration without losing focus on the current topic."
+
+    @property
+    def parameters(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "parent_topic_id": {
+                    "type": "string",
+                    "description": "ID of the current learning topic"
+                },
+                "tangent_description": {
+                    "type": "string",
+                    "description": "What the tangent/side question is about"
+                },
+                "source_context": {
+                    "type": "string",
+                    "description": "What was being discussed when the tangent arose"
+                },
+                "priority": {
+                    "type": "integer",
+                    "description": "Priority 1-5 (5=most interesting, default: 3)"
+                }
+            },
+            "required": ["parent_topic_id", "tangent_description"]
+        }
+
+    async def execute(self, user_id: str, **kwargs) -> ToolResult:
+        parent_topic_id = kwargs.get("parent_topic_id")
+        tangent_description = kwargs.get("tangent_description")
+        source_context = kwargs.get("source_context")
+        priority = min(max(kwargs.get("priority", 3), 1), 5)
+
+        if not parent_topic_id or not tangent_description:
+            return ToolResult(success=False, message="parent_topic_id and tangent_description are required")
+
+        db_gen = get_db()
+        db: Session = next(db_gen)
+
+        try:
+            tangent = TangentQueue(
+                id=str(uuid.uuid4()),
+                user_id=user_id,
+                parent_topic_id=parent_topic_id,
+                tangent_description=tangent_description,
+                source_context=source_context,
+                priority=priority,
+                status="queued"
+            )
+            db.add(tangent)
+            db.commit()
+
+            return ToolResult(
+                success=True,
+                data=tangent.to_dict(),
+                message=f"Tangent captured: '{tangent_description[:60]}...' (priority {priority}/5)"
+            )
+        except Exception as e:
+            db.rollback()
+            return ToolResult(success=False, message=f"Failed to capture tangent: {str(e)}")
+        finally:
+            db.close()
+
+
+class LearningTangentListTool(BaseTool):
+    """Tool for listing queued tangents"""
+
+    @property
+    def name(self) -> str:
+        return "learning_tangent_list"
+
+    @property
+    def description(self) -> str:
+        return "List queued tangents for a topic. Shows interesting side questions captured during learning that can be explored later or promoted to full topics."
+
+    @property
+    def parameters(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "parent_topic_id": {
+                    "type": "string",
+                    "description": "Filter by parent topic ID (optional)"
+                },
+                "status": {
+                    "type": "string",
+                    "description": "Filter by status: queued, promoted_to_topic, dismissed (default: queued)",
+                    "enum": ["queued", "promoted_to_topic", "dismissed"]
+                }
+            }
+        }
+
+    async def execute(self, user_id: str, **kwargs) -> ToolResult:
+        parent_topic_id = kwargs.get("parent_topic_id")
+        status = kwargs.get("status", "queued")
+
+        db_gen = get_db()
+        db: Session = next(db_gen)
+
+        try:
+            query = db.query(TangentQueue).filter(
+                TangentQueue.user_id == user_id,
+                TangentQueue.status == status
+            )
+            if parent_topic_id:
+                query = query.filter(TangentQueue.parent_topic_id == parent_topic_id)
+
+            tangents = query.order_by(TangentQueue.priority.desc(), TangentQueue.created_at.desc()).all()
+
+            return ToolResult(
+                success=True,
+                data={
+                    "tangents": [t.to_dict() for t in tangents],
+                    "total": len(tangents)
+                },
+                message=f"Found {len(tangents)} queued tangent(s)"
+            )
+        except Exception as e:
+            return ToolResult(success=False, message=f"Failed to list tangents: {str(e)}")
+        finally:
+            db.close()
+
+
+class LearningKnownDomainsTool(BaseTool):
+    """Tool for querying and managing known domains"""
+
+    @property
+    def name(self) -> str:
+        return "learning_known_domains"
+
+    @property
+    def description(self) -> str:
+        return "Query, update, or add to David's known domains — the areas he's already proficient in, used for generating analogies during learning."
+
+    @property
+    def parameters(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "description": "Action to perform: query (list all), update (modify existing), add (create new)",
+                    "enum": ["query", "update", "add"]
+                },
+                "domain_name": {
+                    "type": "string",
+                    "description": "Domain name (required for update/add)"
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Domain description (for add)"
+                },
+                "proficiency": {
+                    "type": "string",
+                    "description": "Proficiency level (for update/add)",
+                    "enum": ["beginner", "intermediate", "expert"]
+                },
+                "key_concepts": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Key concepts to set or add (for update/add)"
+                }
+            },
+            "required": ["action"]
+        }
+
+    async def execute(self, user_id: str, **kwargs) -> ToolResult:
+        action = kwargs.get("action", "query")
+        domain_name = kwargs.get("domain_name")
+
+        db_gen = get_db()
+        db: Session = next(db_gen)
+
+        try:
+            if action == "query":
+                domains = db.query(KnownDomain).filter(
+                    KnownDomain.user_id == user_id
+                ).order_by(KnownDomain.domain_name).all()
+                return ToolResult(
+                    success=True,
+                    data={"domains": [d.to_dict() for d in domains], "total": len(domains)},
+                    message=f"Found {len(domains)} known domain(s)"
+                )
+
+            if not domain_name:
+                return ToolResult(success=False, message="domain_name is required for update/add")
+
+            if action == "add":
+                existing = db.query(KnownDomain).filter(
+                    KnownDomain.user_id == user_id,
+                    KnownDomain.domain_name == domain_name
+                ).first()
+                if existing:
+                    return ToolResult(success=False, message=f"Domain '{domain_name}' already exists. Use 'update' action.")
+
+                domain = KnownDomain(
+                    id=str(uuid.uuid4()),
+                    user_id=user_id,
+                    domain_name=domain_name,
+                    description=kwargs.get("description"),
+                    proficiency=kwargs.get("proficiency", "intermediate"),
+                    key_concepts=kwargs.get("key_concepts", [])
+                )
+                db.add(domain)
+                db.commit()
+                return ToolResult(success=True, data=domain.to_dict(), message=f"Added known domain: {domain_name}")
+
+            if action == "update":
+                domain = db.query(KnownDomain).filter(
+                    KnownDomain.user_id == user_id,
+                    KnownDomain.domain_name == domain_name
+                ).first()
+                if not domain:
+                    return ToolResult(success=False, message=f"Domain '{domain_name}' not found")
+
+                if kwargs.get("proficiency"):
+                    domain.proficiency = kwargs["proficiency"]
+                if kwargs.get("key_concepts"):
+                    # Merge new concepts with existing
+                    existing_concepts = set(domain.key_concepts or [])
+                    existing_concepts.update(kwargs["key_concepts"])
+                    domain.key_concepts = list(existing_concepts)
+                if kwargs.get("description"):
+                    domain.description = kwargs["description"]
+
+                db.commit()
+                return ToolResult(success=True, data=domain.to_dict(), message=f"Updated domain: {domain_name}")
+
+            return ToolResult(success=False, message=f"Unknown action: {action}")
+
+        except Exception as e:
+            db.rollback()
+            return ToolResult(success=False, message=f"Known domains operation failed: {str(e)}")
+        finally:
+            db.close()
+
+
+class LearningFindAnchorsTool(BaseTool):
+    """Tool for finding/generating analogy anchors for a topic"""
+
+    @property
+    def name(self) -> str:
+        return "learning_find_anchors"
+
+    @property
+    def description(self) -> str:
+        return "Find or generate analogy anchor points for a learning topic. Anchors connect new concepts to David's existing knowledge domains."
+
+    @property
+    def parameters(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "topic_id": {
+                    "type": "string",
+                    "description": "ID of the learning topic to find anchors for"
+                },
+                "regenerate": {
+                    "type": "boolean",
+                    "description": "If true, generate new anchors even if some exist (default: false)"
+                }
+            },
+            "required": ["topic_id"]
+        }
+
+    async def execute(self, user_id: str, **kwargs) -> ToolResult:
+        from app.services.anchor_service import anchor_service
+
+        topic_id = kwargs.get("topic_id")
+        regenerate = kwargs.get("regenerate", False)
+
+        if not topic_id:
+            return ToolResult(success=False, message="topic_id is required")
+
+        db_gen = get_db()
+        db: Session = next(db_gen)
+
+        try:
+            anchors = await anchor_service.generate_anchors(
+                topic_id=topic_id,
+                user_id=user_id,
+                db=db,
+                regenerate=regenerate
+            )
+
+            if anchors:
+                return ToolResult(
+                    success=True,
+                    data={"anchors": anchors, "count": len(anchors)},
+                    message=f"Generated {len(anchors)} analogy anchor(s) for this topic"
+                )
+            else:
+                return ToolResult(
+                    success=True,
+                    data={"anchors": [], "count": 0},
+                    message="No anchors generated — make sure known domains are set up"
+                )
+
+        except Exception as e:
+            return ToolResult(success=False, message=f"Anchor generation failed: {str(e)}")
         finally:
             db.close()

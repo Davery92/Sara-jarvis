@@ -5,7 +5,7 @@ Redis pub/sub based event system for reactive features
 from typing import Dict, Any, List, Callable, Optional
 from pydantic import BaseModel, Field
 from enum import Enum
-from datetime import datetime
+from datetime import datetime, timezone
 import asyncio
 import json
 import redis.asyncio as redis
@@ -79,18 +79,78 @@ class EventType(str, Enum):
     SHADOW_SUGGESTION_ACCEPTED = "shadow.suggestion_accepted"
     SHADOW_SUGGESTION_DISMISSED = "shadow.suggestion_dismissed"
 
+    # Home Assistant events (reactive engine)
+    HOME_STATE_CHANGED = "home.state_changed"
+    HOME_MOTION_DETECTED = "home.motion_detected"
+    HOME_DOOR_CHANGED = "home.door_changed"
+    HOME_LIGHT_CHANGED = "home.light_changed"
+    HOME_CLIMATE_CHANGED = "home.climate_changed"
+    HOME_ANOMALY_DETECTED = "home.anomaly_detected"
+
+    # Activity & presence events
+    ACTIVITY_STATE_CHANGED = "activity.state_changed"
+    PRESENCE_ROOM_CHANGED = "presence.room_changed"
+    INTERRUPTIBILITY_CHANGED = "interruptibility.changed"
+    # Unified "which device is David active on" resolver (device_presence.py, A7)
+    DEVICE_ACTIVE_CHANGED = "presence.device_active_changed"
+
+    # Location events (phone GPS / geofencing)
+    LOCATION_PLACE_ENTERED = "location.place_entered"
+    LOCATION_PLACE_EXITED = "location.place_exited"
+
+    # Desktop activity events (from the Sara desktop agent's focus tracker)
+    DESKTOP_FOCUS_SPAN = "desktop.focus_span"
+    DESKTOP_ACTIVITY_STATE = "desktop.activity_state"
+    # Qwen-VLM extracted description of a screenshot uploaded from the desktop.
+    DESKTOP_SCREEN_CONTENT = "desktop.screen_content"
+
+    # Chat events
+    CHAT_MESSAGE_RECEIVED = "chat.message_received"
+
+    # App activity events (web/iOS presence — contact, not conversation)
+    APP_SESSION_STARTED = "app.session_started"   # first visible heartbeat after app_active was false
+    APP_VIEW_CHANGED = "app.view_changed"          # view changed AND >=2 min dwell in the new view
+    APP_SESSION_ENDED = "app.session_ended"        # reaper detected all clients gone
+
+    # Agent task events
+    AGENT_TASK_PROGRESS = "agent_task.progress"
+    AGENT_TASK_COMPLETED = "agent_task.completed"
+
+    # Vision / Sensory events (Jetson)
+    FACE_DETECTED = "vision.face_detected"
+    DESK_PRESENCE_CHANGED = "vision.desk_presence_changed"
+    VOICE_CONVERSATION_STARTED = "voice.conversation_started"
+    VOICE_CONVERSATION_ENDED = "voice.conversation_ended"
+
+    # ACS (Autonomous Cognition System) events
+    ACS_STATE_CHANGED = "acs.state_changed"
+    ACS_SESSION_STARTED = "acs.session_started"
+    ACS_SESSION_ENDED = "acs.session_ended"
+    ACS_MODE_SELECTED = "acs.mode_selected"
+    ACS_INTEREST_CREATED = "acs.interest_created"
+    ACS_INTEREST_CONNECTED = "acs.interest_connected"
+    ACS_SELF_MODEL_UPDATED = "acs.self_model_updated"
+
     # System events
     SYSTEM_STARTED = "system.started"
     SYSTEM_SHUTDOWN = "system.shutdown"
 
+    # Interoception — Sara's sense of her own body (ONE_MIND §3.1).
+    # Her own bodies (hosts), jobs, and vital signs become events on the same
+    # afferent pathway as everything else, so a self-failure is *noticed* and
+    # *spoken about in one voice* instead of pushed as a raw alert nobody reads.
+    # Fired on state transitions only (degraded ⇄ recovered), never per-tick.
+    SYSTEM_HEALTH_DEGRADED = "system.health_degraded"
+    SYSTEM_HEALTH_RECOVERED = "system.health_recovered"
+
 
 class Event(BaseModel):
     """Event model"""
-    event_id: str = Field(default_factory=lambda: f"evt_{datetime.utcnow().timestamp()}")
+    event_id: str = Field(default_factory=lambda: f"evt_{datetime.now(timezone.utc).timestamp()}")
     event_type: EventType
     user_id: str
     payload: Dict[str, Any] = {}
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     source: str = "system"  # Source of event (api, scheduled_job, shadow_agent, etc.)
     metadata: Dict[str, Any] = {}
 
@@ -132,7 +192,10 @@ class EventBus:
     Enables reactive features like shadow agents, notifications, etc.
     """
 
-    def __init__(self, redis_url: str = "redis://localhost:6379/0"):
+    def __init__(self, redis_url: str = None):
+        if redis_url is None:
+            import os
+            redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
         self.redis_url = redis_url
         self.redis_client: Optional[redis.Redis] = None
         self.pubsub: Optional[redis.client.PubSub] = None
@@ -140,10 +203,36 @@ class EventBus:
         self.event_handlers: Dict[EventType, List[Callable]] = {}
         self.running = False
         self._listener_task: Optional[asyncio.Task] = None
+        self._connect_lock: Optional[asyncio.Lock] = None
+        self._connect_lock_loop_id: Optional[int] = None
 
         # Event replay buffer (in-memory, could be Redis-backed)
         self.replay_buffer: List[Event] = []
         self.replay_buffer_size = 1000  # Keep last 1000 events
+
+    def _get_connect_lock(self) -> asyncio.Lock:
+        loop_id = id(asyncio.get_running_loop())
+        if self._connect_lock is None or self._connect_lock_loop_id != loop_id:
+            self._connect_lock = asyncio.Lock()
+            self._connect_lock_loop_id = loop_id
+        return self._connect_lock
+
+    async def _ensure_connected(self) -> bool:
+        if self.redis_client is not None:
+            return True
+
+        lock = self._get_connect_lock()
+        async with lock:
+            if self.redis_client is not None:
+                return True
+            try:
+                await self.connect()
+                return True
+            except Exception as e:
+                logger.warning(f"Event bus connect failed, event not published: {e}")
+                self.redis_client = None
+                self.pubsub = None
+                return False
 
     async def connect(self):
         """Connect to Redis"""
@@ -185,8 +274,7 @@ class EventBus:
         Args:
             event: Event to publish
         """
-        if not self.redis_client:
-            logger.warning("Event bus not connected, event not published")
+        if not await self._ensure_connected():
             return
 
         try:
@@ -211,6 +299,8 @@ class EventBus:
 
         except Exception as e:
             logger.error(f"Failed to publish event: {e}")
+            self.redis_client = None
+            self.pubsub = None
 
     def subscribe(self, subscriber: EventSubscriber):
         """

@@ -31,9 +31,15 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     messages: List[ChatMessage]
     conversation_id: Optional[str] = None
-    model: Optional[str] = None  # Override default model (e.g., "claude-opus-4-5-20250514")
+    model: Optional[str] = None  # Override default model (e.g., "claude-opus-4-6")
     ephemeral: Optional[bool] = False  # If true, chat won't be saved to memory
     source: Optional[str] = None  # "workspace" | "webapp" | "ios" - determines available tools
+    inbox_item_id: Optional[str] = None  # Pre-load inbox item content for discussion
+    attention_item_id: Optional[str] = None  # SARA_UNLEASHED T.4: original proactive item this reply continues
+    note_id: Optional[str] = None  # Pre-load note content for discussion
+    notify_on_complete: Optional[bool] = False  # Send push notification when response is ready
+    current_screen: Optional[str] = None  # iOS current screen name for context-aware tool loading
+    workspace_context: Optional[dict] = None  # Canvas workspace context (open windows, active scene)
 
 
 class ChatResponse(BaseModel):

@@ -19,6 +19,7 @@ class LearningTopic(Base):
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id = Column(String, ForeignKey("app_user.id", ondelete="CASCADE"), nullable=False)
     parent_id = Column(String, ForeignKey("learning_topic.id", ondelete="SET NULL"), nullable=True)
+    blueprint_id = Column(String, ForeignKey("learning_blueprint.id", ondelete="SET NULL"), nullable=True)
 
     # Topic details
     title = Column(String(255), nullable=False)
@@ -35,6 +36,7 @@ class LearningTopic(Base):
     # Relationships
     user = relationship("User")
     parent = relationship("LearningTopic", remote_side=[id], backref="children")
+    blueprint = relationship("LearningBlueprint", back_populates="topics")
     sources = relationship("TopicSource", back_populates="topic", cascade="all, delete-orphan")
     sessions = relationship("LearningSession", back_populates="topic")
     progress_items = relationship("LearningProgress", back_populates="topic")
@@ -45,6 +47,7 @@ class LearningTopic(Base):
             "id": self.id,
             "user_id": self.user_id,
             "parent_id": self.parent_id,
+            "blueprint_id": self.blueprint_id,
             "title": self.title,
             "description": self.description,
             "status": self.status,
@@ -73,6 +76,7 @@ class TopicSource(Base):
     origin_reputation = Column(Float, default=0.5)  # 0.0 to 1.0
     fetch_status = Column(String(50), default="pending")  # pending, fetching, fetched, failed
     meta = Column(JSONB, default=dict)  # author, date, citations, etc.
+    toc = Column(JSONB, nullable=True)  # PDF table of contents: [{title, normalized, page_start, page_end, level}]
 
     # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -94,6 +98,7 @@ class TopicSource(Base):
             "origin_reputation": self.origin_reputation,
             "fetch_status": self.fetch_status,
             "meta": self.meta or {},
+            "toc": self.toc,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
@@ -112,6 +117,9 @@ class SourceChunk(Base):
     breadcrumb = Column(String(500), nullable=True)  # Section > Subsection hierarchy
     embedding = Column(Vector(1024), nullable=False)
     concept_tags = Column(JSONB, default=list)
+    analogy_version = Column(JSONB, nullable=True)  # {"text": "...", "domain": "...", "unknown_terms": [...]}
+    chapter_ref = Column(String(500), nullable=True)  # Normalized chapter reference (e.g. "chapter_3")
+    page_start = Column(Integer, nullable=True)  # Starting page number for this chunk
 
     # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -127,6 +135,9 @@ class SourceChunk(Base):
             "text": self.text,
             "breadcrumb": self.breadcrumb,
             "concept_tags": self.concept_tags or [],
+            "analogy_version": self.analogy_version,
+            "chapter_ref": self.chapter_ref,
+            "page_start": self.page_start,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
 
@@ -184,6 +195,8 @@ class LearningProgress(Base):
     next_review_at = Column(DateTime(timezone=True), server_default=func.now())
     last_reviewed_at = Column(DateTime(timezone=True), nullable=True)
     quality_history = Column(JSONB, default=list)  # [{date, quality_score}]
+    review_mode = Column(String(50), nullable=True)  # Last review mode used
+    review_mode_history = Column(JSONB, default=list)  # [{mode, quality, date}]
 
     # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -207,6 +220,8 @@ class LearningProgress(Base):
             "next_review_at": self.next_review_at.isoformat() if self.next_review_at else None,
             "last_reviewed_at": self.last_reviewed_at.isoformat() if self.last_reviewed_at else None,
             "quality_history": self.quality_history or [],
+            "review_mode": self.review_mode,
+            "review_mode_history": self.review_mode_history or [],
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
@@ -223,6 +238,13 @@ class TopicScratchpad(Base):
     # Content
     content = Column(Text, nullable=False, default="")
     version = Column(Integer, default=1)
+
+    # Session state for continuity
+    session_state = Column(JSONB, default=dict)  # Stores summary, open_questions, concepts_in_progress, stuck_points, mastery_signals
+    last_interaction_at = Column(DateTime(timezone=True), nullable=True)
+
+    # Persisted curriculum (LLM-generated learning path)
+    curriculum = Column(JSONB, nullable=True)
 
     # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -244,6 +266,8 @@ class TopicScratchpad(Base):
             "user_id": self.user_id,
             "content": self.content,
             "version": self.version,
+            "session_state": self.session_state or {},
+            "last_interaction_at": self.last_interaction_at.isoformat() if self.last_interaction_at else None,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
@@ -340,6 +364,56 @@ class ResearchJob(Base):
         }
 
 
+class LearningGuideJob(Base):
+    """Background job tracking for blueprint study-guide generation"""
+    __tablename__ = "learning_guide_job"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, ForeignKey("app_user.id", ondelete="CASCADE"), nullable=False)
+    blueprint_id = Column(String, ForeignKey("learning_blueprint.id", ondelete="CASCADE"), nullable=False)
+
+    # Job state
+    status = Column(String(50), default="queued")  # queued, running, completed, failed
+    progress = Column(Integer, default=0)  # 0-100
+    current_step = Column(Text, nullable=True)
+    total_modules = Column(Integer, default=0)
+    completed_modules = Column(Integer, default=0)
+    artifacts_created = Column(Integer, default=0)
+    model = Column(String(255), nullable=True)
+    job_type = Column(String(50), default="guide")  # guide or lesson
+    error_message = Column(Text, nullable=True)
+    meta = Column(JSONB, default=dict)
+
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+
+    # Relationships
+    user = relationship("User")
+    blueprint = relationship("LearningBlueprint")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "user_id": self.user_id,
+            "blueprint_id": self.blueprint_id,
+            "status": self.status,
+            "progress": self.progress,
+            "current_step": self.current_step,
+            "total_modules": self.total_modules,
+            "completed_modules": self.completed_modules,
+            "artifacts_created": self.artifacts_created,
+            "model": self.model,
+            "job_type": self.job_type or "guide",
+            "error_message": self.error_message,
+            "meta": self.meta or {},
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+        }
+
+
 class TopicConnection(Base):
     """Semantic relationships between learning topics"""
     __tablename__ = "topic_connection"
@@ -418,6 +492,52 @@ class LearningArtifact(Base):
             "title": self.title,
             "content": self.content or {},
             "version": self.version,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class LearningBlueprint(Base):
+    """Imported multi-phase learning plans that can be materialized into topics."""
+    __tablename__ = "learning_blueprint"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, ForeignKey("app_user.id", ondelete="CASCADE"), nullable=False)
+
+    title = Column(String(255), nullable=False)
+    subtitle = Column(String(255), nullable=True)
+    description = Column(Text, nullable=True)
+    source_format = Column(String(50), default="text")  # text, markdown, pdf
+    pace_mode = Column(String(50), default="self_directed")
+    status = Column(String(50), default="parsed")  # parsed, materialized, failed
+    import_confidence = Column(Float, default=0.5)
+
+    raw_text = Column(Text, nullable=False)
+    parsed_json = Column(JSONB, nullable=False, default=dict)
+    materialized_at = Column(DateTime(timezone=True), nullable=True)
+    meta = Column(JSONB, default=dict)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    user = relationship("User")
+    topics = relationship("LearningTopic", back_populates="blueprint")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "user_id": self.user_id,
+            "title": self.title,
+            "subtitle": self.subtitle,
+            "description": self.description,
+            "source_format": self.source_format,
+            "pace_mode": self.pace_mode,
+            "status": self.status,
+            "import_confidence": self.import_confidence,
+            "raw_text": self.raw_text,
+            "parsed_json": self.parsed_json or {},
+            "materialized_at": self.materialized_at.isoformat() if self.materialized_at else None,
+            "meta": self.meta or {},
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }

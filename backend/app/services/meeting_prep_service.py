@@ -23,7 +23,7 @@ class MeetingPrepService:
             Dictionary with meeting prep information
         """
         try:
-            from app.models.calendar import Event
+            from app.models.calendar_event import CalendarEvent as Event
             from app.models.note import Note
             from app.models.thread import ConversationThread
 

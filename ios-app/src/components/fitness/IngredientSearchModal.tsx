@@ -13,9 +13,10 @@ import {
   KeyboardAvoidingView,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { Ionicons } from '@expo/vector-icons';
 import { fitnessService, FoodItem } from '../../services/fitness';
 import { IngredientItem } from '../../types/api';
-import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
+import { colors, spacing, borderRadius, fontSizes, fontWeights } from '../../styles/theme';
 import BarcodeScanner from './BarcodeScanner';
 
 interface Props {
@@ -198,7 +199,7 @@ export default function IngredientSearchModal({
           <View style={styles.header}>
             <Text style={styles.title}>Add Ingredient</Text>
             <TouchableOpacity onPress={handleClose} style={styles.closeButtonContainer}>
-              <Text style={styles.closeButton}>✕</Text>
+              <Ionicons name="close" size={fontSizes.xxl} color={colors.textSecondary} />
             </TouchableOpacity>
           </View>
         </SafeAreaView>
@@ -234,7 +235,7 @@ export default function IngredientSearchModal({
                   style={styles.barcodeButton}
                   onPress={() => setShowBarcodeScanner(true)}
                 >
-                  <Text style={styles.barcodeButtonText}>📷</Text>
+                  <Ionicons name="barcode-outline" size={24} color={colors.background} />
                 </TouchableOpacity>
               </View>
 
@@ -338,6 +339,7 @@ export default function IngredientSearchModal({
                     style={styles.addButton}
                     onPress={handleAddFromSearch}
                   >
+                    <Ionicons name="add" size={20} color={colors.background} />
                     <Text style={styles.addButtonText}>Add Ingredient</Text>
                   </TouchableOpacity>
                 </View>
@@ -348,8 +350,9 @@ export default function IngredientSearchModal({
                 style={styles.manualEntryButton}
                 onPress={() => setShowManualEntry(true)}
               >
+                <Ionicons name="create-outline" size={16} color={colors.accent} />
                 <Text style={styles.manualEntryText}>
-                  ✏️ Can't find it? Enter manually
+                  Can't find it? Enter manually
                 </Text>
               </TouchableOpacity>
             </>
@@ -448,6 +451,7 @@ export default function IngredientSearchModal({
                 style={styles.addButton}
                 onPress={handleAddManual}
               >
+                <Ionicons name="add" size={20} color={colors.background} />
                 <Text style={styles.addButtonText}>Add Ingredient</Text>
               </TouchableOpacity>
 
@@ -458,7 +462,8 @@ export default function IngredientSearchModal({
                   resetManualFields();
                 }}
               >
-                <Text style={styles.backToSearchText}>← Back to Search</Text>
+                <Ionicons name="arrow-back" size={14} color={colors.accent} />
+                <Text style={styles.backToSearchText}>Back to Search</Text>
               </TouchableOpacity>
             </View>
           )}
@@ -490,11 +495,11 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.md,
     borderBottomWidth: 1,
-    borderBottomColor: colors.surface,
+    borderBottomColor: colors.border,
   },
   title: {
     fontSize: fontSizes.xl,
-    fontWeight: '700',
+    fontWeight: fontWeights.bold,
     color: colors.text,
   },
   closeButtonContainer: {
@@ -503,10 +508,6 @@ const styles = StyleSheet.create({
     minHeight: 44,
     justifyContent: 'center',
     alignItems: 'center',
-  },
-  closeButton: {
-    fontSize: fontSizes.xxl,
-    color: colors.textSecondary,
   },
   content: {
     flex: 1,
@@ -525,35 +526,32 @@ const styles = StyleSheet.create({
   },
   barcodeButton: {
     backgroundColor: colors.primary,
-    borderRadius: borderRadius.md,
+    borderRadius: borderRadius.lg,
     width: 52,
     height: 52,
     justifyContent: 'center',
     alignItems: 'center',
   },
-  barcodeButtonText: {
-    fontSize: 24,
-  },
   errorContainer: {
-    backgroundColor: 'rgba(239, 68, 68, 0.1)',
-    borderRadius: borderRadius.md,
+    backgroundColor: colors.assistant.errorSoft,
+    borderRadius: borderRadius.lg,
     padding: spacing.md,
     borderWidth: 1,
-    borderColor: 'rgba(239, 68, 68, 0.3)',
+    borderColor: colors.error,
   },
   errorText: {
-    color: '#ef4444',
+    color: colors.error,
     fontSize: fontSizes.sm,
     textAlign: 'center',
   },
   searchInput: {
-    backgroundColor: colors.surface,
-    borderRadius: borderRadius.md,
+    backgroundColor: colors.surfaceLight,
+    borderRadius: borderRadius.lg,
     padding: spacing.md,
     fontSize: fontSizes.md,
     color: colors.text,
     borderWidth: 1,
-    borderColor: colors.surface,
+    borderColor: colors.border,
   },
   searchLoader: {
     position: 'absolute',
@@ -562,10 +560,11 @@ const styles = StyleSheet.create({
   },
   resultsContainer: {
     backgroundColor: colors.surface,
-    borderRadius: borderRadius.md,
+    borderRadius: borderRadius.xl,
     maxHeight: 300,
     borderWidth: 1,
-    borderColor: colors.primary,
+    borderColor: colors.border,
+    overflow: 'hidden',
   },
   resultsList: {
     maxHeight: 300,
@@ -573,14 +572,14 @@ const styles = StyleSheet.create({
   resultItem: {
     padding: spacing.md,
     borderBottomWidth: 1,
-    borderBottomColor: colors.background,
+    borderBottomColor: colors.divider,
   },
   resultInfo: {
     gap: spacing.xs,
   },
   resultName: {
     fontSize: fontSizes.md,
-    fontWeight: '600',
+    fontWeight: fontWeights.semibold,
     color: colors.text,
   },
   resultBrand: {
@@ -593,7 +592,9 @@ const styles = StyleSheet.create({
   },
   selectedFoodContainer: {
     backgroundColor: colors.surface,
-    borderRadius: borderRadius.md,
+    borderRadius: borderRadius.xl,
+    borderWidth: 1,
+    borderColor: colors.border,
     padding: spacing.md,
     gap: spacing.md,
   },
@@ -602,7 +603,7 @@ const styles = StyleSheet.create({
   },
   selectedFoodName: {
     fontSize: fontSizes.lg,
-    fontWeight: '700',
+    fontWeight: fontWeights.bold,
     color: colors.text,
   },
   selectedFoodBrand: {
@@ -615,15 +616,15 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.md,
     borderTopWidth: 1,
     borderBottomWidth: 1,
-    borderColor: colors.background,
+    borderColor: colors.divider,
   },
   nutritionItem: {
     alignItems: 'center',
   },
   nutritionValue: {
     fontSize: fontSizes.lg,
-    fontWeight: '700',
-    color: colors.primary,
+    fontWeight: fontWeights.bold,
+    color: colors.accent,
   },
   nutritionLabel: {
     fontSize: fontSizes.xs,
@@ -635,7 +636,7 @@ const styles = StyleSheet.create({
   },
   label: {
     fontSize: fontSizes.sm,
-    fontWeight: '600',
+    fontWeight: fontWeights.semibold,
     color: colors.text,
   },
   quantityRow: {
@@ -644,65 +645,74 @@ const styles = StyleSheet.create({
   },
   quantityInput: {
     flex: 1,
-    backgroundColor: colors.background,
-    borderRadius: borderRadius.sm,
+    backgroundColor: colors.surfaceLight,
+    borderRadius: borderRadius.lg,
     padding: spacing.md,
     fontSize: fontSizes.md,
     color: colors.text,
+    borderWidth: 1,
+    borderColor: colors.border,
     textAlign: 'center',
   },
   unitInput: {
     flex: 2,
-    backgroundColor: colors.background,
-    borderRadius: borderRadius.sm,
+    backgroundColor: colors.surfaceLight,
+    borderRadius: borderRadius.lg,
     padding: spacing.md,
     fontSize: fontSizes.md,
     color: colors.text,
+    borderWidth: 1,
+    borderColor: colors.border,
   },
   addButton: {
+    flexDirection: 'row',
     backgroundColor: colors.primary,
-    borderRadius: borderRadius.md,
+    borderRadius: borderRadius.lg,
     padding: spacing.md,
     alignItems: 'center',
-    minHeight: 48,
     justifyContent: 'center',
+    gap: spacing.xs,
+    minHeight: 48,
   },
   addButtonText: {
     fontSize: fontSizes.md,
-    fontWeight: '600',
-    color: colors.text,
+    fontWeight: fontWeights.bold,
+    color: colors.background,
   },
   manualEntryButton: {
+    flexDirection: 'row',
     backgroundColor: colors.surface,
-    borderRadius: borderRadius.md,
+    borderRadius: borderRadius.lg,
     padding: spacing.md,
     alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.xs,
     borderWidth: 1,
-    borderColor: colors.primary,
+    borderColor: colors.assistant.borderStrong,
     borderStyle: 'dashed',
   },
   manualEntryText: {
     fontSize: fontSizes.sm,
-    color: colors.primary,
-    fontWeight: '600',
+    color: colors.accent,
+    fontWeight: fontWeights.semibold,
   },
   manualForm: {
     gap: spacing.md,
   },
   sectionTitle: {
     fontSize: fontSizes.md,
-    fontWeight: '700',
+    fontWeight: fontWeights.bold,
     color: colors.text,
     marginTop: spacing.sm,
   },
   input: {
-    backgroundColor: colors.surface,
-    borderRadius: borderRadius.md,
+    backgroundColor: colors.surfaceLight,
+    borderRadius: borderRadius.lg,
     padding: spacing.md,
     fontSize: fontSizes.md,
     color: colors.text,
     borderWidth: 1,
-    borderColor: colors.surface,
+    borderColor: colors.border,
   },
   row: {
     flexDirection: 'row',
@@ -713,12 +723,15 @@ const styles = StyleSheet.create({
     gap: spacing.xs,
   },
   backToSearchButton: {
+    flexDirection: 'row',
     padding: spacing.sm,
     alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.xs,
   },
   backToSearchText: {
     fontSize: fontSizes.sm,
-    color: colors.primary,
-    fontWeight: '600',
+    color: colors.accent,
+    fontWeight: fontWeights.semibold,
   },
 });

@@ -1,0 +1,77 @@
+"""Single source of truth for "is this date a training day?"
+
+Before this, two places answered the question differently and contradicted
+each other:
+  - nutrition context only checked for a logged `workout_session` row, and
+  - the morning brief only checked the active phase's scheduled templates.
+So right after importing a plan (templates scheduled, no sessions logged yet),
+the brief said "training day" while the macro targets said "rest day".
+
+Both signals are legitimate, so they're unified here:
+  1. An explicit `workout_session` row for the date — you logged or started one,
+     or the training-schedule toggle planned it. Authoritative.
+  2. An active-phase `fitness_template` whose `scheduled_days` includes the
+     date's weekday — the plan's intent, even before a session exists.
+It's a training day if EITHER holds; otherwise a rest day.
+
+Note: there's no explicit "this scheduled day is OFF" store, so toggling a
+normally-scheduled day to rest isn't expressible yet — a known limitation, not
+worse than before.
+"""
+
+import json
+import logging
+from datetime import date
+from typing import Dict
+from sqlalchemy import text
+from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
+
+
+def is_training_day(db: Session, user_id: str, on_date: date) -> Dict:
+    """Resolve training vs rest for `on_date`.
+
+    Returns {is_training_day: bool, reason: str, template_id, template_name}.
+    `reason` is one of: "session_logged", "scheduled", "rest".
+    """
+    # 1. Explicit session row (logged / started / toggled).
+    sess = db.execute(text("""
+        SELECT id FROM workout_session
+        WHERE user_id = :uid AND session_date = :d
+        LIMIT 1
+    """), {"uid": user_id, "d": on_date}).fetchone()
+    if sess:
+        return {"is_training_day": True, "reason": "session_logged",
+                "template_id": None, "template_name": None}
+
+    # 2. Active-phase template scheduled for this weekday.
+    weekday = on_date.strftime("%A").lower()
+    active_phase = db.execute(text("""
+        SELECT id, name FROM fitness_phase
+        WHERE user_id = :uid AND status = 'active'
+          AND (start_date IS NULL OR :d >= start_date)
+          AND (end_date IS NULL OR :d <= end_date)
+        ORDER BY start_date DESC NULLS LAST
+        LIMIT 1
+    """), {"uid": user_id, "d": on_date}).fetchone()
+
+    if active_phase:
+        templates = db.execute(text("""
+            SELECT id, name, scheduled_days
+            FROM fitness_template
+            WHERE user_id = :uid AND phase_id = :pid
+        """), {"uid": user_id, "pid": active_phase.id}).fetchall()
+        for t in templates:
+            if not t.scheduled_days:
+                continue
+            try:
+                days = [str(d).lower() for d in json.loads(t.scheduled_days or "[]")]
+            except (ValueError, TypeError):
+                days = []
+            if weekday in days:
+                return {"is_training_day": True, "reason": "scheduled",
+                        "template_id": t.id, "template_name": t.name}
+
+    return {"is_training_day": False, "reason": "rest",
+            "template_id": None, "template_name": None}

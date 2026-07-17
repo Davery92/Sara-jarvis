@@ -2,7 +2,7 @@
 Add human-like memory stack tables
 
 Revision ID: 20250830_memory_stack
-Revises: 3fe9de76a45e
+Revises: 013_cognitive_enhancement
 Create Date: 2025-08-30
 """
 
@@ -10,7 +10,7 @@ from alembic import op
 import sqlalchemy as sa
 
 revision = '20250830_memory_stack'
-down_revision = '3fe9de76a45e'
+down_revision = '013_cognitive_enhancement'
 branch_labels = None
 depends_on = None
 

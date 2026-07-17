@@ -1,8 +1,16 @@
 from typing import Dict, List, Any
 from app.tools.base import BaseTool, ToolResult
 from app.tools.memory import MemorySearchTool
-from app.tools.notes import NotesCreateTool, NotesSearchTool, NotesEditTool, NotesDeleteTool, NotesListTool
+from app.tools.notes import (
+    NotesCreateTool, NotesSearchTool, NotesEditTool, NotesDeleteTool, NotesListTool,
+    NotesFindSimilarTool, NotesMergeTool, NotesListFoldersTool, NotesCreateFolderTool,
+)
 from app.tools.reminders import RemindersCreateTool, RemindersListTool, RemindersCancelTool
+from app.tools.location import (
+    LocationReminderCreateTool, LocationReminderListTool, LocationReminderCancelTool,
+    PlacesSaveTool, PlacesListTool, PlacesDeleteTool,
+)
+from app.tools.daily_tasks import DailyTaskCreateTool, DailyTaskListTool, DailyTaskCompleteTool
 from app.tools.timers import TimersStartTool, TimersStatusTool, TimersCancelTool
 from app.tools.calendar import CalendarListTool, CalendarCreateTool, CalendarSetRecurringTool
 from app.tools.knowledge_graph import (
@@ -58,6 +66,7 @@ from app.tools.fitness.program_tools import (
     PhaseActivateTool,
     PhaseDeleteTool
 )
+from app.tools.fitness.training_schedule import TrainingScheduleTool
 from app.tools.fitness.workout_suggest import WorkoutSuggestTool
 from app.tools.fitness.summary import FitnessSummaryTool
 from app.tools.fitness.workout_mode import (
@@ -92,12 +101,19 @@ from app.tools.learning import (
     LearningAnalyzeGapsTool,
     LearningFetchSourceTool,
     LearningPathTool,
-    LearningNextSessionTool
+    LearningNextSessionTool,
+    LearningTangentCaptureTool,
+    LearningTangentListTool,
+    LearningKnownDomainsTool,
+    LearningFindAnchorsTool
 )
 from app.tools.morning_brief import MorningBriefTool, WeatherTool
 from app.tools.projects import PROJECT_TOOLS
 from app.tools.home import HOME_TOOLS
-from app.tools.agents import HandoffToAgentsTool, GetBackgroundTasksTool
+from app.tools.agents import GetBackgroundTasksTool
+from app.tools.research_plan import CreateResearchPlanTool, ResearchPlanStatusTool
+from app.tools.meeting import MeetingPrepTool
+from app.tools.lists import LIST_TOOLS
 from app.tools.health import HEALTH_TOOLS
 from app.tools.canvas import (
     CanvasOpenTool,
@@ -111,6 +127,20 @@ from app.tools.device_commands import DEVICE_TOOLS
 from app.tools.workspace import WORKSPACE_TOOLS
 from app.tools.maps import MAP_TOOLS
 from app.tools.self_knowledge import SELF_KNOWLEDGE_TOOLS
+from app.tools.email import EMAIL_TOOLS
+from app.tools.soul import SOUL_TOOLS
+from app.tools.heartbeat import HEARTBEAT_TOOLS
+from app.tools.behavior_router import BEHAVIOR_ROUTER_TOOLS
+from app.tools.personal_knowledge import PKG_TOOLS
+from app.tools.standing_orders import STANDING_ORDER_TOOLS
+from app.tools.content_inbox import CONTENT_INBOX_TOOLS
+from app.tools.agent_dispatch import AGENT_DISPATCH_TOOLS
+from app.tools.sara_queue import QueueForSaraTool
+from app.tools.notifications import NOTIFICATION_TOOLS
+from app.tools.shell import SHELL_TOOLS
+from app.tools.recipes import RECIPE_TOOLS
+from app.tools.people import ListPeopleTool
+from app.tools.goals import ManageGoalTool
 import logging
 
 logger = logging.getLogger(__name__)
@@ -135,26 +165,44 @@ class ToolRegistry:
             ]
         },
         'notes': {
-            'description': 'Create, edit, search, list, and delete notes in the knowledge garden',
+            'description': 'Create, edit, search, list, and delete notes and folders in the knowledge garden',
             'tools': [
                 'notes_create',
                 'notes_search',
                 'notes_edit',
                 'notes_delete',
-                'notes_list'
+                'notes_list',
+                'notes_list_folders',
+                'notes_create_folder',
+                'find_similar_notes',
+                'merge_notes',
             ]
         },
         'time': {
-            'description': 'Manage reminders, timers, and calendar events',
+            'description': 'Manage reminders, timers, calendar events, and daily tasks',
             'tools': [
                 'reminders_create',
                 'reminders_list',
                 'reminders_cancel',
+                'daily_task_create',
+                'daily_task_list',
+                'daily_task_complete',
                 'timers_start',
                 'timers_status',
                 'timers_cancel',
                 'calendar_list',
-                'calendar_create'
+                'calendar_create',
+                'calendar_set_recurring',
+                'meeting_prep'
+            ]
+        },
+        'lists': {
+            'description': 'Personal lists — grocery, packing, gift ideas, etc.',
+            'tools': [
+                'list_add',
+                'list_view',
+                'list_check',
+                'list_remove'
             ]
         },
         'web': {
@@ -177,7 +225,9 @@ class ToolRegistry:
                 'template_list', 'template_get', 'template_create', 'template_update', 'template_delete',
                 'program_list', 'program_get', 'program_create', 'program_update', 'program_activate', 'program_delete',
                 'phase_list', 'phase_get', 'phase_create', 'phase_update', 'phase_activate', 'phase_delete',
-                'workout_suggest'
+                'training_schedule',
+                'workout_suggest',
+                'start_workout', 'end_workout', 'workout_mode_log', 'workout_history',
             ]
         },
         'chess': {
@@ -191,13 +241,15 @@ class ToolRegistry:
             ]
         },
         'learning': {
-            'description': 'Manage learning topics, sources, study notes, autonomous research, and personalized learning paths',
+            'description': 'Manage learning topics, sources, study notes, autonomous research, personalized learning paths, tangent capture, known domains, and analogy anchors',
             'tools': [
                 'learning_topic_create', 'learning_topic_list', 'learning_topic_update',
                 'learning_source_add', 'learning_source_list', 'learning_fetch_source',
                 'learning_scratchpad_read', 'learning_scratchpad_update',
                 'learning_research', 'learning_analyze_gaps',
-                'learning_path', 'learning_next_session'
+                'learning_path', 'learning_next_session',
+                'learning_tangent_capture', 'learning_tangent_list',
+                'learning_known_domains', 'learning_find_anchors'
             ]
         },
         'daily': {
@@ -223,9 +275,11 @@ class ToolRegistry:
             ]
         },
         'agents': {
-            'description': 'Hand off research tasks to background worker agents for autonomous investigation',
+            'description': 'Inspect background worker agents and tasks, hand off multi-day work to the autonomous daemon, and create/check structured research plans',
             'tools': [
-                'handoff_to_agents', 'get_background_tasks'
+                'get_background_tasks',
+                'queue_for_sara',
+                'create_research_plan', 'research_plan_status',
             ]
         },
         'health': {
@@ -249,10 +303,12 @@ class ToolRegistry:
             ]
         },
         'devices': {
-            'description': 'Control connected desktop agents - send notifications, open URLs, show notes, take screenshots, open workspace on user devices',
+            'description': 'Control connected desktop agents - send notifications, open URLs, show notes, take screenshots, open workspace, write clipboard, focus windows, and type into named windows on user devices. The clipboard/focus/typing tools only run when the user explicitly asks for them.',
             'tools': [
                 'device_list', 'device_send_notification', 'device_open_url',
-                'device_show_note', 'device_take_screenshot', 'device_open_workspace'
+                'device_show_note', 'device_take_screenshot', 'device_open_workspace',
+                'device_write_clipboard', 'device_focus_window', 'device_type_into_window',
+                'device_open_overlay', 'device_record_voice_note',
             ]
         },
         'workspace': {
@@ -260,7 +316,7 @@ class ToolRegistry:
             'tools': [
                 'workspace_list_windows', 'workspace_open_window', 'workspace_open_note',
                 'workspace_close_window', 'workspace_save_state', 'workspace_arrange',
-                'workspace_focus_window'
+                'workspace_focus_window', 'workspace_find_and_open', 'workspace_open_from_last_results'
             ]
         },
         'maps': {
@@ -275,7 +331,81 @@ class ToolRegistry:
         'self_knowledge': {
             'description': 'Retrieve detailed self-knowledge about Sara\'s architecture, capabilities, autonomous systems, and limitations',
             'tools': ['get_self_knowledge']
-        }
+        },
+        'email': {
+            'description': 'Search, read, and get summaries of emails from synced mailboxes',
+            'tools': ['email_search', 'email_read', 'email_recent', 'email_attachment_read']
+        },
+        'soul': {
+            'description': "View and propose changes to Sara's core identity, operating principles, boundaries, and growth areas. The Soul is Sara's persistent self-definition.",
+            'tools': [
+                'view_soul', 'propose_soul_change', 'list_soul_proposals'
+            ]
+        },
+        'heartbeat': {
+            'description': "View Sara's heartbeat checklist — active monitors and the HEARTBEAT.md natural language rules file.",
+            'tools': [
+                'list_heartbeat_items', 'read_heartbeat_file'
+            ]
+        },
+        'behavior': {
+            'description': "Route behavior intents to the appropriate system (Soul, Skills, Automation, or Heartbeat) using intelligent classification. Also view unified behavioral configuration.",
+            'tools': ['route_behavior', 'show_behavior_config']
+        },
+        'personal_knowledge': {
+            'description': "Query and store personal knowledge about David — preferences, routines, goals, interests, health, relationships, and places.",
+            'tools': ['query_david_knowledge', 'remember_about_david']
+        },
+        'standing_orders': {
+            'description': "Manage standing orders — pre-authorized autonomous actions Sara can execute without asking. Also view/undo recent autonomous actions.",
+            'tools': [
+                'standing_order_list', 'standing_order_create',
+                'standing_order_modify', 'action_ledger_recent', 'action_undo'
+            ]
+        },
+        'inbox': {
+            'description': "Search and read items from David's content inbox — saved URLs, Reddit posts, PDFs, articles, and text snippets.",
+            'tools': ['inbox_search', 'inbox_read']
+        },
+        'notifications': {
+            'description': "Read the notifications Sara has sent David — what's unread, what the app icon badge refers to, recent notification history. Use when David asks \"what's the notification?\" or \"did I miss anything?\"",
+            'tools': ['get_recent_notifications']
+        },
+        'vm_agents': {
+            'description': "Dispatch background tasks (research, code, setup) to agents, check status, resume sessions, and propose candidate skills. Use dispatch_and_monitor for tasks where David should be notified on completion.",
+            'tools': [
+                'dispatch_agent_task', 'dispatch_and_monitor',
+                'get_agent_status', 'resume_agent_session',
+                'submit_candidate_skill', 'cancel_agent_task',
+            ]
+        },
+        'shell': {
+            'description': 'Execute shell commands, read and write files on the server. Use for code execution, scripting, system administration, file manipulation.',
+            'tools': ['run_command', 'read_file', 'write_file']
+        },
+        'recipes': {
+            'description': "Create, search, edit, and log David's recipes — structured ingredients, steps, servings, prep/cook time, macros. Use these instead of notes for any cooking recipe.",
+            'tools': [
+                'recipes_create', 'recipes_search', 'recipes_get',
+                'recipes_list', 'recipes_edit', 'recipes_delete',
+                'recipes_log_made'
+            ]
+        },
+        'location': {
+            'description': "Save named places (home, work, gym, client sites) and set location-triggered reminders that fire when David arrives at or leaves a place — 'remind me to X when I get home/leave here'.",
+            'tools': [
+                'places_save', 'places_list', 'places_delete',
+                'location_reminder_create', 'location_reminder_list', 'location_reminder_cancel',
+            ]
+        },
+        'people': {
+            'description': "Answer questions about who David has been interacting with — who he's overdue to reconnect with, who's new, recent contacts — from the real person table (built from email + chat mentions).",
+            'tools': ['list_people']
+        },
+        'goals': {
+            'description': "Create, advance, or complete a persistent goal that survives across days (not just this conversation) — 'let's make X a goal', tracking progress, marking a goal done.",
+            'tools': ['manage_goal']
+        },
     }
 
     def __init__(self):
@@ -294,11 +424,28 @@ class ToolRegistry:
             NotesEditTool(),
             NotesDeleteTool(),
             NotesListTool(),
+            NotesFindSimilarTool(),
+            NotesMergeTool(),
+            NotesListFoldersTool(),
+            NotesCreateFolderTool(),
             
             # Reminders
             RemindersCreateTool(),
             RemindersListTool(),
             RemindersCancelTool(),
+
+            # Location — location-triggered reminders + saved places
+            LocationReminderCreateTool(),
+            LocationReminderListTool(),
+            LocationReminderCancelTool(),
+            PlacesSaveTool(),
+            PlacesListTool(),
+            PlacesDeleteTool(),
+
+            # Daily Tasks
+            DailyTaskCreateTool(),
+            DailyTaskListTool(),
+            DailyTaskCompleteTool(),
             
             # Timers
             TimersStartTool(),
@@ -367,6 +514,9 @@ class ToolRegistry:
             PhaseActivateTool(),
             PhaseDeleteTool(),
 
+            # Training Schedule (swap days, toggle dates)
+            TrainingScheduleTool(),
+
             # Workout Suggestion (intelligent weight recommendations)
             WorkoutSuggestTool(),
 
@@ -406,6 +556,10 @@ class ToolRegistry:
             LearningAnalyzeGapsTool(),
             LearningPathTool(),
             LearningNextSessionTool(),
+            LearningTangentCaptureTool(),
+            LearningTangentListTool(),
+            LearningKnownDomainsTool(),
+            LearningFindAnchorsTool(),
 
             # Morning Brief & Weather Tools
             MorningBriefTool(),
@@ -418,7 +572,6 @@ class ToolRegistry:
             *HOME_TOOLS,
 
             # Agent Handoff Tools
-            HandoffToAgentsTool(),
             GetBackgroundTasksTool(),
 
             # Health Monitoring Tools
@@ -445,6 +598,58 @@ class ToolRegistry:
 
             # Self-Knowledge Tools (Sara's self-awareness)
             *SELF_KNOWLEDGE_TOOLS,
+
+            # Email Tools
+            *EMAIL_TOOLS,
+
+            # Soul Tools (Sara's identity and self-modification)
+            *SOUL_TOOLS,
+
+            # Heartbeat Tools (dynamic monitoring checklist)
+            *HEARTBEAT_TOOLS,
+
+            # Behavior Router Tools (intelligent routing to appropriate system)
+            *BEHAVIOR_ROUTER_TOOLS,
+
+            # Personal Knowledge Graph Tools (query/remember about David)
+            *PKG_TOOLS,
+
+            # Standing Order Tools (pre-authorized autonomous actions)
+            *STANDING_ORDER_TOOLS,
+
+            # Content Inbox Tools (search/read saved content)
+            *CONTENT_INBOX_TOOLS,
+
+            # VM Agent Dispatch Tools (sandbox VM agent orchestration)
+            *AGENT_DISPATCH_TOOLS,
+
+            # Shell Tools (local command execution, file I/O)
+            *SHELL_TOOLS,
+
+            # Hand-off to the autonomous mind (ACS daemon inbox → goals)
+            QueueForSaraTool(),
+
+            # Notification history ("what's the notification?" / badge explainer)
+            *NOTIFICATION_TOOLS,
+
+            # Research Plan Tools (delegate research to dedicated agent)
+            CreateResearchPlanTool(),
+            ResearchPlanStatusTool(),
+
+            # Meeting prep ("who am I meeting with / prep me for my 2pm")
+            MeetingPrepTool(),
+
+            # Personal lists (grocery by default) — plain DB, not Home Assistant
+            *LIST_TOOLS,
+
+            # Recipe Tools (structured cooking recipes — not notes)
+            *RECIPE_TOOLS,
+
+            # People ("who am I overdue with?") — person table, Phase 2
+            ListPeopleTool(),
+
+            # Goals ("let's make X a goal") — sara_goal, Phase 3
+            ManageGoalTool(),
         ]
 
         for tool in tools:
@@ -551,9 +756,14 @@ class ToolRegistry:
         return schemas
 
     async def execute_tool(
-        self, name: str, user_id: str, parameters: Dict[str, Any]
+        self, name: str, user_id: str, parameters: Dict[str, Any],
+        context: Dict[str, Any] = None,
     ) -> ToolResult:
-        """Execute a tool by name"""
+        """Execute a tool by name.
+
+        Args:
+            context: Optional execution context (e.g. {"task_id": "..."} for shell tools).
+        """
         # Handle special meta-tool for loading categories
         if name == "load_tool_categories":
             categories = parameters.get("categories", [])
@@ -570,6 +780,28 @@ class ToolRegistry:
                 success=False,
                 message=f"Tool '{name}' not found"
             )
+
+        # Origin gate: actuators that require a user-originated chat turn cannot
+        # be invoked by the autonomous loop. Default origin is "chat" because the
+        # tool_registry is currently only reached from the chat dispatch site; any
+        # future caller (e.g. ACS daemon) must pass an explicit origin.
+        origin = (context or {}).get("origin", "chat")
+        if getattr(tool, "requires_user_origin", False) and origin != "chat":
+            logger.warning(
+                f"Refusing tool '{name}' from origin '{origin}' "
+                f"(requires user-originated chat turn)"
+            )
+            return ToolResult(
+                success=False,
+                message=(
+                    f"Tool '{name}' can only be invoked from a user chat turn, "
+                    f"not from origin '{origin}'."
+                ),
+            )
+
+        # Inject context into parameters for tools that need it (e.g. shell tools)
+        if context and context.get("task_id"):
+            parameters = {**parameters, "_task_id": context["task_id"]}
 
         try:
             result = await tool.execute(user_id, **parameters)

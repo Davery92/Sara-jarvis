@@ -167,7 +167,7 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   iosBadge: {
-    backgroundColor: '#555',
+    backgroundColor: colors.textMuted,
     borderRadius: borderRadius.sm,
     paddingHorizontal: spacing.sm,
     paddingVertical: 2,

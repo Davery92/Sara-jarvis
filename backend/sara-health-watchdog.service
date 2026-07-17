@@ -13,7 +13,7 @@ WorkingDirectory=/home/david/jarvis/backend
 Environment=PYTHONPATH=/home/david/jarvis/backend
 Environment=DATABASE_URL=postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub
 Environment=OPENAI_BASE_URL=http://100.104.68.115:11434/v1
-Environment=OPENAI_MODEL=gpt-oss:120b
+Environment=OPENAI_MODEL=gpt-oss:20b
 Environment=EMBEDDING_BASE_URL=http://100.104.68.115:11434
 Environment=EMBEDDING_MODEL=bge-m3
 Environment=EMBEDDING_DIM=1024

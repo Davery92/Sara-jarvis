@@ -9,16 +9,43 @@ import {
   KeyboardAvoidingView,
   Platform,
   ScrollView,
+  Image,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import Markdown from 'react-native-markdown-display';
+
+// Custom image rule: the default rule renders react-native-fit-image, which
+// async-fetches each remote image's size and re-renders — that's the known
+// trigger for "Each child in a list should have a unique key" warnings on notes
+// containing screenshots. A plain, explicitly-keyed <Image> avoids it.
+const markdownRules = {
+  image: (node: any) => {
+    const { src, alt } = node.attributes;
+    return (
+      <Image
+        key={node.key}
+        source={{ uri: src }}
+        style={{
+          width: '100%',
+          height: 220,
+          borderRadius: borderRadius.md,
+          marginVertical: spacing.sm,
+          backgroundColor: colors.surface,
+        }}
+        resizeMode="contain"
+        accessibilityLabel={alt}
+      />
+    );
+  },
+};
 import { notesService } from '../../services/notes';
 import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
 
 interface NoteEditorScreenProps {
   route?: {
     params?: {
-      noteId?: number;
-      folderId?: number;
+      noteId?: string | number;
+      folderId?: string | number;
       onSave?: () => void;
     };
   };
@@ -34,6 +61,7 @@ export default function NoteEditorScreen({ route, navigation }: NoteEditorScreen
   const [content, setContent] = useState('');
   const [loading, setLoading] = useState(!!noteId);
   const [saving, setSaving] = useState(false);
+  const [isEditing, setIsEditing] = useState(!noteId);
 
   useEffect(() => {
     if (noteId) {
@@ -78,15 +106,12 @@ export default function NoteEditorScreen({ route, navigation }: NoteEditorScreen
         });
       }
 
-      Alert.alert('Success', 'Note saved successfully', [
-        {
-          text: 'OK',
-          onPress: () => {
-            onSave?.();
-            navigation.goBack();
-          },
-        },
-      ]);
+      onSave?.();
+      if (noteId) {
+        setIsEditing(false);
+      } else {
+        navigation.goBack();
+      }
     } catch (error) {
       console.error('Failed to save note:', error);
       Alert.alert('Error', 'Failed to save note');
@@ -97,7 +122,7 @@ export default function NoteEditorScreen({ route, navigation }: NoteEditorScreen
 
   if (loading) {
     return (
-      <SafeAreaView style={styles.container} edges={['bottom']}>
+      <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
         <View style={styles.loadingContainer}>
           <Text style={styles.loadingText}>Loading...</Text>
         </View>
@@ -106,49 +131,72 @@ export default function NoteEditorScreen({ route, navigation }: NoteEditorScreen
   }
 
   return (
-    <SafeAreaView style={styles.container} edges={['bottom']}>
+    <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         style={styles.container}
       >
         {/* Header */}
         <View style={styles.header}>
-          <TouchableOpacity onPress={() => navigation.goBack()}>
-            <Text style={styles.cancelButton}>Cancel</Text>
-          </TouchableOpacity>
-          <Text style={styles.headerTitle}>
-            {noteId ? 'Edit Note' : 'New Note'}
-          </Text>
-          <TouchableOpacity onPress={handleSave} disabled={saving}>
-            <Text style={[styles.saveButton, saving && styles.saveButtonDisabled]}>
-              {saving ? 'Saving...' : 'Save'}
+          <TouchableOpacity
+            onPress={() => {
+              if (isEditing && noteId) {
+                // Cancel edit — reload original content
+                loadNote();
+                setIsEditing(false);
+              } else {
+                navigation.goBack();
+              }
+            }}
+          >
+            <Text style={styles.cancelButton}>
+              {isEditing && noteId ? 'Cancel' : 'Close'}
             </Text>
           </TouchableOpacity>
+          <Text style={styles.headerTitle}>
+            {isEditing ? (noteId ? 'Edit Note' : 'New Note') : title}
+          </Text>
+          {isEditing ? (
+            <TouchableOpacity onPress={handleSave} disabled={saving}>
+              <Text style={[styles.saveButton, saving && styles.saveButtonDisabled]}>
+                {saving ? 'Saving...' : 'Save'}
+              </Text>
+            </TouchableOpacity>
+          ) : (
+            <TouchableOpacity onPress={() => setIsEditing(true)}>
+              <Text style={styles.saveButton}>Edit</Text>
+            </TouchableOpacity>
+          )}
         </View>
 
-        {/* Editor */}
-        <ScrollView style={styles.content} keyboardShouldPersistTaps="handled">
-          {/* Title Input */}
-          <TextInput
-            style={styles.titleInput}
-            placeholder="Note Title"
-            placeholderTextColor={colors.textMuted}
-            value={title}
-            onChangeText={setTitle}
-            autoFocus={!noteId}
-          />
-
-          {/* Content Input */}
-          <TextInput
-            style={styles.contentInput}
-            placeholder="Start writing..."
-            placeholderTextColor={colors.textMuted}
-            value={content}
-            onChangeText={setContent}
-            multiline
-            textAlignVertical="top"
-          />
-        </ScrollView>
+        {isEditing ? (
+          /* Editor */
+          <ScrollView style={styles.content} keyboardShouldPersistTaps="handled">
+            <TextInput
+              style={styles.titleInput}
+              placeholder="Note Title"
+              placeholderTextColor={colors.textMuted}
+              value={title}
+              onChangeText={setTitle}
+              autoFocus={!noteId}
+            />
+            <TextInput
+              style={styles.contentInput}
+              placeholder="Start writing..."
+              placeholderTextColor={colors.textMuted}
+              value={content}
+              onChangeText={setContent}
+              multiline
+              textAlignVertical="top"
+            />
+          </ScrollView>
+        ) : (
+          /* Rendered markdown view */
+          <ScrollView style={styles.content}>
+            <Text style={styles.viewTitle}>{title}</Text>
+            <Markdown style={markdownStyles} rules={markdownRules}>{content || ' '}</Markdown>
+          </ScrollView>
+        )}
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
@@ -213,4 +261,78 @@ const styles = StyleSheet.create({
     minHeight: 400,
     padding: 0,
   },
+  viewTitle: {
+    color: colors.text,
+    fontSize: fontSizes.xl,
+    fontWeight: '600',
+    marginBottom: spacing.md,
+  },
 });
+
+const markdownStyles = {
+  body: {
+    color: colors.text,
+    fontSize: fontSizes.md,
+    lineHeight: 24,
+  },
+  heading1: {
+    fontSize: fontSizes.xxl,
+    fontWeight: 'bold' as const,
+    color: colors.text,
+    marginTop: spacing.lg,
+    marginBottom: spacing.md,
+  },
+  heading2: {
+    fontSize: fontSizes.xl,
+    fontWeight: '600' as const,
+    color: colors.text,
+    marginTop: spacing.md,
+    marginBottom: spacing.sm,
+  },
+  heading3: {
+    fontSize: fontSizes.lg,
+    fontWeight: '600' as const,
+    color: colors.text,
+    marginTop: spacing.sm,
+    marginBottom: spacing.xs,
+  },
+  paragraph: {
+    marginBottom: spacing.sm,
+    color: colors.text,
+  },
+  listItem: {
+    color: colors.text,
+  },
+  strong: {
+    fontWeight: 'bold' as const,
+    color: colors.text,
+  },
+  code_inline: {
+    backgroundColor: colors.surface,
+    color: colors.primary,
+    borderRadius: 4,
+    paddingHorizontal: 4,
+  },
+  fence: {
+    backgroundColor: colors.surface,
+    borderRadius: 8,
+    padding: spacing.sm,
+    color: colors.text,
+  },
+  link: {
+    color: colors.primary,
+  },
+  blockquote: {
+    borderLeftColor: colors.primary,
+    borderLeftWidth: 3,
+    paddingLeft: spacing.sm,
+    backgroundColor: colors.surface,
+    borderRadius: 4,
+    marginVertical: spacing.sm,
+  },
+  hr: {
+    backgroundColor: colors.border,
+    height: 1,
+    marginVertical: spacing.md,
+  },
+};

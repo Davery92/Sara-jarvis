@@ -16,6 +16,7 @@ import ChatScreen from '../chat/ChatScreen';
 import WorkoutPanel from '../../components/fitness/WorkoutPanel';
 import { useWorkoutMode } from '../../context/WorkoutModeContext';
 import { RootStackParamList } from '../../types/navigation';
+import { colors, spacing, borderRadius, fontSizes, fontWeights } from '../../styles/theme';
 
 type WorkoutModeScreenNavigationProp = NativeStackNavigationProp<RootStackParamList, 'WorkoutMode'>;
 type WorkoutModeScreenRouteProp = RouteProp<RootStackParamList, 'WorkoutMode'>;
@@ -79,7 +80,7 @@ export default function WorkoutModeScreen() {
     return (
       <SafeAreaView style={styles.container}>
         <View style={styles.summaryContainer}>
-          <Ionicons name="trophy" size={64} color="#22c55e" />
+          <Ionicons name="trophy" size={64} color={colors.success} />
           <Text style={styles.summaryTitle}>Workout Complete!</Text>
 
           <View style={styles.summaryStats}>
@@ -99,6 +100,36 @@ export default function WorkoutModeScreen() {
             </View>
           </View>
 
+          {/* Heart rate / calories melded from the Apple Watch workout, if it
+              overlapped this session and has synced. */}
+          {workoutSummary.heart_rate && (
+            <View style={{ alignItems: 'center', marginTop: 4 }}>
+              <Text style={{ color: colors.textSecondary, fontSize: 12, marginBottom: 8 }}>
+                ❤️ From your watch · {workoutSummary.heart_rate.activity}
+              </Text>
+              <View style={styles.summaryStats}>
+                {workoutSummary.heart_rate.avg_heart_rate ? (
+                  <View style={styles.statItem}>
+                    <Text style={styles.statValue}>{workoutSummary.heart_rate.avg_heart_rate}</Text>
+                    <Text style={styles.statLabel}>Avg BPM</Text>
+                  </View>
+                ) : null}
+                {workoutSummary.heart_rate.max_heart_rate ? (
+                  <View style={styles.statItem}>
+                    <Text style={styles.statValue}>{workoutSummary.heart_rate.max_heart_rate}</Text>
+                    <Text style={styles.statLabel}>Max BPM</Text>
+                  </View>
+                ) : null}
+                {workoutSummary.heart_rate.calories ? (
+                  <View style={styles.statItem}>
+                    <Text style={styles.statValue}>{workoutSummary.heart_rate.calories}</Text>
+                    <Text style={styles.statLabel}>Cal</Text>
+                  </View>
+                ) : null}
+              </View>
+            </View>
+          )}
+
           <TouchableOpacity
             style={styles.doneButton}
             onPress={() => navigation.goBack()}
@@ -115,7 +146,7 @@ export default function WorkoutModeScreen() {
     return (
       <SafeAreaView style={styles.container}>
         <View style={styles.noSessionContainer}>
-          <Ionicons name="barbell-outline" size={64} color="#555" />
+          <Ionicons name="barbell-outline" size={64} color={colors.textMuted} />
           <Text style={styles.noSessionText}>No active workout</Text>
           <Text style={styles.noSessionSubtext}>
             Start a workout from the Fitness tab to begin training with Sara
@@ -139,33 +170,39 @@ export default function WorkoutModeScreen() {
       >
         {/* Header */}
         <View style={styles.header}>
-          <TouchableOpacity onPress={() => navigation.goBack()}>
-            <Ionicons name="chevron-back" size={24} color="#fff" />
+          <TouchableOpacity onPress={() => navigation.goBack()} hitSlop={8}>
+            <Ionicons name="chevron-back" size={24} color={colors.text} />
           </TouchableOpacity>
-          <Text style={styles.headerTitle}>
+          <Text style={styles.headerTitle} numberOfLines={1}>
             {session?.workout_snapshot?.template_name || 'Workout'}
           </Text>
-          <TouchableOpacity
-            onPress={() => setIsPanelCollapsed(!isPanelCollapsed)}
-          >
+          <TouchableOpacity onPress={() => setIsPanelCollapsed(!isPanelCollapsed)} hitSlop={8}>
             <Ionicons
-              name={isPanelCollapsed ? 'chevron-up' : 'chevron-down'}
-              size={24}
-              color="#fff"
+              name={isPanelCollapsed ? 'chatbubble-ellipses' : 'ellipsis-vertical'}
+              size={22}
+              color={colors.text}
             />
           </TouchableOpacity>
         </View>
 
-        {/* Workout Panel */}
+        {/* Workout Panel — fills the screen while capturing; the ⋮ collapses it to
+            a bar and reveals Sara's coaching chat. */}
         <WorkoutPanel
           isCollapsed={isPanelCollapsed}
           onCollapse={() => setIsPanelCollapsed(!isPanelCollapsed)}
+          onFinish={async () => {
+            const result = await completeWorkout();
+            setWorkoutSummary(result.summary);
+            setShowSummary(true);
+          }}
         />
 
-        {/* Chat Interface */}
-        <View style={styles.chatContainer}>
-          <ChatScreen isEmbedded={true} />
-        </View>
+        {/* Chat only appears once the workout panel is collapsed */}
+        {isPanelCollapsed && (
+          <View style={styles.chatContainer}>
+            <ChatScreen isEmbedded={true} />
+          </View>
+        )}
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
@@ -174,7 +211,7 @@ export default function WorkoutModeScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#000',
+    backgroundColor: colors.background,
   },
   keyboardView: {
     flex: 1,
@@ -183,15 +220,20 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm + 4,
     borderBottomWidth: 1,
-    borderBottomColor: '#222',
+    borderBottomColor: colors.border,
+    backgroundColor: colors.surface,
   },
   headerTitle: {
-    color: '#fff',
-    fontSize: 17,
-    fontWeight: '600',
+    flex: 1,
+    textAlign: 'center',
+    marginHorizontal: spacing.sm,
+    color: colors.text,
+    fontSize: fontSizes.md,
+    fontWeight: fontWeights.bold,
+    letterSpacing: 0.2,
   },
   chatContainer: {
     flex: 1,
@@ -200,72 +242,82 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    padding: 32,
+    padding: spacing.xl,
   },
   noSessionText: {
-    color: '#888',
-    fontSize: 18,
-    fontWeight: '600',
-    marginTop: 16,
+    color: colors.text,
+    fontSize: fontSizes.lg,
+    fontWeight: fontWeights.bold,
+    marginTop: spacing.md,
   },
   noSessionSubtext: {
-    color: '#555',
-    fontSize: 14,
+    color: colors.textMuted,
+    fontSize: fontSizes.sm,
     textAlign: 'center',
-    marginTop: 8,
-    marginHorizontal: 32,
+    lineHeight: 20,
+    marginTop: spacing.sm,
+    marginHorizontal: spacing.xl,
   },
   goBackButton: {
-    marginTop: 24,
-    paddingHorizontal: 24,
-    paddingVertical: 12,
-    backgroundColor: '#3b82f6',
-    borderRadius: 8,
+    marginTop: spacing.lg,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.sm + 4,
+    backgroundColor: colors.primary,
+    borderRadius: borderRadius.lg,
   },
   goBackButtonText: {
-    color: '#fff',
-    fontWeight: '600',
+    color: colors.background,
+    fontSize: fontSizes.sm,
+    fontWeight: fontWeights.bold,
   },
   summaryContainer: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    padding: 32,
+    padding: spacing.xl,
   },
   summaryTitle: {
-    color: '#fff',
-    fontSize: 24,
-    fontWeight: '700',
-    marginTop: 16,
+    color: colors.text,
+    fontSize: fontSizes.xxl,
+    fontWeight: fontWeights.bold,
+    marginTop: spacing.md,
   },
   summaryStats: {
     flexDirection: 'row',
-    marginTop: 32,
-    gap: 32,
+    marginTop: spacing.xl,
+    gap: spacing.sm,
   },
   statItem: {
+    flex: 1,
     alignItems: 'center',
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: borderRadius.xl,
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.sm,
   },
   statValue: {
-    color: '#fff',
-    fontSize: 32,
-    fontWeight: '700',
+    color: colors.accent,
+    fontSize: fontSizes.xxxl,
+    fontWeight: fontWeights.bold,
   },
   statLabel: {
-    color: '#888',
-    fontSize: 14,
-    marginTop: 4,
+    color: colors.textSecondary,
+    fontSize: fontSizes.xs,
+    marginTop: spacing.xs,
   },
   doneButton: {
-    marginTop: 48,
-    paddingHorizontal: 48,
-    paddingVertical: 14,
-    backgroundColor: '#22c55e',
-    borderRadius: 10,
+    marginTop: spacing.xxl,
+    alignSelf: 'stretch',
+    alignItems: 'center',
+    paddingVertical: spacing.md,
+    backgroundColor: colors.primary,
+    borderRadius: borderRadius.lg,
   },
   doneButtonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600',
+    color: colors.background,
+    fontSize: fontSizes.md,
+    fontWeight: fontWeights.bold,
   },
 });

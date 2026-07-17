@@ -9,6 +9,7 @@ import uuid
 class Reminder(Base):
     """User reminder with title, description, and scheduled time."""
     __tablename__ = "reminder"
+    __table_args__ = {"extend_existing": True}
 
     id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id = Column(String, ForeignKey("app_user.id", ondelete="CASCADE"), nullable=False)
@@ -16,6 +17,7 @@ class Reminder(Base):
     description = Column(Text, default="")
     reminder_time = Column(DateTime(timezone=True), nullable=False)
     is_completed = Column(Boolean, default=False)
+    event_id = Column(String, ForeignKey("calendar_event.id", ondelete="CASCADE"), nullable=True, index=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

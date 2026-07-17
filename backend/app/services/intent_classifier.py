@@ -351,7 +351,7 @@ def get_keyword_classifier() -> KeywordIntentClassifier:
 # Tool Intent Classifier - Maps messages to tool categories for token savings
 # ============================================================================
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from threading import Lock
 
 @dataclass
@@ -372,13 +372,51 @@ class ToolIntentClassifier:
     """
 
     # Base tools always available (essential for most interactions)
-    BASE_TOOLS = ['memory', 'notes', 'time']
+    BASE_TOOLS = ['memory', 'notes', 'time', 'acs']
 
     # Extended default tools for general/unclear intent
-    DEFAULT_TOOLS = ['memory', 'notes', 'time', 'web', 'fitness', 'learning']
+    DEFAULT_TOOLS = ['memory', 'notes', 'time', 'web', 'fitness', 'learning', 'home']
 
     # Intent patterns - more specific patterns checked first
     INTENT_PATTERNS = {
+        # RECIPES must precede FITNESS/NOTES: a recipe request often contains
+        # fitness keywords ('protein', 'meal') or 'save this' (NOTES), which would
+        # otherwise steal the intent and hide recipes_create from the model.
+        'RECIPES': [
+            'recipe', 'recipes',
+        ],
+        # LOCATION must precede NOTES ('save this' collides) and TIME
+        # ('remind'/'reminder' collides with "remind me ... when I get home") —
+        # SARA_UNLEASHED Phase U.8: these tools existed and data was flowing
+        # (location_event, known_place) but were unreachable from chat because
+        # no intent ever routed to them.
+        'LOCATION': [
+            'save this location', 'save my location', 'save this place',
+            'save my current location', 'remember this place', 'remember where',
+            'known place', 'known places', 'saved places', 'saved place', 'my places',
+            'forget this place', 'forget that place', 'delete this place',
+            'add this as a known place', 'add this as a place',
+            'when i get home', 'when i leave', 'when i arrive', 'when i get to',
+            'leave here', 'get home', 'location reminder', 'geofence', 'where am i',
+        ],
+        # PEOPLE must precede MEMORY ('have i'/'have we' collides with "who
+        # have i been talking to") — SARA_UNLEASHED U.8 registry sweep found
+        # list_people (Phase D's people-graph tool, real data, zero routing).
+        'PEOPLE': [
+            'who am i overdue with', 'overdue with', "who's new this week",
+            'who is new this week', "haven't talked to", 'have not talked to',
+            'catch up with', 'who have i been talking to', "who've i been talking to",
+            'people i talk to', 'reconnect with', 'who am i overdue to',
+        ],
+        # GOALS must precede PERSONAL_KNOWLEDGE ('my goals' is already one of
+        # its keywords) — SARA_UNLEASHED U.8 found manage_goal (Phase E's
+        # persistent-goal tool, same table the ACS daemon reads) with zero
+        # routing. A tracked goal is a better answer than a generic fact.
+        'GOALS': [
+            'a goal', 'track progress on', 'mark that goal', 'mark this goal',
+            'goal done', 'complete that goal', 'complete this goal', 'my goals',
+            'persistent goal', 'goal progress', 'stalled goal',
+        ],
         'FITNESS': [
             'log', 'food', 'calories', 'workout', 'exercise', 'meal', 'weight',
             'protein', 'carbs', 'fat', 'macros', 'ate', 'eating', 'breakfast',
@@ -410,15 +448,35 @@ class ToolIntentClassifier:
             'search', 'look up', 'find out', 'google', 'look for',
             'research', 'news about', 'latest on', 'who is', 'what is'
         ],
+        # Before MEMORY/HOME/CONVERSATIONAL: their broad keywords ('did i',
+        # 'is the', 'hey') would otherwise swallow "hey what's the notification?"
+        # / badge questions. Device-targeted phrasing ("send a notification to
+        # my pc") still wins via the priority check above.
+        'NOTIFICATIONS': [
+            'the notification', 'that notification', 'notifications',
+            'what notification', 'which notification', 'badge',
+            'did you send me', 'what did you send', 'did i miss',
+            'miss anything', 'missed anything', 'did you notify',
+            'why did you ping', 'pinged me', 'what was that alert',
+        ],
         'MEMORY': [
             'remember', 'recall', 'earlier', 'yesterday', 'last time',
             'before', 'previously', 'did i', 'did we', 'have i', 'have we',
             'what did', 'when did', 'told you', 'mentioned'
         ],
         'HOME': [
-            'lights', 'thermostat', 'home assistant', 'turn on', 'turn off',
-            'temperature', 'fan', 'switch', 'door', 'lock', 'garage',
-            'automation', 'sensor', 'smart home'
+            'lights', 'light', 'lamp', 'lamps', 'thermostat', 'home assistant',
+            'turn on', 'turn off', 'shut off', 'switch on', 'switch off',
+            'temperature', 'fan', 'switch', 'door', 'lock', 'unlock', 'garage',
+            'automation', 'sensor', 'smart home', 'home status',
+            'dim', 'bright', 'brighten', 'darken',
+            'air conditioning', 'ac', 'heat', 'heating', 'cooling',
+            'blinds', 'shades', 'curtains', 'cover',
+            'scene', 'goodnight', 'movie mode',
+            'porch', 'bedroom light', 'kitchen light', 'living room light',
+            'is the', 'are the lights', 'house', 'my home',
+            'all lights', 'lights off', 'lights on',
+            'what lights', 'which lights', 'home overview',
         ],
         'CHESS': [
             'chess', 'checkmate', 'chess opening', 'chess endgame', 'chess tactics',
@@ -449,7 +507,10 @@ class ToolIntentClassifier:
             'send notification', 'send a notification', 'notify', 'notification',
             'open on my', 'open url on', 'open this on', 'on my computer',
             'on my desktop', 'on my pc', 'screenshot', 'take screenshot',
-            'connected devices', 'what devices', 'list devices', 'show devices'
+            'connected devices', 'what devices', 'list devices', 'show devices',
+            'what am i looking at', "what's on my screen", 'whats on my screen',
+            "what's this on my screen", 'on my screen', 'my screen',
+            'look at my screen', 'see my screen'
         ],
         'WORKSPACE': [
             'map', 'maps', 'mindmap', 'mind map', 'flowchart', 'flow chart',
@@ -458,25 +519,99 @@ class ToolIntentClassifier:
             'show the map', 'hide the map', 'create a map', 'add node',
             'connect nodes', 'visualization', 'visualize'
         ],
+        'EMAIL': [
+            'email', 'emails', 'mail', 'email inbox', 'message', 'unread',
+            'sender', 'from', 'attachment', 'attachments', 'riskninja',
+            'mailbox', 'outlook', 'sent', 'received'
+        ],
+        'AUTOMATION': [
+            'automation', 'automate', 'every hour', 'every day', 'every minute',
+            'schedule this', 'recurring', 'automatically', 'auto', 'trigger',
+            'when the', 'if the', 'alert me', 'notify me when',
+            'confirm', 'activate', 'activate it', 'yes activate', 'do it',
+            'start it', 'enable it', 'turn it on'
+        ],
+        'SOUL': [
+            'soul', 'your soul', 'identity', 'your identity', 'who you are',
+            'operating principles', 'principles', 'boundaries', 'your boundaries',
+            'growth areas', 'how you operate', 'your rules', 'change yourself',
+            'propose a change', 'soul change', 'self-modification', 'your personality',
+            'personality', 'what are you', 'define yourself', 'evolution'
+        ],
+        'HEARTBEAT': [
+            'heartbeat', 'monitoring', 'what are you watching', 'what are you tracking',
+            'add a monitor', 'remind me about', 'keep an eye on', 'watch for',
+            'check on', 'alert if', 'heartbeat items', 'your checklist',
+            'what are you checking', 'periodic checks', 'daily checks'
+        ],
+        'HEALTH': [
+            'health', 'hrv', 'heart rate', 'resting heart rate', 'blood pressure',
+            'steps today', 'calories burned', 'health metrics', 'health data',
+            'health trends', 'sleep quality', 'sleep score', 'body temperature',
+            'oxygen', 'spo2', 'vo2', 'respiratory'
+        ],
+        'INBOX': [
+            'saved articles', 'reading list', 'what i saved', 'saved links',
+            'shared content', 'content inbox', 'stuff i saved', 'articles i saved'
+        ],
+        'PATTERNS': [
+            'patterns', 'correlations', 'trends over time', 'notice any pattern',
+            'relationship between', 'behavioral pattern', 'what have you noticed',
+            'any trends', 'data correlations'
+        ],
+        'PERSONAL_KNOWLEDGE': [
+            'what do you know about me', 'my preferences', 'about me',
+            'you know that i', 'my routine', 'my goals', 'facts about me',
+            'what have you learned about me', 'my habits'
+        ],
+        'STANDING_ORDERS': [
+            'standing order', 'pre-authorize', 'always do this', 'from now on always',
+            'automatic action', 'pre-approved', 'blanket permission'
+        ],
+        'BEHAVIOR_CONFIG': [
+            'change how you', 'act differently', 'be more', 'be less',
+            'stop being so', 'when coaching', 'your approach to',
+            'modify your behavior', 'change your style'
+        ],
+        'KNOWLEDGE_GRAPH': [
+            'connections between', 'related to', 'how is.*connected',
+            'knowledge clusters', 'linked notes', 'note connections'
+        ],
     }
 
     # Map intents to tool categories
     INTENT_TO_TOOL_CATEGORIES = {
         'CONVERSATIONAL': [],  # Will inherit from conversation context
+        'RECIPES': ['recipes'],  # Structured recipe storage (recipes_create, not notes)
+        'LOCATION': ['location', 'time'],  # 'time' too — location_reminder is reminder-adjacent
+        'PEOPLE': ['people'],
+        'GOALS': ['goals'],
         'FITNESS': ['fitness'],
         'NOTES': ['notes'],
         'TIME': ['time'],
         'WEB': ['web'],
         'MEMORY': ['memory', 'knowledge_graph'],
-        'HOME': ['home'],
+        'HOME': ['home', 'automation'],
         'CHESS': ['chess'],
         'LEARNING': ['learning', 'web'],
         'PROJECTS': ['projects'],
         'MORNING_BRIEF': ['morning_brief', 'time'],
         'AGENTS': ['agents', 'web'],
+        'NOTIFICATIONS': ['notifications'],  # Badge / "what's the notification?"
         'DEVICES': ['devices'],  # Cross-device commands
         'WORKSPACE': ['workspace', 'maps'],  # Canvas and map control
-        'GENERAL': ['notes', 'memory', 'web', 'fitness', 'time', 'devices'],  # Expanded fallback with devices
+        'EMAIL': ['email'],  # Email search and reading
+        'AUTOMATION': ['standing_orders', 'home'],  # Routed to standing orders
+        'SOUL': ['soul', 'self_knowledge'],  # Sara's identity and self-modification
+        'HEARTBEAT': ['heartbeat'],  # Sara's monitoring checklist
+        'HEALTH': ['health', 'fitness'],
+        'INBOX': ['inbox'],
+        'PATTERNS': ['patterns', 'fitness'],
+        'PERSONAL_KNOWLEDGE': ['personal_knowledge', 'memory'],
+        'STANDING_ORDERS': ['standing_orders', 'home'],
+        'BEHAVIOR_CONFIG': ['behavior', 'soul'],
+        'KNOWLEDGE_GRAPH': ['knowledge_graph', 'notes'],
+        'GENERAL': ['notes', 'memory', 'web', 'fitness', 'time', 'devices', 'email', 'home', 'location', 'people', 'goals'],  # Expanded fallback
     }
 
     # How many recent turns to preserve context from
@@ -496,7 +631,7 @@ class ToolIntentClassifier:
                 return None
 
             # Check if context has expired
-            if datetime.utcnow() - ctx.last_update > timedelta(minutes=self.CONTEXT_TTL_MINUTES):
+            if datetime.now(timezone.utc) - ctx.last_update > timedelta(minutes=self.CONTEXT_TTL_MINUTES):
                 del self._conversation_contexts[session_id]
                 return None
 
@@ -511,14 +646,14 @@ class ToolIntentClassifier:
                 ctx = ConversationContext(
                     recent_intents=[],
                     recent_tools=[],
-                    last_update=datetime.utcnow()
+                    last_update=datetime.now(timezone.utc)
                 )
                 self._conversation_contexts[session_id] = ctx
 
             # Add current intent/tools, keeping only last N turns
             ctx.recent_intents = ([intent] + ctx.recent_intents)[:self.CONTEXT_TURNS]
             ctx.recent_tools = (tools + ctx.recent_tools)[:self.CONTEXT_TURNS * 3]
-            ctx.last_update = datetime.utcnow()
+            ctx.last_update = datetime.now(timezone.utc)
 
             # Periodically clean up old sessions (every 100 updates)
             if len(self._conversation_contexts) > 100:
@@ -526,7 +661,7 @@ class ToolIntentClassifier:
 
     def _cleanup_old_contexts(self):
         """Remove expired conversation contexts"""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         expired = [
             sid for sid, ctx in self._conversation_contexts.items()
             if now - ctx.last_update > timedelta(minutes=self.CONTEXT_TTL_MINUTES)
@@ -649,6 +784,33 @@ class ToolIntentClassifier:
 
         logger.info(f"[ToolIntent] '{message[:50]}...' -> {explicit_intent}, tools={tools}")
         return explicit_intent, tools
+
+    def classify_multi(self, message: str, max_intents: int = 3) -> List[Tuple[str, float]]:
+        """
+        Return top N intents with confidence scores for multi-intent messages.
+
+        Scores all intents against the message and returns those above threshold.
+        Used when messages contain conjunctions ("and", "also", "then", "plus").
+        """
+        import re
+        message_lower = message.lower()
+        scores: Dict[str, float] = {}
+
+        for intent, keywords in self.INTENT_PATTERNS.items():
+            match_count = 0
+            for keyword in keywords:
+                if len(keyword) <= 3:
+                    if re.search(rf'\b{re.escape(keyword)}\b', message_lower):
+                        match_count += 1
+                else:
+                    if keyword in message_lower:
+                        match_count += 1
+            if match_count > 0:
+                scores[intent] = match_count / len(keywords)
+
+        # Sort by score descending, take top N with score > 0
+        sorted_intents = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        return sorted_intents[:max_intents]
 
     def classify_with_categories(self, message: str) -> Tuple[str, List[str]]:
         """

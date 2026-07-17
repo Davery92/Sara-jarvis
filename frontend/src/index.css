@@ -1,17 +1,30 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap');
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 @layer base {
+  :root {
+    --assistant-bg: #08111f;
+    --assistant-surface: rgba(12, 20, 34, 0.9);
+    --assistant-surface-strong: rgba(15, 27, 43, 0.98);
+    --assistant-surface-soft: rgba(17, 29, 47, 0.66);
+    --assistant-border: rgba(130, 151, 182, 0.16);
+    --assistant-border-strong: rgba(94, 234, 212, 0.24);
+    --assistant-text-soft: #9db3cd;
+    --assistant-accent: #5eead4;
+    --assistant-accent-strong: #14b8a6;
+    --assistant-highlight: #7dd3fc;
+  }
+
   html {
     font-family: 'Inter', system-ui, sans-serif;
   }
   
   body {
-    @apply bg-gray-50 text-gray-900;
+    @apply text-gray-900;
     overflow-x: hidden;
-    /* Support for dynamic viewport height on mobile browsers */
+    background: #050b16;
     min-height: 100vh;
     min-height: 100dvh;
   }
@@ -22,17 +35,49 @@
   }
   
   .dark body {
-    background-color: #0d1117;
     color: #c9d1d9;
   }
 }
 
 @layer components {
+  .font-display {
+    font-family: 'Space Grotesk', 'Inter', system-ui, sans-serif;
+  }
+
   .bg-card {
     background-color: #161b22;
   }
   .border-card {
     border-color: #30363d;
+  }
+
+  .assistant-panel {
+    background: rgba(15, 26, 44, 0.78);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    box-shadow: 0 24px 60px -30px rgba(0, 0, 0, 0.55), inset 0 0 0 1px rgba(255, 255, 255, 0.02);
+  }
+
+  .assistant-panel-soft {
+    background: rgba(255, 255, 255, 0.035);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+  }
+
+  .assistant-panel-muted {
+    background: rgba(255, 255, 255, 0.025);
+    border: 1px solid rgba(255, 255, 255, 0.04);
+  }
+
+  .assistant-orbit {
+    background: #0f1a2c;
+  }
+
+  .assistant-kicker {
+    color: var(--assistant-text-soft);
+    font-size: 0.72rem;
+    letter-spacing: 0.14em;
+    line-height: 1;
+    text-transform: uppercase;
+    font-weight: 600;
   }
 }
 

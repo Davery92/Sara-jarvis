@@ -176,7 +176,7 @@ const styles = StyleSheet.create({
   headerTitle: {
     fontSize: fontSizes.lg,
     fontWeight: '600',
-    color: '#f97316', // orange
+    color: colors.hues.orange,
   },
   dismissText: {
     fontSize: fontSizes.md,
@@ -207,7 +207,7 @@ const styles = StyleSheet.create({
     padding: spacing.md,
     marginBottom: spacing.lg,
     borderLeftWidth: 3,
-    borderLeftColor: '#f97316', // orange
+    borderLeftColor: colors.hues.orange,
   },
   questionText: {
     fontSize: fontSizes.md,
@@ -248,7 +248,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     padding: spacing.md,
     borderRadius: borderRadius.md,
-    backgroundColor: '#f97316', // orange
+    backgroundColor: colors.hues.orange,
     alignItems: 'center',
     justifyContent: 'center',
     gap: spacing.xs,

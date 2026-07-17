@@ -674,8 +674,8 @@ function TaskBoardView({
   const columns = [
     { id: 'backlog', label: 'Backlog', tasks: board.backlog, color: colors.textSecondary },
     { id: 'in_progress', label: 'In Progress', tasks: board.in_progress, color: colors.primary },
-    { id: 'in_qa', label: 'In QA', tasks: board.in_qa, color: '#f59e0b' },
-    { id: 'completed', label: 'Completed', tasks: board.completed, color: '#10b981' },
+    { id: 'in_qa', label: 'In QA', tasks: board.in_qa, color: colors.warning },
+    { id: 'completed', label: 'Completed', tasks: board.completed, color: colors.success },
   ];
 
   return (
@@ -721,9 +721,9 @@ function TaskCard({
   };
 
   const priorityColors: Record<string, string> = {
-    critical: '#ef4444',
-    high: '#f97316',
-    medium: '#eab308',
+    critical: colors.error,
+    high: colors.hues.orange,
+    medium: colors.hues.amber,
     low: colors.textSecondary,
   };
 
@@ -1313,14 +1313,14 @@ const styles = StyleSheet.create({
     borderRadius: 6,
   },
   actionBtnSuccess: {
-    backgroundColor: '#10b981',
+    backgroundColor: colors.success,
   },
   actionBtnText: {
     fontSize: fontSizes.xs,
     color: colors.textSecondary,
   },
   actionBtnTextSuccess: {
-    color: '#fff',
+    color: colors.text,
   },
   // QA styles
   qaContainer: {
@@ -1406,7 +1406,7 @@ const styles = StyleSheet.create({
     borderColor: colors.primary,
   },
   checkmark: {
-    color: '#fff',
+    color: colors.text,
     fontSize: 12,
     fontWeight: 'bold',
   },
@@ -1436,10 +1436,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   qaBtnPass: {
-    backgroundColor: '#10b981',
+    backgroundColor: colors.success,
   },
   qaBtnFail: {
-    backgroundColor: '#ef4444',
+    backgroundColor: colors.error,
   },
   qaBtnSkip: {
     backgroundColor: colors.textSecondary,
@@ -1448,13 +1448,13 @@ const styles = StyleSheet.create({
     opacity: 0.5,
   },
   qaBtnText: {
-    color: '#fff',
+    color: colors.text,
     fontWeight: '600',
     fontSize: fontSizes.sm,
   },
   qaHint: {
     fontSize: fontSizes.xs,
-    color: '#f59e0b',
+    color: colors.warning,
     marginTop: 8,
     textAlign: 'center',
   },
@@ -1540,7 +1540,7 @@ const styles = StyleSheet.create({
     fontWeight: '500',
   },
   filesBtnTextPrimary: {
-    color: '#fff',
+    color: colors.text,
     fontSize: fontSizes.sm,
     fontWeight: '500',
   },
@@ -1594,7 +1594,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   createFolderBtnText: {
-    color: '#fff',
+    color: colors.text,
     fontSize: fontSizes.sm,
     fontWeight: '500',
   },
@@ -1722,13 +1722,13 @@ const styles = StyleSheet.create({
     borderWidth: 2,
   },
   priorityBtnCritical: {
-    borderColor: '#ef4444',
+    borderColor: colors.error,
   },
   priorityBtnHigh: {
-    borderColor: '#f97316',
+    borderColor: colors.hues.orange,
   },
   priorityBtnMedium: {
-    borderColor: '#eab308',
+    borderColor: colors.hues.amber,
   },
   priorityBtnLow: {
     borderColor: colors.textSecondary,
@@ -1772,7 +1772,7 @@ const styles = StyleSheet.create({
   },
   createBtnText: {
     fontSize: fontSizes.md,
-    color: '#fff',
+    color: colors.text,
     fontWeight: '600',
   },
   // Floating Action Button
@@ -1786,7 +1786,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.primary,
     justifyContent: 'center',
     alignItems: 'center',
-    shadowColor: '#000',
+    shadowColor: colors.shadow,
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.3,
     shadowRadius: 6,
@@ -1794,7 +1794,7 @@ const styles = StyleSheet.create({
   },
   fabText: {
     fontSize: 28,
-    color: '#fff',
+    color: colors.text,
     fontWeight: '300',
     marginTop: -2,
   },

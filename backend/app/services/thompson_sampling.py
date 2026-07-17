@@ -6,7 +6,7 @@ uncertainty (Beta distribution sampling).
 """
 
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 import logging
 
@@ -60,7 +60,7 @@ class ThompsonSampler:
             Exploration bonus (0 to max_bonus)
         """
         if current_time is None:
-            current_time = datetime.utcnow()
+            current_time = datetime.now(timezone.utc)
 
         # Calculate age in days
         age_days = (current_time - created_at).total_seconds() / 86400.0
@@ -120,7 +120,7 @@ class ThompsonSampler:
             Exploration bonus (0 to max_bonus)
         """
         if current_time is None:
-            current_time = datetime.utcnow()
+            current_time = datetime.now(timezone.utc)
 
         # Calculate age in days
         age_days = (current_time - created_at).total_seconds() / 86400.0

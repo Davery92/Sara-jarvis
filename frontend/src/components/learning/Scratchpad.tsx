@@ -9,7 +9,7 @@ interface ScratchpadProps {
 export default function Scratchpad({ content, onChange, disabled = false }: ScratchpadProps) {
   const [localContent, setLocalContent] = useState(content)
   const [isSaving, setIsSaving] = useState(false)
-  const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
   // Sync local content with prop

@@ -3,6 +3,23 @@ import * as Device from 'expo-device';
 import * as Notifications from 'expo-notifications';
 import Constants from 'expo-constants';
 import apiClient from './api';
+import { navigateToChat, navigateToInbox, navigateToNoteEditor, navigateToFitness, navigateToNotifications, navigate } from './navigation';
+import { endEvent } from './eventActivity';
+
+// Push types that mean a background task reached a terminal state — the
+// "Sara is working" Live Activity for it must be torn down on sight.
+const TASK_TERMINAL_PUSH_TYPES = new Set([
+  'background_task',
+  'research_complete',
+  'task_chat_inject',
+]);
+
+/** Ends the task Live Activity named by a terminal-task push, if any. */
+function endTaskActivityFromPush(data: any): void {
+  if (data?.task_id && TASK_TERMINAL_PUSH_TYPES.has(data?.type)) {
+    endEvent(String(data.task_id));
+  }
+}
 
 // Configure how notifications appear when app is in foreground
 Notifications.setNotificationHandler({
@@ -21,6 +38,7 @@ const NOTIFICATION_ACTIONS = {
   REPLY: 'REPLY',
   VIEW_DETAILS: 'VIEW_DETAILS',
   DISMISS: 'DISMISS',
+  DISLIKE: 'DISLIKE',
 };
 
 // Notification category identifiers
@@ -29,57 +47,59 @@ const NOTIFICATION_CATEGORIES = {
   MORNING_CHECKIN: 'MORNING_CHECKIN',
   HEALTH_ALERT: 'HEALTH_ALERT',
   GENERAL_NUDGE: 'GENERAL_NUDGE',
+  SARA_INSIGHT: 'SARA_INSIGHT',
+  ACS_DISCOVERY: 'ACS_DISCOVERY',
+  THREAD_FOLLOWUP: 'THREAD_FOLLOWUP',
+  LEARNING_REVIEW: 'LEARNING_REVIEW',
 };
 
 // Set up interactive notification categories
 async function setupNotificationCategories() {
-  await Notifications.setNotificationCategoryAsync(NOTIFICATION_CATEGORIES.MEAL_NUDGE, [
-    {
-      identifier: NOTIFICATION_ACTIONS.LOG_MEAL,
-      buttonTitle: 'Log Meal',
-      options: { opensAppToForeground: true },
-    },
-    {
-      identifier: NOTIFICATION_ACTIONS.REPLY,
-      buttonTitle: 'Reply',
-      options: { opensAppToForeground: true },
-      textInput: { submitButtonTitle: 'Send', placeholder: 'Tell Sara...' },
-    },
-  ]);
+  // A "Dislike" action is appended to EVERY category so David can tell Sara, at
+  // notify-time (long-press), that he didn't want this. It runs in the
+  // background (no app open) and feeds the learner's fast 'stop' signal.
+  const DISLIKE = {
+    identifier: NOTIFICATION_ACTIONS.DISLIKE,
+    buttonTitle: '👎 Dislike',
+    options: { opensAppToForeground: false, isDestructive: true },
+  };
 
-  await Notifications.setNotificationCategoryAsync(NOTIFICATION_CATEGORIES.MORNING_CHECKIN, [
-    {
-      identifier: NOTIFICATION_ACTIONS.REPLY,
-      buttonTitle: 'Reply',
-      options: { opensAppToForeground: true },
-      textInput: { submitButtonTitle: 'Send', placeholder: 'Tell Sara...' },
-    },
-  ]);
+  const REPLY = (placeholder: string) => ({
+    identifier: NOTIFICATION_ACTIONS.REPLY,
+    buttonTitle: 'Reply',
+    options: { opensAppToForeground: true },
+    textInput: { submitButtonTitle: 'Send', placeholder },
+  });
+  const VIEW = (buttonTitle = 'View') => ({
+    identifier: NOTIFICATION_ACTIONS.VIEW_DETAILS,
+    buttonTitle,
+    options: { opensAppToForeground: true },
+  });
+  const DISMISS = (buttonTitle = 'Not Now') => ({
+    identifier: NOTIFICATION_ACTIONS.DISMISS,
+    buttonTitle,
+    options: { opensAppToForeground: false },
+  });
 
-  await Notifications.setNotificationCategoryAsync(NOTIFICATION_CATEGORIES.HEALTH_ALERT, [
-    {
-      identifier: NOTIFICATION_ACTIONS.VIEW_DETAILS,
-      buttonTitle: 'View Details',
-      options: { opensAppToForeground: true },
-    },
-    {
-      identifier: NOTIFICATION_ACTIONS.REPLY,
-      buttonTitle: 'Reply',
-      options: { opensAppToForeground: true },
-      textInput: { submitButtonTitle: 'Send', placeholder: 'Ask Sara...' },
-    },
-  ]);
+  const categoryActions: Record<string, any[]> = {
+    [NOTIFICATION_CATEGORIES.MEAL_NUDGE]: [
+      { identifier: NOTIFICATION_ACTIONS.LOG_MEAL, buttonTitle: 'Log Meal', options: { opensAppToForeground: true } },
+      REPLY('Tell Sara...'),
+    ],
+    [NOTIFICATION_CATEGORIES.MORNING_CHECKIN]: [REPLY('Tell Sara...')],
+    [NOTIFICATION_CATEGORIES.HEALTH_ALERT]: [VIEW('View Details'), REPLY('Ask Sara...')],
+    [NOTIFICATION_CATEGORIES.GENERAL_NUDGE]: [REPLY('Tell Sara...')],
+    [NOTIFICATION_CATEGORIES.SARA_INSIGHT]: [REPLY('Reply to Sara...'), VIEW(), DISMISS('Not Now')],
+    [NOTIFICATION_CATEGORIES.ACS_DISCOVERY]: [VIEW(), DISMISS('Not Now')],
+    [NOTIFICATION_CATEGORIES.THREAD_FOLLOWUP]: [REPLY('Reply...'), DISMISS('Dismiss')],
+    [NOTIFICATION_CATEGORIES.LEARNING_REVIEW]: [VIEW('Start Review'), DISMISS('Later')],
+  };
 
-  await Notifications.setNotificationCategoryAsync(NOTIFICATION_CATEGORIES.GENERAL_NUDGE, [
-    {
-      identifier: NOTIFICATION_ACTIONS.REPLY,
-      buttonTitle: 'Reply',
-      options: { opensAppToForeground: true },
-      textInput: { submitButtonTitle: 'Send', placeholder: 'Tell Sara...' },
-    },
-  ]);
+  for (const [category, actions] of Object.entries(categoryActions)) {
+    await Notifications.setNotificationCategoryAsync(category, [...actions, DISLIKE]);
+  }
 
-  console.log('[PushNotifications] Notification categories set up');
+  console.log('[PushNotifications] Notification categories set up (with Dislike)');
 }
 
 // Initialize categories on module load
@@ -154,7 +174,15 @@ class PushNotificationService {
       // Extract action identifier and user text
       const actionIdentifier = response.actionIdentifier;
       const userText = (response as any).userText;
-      const data = response.notification.request.content.data;
+      // Merge canonical title/body from the notification content into `data`
+      // so handlers can always rely on data.title / data.body, even when the
+      // backend didn't duplicate them into the data dict.
+      const content = response.notification.request.content;
+      const data = {
+        ...(content.data || {}),
+        ...(content.title && !((content.data || {}) as any).title ? { title: content.title } : {}),
+        ...(content.body && !((content.data || {}) as any).body ? { body: content.body } : {}),
+      };
 
       this.handleNotificationNavigation(data, actionIdentifier, userText);
     }
@@ -225,6 +253,9 @@ class PushNotificationService {
     this.notificationListener = Notifications.addNotificationReceivedListener(
       (notification) => {
         console.log('[PushNotifications] Notification received:', notification);
+        // Task finished while the app is foregrounded — don't wait for the
+        // next poll cycle (or a tap) to clear the Live Activity.
+        endTaskActivityFromPush(notification.request.content.data);
         if (this.onNotificationReceived) {
           this.onNotificationReceived(notification);
         }
@@ -243,8 +274,36 @@ class PushNotificationService {
         const actionIdentifier = response.actionIdentifier;
         const userText = (response as any).userText; // Text from reply action
 
+        // Track notification feedback. Merge canonical title/body from the
+        // notification content into `data` so handlers can always rely on
+        // data.title / data.body — see the matching block in
+        // markCallbacksReady() for why.
+        const content = response.notification.request.content;
+        const data = {
+          ...(content.data || {}),
+          ...(content.title && !((content.data || {}) as any).title ? { title: content.title } : {}),
+          ...(content.body && !((content.data || {}) as any).body ? { body: content.body } : {}),
+        };
+        if (data?.notification_id) {
+          const notifId = Number(data.notification_id);
+          if (!isNaN(notifId)) {
+            if (actionIdentifier === NOTIFICATION_ACTIONS.DISLIKE) {
+              // Explicit "I dislike this" — strongest negative signal.
+              apiClient.sendNotificationFeedback(notifId, 'dislike');
+            } else if (actionIdentifier === NOTIFICATION_ACTIONS.DISMISS) {
+              apiClient.sendNotificationFeedback(notifId, 'dismissed');
+            } else {
+              // Any other interaction (tap, reply, view) counts as engaged
+              apiClient.sendNotificationFeedback(
+                notifId,
+                'engaged',
+                userText || undefined,
+              );
+            }
+          }
+        }
+
         // Handle navigation based on notification data
-        const data = response.notification.request.content.data;
         this.handleNotificationNavigation(data, actionIdentifier, userText);
       }
     );
@@ -253,8 +312,76 @@ class PushNotificationService {
   /**
    * Handle navigation when user taps a notification
    */
+  /**
+   * Generic deep-link router. The server sets `data.target` (+ optional
+   * `data.params`) on every push so a tap opens the relevant area. Returns true
+   * if it handled the target. Falls through to type-based routing otherwise.
+   */
+  private routeByTarget(target?: string, params?: any, data?: any): boolean {
+    if (!target) return false;
+    const p = params || {};
+    try {
+      switch (String(target).toLowerCase()) {
+        case 'chat': {
+          // Proactive check-ins / follow-ups are Sara *talking to you* — they
+          // should drop her message into the chat so you can just reply, NOT
+          // open the "Discuss this" templated-prompt flow (that's for reviewing
+          // an ACS discovery/notification). Route those through the heartbeat
+          // param, which ChatScreen renders as an assistant message + open
+          // composer. Everything else keeps the old notification behaviour.
+          const ptype = String(data?.type || '').toLowerCase();
+          const pcat = String(data?.category || '').toLowerCase();
+          const isCheckin =
+            ptype === 'proactive_checkin' ||
+            ptype === 'heartbeat' ||
+            ptype === 'unified_heartbeat' ||
+            pcat === 'checkin' ||
+            pcat === 'followup';
+          if (!p.chat && isCheckin) {
+            navigateToChat({
+              heartbeat: {
+                title: data?.title || 'Checking in',
+                message: data?.message || data?.body || '',
+                priority: data?.priority || 'normal',
+              },
+            });
+          } else {
+            navigateToChat(p.chat || { notification: data });
+          }
+          return true;
+        }
+        case 'inbox': navigateToInbox({ focus: p.focus || 'new' }); return true;
+        case 'notifications': navigateToNotifications(); return true;
+        case 'email': navigate('Email', p); return true;
+        case 'agent_tasks': navigate('AgentTasks', p); return true;
+        case 'calendar': navigate('Calendar', p); return true;
+        case 'fitness': navigateToFitness(); return true;
+        case 'learn': navigate('Learning', p); return true;
+        case 'acs': navigate('ACS', p); return true;
+        case 'knowledge': navigate('Knowledge', p); return true;
+        // "System" = Sara's awareness/proactive thoughts → open the System hub.
+        case 'system': navigate('System'); return true;
+        case 'notes':
+          if (data?.note_id) navigateToNoteEditor(data.note_id);
+          else navigate('Notes', p);
+          return true;
+        default: return false;
+      }
+    } catch (e) {
+      console.warn('[PushNotifications] routeByTarget failed', e);
+      return false;
+    }
+  }
+
   private handleNotificationNavigation(data: any, actionIdentifier?: string, userText?: string): void {
     if (!data) return;
+
+    // "Dislike" is a pure background feedback signal — never open or navigate.
+    if (actionIdentifier === NOTIFICATION_ACTIONS.DISLIKE) return;
+
+    // Tapping a "task done" notification must also clear its Live Activity —
+    // the app may have been backgrounded/killed when the push landed.
+    endTaskActivityFromPush(data);
 
     // Handle action button taps with text input
     if (userText && this.onQuickReply) {
@@ -275,6 +402,18 @@ class PushNotificationService {
       return;
     }
 
+    // Generic deep-link target wins over type-based routing (server sets it on
+    // every push). A body TAP uses the DEFAULT action identifier (which is a
+    // non-empty string), so treat tap + "View" as open-intents. Quick-reply,
+    // Log-Meal, and Dislike are handled and returned above this point.
+    const isOpenIntent =
+      !actionIdentifier ||
+      actionIdentifier === Notifications.DEFAULT_ACTION_IDENTIFIER ||
+      actionIdentifier === NOTIFICATION_ACTIONS.VIEW_DETAILS;
+    if (isOpenIntent && this.routeByTarget(data.target, data.params, data)) {
+      return;
+    }
+
     // Handle different notification types
     switch (data.type) {
       case 'timer_complete':
@@ -282,10 +421,14 @@ class PushNotificationService {
         Vibration.vibrate([0, 500, 200, 500]);
         break;
       case 'reminder':
-        // Navigate to reminders
+        // Reminder-style notifications belong in the assistant inbox
+        console.log('[PushNotifications] Reminder notification:', data);
+        navigateToInbox({ focus: 'new' });
         break;
       case 'message':
-        // Navigate to chat
+        // Direct conversational messages should land in chat
+        console.log('[PushNotifications] Message notification:', data);
+        navigateToChat();
         break;
       case 'health_sync':
         // Navigate to health/fitness screen
@@ -328,11 +471,47 @@ class PushNotificationService {
           );
         }
         break;
-      case 'background_task':
-        // Background task completed - notify listeners
+      case 'task_chat_inject':
+        // Background task result was persisted to conversation — reload chat
+        console.log('[PushNotifications] Task chat inject:', data);
+        if (this.onTaskChatInject) {
+          this.onTaskChatInject(data.task_id, data.conversation_id, data.note_id);
+        }
+        break;
+      case 'background_task': {
+        // Background task completed. If it produced a report note, deep-link
+        // straight to it; otherwise fall back to the inbox. (Backend sends the
+        // id as both `note_id` and `result_note_id`.)
         console.log('[PushNotifications] Background task notification:', data);
+        const bgNoteId = data.note_id || data.result_note_id;
         if (this.onBackgroundTaskComplete) {
-          this.onBackgroundTaskComplete(data.task_id, data.result_note_id);
+          this.onBackgroundTaskComplete(data.task_id, bgNoteId);
+        }
+        if (bgNoteId) {
+          navigateToNoteEditor(bgNoteId);
+        } else {
+          navigateToInbox({ focus: 'done' });
+        }
+        break;
+      }
+      case 'research_complete':
+        // Chat-initiated research plan finished — open the report note directly.
+        console.log('[PushNotifications] Research complete:', data);
+        if (data.note_id) {
+          navigateToNoteEditor(data.note_id);
+        } else {
+          navigateToInbox({ focus: 'done' });
+        }
+        break;
+      case 'acs_daemon':
+        // The in-VM ACS daemon (Sara) is pinging David. If she included a
+        // note_id, deep-link to the note she just wrote. Otherwise route
+        // to chat — the conversation is the closest thing to "go talk to her."
+        console.log('[PushNotifications] ACS daemon notification:', data);
+        if (data.note_id) {
+          navigateToNoteEditor(data.note_id);
+        } else {
+          navigateToChat();
         }
         break;
       case 'agent_clarification':
@@ -341,16 +520,76 @@ class PushNotificationService {
         if (this.onAgentClarificationNeeded) {
           this.onAgentClarificationNeeded(data.task_id);
         }
+        navigateToInbox({ focus: 'waiting' });
+        break;
+      case 'chat_response':
+        // Background chat response is ready - return to Sara chat
+        console.log('[PushNotifications] Chat response ready:', data.conversation_id);
+        navigateToChat();
+        break;
+      case 'sara_insight':
+      case 'observation':
+        // Sara proactive insight — open the assistant inbox
+        console.log('[PushNotifications] Sara insight notification:', data);
+        navigateToInbox({ focus: 'new' });
+        break;
+      case 'thread_followup':
+        // Thread follow-up — Sara following up on a prior conversation topic
+        console.log('[PushNotifications] Thread follow-up notification:', data);
+        if (this.onHeartbeatTapped) {
+          this.onHeartbeatTapped(
+            data.title || 'Following up',
+            data.message || data.body || '',
+            data.priority || 'normal'
+          );
+        }
+        break;
+      case 'learning_review':
+        // Learning spaced repetition review reminder
+        console.log('[PushNotifications] Learning review notification:', data);
+        if (this.onNudgeTapped) {
+          this.onNudgeTapped(
+            'learning_review',
+            data.title || 'Review time',
+            data.message || data.body || 'You have topics due for review',
+            'Open Learning tab to review'
+          );
+        }
+        break;
+      case 'inbox_digest':
+      case 'inbox':
+        // Morning inbox summary - open Inbox directly
+        console.log('[PushNotifications] Inbox digest notification:', data);
+        navigateToInbox({ focus: 'new' });
+        break;
+      case 'attention_digest':
+        // Attention backlog summary - open Inbox Attention tab
+        console.log('[PushNotifications] Attention digest notification:', data);
+        navigateToInbox({ focus: 'waiting' });
+        break;
+      case 'heartbeat':
+      case 'unified_heartbeat':
+      case 'checkin':
+        // Heartbeat/check-in notification from Sara
+        console.log('[PushNotifications] Heartbeat notification:', data);
+        navigateToInbox({ focus: 'new' });
         break;
       default:
+        // Unknown async notifications should still land in the assistant inbox
+        console.log('[PushNotifications] Notification tapped, opening assistant inbox:', data.type);
+        navigateToInbox({ focus: 'new' });
         break;
     }
   }
 
+  // Callback for task chat inject (result persisted to conversation — reload chat)
+  private onTaskChatInject: ((taskId: string, conversationId?: string, noteId?: string) => void) | null = null;
   // Callback for background task completion
   private onBackgroundTaskComplete: ((taskId: string, noteId?: string) => void) | null = null;
   private onAgentClarificationNeeded: ((taskId: string) => void) | null = null;
   private onHealthAlertTapped: ((severity: string, insightId?: string, title?: string, body?: string) => void) | null = null;
+  // Callback for heartbeat notifications (proactive check-ins from Sara)
+  private onHeartbeatTapped: ((title: string, message: string, priority: string) => void) | null = null;
   // Pending health alert data (stored if callback wasn't ready when notification was tapped)
   private pendingHealthAlertData: { severity: string; insightId?: string; title?: string; body?: string } | null = null;
   // Callback for subconscious nudges (meal reminders, morning check-ins, etc.)
@@ -367,6 +606,15 @@ class PushNotificationService {
     callback: (taskId: string, noteId?: string) => void
   ): void {
     this.onBackgroundTaskComplete = callback;
+  }
+
+  /**
+   * Set callback for task chat inject (task result was persisted — reload conversation)
+   */
+  setOnTaskChatInject(
+    callback: (taskId: string, conversationId?: string, noteId?: string) => void
+  ): void {
+    this.onTaskChatInject = callback;
   }
 
   /**
@@ -421,6 +669,16 @@ class PushNotificationService {
    */
   setOnLogMealAction(callback: () => void): void {
     this.onLogMealAction = callback;
+  }
+
+  /**
+   * Set callback for heartbeat notifications (proactive check-ins from Sara)
+   * When tapped, opens the chat with context about what Sara noticed
+   */
+  setOnHeartbeatTapped(
+    callback: (title: string, message: string, priority: string) => void
+  ): void {
+    this.onHeartbeatTapped = callback;
   }
 
   /**

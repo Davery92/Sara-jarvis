@@ -1,0 +1,36 @@
+# Speaker Diarization Service using SpeechBrain
+FROM pytorch/pytorch:2.1.0-cuda11.8-cudnn8-runtime
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libsndfile1 \
+    ffmpeg \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
+# Pin huggingface_hub to avoid use_auth_token deprecation issue
+RUN pip install --no-cache-dir \
+    fastapi==0.109.0 \
+    uvicorn==0.27.0 \
+    python-multipart==0.0.6 \
+    httpx==0.26.0 \
+    pydantic==2.5.3 \
+    soundfile==0.12.1 \
+    scikit-learn==1.4.0 \
+    numpy==1.26.3 \
+    huggingface_hub==0.21.4 \
+    speechbrain==1.0.0
+
+# Copy service code
+COPY nemo_service.py /app/
+COPY speaker_utils.py /app/
+
+# Create directories
+RUN mkdir -p /data/models /data/cache /data/speakers /data/audio
+
+EXPOSE 8002
+
+CMD ["uvicorn", "nemo_service:app", "--host", "0.0.0.0", "--port", "8002"]

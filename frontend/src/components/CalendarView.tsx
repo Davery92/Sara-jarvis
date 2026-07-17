@@ -178,12 +178,11 @@ const CalendarView: React.FC = () => {
 
   // Delete event
   const handleDeleteEvent = async (eventId: string) => {
-    // Don't allow deleting iOS events
-    if (selectedEvent?.read_only || selectedEvent?.source === 'ios_calendar') {
-      alert('This event is synced from iOS Calendar and cannot be deleted here. Delete it in your iOS Calendar app.');
-      return;
-    }
-    if (!confirm('Delete this event?')) return;
+    const isIOS = selectedEvent?.read_only || selectedEvent?.source === 'ios_calendar';
+    const confirmMsg = isIOS
+      ? 'Hide this iOS Calendar event from Sara?\n\nIt will stay on your iPhone. Sara will stop showing it and won\'t re-add it on next sync.'
+      : 'Delete this event?';
+    if (!confirm(confirmMsg)) return;
     try {
       const response = await fetch(`${APP_CONFIG.apiUrl}/calendar/events/${eventId}`, {
         method: 'DELETE',
@@ -192,6 +191,9 @@ const CalendarView: React.FC = () => {
       if (response.ok) {
         setSelectedEvent(null);
         fetchEvents();
+      } else {
+        const err = await response.json().catch(() => ({}));
+        alert(err.detail || 'Failed to delete event');
       }
     } catch (error) {
       alert('Error deleting event');
@@ -301,6 +303,14 @@ const CalendarView: React.FC = () => {
 
   // Check if event is from iOS
   const isIOSEvent = (event: CalendarEvent) => event.source === 'ios_calendar' || event.read_only;
+  const todayEventsCount = getEventsForDate(new Date()).length;
+  const iosEventCount = events.filter(isIOSEvent).length;
+  const currentPeriodLabel =
+    view === 'day'
+      ? selectedDate.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
+      : view === 'week'
+      ? `Week of ${weekDays[0].toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} - ${weekDays[6].toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`
+      : selectedDate.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
 
   // Render event card
   const EventCard = ({ event, compact = false, forDate }: { event: CalendarEvent; compact?: boolean; forDate?: Date }) => {
@@ -319,31 +329,45 @@ const CalendarView: React.FC = () => {
       return `${formatTime(event.starts_at)} - ${formatTime(event.ends_at)}`;
     };
 
+    // Calendar/type identity lives in a 2px left edge, never a full-bleed fill
+    const edgeClass = isMultiDay
+      ? 'border-amber-400/70'
+      : isIOSEvent(event)
+      ? 'border-purple-400/60'
+      : 'border-teal-400/70';
+
+    if (compact) {
+      return (
+        <button
+          onClick={() => setSelectedEvent(event)}
+          className={`w-full rounded-r border-l-2 ${edgeClass} px-1.5 py-1 text-left transition-colors hover:bg-white/[0.06]`}
+        >
+          <div className="truncate text-[13px] leading-snug text-slate-200">
+            {isContinuation && <span className="text-amber-400/80">↳ </span>}
+            {event.title}
+          </div>
+          {!isMultiDay && (
+            <div className="truncate text-[11px] tabular-nums text-slate-500">{formatTime(event.starts_at)}</div>
+          )}
+        </button>
+      );
+    }
+
     return (
       <button
         onClick={() => setSelectedEvent(event)}
-        className={`w-full text-left rounded transition-colors ${
-          compact
-            ? `p-1 text-xs truncate ${isMultiDay ? 'bg-amber-600/30 hover:bg-amber-600/50' : isIOSEvent(event) ? 'bg-purple-600/30 hover:bg-purple-600/50' : 'bg-teal-600/30 hover:bg-teal-600/50'}`
-            : `p-3 border ${isMultiDay ? 'bg-amber-800/30 border-amber-700 hover:border-amber-500/50' : isIOSEvent(event) ? 'bg-purple-800/30 border-purple-700 hover:border-purple-500/50' : 'bg-gray-800/50 border-gray-700 hover:border-teal-500/50'}`
-        }`}
+        className={`w-full rounded-r border-l-2 ${edgeClass} px-3 py-2 text-left transition-colors hover:bg-white/[0.04]`}
       >
-        <div className={`font-medium text-white ${compact ? 'truncate' : ''} flex items-center gap-2`}>
-          {isContinuation && <span className="text-amber-400">↳</span>}
-          {event.title}
-          {isMultiDay && !compact && (
-            <span className="text-xs px-1.5 py-0.5 bg-amber-600/50 rounded text-amber-200">Multi-day</span>
-          )}
-          {isIOSEvent(event) && !compact && !isMultiDay && (
-            <span className="text-xs px-1.5 py-0.5 bg-purple-600/50 rounded text-purple-200">iOS</span>
-          )}
+        <div className="flex items-center gap-2 text-[15px] font-medium text-slate-100">
+          {isContinuation && <span className="text-amber-400/80">↳</span>}
+          <span className="truncate">{event.title}</span>
+          {isMultiDay && <span className="flex-shrink-0 text-xs font-normal text-slate-500">multi-day</span>}
+          {isIOSEvent(event) && !isMultiDay && <span className="flex-shrink-0 text-xs font-normal text-slate-500">iOS</span>}
         </div>
-        {!compact && (
-          <div className="text-sm text-gray-400 mt-1">
-            {getTimeDisplay()}
-            {event.location && <span className="ml-2">📍 {event.location}</span>}
-          </div>
-        )}
+        <div className="mt-0.5 text-xs tabular-nums text-slate-500">
+          {getTimeDisplay()}
+          {event.location && <span> · {event.location}</span>}
+        </div>
       </button>
     );
   };
@@ -352,15 +376,10 @@ const CalendarView: React.FC = () => {
   const renderDayView = () => {
     const dayEvents = getEventsForDate(selectedDate);
     return (
-      <div>
-        <div className="text-center mb-4">
-          <div className="text-2xl font-bold text-white">
-            {selectedDate.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}
-          </div>
-        </div>
-        <div className="space-y-2">
+      <div className="mx-auto w-full max-w-[740px]">
+        <div className="space-y-1.5 pt-2">
           {dayEvents.length === 0 ? (
-            <div className="text-center py-12 text-gray-400">No events for this day</div>
+            <p className="py-8 text-sm text-slate-500">No events this day.</p>
           ) : (
             dayEvents.map(event => <EventCard key={event.id} event={event} forDate={selectedDate} />)
           )}
@@ -372,7 +391,7 @@ const CalendarView: React.FC = () => {
   // Week View
   const renderWeekView = () => {
     return (
-      <div className="grid grid-cols-7 gap-2">
+      <div className="grid min-h-full grid-cols-7 divide-x divide-white/[0.06] border-t border-white/[0.06]">
         {weekDays.map((day, idx) => {
           const dayStr = toLocalDateString(day);
           const isToday = dayStr === todayStr;
@@ -386,26 +405,26 @@ const CalendarView: React.FC = () => {
                 setSelectedDate(new Date(day));
                 setView('day');
               }}
-              className={`border rounded-lg p-2 min-h-[180px] cursor-pointer transition-colors ${
-                isToday ? 'border-teal-500 bg-teal-500/10' :
-                isSelected ? 'border-blue-500 bg-blue-500/10' :
-                'border-gray-700 bg-gray-800/30 hover:bg-gray-800/50'
+              className={`min-h-[360px] cursor-pointer px-1.5 pt-3 transition-colors ${
+                isToday ? 'bg-teal-400/[0.04]' : 'hover:bg-white/[0.02]'
               }`}
             >
-              <div className="text-center mb-2">
-                <div className={`text-xs ${isToday ? 'text-teal-400' : 'text-gray-400'}`}>
+              <div className="mb-3 px-1.5">
+                <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">
                   {day.toLocaleDateString('en-US', { weekday: 'short' })}
                 </div>
-                <div className={`text-lg font-bold ${isToday ? 'text-teal-300' : 'text-white'}`}>
+                <div className={`font-display text-lg ${
+                  isToday ? 'font-semibold text-teal-300' : isSelected ? 'font-semibold text-white' : 'text-slate-300'
+                }`}>
                   {day.getDate()}
                 </div>
               </div>
               <div className="space-y-1">
-                {dayEvents.slice(0, 3).map(event => (
+                {dayEvents.slice(0, 4).map(event => (
                   <EventCard key={event.id} event={event} compact forDate={day} />
                 ))}
-                {dayEvents.length > 3 && (
-                  <div className="text-xs text-gray-400 text-center">+{dayEvents.length - 3} more</div>
+                {dayEvents.length > 4 && (
+                  <div className="px-1.5 text-xs text-slate-500">+{dayEvents.length - 4} more</div>
                 )}
               </div>
             </div>
@@ -418,12 +437,12 @@ const CalendarView: React.FC = () => {
   // Month View
   const renderMonthView = () => (
     <div>
-      <div className="grid grid-cols-7 gap-1 mb-1">
+      <div className="grid grid-cols-7">
         {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(d => (
-          <div key={d} className="text-center text-xs text-gray-400 py-1">{d}</div>
+          <div key={d} className="pb-2 pl-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">{d}</div>
         ))}
       </div>
-      <div className="grid grid-cols-7 gap-1">
+      <div className="grid grid-cols-7 border-l border-t border-white/[0.06]">
         {monthGrid.map((day, idx) => {
           const dayStr = toLocalDateString(day);
           const isToday = dayStr === todayStr;
@@ -437,32 +456,34 @@ const CalendarView: React.FC = () => {
                 setSelectedDate(new Date(day));
                 setView('day');
               }}
-              className={`p-1 min-h-[80px] border rounded cursor-pointer transition-colors ${
-                isToday ? 'border-teal-500 bg-teal-500/10' :
-                isCurrentMonth ? 'border-gray-700 bg-gray-800/30 hover:bg-gray-800/50' :
-                'border-gray-800 bg-gray-900/30 opacity-50'
-              }`}
+              className={`min-h-[96px] cursor-pointer border-b border-r border-white/[0.06] p-1.5 transition-colors ${
+                isToday ? 'bg-teal-400/[0.04]' : 'hover:bg-white/[0.02]'
+              } ${!isCurrentMonth ? 'opacity-40' : ''}`}
             >
-              <div className={`text-sm font-medium ${isToday ? 'text-teal-300' : isCurrentMonth ? 'text-white' : 'text-gray-500'}`}>
+              <div className={`pl-0.5 text-sm ${
+                isToday ? 'font-semibold text-teal-300' : isCurrentMonth ? 'text-slate-300' : 'text-slate-600'
+              }`}>
                 {day.getDate()}
               </div>
               {dayEvents.length > 0 && (
-                <div className="mt-1">
+                <div className="mt-1 space-y-0.5">
                   {dayEvents.slice(0, 2).map(event => {
                     const isMultiDay = isMultiDayEvent(event);
                     const isCont = isContinuationDay(event, day);
                     return (
                       <div
                         key={event.id}
-                        className={`text-xs rounded px-1 truncate mb-0.5 ${isMultiDay ? 'bg-amber-600/30' : 'bg-teal-600/30'}`}
+                        className={`truncate rounded-r border-l-2 px-1 text-xs text-slate-300 ${
+                          isMultiDay ? 'border-amber-400/70' : isIOSEvent(event) ? 'border-purple-400/60' : 'border-teal-400/70'
+                        }`}
                       >
-                        {isCont && <span className="text-amber-400">↳</span>}
+                        {isCont && <span className="text-amber-400/80">↳</span>}
                         {event.title}
                       </div>
                     );
                   })}
                   {dayEvents.length > 2 && (
-                    <div className="text-xs text-gray-400">+{dayEvents.length - 2}</div>
+                    <div className="pl-1 text-xs text-slate-500">+{dayEvents.length - 2}</div>
                   )}
                 </div>
               )}
@@ -474,63 +495,82 @@ const CalendarView: React.FC = () => {
   );
 
   return (
-    <div className="calendar-view h-full">
-      {/* Header */}
-      <div className="bg-card border border-card rounded-xl p-4 mb-4">
-        <div className="flex items-center justify-between flex-wrap gap-2">
-          <h2 className="text-xl font-semibold">📅 Calendar</h2>
-
-          <div className="flex items-center gap-2 flex-wrap">
-            {/* Navigation */}
-            <div className="flex items-center gap-1">
-              <button onClick={() => navigate(-1)} className="px-3 py-1 bg-gray-700 rounded hover:bg-gray-600">‹</button>
-              <button onClick={goToToday} className="px-3 py-1 bg-gray-700 rounded hover:bg-gray-600">Today</button>
-              <button onClick={() => navigate(1)} className="px-3 py-1 bg-gray-700 rounded hover:bg-gray-600">›</button>
-            </div>
-
-            {/* View Toggle */}
-            <div className="flex border border-gray-700 rounded overflow-hidden">
-              {(['day', 'week', 'month'] as const).map(v => (
-                <button
-                  key={v}
-                  onClick={() => setView(v)}
-                  className={`px-3 py-1 text-sm ${view === v ? 'bg-teal-600 text-white' : 'text-gray-400 hover:bg-gray-700'}`}
-                >
-                  {v.charAt(0).toUpperCase() + v.slice(1)}
-                </button>
-              ))}
-            </div>
-
-            {/* New Event */}
-            <button
-              type="button"
-              onClick={() => {
-                console.log('Opening create modal, date:', selectedDateStr);
-                setCreateForm(f => ({ ...f, date: selectedDateStr }));
-                setShowCreateModal(true);
-              }}
-              className="px-3 py-1 bg-teal-600 text-white font-medium rounded hover:bg-teal-700"
+    <div className="calendar-view flex h-full flex-col">
+      {/* Header — one slim row: title + state, navigation, view tabs, primary action */}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 pb-4">
+        <div className="flex min-w-0 items-baseline gap-3">
+          <h2 className="font-display text-xl font-semibold text-white">Calendar</h2>
+          <span className="hidden truncate text-sm text-slate-400 sm:inline">
+            {todayEventsCount} {todayEventsCount === 1 ? 'event' : 'events'} today
+            <span className="text-slate-600"> · </span>
+            {currentPeriodLabel}
+          </span>
+          {iosEventCount > 0 && (
+            <span
+              className="material-icons flex-shrink-0 cursor-default text-[14px] text-slate-600"
+              title={`${iosEventCount} events synced from iOS Calendar`}
             >
-              + New Event
-            </button>
-          </div>
+              sync
+            </span>
+          )}
         </div>
 
-        {/* Current Period Display */}
-        <div className="text-center mt-2 text-lg font-medium text-white">
-          {view === 'day' && selectedDate.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}
-          {view === 'week' && `Week of ${weekDays[0].toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} - ${weekDays[6].toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`}
-          {view === 'month' && selectedDate.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}
+        <div className="ml-auto flex flex-wrap items-center gap-x-3 gap-y-2">
+          <div className="flex items-center">
+            <button
+              onClick={() => navigate(-1)}
+              aria-label="Previous"
+              className="rounded-lg px-2 py-1 text-slate-400 transition-colors hover:bg-white/[0.06] hover:text-white"
+            >
+              ‹
+            </button>
+            <button
+              onClick={goToToday}
+              className="rounded-lg px-2.5 py-1 text-sm text-slate-400 transition-colors hover:bg-white/[0.06] hover:text-white"
+            >
+              Today
+            </button>
+            <button
+              onClick={() => navigate(1)}
+              aria-label="Next"
+              className="rounded-lg px-2 py-1 text-slate-400 transition-colors hover:bg-white/[0.06] hover:text-white"
+            >
+              ›
+            </button>
+          </div>
+
+          <div className="flex items-center gap-1">
+            {(['day', 'week', 'month'] as const).map(v => (
+              <button
+                key={v}
+                onClick={() => setView(v)}
+                className={`rounded-lg px-2.5 py-1 text-sm transition-colors ${
+                  view === v ? 'font-medium text-white' : 'text-slate-500 hover:text-white'
+                }`}
+              >
+                {v.charAt(0).toUpperCase() + v.slice(1)}
+              </button>
+            ))}
+          </div>
+
+          <button
+            type="button"
+            onClick={() => {
+              console.log('Opening create modal, date:', selectedDateStr);
+              setCreateForm(f => ({ ...f, date: selectedDateStr }));
+              setShowCreateModal(true);
+            }}
+            className="rounded-xl bg-teal-400/90 px-3.5 py-2 text-sm font-medium text-slate-950 transition-colors hover:bg-teal-300"
+          >
+            + New event
+          </button>
         </div>
       </div>
 
       {/* Calendar Content */}
-      <div className="bg-card border border-card rounded-xl p-4">
+      <div className="min-h-0 flex-1 overflow-y-auto">
         {loading ? (
-          <div className="text-center py-12">
-            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-teal-500 mx-auto mb-4"></div>
-            <p className="text-gray-400">Loading...</p>
-          </div>
+          <p className="py-12 text-sm text-slate-500">Loading calendar…</p>
         ) : (
           <>
             {view === 'day' && renderDayView()}
@@ -542,117 +582,140 @@ const CalendarView: React.FC = () => {
 
       {/* Event Detail Modal */}
       {selectedEvent && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setSelectedEvent(null)}>
-          <div className="bg-gray-900 border border-gray-700 rounded-xl max-w-md w-full p-6" onClick={e => e.stopPropagation()}>
-            <div className="flex justify-between items-start mb-4">
-              <div className="flex items-center gap-2">
-                <h3 className="text-xl font-semibold text-white">{selectedEvent.title}</h3>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={() => setSelectedEvent(null)}>
+          <div className="w-full max-w-md rounded-2xl border border-white/10 bg-[#0c1626] p-6" onClick={e => e.stopPropagation()}>
+            <div className="mb-4 flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <h3 className="font-display text-lg font-semibold text-white">{selectedEvent.title}</h3>
                 {isIOSEvent(selectedEvent) && (
-                  <span className="text-xs px-2 py-1 bg-purple-600/50 rounded text-purple-200">iOS Calendar</span>
+                  <p className="mt-0.5 text-xs text-slate-500">
+                    Synced from iOS Calendar
+                    {selectedEvent.ios_calendar_name && <span> · {selectedEvent.ios_calendar_name}</span>}
+                  </p>
                 )}
               </div>
-              <button onClick={() => setSelectedEvent(null)} className="text-gray-400 hover:text-white">✕</button>
+              <button
+                onClick={() => setSelectedEvent(null)}
+                aria-label="Close"
+                className="flex-shrink-0 text-slate-500 transition-colors hover:text-white"
+              >
+                ✕
+              </button>
             </div>
 
             {selectedEvent.description && (
-              <p className="text-gray-300 mb-4">{selectedEvent.description}</p>
+              <p className="mb-4 text-[15px] leading-relaxed text-slate-300">{selectedEvent.description}</p>
             )}
 
-            <div className="space-y-2 text-sm text-gray-400 mb-6">
-              <div>🕐 {new Date(selectedEvent.starts_at).toLocaleString()}</div>
-              <div>🏁 {new Date(selectedEvent.ends_at).toLocaleString()}</div>
-              {selectedEvent.location && <div>📍 {selectedEvent.location}</div>}
-              {selectedEvent.ios_calendar_name && (
-                <div className="text-purple-300">📱 {selectedEvent.ios_calendar_name}</div>
+            <div className="mb-6 space-y-1.5 text-sm text-slate-400">
+              <div className="flex gap-3">
+                <span className="w-12 flex-shrink-0 text-xs uppercase tracking-wide text-slate-500">Starts</span>
+                <span className="tabular-nums">{new Date(selectedEvent.starts_at).toLocaleString()}</span>
+              </div>
+              <div className="flex gap-3">
+                <span className="w-12 flex-shrink-0 text-xs uppercase tracking-wide text-slate-500">Ends</span>
+                <span className="tabular-nums">{new Date(selectedEvent.ends_at).toLocaleString()}</span>
+              </div>
+              {selectedEvent.location && (
+                <div className="flex gap-3">
+                  <span className="w-12 flex-shrink-0 text-xs uppercase tracking-wide text-slate-500">Where</span>
+                  <span>{selectedEvent.location}</span>
+                </div>
               )}
             </div>
 
-            <div className="flex gap-2">
-              {!isIOSEvent(selectedEvent) && (
-                <>
-                  <button
-                    onClick={() => handleDeleteEvent(selectedEvent.id)}
-                    className="px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700"
-                  >
-                    Delete
-                  </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => handleDeleteEvent(selectedEvent.id)}
+                className="text-xs text-slate-500 transition-colors hover:text-rose-300"
+              >
+                {isIOSEvent(selectedEvent) ? 'Hide from Sara' : 'Delete'}
+              </button>
+              <div className="ml-auto flex items-center gap-2">
+                <button
+                  onClick={() => setSelectedEvent(null)}
+                  className="rounded-xl border border-white/10 px-3.5 py-2 text-sm text-slate-300 transition-colors hover:bg-white/[0.06] hover:text-white"
+                >
+                  Close
+                </button>
+                {!isIOSEvent(selectedEvent) && (
                   <button
                     onClick={() => openEditModal(selectedEvent)}
-                    className="flex-1 px-4 py-2 bg-teal-600 text-white rounded hover:bg-teal-700"
+                    className="rounded-xl bg-teal-400/90 px-3.5 py-2 text-sm font-medium text-slate-950 transition-colors hover:bg-teal-300"
                   >
                     Edit
                   </button>
-                </>
-              )}
-              {isIOSEvent(selectedEvent) && (
-                <p className="flex-1 text-sm text-gray-400 italic">
-                  Synced from iOS Calendar. Edit in your iOS Calendar app.
-                </p>
-              )}
-              <button
-                onClick={() => setSelectedEvent(null)}
-                className="px-4 py-2 bg-gray-700 text-white rounded hover:bg-gray-600"
-              >
-                Close
-              </button>
+                )}
+              </div>
             </div>
+            {isIOSEvent(selectedEvent) && (
+              <p className="mt-3 text-xs text-slate-500">
+                To edit, use your iOS Calendar app. Hiding here keeps the event on iPhone but removes it from Sara.
+              </p>
+            )}
           </div>
         </div>
       )}
 
       {/* Create/Edit Event Modal */}
       {showCreateModal && (
-        <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4" style={{ zIndex: 9999 }} onClick={() => { setShowCreateModal(false); setEditMode(false); }}>
-          <div className="bg-gray-900 border border-gray-700 rounded-xl max-w-md w-full p-6 shadow-2xl" onClick={e => e.stopPropagation()}>
-            <div className="flex justify-between items-start mb-4">
-              <h3 className="text-xl font-semibold text-white">{editMode ? 'Edit Event' : 'New Event'}</h3>
-              <button onClick={() => { setShowCreateModal(false); setEditMode(false); }} className="text-gray-400 hover:text-white">✕</button>
+        <div className="fixed inset-0 flex items-center justify-center bg-black/60 p-4" style={{ zIndex: 9999 }} onClick={() => { setShowCreateModal(false); setEditMode(false); }}>
+          <div className="w-full max-w-md rounded-2xl border border-white/10 bg-[#0c1626] p-6" onClick={e => e.stopPropagation()}>
+            <div className="mb-4 flex items-start justify-between">
+              <h3 className="font-display text-lg font-semibold text-white">{editMode ? 'Edit event' : 'New event'}</h3>
+              <button
+                onClick={() => { setShowCreateModal(false); setEditMode(false); }}
+                aria-label="Close"
+                className="text-slate-500 transition-colors hover:text-white"
+              >
+                ✕
+              </button>
             </div>
 
-            <div className="space-y-4">
+            <div className="space-y-3">
               <input
                 type="text"
                 placeholder="Event title *"
                 value={createForm.title}
                 onChange={e => setCreateForm(f => ({ ...f, title: e.target.value }))}
-                className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white"
+                className="w-full rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-slate-100 placeholder-slate-500 outline-none focus:border-teal-300/30"
               />
 
               <textarea
                 placeholder="Description"
                 value={createForm.description}
                 onChange={e => setCreateForm(f => ({ ...f, description: e.target.value }))}
-                className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white"
+                className="w-full rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-slate-100 placeholder-slate-500 outline-none focus:border-teal-300/30"
                 rows={2}
               />
 
               <div>
-                <label className="block text-sm text-gray-400 mb-1">Date *</label>
+                <label className="mb-1 block text-xs text-slate-500">Date *</label>
                 <input
                   type="date"
                   value={createForm.date}
                   onChange={e => setCreateForm(f => ({ ...f, date: e.target.value }))}
-                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white [color-scheme:dark]"
+                  className="w-full rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-slate-100 outline-none focus:border-teal-300/30 [color-scheme:dark]"
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-sm text-gray-400 mb-1">Start *</label>
+                  <label className="mb-1 block text-xs text-slate-500">Start *</label>
                   <input
                     type="time"
                     value={createForm.startTime}
                     onChange={e => setCreateForm(f => ({ ...f, startTime: e.target.value }))}
-                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white [color-scheme:dark]"
+                    className="w-full rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-slate-100 outline-none focus:border-teal-300/30 [color-scheme:dark]"
                   />
                 </div>
                 <div>
-                  <label className="block text-sm text-gray-400 mb-1">End *</label>
+                  <label className="mb-1 block text-xs text-slate-500">End *</label>
                   <input
                     type="time"
                     value={createForm.endTime}
                     onChange={e => setCreateForm(f => ({ ...f, endTime: e.target.value }))}
-                    className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white [color-scheme:dark]"
+                    className="w-full rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-slate-100 outline-none focus:border-teal-300/30 [color-scheme:dark]"
                   />
                 </div>
               </div>
@@ -662,15 +725,15 @@ const CalendarView: React.FC = () => {
                 placeholder="Location"
                 value={createForm.location}
                 onChange={e => setCreateForm(f => ({ ...f, location: e.target.value }))}
-                className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded text-white"
+                className="w-full rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-slate-100 placeholder-slate-500 outline-none focus:border-teal-300/30"
               />
             </div>
 
-            <div className="flex gap-2 mt-6">
+            <div className="mt-6 flex items-center justify-end gap-2">
               <button
                 type="button"
                 onClick={() => { setShowCreateModal(false); setEditMode(false); }}
-                className="flex-1 px-4 py-2 bg-gray-700 text-white rounded hover:bg-gray-600"
+                className="rounded-xl border border-white/10 px-3.5 py-2 text-sm text-slate-300 transition-colors hover:bg-white/[0.06] hover:text-white"
               >
                 Cancel
               </button>
@@ -683,9 +746,9 @@ const CalendarView: React.FC = () => {
                     handleCreateEvent();
                   }
                 }}
-                className="flex-1 px-4 py-2 bg-teal-600 text-white font-medium rounded hover:bg-teal-700"
+                className="rounded-xl bg-teal-400/90 px-3.5 py-2 text-sm font-medium text-slate-950 transition-colors hover:bg-teal-300"
               >
-                {editMode ? 'Save Changes' : 'Create Event'}
+                {editMode ? 'Save changes' : 'Create event'}
               </button>
             </div>
           </div>

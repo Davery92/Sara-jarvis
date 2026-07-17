@@ -1,0 +1,244 @@
+# Simplified GPU Cluster - Modular ASR + Diarization
+
+services:
+  # ============================================
+  # faster-whisper ASR
+  # ============================================
+  asr-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.asr
+    container_name: asr-service
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=0
+      - ASR_MODEL_NAME=${ASR_MODEL_NAME:-distil-large-v3}
+      - ASR_DEVICE=${ASR_DEVICE:-cuda}
+      - ASR_COMPUTE_TYPE=${ASR_COMPUTE_TYPE:-float16}
+      - VOICE_CONTROL_URL=${VOICE_CONTROL_URL:-}
+      - VOICE_CONTROL_INTERNAL_TOKEN=${VOICE_CONTROL_INTERNAL_TOKEN:-}
+      - VOICE_HEARTBEAT_INTERVAL_SECONDS=${VOICE_HEARTBEAT_INTERVAL_SECONDS:-15}
+    ports:
+      - "8585:8585"
+    volumes:
+      - /data/audio:/data/audio
+      - /data/whisper-cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['0']
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8585/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+
+  # ============================================
+  # NeMo Speaker Diarization
+  # ============================================
+  nemo-diarization:
+    build:
+      context: .
+      dockerfile: Dockerfile.nemo
+    container_name: nemo-diarization
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=2
+      - NEMO_CACHE_DIR=/data/cache
+      - VOICE_CONTROL_URL=${VOICE_CONTROL_URL:-}
+      - VOICE_CONTROL_INTERNAL_TOKEN=${VOICE_CONTROL_INTERNAL_TOKEN:-}
+      - VOICE_HEARTBEAT_INTERVAL_SECONDS=${VOICE_HEARTBEAT_INTERVAL_SECONDS:-15}
+    ports:
+      - "8002:8002"
+    volumes:
+      - /data/nemo-models:/data/models
+      - /data/nemo-cache:/data/cache
+      - /data/speakers:/data/speakers
+      - /data/audio:/data/audio
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['2']
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+
+  # ============================================
+  # pyannote Speaker Diarization (optional profile)
+  # ============================================
+  pyannote-diarization:
+    profiles: ["pyannote"]
+    build:
+      context: .
+      dockerfile: Dockerfile.pyannote
+      args:
+        INSTALL_PYANNOTE: ${INSTALL_PYANNOTE:-false}
+    container_name: pyannote-diarization
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=${PYANNOTE_GPU_ID:-2}
+      - PYANNOTE_MODEL=${PYANNOTE_MODEL:-pyannote/speaker-diarization-community-1}
+      - HUGGINGFACE_TOKEN=${HUGGINGFACE_TOKEN:-}
+      - VOICE_CONTROL_URL=${VOICE_CONTROL_URL:-}
+      - VOICE_CONTROL_INTERNAL_TOKEN=${VOICE_CONTROL_INTERNAL_TOKEN:-}
+      - VOICE_HEARTBEAT_INTERVAL_SECONDS=${VOICE_HEARTBEAT_INTERVAL_SECONDS:-15}
+    ports:
+      - "8004:8004"
+    volumes:
+      - /data/audio:/data/audio
+      - /data/pyannote-cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['2']
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+
+  # ============================================
+  # Speaker Enrollment Service
+  # ============================================
+  speaker-enrollment:
+    build:
+      context: .
+      dockerfile: Dockerfile.enrollment
+    container_name: speaker-enrollment
+    environment:
+      - NEMO_DIARIZATION_URL=http://nemo-diarization:8002
+      - VOICE_CONTROL_URL=${VOICE_CONTROL_URL:-}
+      - VOICE_CONTROL_INTERNAL_TOKEN=${VOICE_CONTROL_INTERNAL_TOKEN:-}
+      - VOICE_HEARTBEAT_INTERVAL_SECONDS=${VOICE_HEARTBEAT_INTERVAL_SECONDS:-15}
+    ports:
+      - "8003:8003"
+    volumes:
+      - /data/speakers:/data/speakers
+      - /data/enrollment-samples:/data/samples
+    depends_on:
+      - nemo-diarization
+    restart: unless-stopped
+
+  # ============================================
+  # Speaker Training Worker (optional profile)
+  # ============================================
+  speaker-training-worker:
+    profiles: ["training"]
+    build:
+      context: .
+      dockerfile: Dockerfile.speaker-training
+    container_name: speaker-training-worker
+    environment:
+      - SARA_BACKEND_URL=${SARA_BACKEND_URL:-http://10.185.1.180:8000}
+      - VOICE_INTERNAL_SERVICE=speaker-registry
+      - VOICE_CONTROL_INTERNAL_TOKEN=${VOICE_CONTROL_INTERNAL_TOKEN:-change-me-voice-internal-token}
+      - TRAINING_POLL_INTERVAL_SECONDS=${TRAINING_POLL_INTERVAL_SECONDS:-6}
+      - TRAINING_HEARTBEAT_INTERVAL_SECONDS=${TRAINING_HEARTBEAT_INTERVAL_SECONDS:-20}
+      - SPEAKER_TRAINING_AUTO_ACTIVATE=${SPEAKER_TRAINING_AUTO_ACTIVATE:-false}
+      - SPEAKER_MODEL_VERSION_PREFIX=${SPEAKER_MODEL_VERSION_PREFIX:-speaker_profiles_v}
+      - SPEAKER_ENROLLMENT_URL=${SPEAKER_ENROLLMENT_URL:-http://speaker-enrollment:8003}
+      - SPEAKER_TRAIN_DATASET_ROOT=${SPEAKER_TRAIN_DATASET_ROOT:-/data/enrollment-samples}
+      - SPEAKER_TRAIN_COMMAND=${SPEAKER_TRAIN_COMMAND:-}
+      - SPEAKER_TRAIN_TIMEOUT_SECONDS=${SPEAKER_TRAIN_TIMEOUT_SECONDS:-1800}
+      - SPEAKER_TRAIN_ALLOW_SIMULATION_FALLBACK=${SPEAKER_TRAIN_ALLOW_SIMULATION_FALLBACK:-true}
+    volumes:
+      - /data/enrollment-samples:/data/enrollment-samples
+    depends_on:
+      - speaker-enrollment
+    restart: unless-stopped
+
+  # ============================================
+  # Wake Word Training Worker (optional profile) — Desktop Jarvis Overhaul B3
+  # ============================================
+  wake-training-worker:
+    profiles: ["training"]
+    build:
+      context: .
+      dockerfile: Dockerfile.wake-training
+    container_name: wake-training-worker
+    environment:
+      - SARA_BACKEND_URL=${SARA_BACKEND_URL:-http://10.185.1.180:8000}
+      - VOICE_INTERNAL_SERVICE=wake-word-training
+      - VOICE_CONTROL_INTERNAL_TOKEN=${VOICE_CONTROL_INTERNAL_TOKEN:-change-me-voice-internal-token}
+      - TRAINING_POLL_INTERVAL_SECONDS=${TRAINING_POLL_INTERVAL_SECONDS:-6}
+      - TRAINING_HEARTBEAT_INTERVAL_SECONDS=${TRAINING_HEARTBEAT_INTERVAL_SECONDS:-20}
+      - WAKE_TRAINING_AUTO_ACTIVATE=${WAKE_TRAINING_AUTO_ACTIVATE:-false}
+      - WAKE_MODEL_VERSION_PREFIX=${WAKE_MODEL_VERSION_PREFIX:-hey_sara_v}
+      - WAKE_TRAIN_COMMAND=${WAKE_TRAIN_COMMAND:-}
+      - WAKE_TRAIN_TIMEOUT_SECONDS=${WAKE_TRAIN_TIMEOUT_SECONDS:-3600}
+      - WAKE_TRAIN_DATASET_SSH_TARGET=${WAKE_TRAIN_DATASET_SSH_TARGET:-david@jetson.local}
+      - JETSON_WAKE_DATASET_ROOT=${JETSON_WAKE_DATASET_ROOT:-/home/david/data/wake-word-datasets}
+      - WAKE_TRAIN_ALLOW_SIMULATION_FALLBACK=${WAKE_TRAIN_ALLOW_SIMULATION_FALLBACK:-true}
+    volumes:
+      - ~/.ssh:/root/.ssh:ro
+    restart: unless-stopped
+
+  # ============================================
+  # ML Training Worker (optional profile) — Desktop Jarvis Overhaul C2
+  # ============================================
+  ml-worker:
+    profiles: ["training"]
+    build:
+      context: .
+      dockerfile: Dockerfile.ml
+    container_name: ml-worker
+    environment:
+      - SARA_BACKEND_URL=${SARA_BACKEND_URL:-http://10.185.1.180:8000}
+      - ML_INTERNAL_SERVICE=ml-worker
+      - ML_CONTROL_INTERNAL_TOKEN=${ML_CONTROL_INTERNAL_TOKEN:-${VOICE_CONTROL_INTERNAL_TOKEN:-change-me-voice-internal-token}}
+      - ML_TRAINING_POLL_INTERVAL_SECONDS=${ML_TRAINING_POLL_INTERVAL_SECONDS:-10}
+      - ML_TRAINING_HEARTBEAT_INTERVAL_SECONDS=${ML_TRAINING_HEARTBEAT_INTERVAL_SECONDS:-20}
+      - ML_TRAINING_AUTO_ACTIVATE=${ML_TRAINING_AUTO_ACTIVATE:-false}
+      - ML_READONLY_DATABASE_URL=${ML_READONLY_DATABASE_URL:-postgresql://sara:sara123@10.185.1.180:5432/sara_hub}
+      - MINIO_URL=${MINIO_URL:-http://10.185.1.180:9000}
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-sara}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-}
+      - ML_MODEL_BUCKET=${ML_MODEL_BUCKET:-sara-ml-models}
+    restart: unless-stopped
+
+  # ============================================
+  # Audio Pipeline Worker
+  # ============================================
+  audio-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: audio-worker
+    environment:
+      - ASR_SERVICE_URL=http://asr-service:8585
+      - NEMO_DIARIZATION_URL=http://nemo-diarization:8002
+      - DIARIZATION_SERVICE_URL=${DIARIZATION_SERVICE_URL:-http://nemo-diarization:8002}
+      - SPEAKER_ENROLLMENT_URL=http://speaker-enrollment:8003
+      - SPEAKER_LINKING_ENABLED=${SPEAKER_LINKING_ENABLED:-true}
+      - SPEAKER_VERIFY_THRESHOLD=${SPEAKER_VERIFY_THRESHOLD:-0.55}
+      - SPEAKER_MIN_SEGMENT_SECONDS=${SPEAKER_MIN_SEGMENT_SECONDS:-0.8}
+      - VOICE_CONTROL_URL=${VOICE_CONTROL_URL:-}
+      - VOICE_CONTROL_INTERNAL_TOKEN=${VOICE_CONTROL_INTERNAL_TOKEN:-}
+      - REDIS_URL=redis://host.docker.internal:6379/0
+      - SARA_BACKEND_URL=http://10.185.1.180:8000
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - /data/audio:/data/audio
+    depends_on:
+      - asr-service
+      - nemo-diarization
+    restart: unless-stopped
+
+networks:
+  default:
+    name: sara-audio-net

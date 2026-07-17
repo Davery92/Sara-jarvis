@@ -6,8 +6,9 @@ and logs activity to the database for pattern detection.
 import asyncio
 import json
 import logging
-from datetime import datetime
-from typing import Optional, Set
+import time
+from datetime import datetime, timezone
+from typing import Dict, Optional, Set
 import aiohttp
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
@@ -29,7 +30,17 @@ class HAWebsocketService:
     DEFAULT_EXCLUDE_PATTERNS = {
         'sensor.cpu', 'sensor.memory', 'sensor.disk',
         'sensor.battery', 'sensor.uptime', 'sensor.last_boot',
-        'update.', 'sensor.sun_', 'weather.'
+        'update.', 'sensor.sun_', 'weather.',
+    }
+
+    # Noisy-but-meaningful entities: instead of excluding them outright, log
+    # only 'on' transitions and at most once per N seconds. The kitchen motion
+    # sensor fires ~95x/hr for the light automation, but it is currently the
+    # only live motion sensor in the house (the Ring sensors have been
+    # unavailable since 2025-12) — sampled, it's the sole presence signal
+    # pattern detection gets.
+    DEFAULT_RATE_LIMITED_ENTITIES = {
+        'binary_sensor.downstairs_light_box_kitchen_sensor': 300,
     }
 
     def __init__(
@@ -60,6 +71,8 @@ class HAWebsocketService:
         self.include_domains = include_domains or self.DEFAULT_INCLUDE_DOMAINS
         self.exclude_patterns = exclude_patterns or self.DEFAULT_EXCLUDE_PATTERNS
         self.require_state_change = require_state_change
+        self.rate_limited_entities: Dict[str, int] = dict(self.DEFAULT_RATE_LIMITED_ENTITIES)
+        self._last_logged_at: Dict[str, float] = {}
 
         self._message_id = 0
         self._running = False
@@ -152,11 +165,22 @@ class HAWebsocketService:
         if self.require_state_change and from_state == to_state:
             return
 
+        # Sample rate-limited entities: 'on' transitions only, max one per window
+        rate_limit = self.rate_limited_entities.get(entity_id)
+        if rate_limit:
+            if to_state != 'on':
+                return
+            now_mono = time.monotonic()
+            last = self._last_logged_at.get(entity_id)
+            if last is not None and (now_mono - last) < rate_limit:
+                return
+            self._last_logged_at[entity_id] = now_mono
+
         # Extract metadata
         domain = entity_id.split('.')[0]
         friendly_name = new_state.get('attributes', {}).get('friendly_name', entity_id)
         changed_at = datetime.fromisoformat(
-            new_state.get('last_changed', datetime.utcnow().isoformat()).replace('Z', '+00:00')
+            new_state.get('last_changed', datetime.now(timezone.utc).isoformat()).replace('Z', '+00:00')
         )
 
         # Build context
@@ -184,6 +208,32 @@ class HAWebsocketService:
             context=context,
             attributes=attributes
         )
+
+        # Bridge to cognitive raw buffer for Phase 1+ architecture
+        try:
+            from app.tasks.input_processing import process_environmental
+            process_environmental.delay(
+                entity_id=entity_id,
+                old_state=from_state,
+                new_state=to_state,
+                attributes=attributes
+            )
+        except Exception as e:
+            logger.debug(f"Could not send to raw buffer: {e}")
+
+        # Bridge to reactive engine (event bus + activity state machine)
+        try:
+            from app.services.ha_reactive_bridge import bridge_ha_event
+            await bridge_ha_event(
+                entity_id=entity_id,
+                domain=domain,
+                from_state=from_state,
+                to_state=to_state,
+                attributes=attributes,
+                changed_at=changed_at,
+            )
+        except Exception as e:
+            logger.debug(f"Reactive bridge failed: {e}")
 
         logger.debug(f"Logged: {entity_id} {from_state} -> {to_state}")
 

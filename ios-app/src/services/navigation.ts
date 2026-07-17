@@ -11,7 +11,11 @@ import { RootStackParamList } from '../types/navigation';
 export const navigationRef = createNavigationContainerRef<RootStackParamList>();
 
 // Queue for pending navigations when navigator isn't ready
-let pendingNavigation: { tabName: string; params?: object } | null = null;
+type PendingNavigation =
+  | { kind: 'tab'; name: string; params?: object }
+  | { kind: 'stack'; name: string; params?: object };
+
+let pendingNavigation: PendingNavigation | null = null;
 
 /**
  * Process any pending navigation once navigator is ready
@@ -20,10 +24,14 @@ let pendingNavigation: { tabName: string; params?: object } | null = null;
 export function onNavigatorReady() {
   console.log('[Navigation] Navigator is ready');
   if (pendingNavigation) {
-    console.log('[Navigation] Processing pending navigation to:', pendingNavigation.tabName);
-    const { tabName, params } = pendingNavigation;
+    console.log('[Navigation] Processing pending navigation to:', pendingNavigation.name);
+    const { kind, name, params } = pendingNavigation;
     pendingNavigation = null;
-    navigateToTab(tabName, params);
+    if (kind === 'tab') {
+      navigateToTab(name, params);
+    } else {
+      navigateToStackScreen(name, params);
+    }
   }
 }
 
@@ -64,7 +72,24 @@ export function navigateToTab(tabName: string, params?: object) {
     }
   } else {
     console.log('[Navigation] Navigator not ready, queueing navigation to:', tabName);
-    pendingNavigation = { tabName, params };
+    pendingNavigation = { kind: 'tab', name: tabName, params };
+  }
+}
+
+function navigateToStackScreen(screenName: string, params?: object) {
+  if (navigationRef.isReady()) {
+    try {
+      // @ts-ignore
+      navigationRef.navigate('Main', {
+        screen: screenName,
+        params,
+      });
+    } catch (error) {
+      console.error('[Navigation] Error navigating to screen:', screenName, error);
+    }
+  } else {
+    console.log('[Navigation] Navigator not ready, queueing stack navigation to:', screenName);
+    pendingNavigation = { kind: 'stack', name: screenName, params };
   }
 }
 
@@ -82,8 +107,103 @@ export function navigateToChat(params?: {
   healthAlert?: { severity: string; insightId?: string; title?: string; body?: string };
   nudge?: { nudgeType: string; title: string; message: string; actionSuggestion?: string };
   quickReply?: { message: string; nudgeType?: string; title?: string };
+  heartbeat?: { title: string; message: string; priority: string };
+  inboxItem?: { id: string; title: string };
+  noteContext?: { id: string; title: string; prompt?: string; preview?: string };
+  taskInject?: { taskId: string; conversationId?: string; noteId?: string };
+  notification?: { id: string; title: string; message: string; category: string; item_type: string };
 }) {
-  navigateToTab('Chat', params);
+  console.log('[Navigation] navigateToChat called with params:', params);
+  navigateToStackScreen('Chat', params);
+}
+
+/**
+ * Navigate to Inbox screen
+ */
+export function navigateToInbox(
+  params: { tab?: 'content' | 'attention'; focus?: 'all' | 'waiting' | 'in_progress' | 'new' | 'done' | 'archived' } = { focus: 'new' }
+) {
+  const focus =
+    params.focus ||
+    (params.tab === 'attention' ? 'waiting' : 'new');
+
+  navigateToTab('AssistantInboxTab', { focus });
+}
+
+export function navigateToNotifications(params?: { notificationId?: number }) {
+  navigateToStackScreen('Notifications', params);
+}
+
+export function navigateToNoteEditor(noteId: string | number, params?: { onSave?: () => void }) {
+  navigate('NoteEditor', {
+    noteId,
+    ...params,
+  });
+}
+
+/**
+ * Sara ui_command handler — chat-driven navigation ("open my inbox",
+ * "bring up my note about the server build"). The backend emits a
+ * `ui_command` SSE event; overlay kinds (webapp surfaces) and screen
+ * targets both map to native screens here.
+ */
+export interface SaraUiCommand {
+  action: string;
+  overlay?: string;
+  screen?: string;
+  payload?: Record<string, any>;
+}
+
+const OVERLAY_TO_SCREEN: Record<string, () => void> = {
+  brief: () => navigateToStackScreen('Briefings'),
+  nutrition: () => navigateToTab('Fitness'),
+  calendar: () => navigateToStackScreen('Calendar'),
+  tasks: () => navigateToStackScreen('AgentTasks'),
+};
+
+const SCREEN_TARGETS: Record<string, () => void> = {
+  inbox: () => navigateToInbox(),
+  notifications: () => navigateToNotifications(),
+  email: () => navigateToStackScreen('Email'),
+  documents: () => navigateToStackScreen('Documents'),
+  recipes: () => navigateToStackScreen('Recipes'),
+  settings: () => navigateToStackScreen('Settings'),
+  health: () => navigateToStackScreen('Health'),
+  learning: () => navigateToStackScreen('Learning'),
+  projects: () => navigateToStackScreen('Projects'),
+  automations: () => navigateToStackScreen('Automations'),
+  knowledge: () => navigateToStackScreen('Knowledge'),
+  fitness: () => navigateToTab('Fitness'),
+  notes: () => navigateToStackScreen('Notes'),
+  chat: () => navigateToChat(),
+};
+
+export function handleSaraUiCommand(cmd: SaraUiCommand): boolean {
+  try {
+    if (cmd?.action === 'open_overlay' && cmd.overlay) {
+      if (cmd.overlay === 'note' && cmd.payload?.note_id) {
+        navigateToNoteEditor(cmd.payload.note_id);
+        return true;
+      }
+      const open = OVERLAY_TO_SCREEN[cmd.overlay];
+      if (open) {
+        open();
+        return true;
+      }
+      return false;
+    }
+    if (cmd?.action === 'navigate' && cmd.screen) {
+      const open = SCREEN_TARGETS[cmd.screen];
+      if (open) {
+        open();
+        return true;
+      }
+    }
+    return false;
+  } catch (error) {
+    console.error('[Navigation] Failed to handle ui_command:', error);
+    return false;
+  }
 }
 
 /**

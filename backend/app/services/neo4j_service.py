@@ -78,7 +78,7 @@ class Neo4jService:
             indexes = [
                 "CREATE INDEX note_title_index IF NOT EXISTS FOR (n:Note) ON (n.title)",
                 "CREATE INDEX episode_role_index IF NOT EXISTS FOR (e:Episode) ON (e.role)",
-                "CREATE INDEX content_created_index IF NOT EXISTS FOR (n) ON (n.created_at)",
+                "CREATE INDEX content_created_index IF NOT EXISTS FOR (n:Note) ON (n.created_at)",
                 "CREATE INDEX document_mime_index IF NOT EXISTS FOR (d:Document) ON (d.mime_type)"
             ]
             

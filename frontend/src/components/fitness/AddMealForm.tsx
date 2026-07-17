@@ -1,20 +1,8 @@
 import React, { useState } from 'react'
 import { X } from 'lucide-react'
 import FoodItemSelector from './FoodItemSelector'
+import type { SelectedFoodItem } from './FoodItemSelector'
 import apiClient from '../../api/client'
-
-interface SelectedFoodItem {
-  id: string
-  name: string
-  brand?: string
-  serving_size: number
-  serving_unit: string
-  quantity: number
-  calculated_calories?: number
-  calculated_protein?: number
-  calculated_carbs?: number
-  calculated_fats?: number
-}
 
 interface AddMealFormProps {
   onClose: () => void

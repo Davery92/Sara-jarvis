@@ -100,9 +100,9 @@ export default function SmartInsightsScreen() {
 
   const getPriorityColor = (priority: string) => {
     const colors_map = {
-      high: '#ef4444',
-      medium: '#f59e0b',
-      low: '#3b82f6'
+      high: colors.error,
+      medium: colors.warning,
+      low: colors.info
     };
     return colors_map[priority as keyof typeof colors_map] || colors_map.low;
   };
@@ -168,7 +168,7 @@ export default function SmartInsightsScreen() {
             <TouchableOpacity
               onPress={() => generateReport('weekly')}
               disabled={generating}
-              style={[styles.generateButton, { backgroundColor: '#3b82f6' }]}
+              style={[styles.generateButton, { backgroundColor: colors.surfaceLight }]}
             >
               <Text style={styles.generateButtonIcon}>📅</Text>
               <Text style={styles.generateButtonText}>Weekly</Text>
@@ -176,7 +176,7 @@ export default function SmartInsightsScreen() {
             <TouchableOpacity
               onPress={() => generateReport('monthly')}
               disabled={generating}
-              style={[styles.generateButton, { backgroundColor: '#6366f1' }]}
+              style={[styles.generateButton, { backgroundColor: colors.surfaceLight }]}
             >
               <Text style={styles.generateButtonIcon}>📊</Text>
               <Text style={styles.generateButtonText}>Monthly</Text>
@@ -184,7 +184,7 @@ export default function SmartInsightsScreen() {
             <TouchableOpacity
               onPress={() => generateReport('quarterly')}
               disabled={generating}
-              style={[styles.generateButton, { backgroundColor: '#8b5cf6' }]}
+              style={[styles.generateButton, { backgroundColor: colors.surfaceLight }]}
             >
               <Text style={styles.generateButtonIcon}>📈</Text>
               <Text style={styles.generateButtonText}>Quarterly</Text>
@@ -364,7 +364,7 @@ const styles = StyleSheet.create({
     position: 'absolute',
     top: 8,
     right: '30%',
-    backgroundColor: '#ef4444',
+    backgroundColor: colors.error,
     borderRadius: 10,
     paddingHorizontal: 6,
     paddingVertical: 2,
@@ -372,7 +372,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   badgeText: {
-    color: '#fff',
+    color: colors.text,
     fontSize: 10,
     fontWeight: 'bold',
   },
@@ -398,7 +398,7 @@ const styles = StyleSheet.create({
     fontSize: 16,
   },
   generateButtonText: {
-    color: '#fff',
+    color: colors.text,
     fontWeight: '600',
     fontSize: fontSizes.sm,
   },
@@ -504,7 +504,7 @@ const styles = StyleSheet.create({
     marginBottom: spacing.sm,
   },
   priorityText: {
-    color: '#fff',
+    color: colors.text,
     fontSize: 10,
     fontWeight: 'bold',
   },
@@ -545,7 +545,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.textMuted,
   },
   suggestionButtonText: {
-    color: '#fff',
+    color: colors.text,
     fontSize: fontSizes.xs,
     fontWeight: '600',
   },

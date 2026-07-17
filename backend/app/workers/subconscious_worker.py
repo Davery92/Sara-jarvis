@@ -1,16 +1,18 @@
 """
 Sara's Subconscious Worker
 
+DEPRECATED: Replaced by unified_agent.py which consolidates both this worker
+(sensing/state) and unified_heartbeat.py (LLM agent loop) into a single 4-phase
+Celery task running every 15 minutes.
+
+Stop the systemd service: sudo systemctl stop sara-subconscious.service
+The Celery beat schedule (unified-agent) handles everything this worker did.
+
+This file is kept for backward compatibility but should no longer be started.
+
+Original description:
 Background service that maintains a running mental model of the user's state.
-
 Runs every 30 minutes during waking hours (6 AM - 10 PM), every hour at night.
-Consolidates: chats, food logs, health metrics, presence, time of day, system health.
-Generates nudges when thresholds are crossed.
-
-Usage:
-    python -m app.workers.subconscious_worker
-
-Systemd service: sara-subconscious.service
 """
 
 import asyncio
@@ -39,7 +41,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Configuration
-DATABASE_URL = os.getenv('DATABASE_URL', 'postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub')
+DATABASE_URL = os.getenv('DATABASE_URL')
 
 # Timezone (Eastern time for David)
 from app.core.timezone import USER_TIMEZONE
@@ -120,10 +122,14 @@ class SubconsciousWorker:
             for user_id in users:
                 try:
                     await self.service.process_user(db, user_id)
+                    db.commit()
                 except Exception as e:
                     logger.error(f"Error processing user {user_id}: {e}", exc_info=True)
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
 
-            db.commit()
             logger.info("Subconscious cycle completed successfully")
 
         except Exception as e:

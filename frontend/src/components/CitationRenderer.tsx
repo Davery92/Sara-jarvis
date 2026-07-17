@@ -138,7 +138,7 @@ const CitationRenderer: React.FC<CitationRendererProps> = ({ content, citations 
       )}
       
       {/* CSS for citation styling */}
-      <style jsx>{`
+      <style>{`
         .citation-content :global(.citation-link) {
           color: #14b8a6;
           cursor: pointer;

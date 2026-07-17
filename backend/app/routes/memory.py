@@ -1,4 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+"""Memory routes — operates on the Episode store (the live memory system).
+
+MemoryTrace is a deprecated legacy model. All chat interactions are stored
+as Episode records with pgvector embeddings.
+"""
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Body
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 from sqlalchemy.orm import Session
@@ -7,29 +13,19 @@ import json
 import uuid
 import time
 import os as _os
+import logging
 
-from app.main_simple import (
-    SessionLocal,
-    get_current_user,
-    embedding_service,
-    EMBEDDING_DIM,
-    PGVECTOR_AVAILABLE,
-    DATABASE_URL,
-    MemoryTrace,
-    MemoryEmbedding,
-)
+from app.db.session import get_db
+from app.core.deps import get_current_user
+from app.models.episode import Episode
+from app.services.embedding_service import embedding_service
+from app.core.config import settings
 
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/memory", tags=["memory"])
 
-
-class MemoryTraceCreate(BaseModel):
-    content: str
-    role: Optional[str] = None
-    heads: Optional[List[str]] = None  # e.g., ["semantic", "entity"]
-    salience: Optional[float] = None
-    source: Optional[Dict[str, Any]] = None
-    meta: Optional[Dict[str, Any]] = None
+EMBEDDING_DIM = settings.embedding_dim
 
 _redis_client = None
 
@@ -47,82 +43,119 @@ def _get_redis():
         return None
 
 
+class EpisodeCreate(BaseModel):
+    content: str
+    role: Optional[str] = None
+    source: Optional[str] = "api"
+    memory_type: Optional[str] = "manual"
+    importance: Optional[float] = None
+    meta: Optional[Dict[str, Any]] = None
+
+
 @router.post("/trace")
-async def create_trace(payload: MemoryTraceCreate, current_user=Depends(get_current_user)):
-    heads = payload.heads or ["semantic"]
-    # Generate embeddings per head (best-effort). If embedding fails, still store the trace.
-    q_embeddings: Dict[str, List[float]] = {}
-    for h in heads:
-        try:
-            emb = await embedding_service.generate_embedding(payload.content)
-        except Exception:
-            emb = None
-        if not emb:
-            # Best-effort: skip embeddings if service is unavailable
-            continue
-        # Normalize to EMBEDDING_DIM
+async def create_episode(payload: EpisodeCreate, current_user=Depends(get_current_user),
+                         db: Session = Depends(get_db)):
+    """Create a new episode (memory trace). Generates embedding automatically."""
+    try:
+        emb = await embedding_service.generate_embedding(payload.content)
+    except Exception:
+        emb = None
+
+    # Normalize embedding dimension
+    if emb:
         if len(emb) < EMBEDDING_DIM:
             emb = emb + [0.0] * (EMBEDDING_DIM - len(emb))
         elif len(emb) > EMBEDDING_DIM:
             emb = emb[:EMBEDDING_DIM]
-        q_embeddings[h] = emb
 
-    db: Session = SessionLocal()
     try:
-        trace_id = str(uuid.uuid4())
-        trace = MemoryTrace(
-            id=trace_id,
+        episode_id = str(uuid.uuid4())
+        episode = Episode(
+            id=episode_id,
             user_id=current_user.id,
             content=payload.content,
-            role=payload.role,
-            salience=payload.salience,
-            source=json.dumps(payload.source) if payload.source else None,
-            meta=json.dumps(payload.meta) if payload.meta else None,
+            role=payload.role or "user",
+            source=payload.source,
+            memory_type=payload.memory_type,
+            importance=payload.importance or 0.5,
+            embedding=emb,
+            meta=payload.meta or {},
         )
-        db.add(trace)
-
-        for head, emb in q_embeddings.items():
-            me = MemoryEmbedding(
-                trace_id=trace_id,
-                head=head,
-                embedding=emb if (PGVECTOR_AVAILABLE and DATABASE_URL.startswith("postgresql")) else json.dumps(emb),
-            )
-            db.add(me)
-
+        db.add(episode)
         db.commit()
-        # Push to Redis working set (recency buffer)
+
+        # Push to Redis working set
         try:
             r = _get_redis()
             if r:
                 key = f"user:{current_user.id}:memory:recent"
                 item = json.dumps({
-                    "trace_id": trace_id,
+                    "trace_id": episode_id,  # Keep trace_id key for backwards compat
                     "content": payload.content,
                     "role": payload.role,
                     "ts": int(time.time())
                 })
                 r.zadd(key, {item: int(time.time())})
-                # keep only latest 1000
                 r.zremrangebyrank(key, 0, -1001)
                 ttl = int(_os.getenv("REDIS_FOCUS_TTL_SECONDS", "172800"))
                 r.expire(key, ttl)
         except Exception:
             pass
 
-        return {"trace_id": trace_id, "heads": list(q_embeddings.keys())}
+        return {"trace_id": episode_id, "episode_id": episode_id}
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to store trace: {e}")
-    finally:
-        db.close()
+        raise HTTPException(status_code=500, detail=f"Failed to store episode: {e}")
+
+
+@router.get("/verification-question")
+async def verification_question(current_user=Depends(get_current_user)):
+    """ONE_MIND §3.4 — the ripest unverified fact as one natural yes/no
+    question (or null). Marks it asked (anti-nag cooldown + daily cap)."""
+    from app.services.fact_verification import pick_question, count_unverified
+    q = await pick_question(user_id=str(current_user.id))
+    total = await count_unverified()
+    return {"question": q, "unverified_remaining": total}
+
+
+@router.post("/verification-answer")
+async def verification_answer(
+    payload: Dict[str, Any] = Body(...),
+    current_user=Depends(get_current_user),
+):
+    """Record David's answer: confirmed → the fact graduates to the confirmed
+    tier; denied → it is retired."""
+    pkg_id = (payload.get("pkg_id") or "").strip()
+    if not pkg_id:
+        raise HTTPException(status_code=400, detail="pkg_id required")
+    confirmed = bool(payload.get("confirmed"))
+    from app.services.fact_verification import record_answer
+    return await record_answer(str(current_user.id), pkg_id, confirmed)
+
+
+@router.get("/unified-recall")
+async def unified_recall(
+    q: str = Query(...),
+    k: int = Query(10, ge=1, le=50),
+    kinds: Optional[str] = Query(None, description="comma-separated: episode,note,document,summary,fact,person,thread"),
+    current_user=Depends(get_current_user),
+):
+    """ONE_MIND §3.4 — the one recall API. Fans out across episodes, notes,
+    documents, summaries, facts (PKG), people, and open threads, returning
+    traces on one shape with one provenance and one graduated confidence scale
+    (observed → inferred → confirmed). This is the recall-paths=1 path callers
+    migrate onto so no subsystem keeps a private view of the truth."""
+    from app.services.memory_recall import recall as unified
+    kind_list = [s.strip() for s in kinds.split(",")] if kinds else None
+    return await unified(user_id=str(current_user.id), query=q, k=k, kinds=kind_list)
 
 
 @router.get("/recall")
 async def recall(q: str = Query(...), k: int = Query(10, ge=1, le=100),
-                 heads: Optional[str] = Query(None), time_window: Optional[str] = Query(None),
-                 current_user=Depends(get_current_user)):
-    heads_list: Optional[List[str]] = [h.strip() for h in heads.split(",")] if heads else None
-    # Compute query embedding
+                 time_window: Optional[str] = Query(None),
+                 current_user=Depends(get_current_user),
+                 db: Session = Depends(get_db)):
+    """Semantic recall over episodes using pgvector similarity search."""
     q_emb = await embedding_service.generate_embedding(q)
     if not q_emb:
         raise HTTPException(status_code=502, detail="Embedding service failed")
@@ -131,247 +164,121 @@ async def recall(q: str = Query(...), k: int = Query(10, ge=1, le=100),
     elif len(q_emb) > EMBEDDING_DIM:
         q_emb = q_emb[:EMBEDDING_DIM]
 
-    db: Session = SessionLocal()
+    results: List[Dict[str, Any]] = []
+    seen: set = set()
+
+    # 1) Redis recent buffer
     try:
-        results: List[Dict[str, Any]] = []
-        seen: set[str] = set()
-
-        # 1) Redis recent
-        try:
-            r = _get_redis()
-            if r:
-                key = f"user:{current_user.id}:memory:recent"
-                raw = r.zrevrange(key, 0, 49)  # latest 50
-                for item in raw:
-                    try:
-                        obj = json.loads(item)
-                        tid = obj.get("trace_id")
-                        if not tid or tid in seen:
-                            continue
-                        results.append({
-                            "trace_id": tid,
-                            "content": obj.get("content"),
-                            "role": obj.get("role"),
-                            "created_at": None,
-                            "head": "recent",
-                            "score": 0.0
-                        })
-                        seen.add(tid)
-                        if len(results) >= k:
-                            return {
-                                "query": q,
-                                "k": k,
-                                "heads": heads_list,
-                                "time_window": time_window,
-                                "results": results,
-                            }
-                    except Exception:
-                        continue
-        except Exception:
-            pass
-        if PGVECTOR_AVAILABLE and DATABASE_URL.startswith("postgresql"):
-            # Use pgvector distance operator
-            head_filter = ""
-            params: Dict[str, Any] = {
-                "user_id": current_user.id,
-                "qvec": str(q_emb),
-                "k": k,
-            }
-            time_filter = ""
-            if time_window:
-                # parse like "30d" or "7d"; default days
+        r = _get_redis()
+        if r:
+            key = f"user:{current_user.id}:memory:recent"
+            raw = r.zrevrange(key, 0, 49)
+            for item in raw:
                 try:
-                    days = int(time_window.rstrip('d'))
-                except Exception:
-                    days = 30
-                time_filter = " AND t.created_at >= NOW() - INTERVAL '" + str(days) + " days'"
-            if not time_window:
-                # Hot tier default window
-                time_filter = " AND t.created_at >= NOW() - INTERVAL '30 days'"
-            if heads_list:
-                head_filter = " AND e.head = ANY(:heads)"
-                params["heads"] = heads_list
-            sql = f"""
-                SELECT t.id, t.content, t.role, t.created_at, e.head,
-                       (e.embedding <=> :qvec) AS distance
-                FROM memory_embedding e
-                JOIN memory_trace t ON t.id = e.trace_id
-                WHERE t.user_id = :user_id
-                {head_filter}
-                {time_filter}
-                ORDER BY e.embedding <=> :qvec
-                LIMIT :k
-            """
-            rows = db.execute(sql_text(sql), params).fetchall()
-            for row in rows:
-                results.append({
-                    "trace_id": row[0],
-                    "content": row[1],
-                    "role": row[2],
-                    "created_at": row[3].isoformat() if row[3] else None,
-                    "head": row[4],
-                    "score": float(row[5]),
-                })
-
-            # Expand via edges: include neighbors of top results (1 hop), de-duplicated
-            if results:
-                top_ids = [r["trace_id"] for r in results[: max(1, min(5, k))]]
-                edge_sql = sql_text(
-                    """
-                    SELECT t.id, t.content, t.role, t.created_at, 'edge' AS head
-                    FROM memory_edge me
-                    JOIN memory_trace t ON t.id = me.dst
-                    WHERE me.src = ANY(:ids) AND t.user_id = :user_id
-                    LIMIT :cap
-                    """
-                )
-                edge_rows = db.execute(edge_sql, {"ids": top_ids, "user_id": current_user.id, "cap": k}).fetchall()
-                for row in edge_rows:
-                    tid = row[0]
-                    if tid in seen:
+                    obj = json.loads(item)
+                    tid = obj.get("trace_id")
+                    if not tid or tid in seen:
                         continue
                     results.append({
                         "trace_id": tid,
-                        "content": row[1],
-                        "role": row[2],
-                        "created_at": row[3].isoformat() if row[3] else None,
-                        "head": row[4],
-                        "score": 0.5
+                        "content": obj.get("content"),
+                        "role": obj.get("role"),
+                        "created_at": None,
+                        "score": 0.0,
+                        "source": "redis_recent",
                     })
                     seen.add(tid)
-        else:
-            # Fallback: naive in-Python cosine similarity over recent items
-            import numpy as np  # lazy import
-            qv = np.array(q_emb, dtype=float)
-            # Fetch recent embeddings to bound computation
-            query = db.query(MemoryEmbedding, MemoryTrace).join(MemoryTrace, MemoryTrace.id == MemoryEmbedding.trace_id)
-            query = query.filter(MemoryTrace.user_id == current_user.id)
-            if heads_list:
-                query = query.filter(MemoryEmbedding.head.in_(heads_list))
-            items = query.order_by(MemoryEmbedding.created_at.desc()).limit(500).all()
-            scored = []
-            for me, mt in items:
-                try:
-                    ev = json.loads(me.embedding) if isinstance(me.embedding, str) else me.embedding
-                    v = np.array(ev, dtype=float)
-                    sim = float(np.dot(qv, v) / (np.linalg.norm(qv) * np.linalg.norm(v) + 1e-8))
-                    scored.append((sim, mt, me.head))
+                    if len(results) >= k:
+                        return {"query": q, "k": k, "time_window": time_window, "results": results}
                 except Exception:
                     continue
-            scored.sort(key=lambda x: x[0], reverse=True)
-            for sim, mt, head in scored[:k]:
-                results.append({
-                    "trace_id": mt.id,
-                    "content": mt.content,
-                    "role": mt.role,
-                    "created_at": mt.created_at.isoformat() if mt.created_at else None,
-                    "head": head,
-                    "score": float(1.0 - sim),  # align with distance-like semantics
-                })
+    except Exception:
+        pass
 
-        return {
-            "query": q,
-            "k": k,
-            "heads": heads_list,
-            "time_window": time_window,
-            "results": results,
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Recall failed: {e}")
-    finally:
-        db.close()
-
-
-class ConsolidateRequest(BaseModel):
-    day: Optional[str] = None  # ISO date, e.g., 2025-08-31
-
-
-@router.post("/consolidate")
-async def consolidate(payload: ConsolidateRequest = None, current_user=Depends(get_current_user)):
-    """One-shot consolidation: create a simple daily summary and temporal edges between same-day traces.
-    This is a lightweight stub to be extended with LLM summarization and richer edge extraction.
-    """
-    from datetime import datetime, timedelta
-    db: Session = SessionLocal()
+    # 2) pgvector similarity search on episode table
     try:
-        if payload and payload.day:
+        # Check for temporal references in the query (e.g. "what happened Tuesday")
+        from app.services.temporal_query_parser import parse_temporal_reference
+        temporal_range = parse_temporal_reference(q)
+
+        time_filter = ""
+        params: Dict[str, Any] = {
+            "user_id": current_user.id,
+            "qvec": str(q_emb),
+            "k": k,
+        }
+        if temporal_range:
+            # Temporal query detected — use parsed time range instead of default window
+            time_filter = " AND e.created_at BETWEEN :t_start AND :t_end"
+            params["t_start"] = temporal_range[0]
+            params["t_end"] = temporal_range[1]
+        elif time_window:
             try:
-                day_dt = datetime.fromisoformat(payload.day)
+                days = int(time_window.rstrip('d'))
             except Exception:
-                raise HTTPException(status_code=400, detail="Invalid day format")
+                days = 30
+            time_filter = f" AND e.created_at >= NOW() - INTERVAL '{days} days'"
         else:
-            day_dt = datetime.utcnow() - timedelta(days=1)
-        start = day_dt.replace(hour=0, minute=0, second=0, microsecond=0)
-        end = start + timedelta(days=1)
+            time_filter = " AND e.created_at >= NOW() - INTERVAL '30 days'"
 
-        # Fetch traces from that day
-        traces = db.query(MemoryTrace).filter(
-            MemoryTrace.user_id == current_user.id,
-            MemoryTrace.created_at >= start,
-            MemoryTrace.created_at < end,
-        ).order_by(MemoryTrace.created_at.asc()).all()
-
-        if not traces:
-            return {"status": "ok", "message": "No traces to consolidate for day"}
-
-        # Create a basic summary trace
-        # Simple heuristic summary for now
-        key_phrases = []
-        try:
-            for t in traces:
-                content_low = (t.content or "").lower()
-                for kw in ["meeting", "call", "email", "note", "vector", "graph", "habit", "calendar", "document"]:
-                    if kw in content_low:
-                        key_phrases.append(kw)
-            key_phrases = list(dict.fromkeys(key_phrases))[:8]
-        except Exception:
-            key_phrases = []
-        summary_content = (
-            f"Daily summary for {start.date()}: {len(traces)} events captured."
-            + (f" Key topics: {', '.join(key_phrases)}." if key_phrases else "")
-        )
-        summary_id = str(uuid.uuid4())
-        summary = MemoryTrace(
-            id=summary_id,
-            user_id=current_user.id,
-            content=summary_content,
-            role="summary",
-            salience=0.5,
-            source=json.dumps({"type": "consolidation"}),
-            meta=json.dumps({"day": str(start.date())}),
-        )
-        db.add(summary)
-
-        # Summary embedding
-        try:
-            emb = await embedding_service.generate_embedding(summary_content)
-            if emb:
-                me = MemoryEmbedding(
-                    trace_id=summary_id,
-                    head="semantic",
-                    embedding=emb if (PGVECTOR_AVAILABLE and DATABASE_URL.startswith("postgresql")) else json.dumps(emb),
-                )
-                db.add(me)
-        except Exception:
-            pass
-
-        # Temporal edges between consecutive items
-        from app.main_simple import MemoryEdge
-        for a, b in zip(traces, traces[1:]):
-            edge = MemoryEdge(src=a.id, dst=b.id, type="temporal", weight=0.1)
-            db.merge(edge)
-        # Connect summary to day traces
-        for t in traces:
-            db.merge(MemoryEdge(src=summary_id, dst=t.id, type="summary_of", weight=0.05))
-        db.commit()
-        return {"status": "ok", "summary_trace": summary_id, "edges_created": max(0, len(traces) - 1)}
-    except HTTPException:
-        raise
+        sql = f"""
+            SELECT e.id, e.content, e.role, e.created_at, e.source, e.importance,
+                   (e.embedding <=> CAST(:qvec AS vector)) AS distance,
+                   COALESCE(e.access_count, 0) AS access_count,
+                   COALESCE(e.rating_boost, 0) AS rating_boost,
+                   COALESCE(e.exploration_bonus, 0) AS exploration_bonus
+            FROM episode e
+            WHERE e.user_id = :user_id
+              AND e.embedding IS NOT NULL
+              {time_filter}
+            ORDER BY (
+                0.55 * (1.0 - (e.embedding <=> CAST(:qvec AS vector)))
+              + 0.25 * COALESCE(e.importance, 0.5)
+              + 0.10 * LEAST(LN(COALESCE(e.access_count, 0) + 1) / 4.6, 1.0)
+              + 0.05 * COALESCE(e.rating_boost, 0)
+              + 0.05 * COALESCE(e.exploration_bonus, 0)
+            ) DESC
+            LIMIT :k
+        """
+        rows = db.execute(sql_text(sql), params).fetchall()
+        for row in rows:
+            eid = row[0]
+            if eid in seen:
+                continue
+            results.append({
+                "trace_id": eid,
+                "content": row[1],
+                "role": row[2],
+                "created_at": row[3].isoformat() if row[3] else None,
+                "source": row[4] or "chat",
+                "importance": float(row[5]) if row[5] else None,
+                "score": float(row[6]),
+            })
+            seen.add(eid)
     except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Consolidation failed: {e}")
-    finally:
-        db.close()
+        logger.error(f"Episode recall vector search failed: {e}")
+
+    # Track access counts for recalled episodes (feedback loop)
+    if results:
+        recalled_ids = [r["trace_id"] for r in results if r.get("trace_id")]
+        if recalled_ids:
+            try:
+                db.execute(sql_text("""
+                    UPDATE episode SET access_count = COALESCE(access_count, 0) + 1,
+                                       last_accessed = NOW()
+                    WHERE id = ANY(:ids) AND user_id = :uid
+                """), {"ids": recalled_ids, "uid": str(current_user.id)})
+                db.commit()
+            except Exception as e:
+                logger.debug(f"Access tracking update failed: {e}")
+
+    return {
+        "query": q,
+        "k": k,
+        "time_window": time_window,
+        "temporal_detected": temporal_range is not None,
+        "results": results,
+    }
 
 
 class ForgetRequest(BaseModel):
@@ -379,15 +286,20 @@ class ForgetRequest(BaseModel):
 
 
 @router.post("/forget")
-async def forget(payload: ForgetRequest, current_user=Depends(get_current_user)):
-    db: Session = SessionLocal()
+async def forget(payload: ForgetRequest, current_user=Depends(get_current_user),
+                 db: Session = Depends(get_db)):
+    """Delete an episode by ID."""
     try:
-        trace = db.query(MemoryTrace).filter(MemoryTrace.id == payload.trace_id, MemoryTrace.user_id == current_user.id).first()
-        if not trace:
-            raise HTTPException(status_code=404, detail="Trace not found")
-        db.query(MemoryEmbedding).filter(MemoryEmbedding.trace_id == payload.trace_id).delete()
-        db.delete(trace)
+        episode = db.query(Episode).filter(
+            Episode.id == payload.trace_id,
+            Episode.user_id == current_user.id
+        ).first()
+        if not episode:
+            raise HTTPException(status_code=404, detail="Episode not found")
+
+        db.delete(episode)
         db.commit()
+
         # Remove from Redis
         try:
             r = _get_redis()
@@ -403,11 +315,40 @@ async def forget(payload: ForgetRequest, current_user=Depends(get_current_user))
                         continue
         except Exception:
             pass
+
         return {"trace_id": payload.trace_id, "deleted": True}
     except HTTPException:
         raise
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to delete trace: {e}")
-    finally:
-        db.close()
+        raise HTTPException(status_code=500, detail=f"Failed to delete episode: {e}")
+
+
+class UpdateImportanceRequest(BaseModel):
+    trace_id: str
+    importance: float
+
+
+@router.put("/importance")
+async def update_importance(payload: UpdateImportanceRequest,
+                            current_user=Depends(get_current_user),
+                            db: Session = Depends(get_db)):
+    """Update an episode's importance score."""
+    if not (0.0 <= payload.importance <= 1.0):
+        raise HTTPException(status_code=400, detail="Importance must be between 0.0 and 1.0")
+
+    episode = db.query(Episode).filter(
+        Episode.id == payload.trace_id,
+        Episode.user_id == current_user.id,
+    ).first()
+    if not episode:
+        raise HTTPException(status_code=404, detail="Episode not found")
+
+    episode.importance = payload.importance
+    db.commit()
+    return {"trace_id": payload.trace_id, "importance": payload.importance}
+
+
+
+# NOTE: /episodes and /search endpoints live in routes/episodes.py
+# (registered without prefix as /memory/episodes and /memory/search)

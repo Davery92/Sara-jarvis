@@ -12,8 +12,9 @@ This service:
 import asyncio
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional
+from app.core.timezone import now as local_now
 
 from sqlalchemy.orm import Session
 
@@ -159,12 +160,23 @@ class BackgroundTaskService:
             logger.error(f"Task {task_id} not found")
             return {"error": "Task not found"}
 
+        # Clarification handling uses retry semantics: rerun from scratch with extra user context.
+        clarification = (task.clarification_response or "").strip()
+        orchestrator_query = task.original_query
+        if clarification:
+            orchestrator_query = (
+                f"{task.original_query}\n\n"
+                f"[Additional context from user: {clarification}]"
+            )
+        task.clarification_response = None
+
         # Update status to running
         task.status = "running"
-        task.started_at = datetime.utcnow()
+        task.clarification_question = None
+        task.started_at = local_now()
         task.task_metadata = {
             **(task.task_metadata or {}),
-            "started_at_utc": datetime.utcnow().isoformat()
+            "started_at_utc": local_now().isoformat()
         }
         db.commit()
 
@@ -213,7 +225,7 @@ class BackgroundTaskService:
         try:
             # Run orchestration with real tools
             result = await orchestrator.run_task(
-                task.original_query,
+                orchestrator_query,
                 collect_events
             )
 
@@ -221,7 +233,7 @@ class BackgroundTaskService:
                 # Task failed
                 task.status = "failed"
                 task.error_message = result.get("error", "Unknown error")
-                task.completed_at = datetime.utcnow()
+                task.completed_at = local_now()
                 db.commit()
 
                 logger.error(f"Background task {task_id} failed: {task.error_message}")
@@ -254,10 +266,10 @@ class BackgroundTaskService:
             # Update task as completed
             task.status = "completed"
             task.result_note_id = note.id if note else None
-            task.completed_at = datetime.utcnow()
+            task.completed_at = local_now()
             task.task_metadata = {
                 **(task.task_metadata or {}),
-                "completed_at_utc": datetime.utcnow().isoformat(),
+                "completed_at_utc": local_now().isoformat(),
                 "total_duration_ms": result.get("total_duration_ms"),
                 "iterations": result.get("iterations"),
                 "worker_count": len(worker_results),
@@ -267,14 +279,16 @@ class BackgroundTaskService:
 
             logger.info(f"Background task {task_id} completed successfully")
 
-            # Trigger notification (async, don't block)
+            # Smart delivery: route result to wherever the user is
             # Extract data before async to avoid session issues
             task_data = {
                 "id": task.id,
                 "user_id": task.user_id,
                 "status": task.status,
                 "original_query": task.original_query,
-                "result_note_id": task.result_note_id
+                "result_note_id": task.result_note_id,
+                "result_note_title": note.title if note else None,
+                "response_preview": final_response[:500] if final_response else "",
             }
             asyncio.create_task(
                 self._notify_task_complete(task_data)
@@ -291,7 +305,7 @@ class BackgroundTaskService:
 
             task.status = "failed"
             task.error_message = str(e)
-            task.completed_at = datetime.utcnow()
+            task.completed_at = local_now()
             db.commit()
 
             return {
@@ -315,7 +329,7 @@ class BackgroundTaskService:
         if len(task.original_query) > 50:
             query_preview += "..."
 
-        timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+        timestamp = local_now().strftime("%Y-%m-%d %H:%M")
         title = f"{'❌' if is_error else '✅'} Agent Report: {query_preview} ({timestamp})"
 
         # Build note content with metadata
@@ -325,7 +339,7 @@ class BackgroundTaskService:
 **Status:** {"Failed" if is_error else "Completed"}
 **Task Type:** {task.task_type}
 **Created:** {task.created_at}
-**Completed:** {datetime.utcnow()}
+**Completed:** {local_now()}
 
 ---
 
@@ -358,89 +372,100 @@ class BackgroundTaskService:
 
     async def _notify_task_complete(self, task_data: Dict[str, Any]):
         """
-        Send notification that task is complete.
+        Smart delivery: route result to the best channel (SSE, push, or both).
 
         Args:
-            task_data: Dict with keys: id, user_id, status, original_query, result_note_id
+            task_data: Dict with keys: id, user_id, status, original_query,
+                       result_note_id, result_note_title, response_preview
         """
         try:
-            # Import notification config from main_simple
-            from ..main_simple import (
-                NTFY_SERVER_URL, NTFY_ENABLED, NTFY_SYSTEM_TOPIC,
-                PushToken, SessionLocal
-            )
-            import httpx
+            from ..main_simple import SessionLocal
+            from app.services.task_result_delivery import deliver_task_result
 
-            task_id = task_data["id"]
-            user_id = task_data["user_id"]
-            status = task_data["status"]
-            original_query = task_data["original_query"]
-            result_note_id = task_data.get("result_note_id")
-
-            status_emoji = "✅" if status == "completed" else "❌"
-            query_preview = original_query[:50]
-            if len(original_query) > 50:
-                query_preview += "..."
-
-            title = f"{status_emoji} Background Task Complete"
-            body = f"Your agents finished: {query_preview}"
-
-            # NTFY notifications disabled - webapp has its own notification banner
-
-            # Send Expo push notification to all user's devices
+            db = SessionLocal()
             try:
-                # Create a new session for the push token query
-                db = SessionLocal()
-                try:
-                    push_tokens = db.query(PushToken).filter(
-                        PushToken.user_id == user_id,
-                        PushToken.is_active == True
-                    ).all()
-
-                    if push_tokens:
-                        # Build messages for Expo push API
-                        messages = []
-                        for token in push_tokens:
-                            messages.append({
-                                "to": token.token,
-                                "sound": "default",
-                                "title": title,
-                                "body": body,
-                                "data": {
-                                    "type": "background_task",
-                                    "task_id": task_id,
-                                    "status": status,
-                                    "note_id": result_note_id
-                                }
-                            })
-
-                        # Send to Expo push notification service
-                        async with httpx.AsyncClient(timeout=10.0) as client:
-                            response = await client.post(
-                                "https://exp.host/--/api/v2/push/send",
-                                json=messages,
-                                headers={
-                                    "Accept": "application/json",
-                                    "Accept-Encoding": "gzip, deflate",
-                                    "Content-Type": "application/json",
-                                }
-                            )
-                            if response.status_code == 200:
-                                logger.info(f"Sent push notifications to {len(push_tokens)} devices for task {task_id}")
-                            else:
-                                logger.warning(f"Expo push returned {response.status_code}: {response.text}")
-                finally:
-                    db.close()
-
-            except Exception as e:
-                logger.warning(f"Failed to send push notifications: {e}")
+                await deliver_task_result(
+                    user_id=task_data["user_id"],
+                    task_id=task_data["id"],
+                    task_query=task_data["original_query"],
+                    result_note_id=task_data.get("result_note_id"),
+                    result_note_title=task_data.get("result_note_title"),
+                    result_summary=task_data.get("response_preview", "Task completed."),
+                    db=db,
+                )
+            finally:
+                db.close()
 
         except Exception as e:
-            logger.exception(f"Error sending task complete notification: {e}")
+            logger.exception(f"Smart delivery failed, falling back to push: {e}")
+            await self._fallback_push_notify(task_data)
+
+    async def _fallback_push_notify(self, task_data: Dict[str, Any]):
+        """Last-resort push notification when smart delivery fails."""
+        try:
+            from ..main_simple import PushToken, SessionLocal
+            import httpx
+
+            user_id = task_data["user_id"]
+            query_preview = task_data["original_query"][:50]
+            if len(task_data["original_query"]) > 50:
+                query_preview += "..."
+
+            db = SessionLocal()
+            try:
+                push_tokens = db.query(PushToken).filter(
+                    PushToken.user_id == user_id,
+                    PushToken.is_active == True,
+                ).all()
+                if not push_tokens:
+                    return
+                messages = [
+                    {
+                        "to": t.token,
+                        "sound": "default",
+                        "title": "Background task complete",
+                        "body": f"Your agents finished: {query_preview}",
+                        "data": {
+                            "type": "background_task",
+                            "task_id": task_data["id"],
+                            "status": task_data.get("status", "completed"),
+                            "note_id": task_data.get("result_note_id"),
+                        },
+                    }
+                    for t in push_tokens
+                ]
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    await client.post(
+                        "https://exp.host/--/api/v2/push/send",
+                        json=messages,
+                        headers={"Accept": "application/json", "Content-Type": "application/json"},
+                    )
+            finally:
+                db.close()
+        except Exception as e:
+            logger.warning(f"Fallback push also failed: {e}")
 
     async def get_active_tasks(self, db: Session, user_id: str) -> List["BackgroundTask"]:
-        """Get all active (pending/running) tasks for a user."""
+        """Get all active (pending/running) tasks for a user.
+
+        Auto-fails tasks stuck in 'needs_clarification' or 'running' for > 4 hours.
+        """
         from ..main_simple import BackgroundTask
+
+        # Auto-expire stuck tasks before returning results
+        cutoff = local_now() - timedelta(hours=4)
+        stuck = db.query(BackgroundTask).filter(
+            BackgroundTask.user_id == user_id,
+            BackgroundTask.status.in_(["needs_clarification", "running"]),
+            BackgroundTask.updated_at < cutoff,
+        ).all()
+        for t in stuck:
+            logger.info(f"Auto-expiring stuck task {t.id} (status={t.status})")
+            orig_status = t.status
+            t.status = "failed"
+            t.error_message = f"Auto-expired: stuck in {orig_status} for >4 hours"
+        if stuck:
+            db.commit()
 
         return db.query(BackgroundTask).filter(
             BackgroundTask.user_id == user_id,
@@ -496,7 +521,7 @@ class BackgroundTaskService:
         task.clarification_question = question
         task.task_metadata = {
             **(task.task_metadata or {}),
-            "clarification_requested_at": datetime.utcnow().isoformat()
+            "clarification_requested_at": local_now().isoformat()
         }
         db.commit()
 
@@ -595,18 +620,25 @@ class BackgroundTaskService:
             return False
 
         task.clarification_response = response
+        task.clarification_question = None
         task.status = "running"
         task.task_metadata = {
             **(task.task_metadata or {}),
-            "clarification_provided_at": datetime.utcnow().isoformat()
+            "clarification_provided_at": local_now().isoformat()
         }
         db.commit()
 
         logger.info(f"Clarification provided for task {task_id}, resuming...")
 
-        # Resume task (would need to implement continuation logic)
-        # For now, we'll need to restart with context
-        # This is a TODO for later - orchestrator needs to support continuation
+        async def run_task_background():
+            from ..main_simple import SessionLocal
+            async_db = SessionLocal()
+            try:
+                await self.run_task(async_db, task_id)
+            finally:
+                async_db.close()
+
+        asyncio.create_task(run_task_background())
 
         return True
 

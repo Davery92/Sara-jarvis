@@ -6,33 +6,46 @@ import {
   TouchableOpacity,
   ActivityIndicator,
   StyleSheet,
+  Modal,
 } from 'react-native';
 import { Audio } from 'expo-av';
+import * as ExpoClipboard from 'expo-clipboard';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { apiClient } from '../../services/api';
-import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
+import { colors, spacing, borderRadius, fontSizes, shadows } from '../../styles/theme';
 import Markdown from 'react-native-markdown-display';
+
+type BriefType = 'morning' | 'research';
 
 interface BriefSummary {
   id: string;
+  brief_type: BriefType;
   brief_date: string;
   has_audio: boolean;
   audio_duration_seconds: number | null;
   generated_at: string | null;
   viewed_at: string | null;
+  paper_count?: number | null;
 }
 
 interface BriefDetail {
   id: string;
+  brief_type: BriefType;
   brief_date: string;
+  // morning-only fields
   news_summary: string | null;
   weather_summary: string | null;
   calendar_summary: string | null;
+  recovery_text: string | null;
+  has_recovery_audio: boolean;
+  // shared
   full_text: string | null;
   has_audio: boolean;
   audio_duration_seconds: number | null;
-  recovery_text: string | null;
-  has_recovery_audio: boolean;
   generated_at: string | null;
+  // research-only
+  paper_count?: number | null;
+  sources?: any[] | null;
 }
 
 interface WeatherData {
@@ -67,6 +80,14 @@ const iconToEmoji: Record<string, string> = {
   '50d': '🌫️', '50n': '🌫️',
 };
 
+const normalizeReaderText = (text?: string | null) => (text || '').replace(/\r\n/g, '\n').trim();
+
+const splitReaderBlocks = (text?: string | null) =>
+  normalizeReaderText(text)
+    .split(/\n{2,}/)
+    .map((block) => block.trim())
+    .filter(Boolean);
+
 // Helper to get auth headers
 const getAuthHeaders = async () => {
   const token = await apiClient.getToken();
@@ -78,6 +99,7 @@ const getAuthHeaders = async () => {
 };
 
 export default function BriefingsScreen() {
+  const insets = useSafeAreaInsets();
   const [briefs, setBriefs] = useState<BriefSummary[]>([]);
   const [selectedBrief, setSelectedBrief] = useState<BriefDetail | null>(null);
   const [weather, setWeather] = useState<WeatherData | null>(null);
@@ -85,7 +107,10 @@ export default function BriefingsScreen() {
   const [generating, setGenerating] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [paused, setPaused] = useState(false);
+  const [audioProgress, setAudioProgress] = useState<{ positionMs: number; durationMs: number } | null>(null);
+  const [readerVisible, setReaderVisible] = useState(false);
   const soundRef = useRef<Audio.Sound | null>(null);
+  const progressTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
     loadBriefs();
@@ -94,26 +119,47 @@ export default function BriefingsScreen() {
       if (soundRef.current) {
         soundRef.current.unloadAsync();
       }
+      if (progressTimerRef.current) {
+        clearInterval(progressTimerRef.current);
+      }
     };
   }, []);
 
   const loadBriefs = async () => {
     try {
       const headers = await getAuthHeaders();
-      console.log('[Briefings] Loading briefs from:', `${apiClient.baseURL}/api/morning-brief/history?limit=14`);
-      const response = await fetch(`${apiClient.baseURL}/api/morning-brief/history?limit=14`, {
-        headers,
+      const [morningResp, researchResp] = await Promise.all([
+        fetch(`${apiClient.baseURL}/api/morning-brief/history?limit=14`, { headers }).catch(() => null),
+        fetch(`${apiClient.baseURL}/api/research-brief/history?limit=14`, { headers }).catch(() => null),
+      ]);
+
+      const morning: BriefSummary[] = morningResp && morningResp.ok
+        ? ((await morningResp.json()) as any[]).map((b) => ({
+            ...b,
+            brief_type: 'morning' as BriefType,
+            id: b.id || `morning-${b.brief_date}`,
+          }))
+        : [];
+
+      const research: BriefSummary[] = researchResp && researchResp.ok
+        ? ((await researchResp.json()) as any[]).map((b) => ({
+            ...b,
+            brief_type: 'research' as BriefType,
+            id: `research-${b.brief_date}`,
+            viewed_at: null,
+          }))
+        : [];
+
+      // Sort by date desc, then type (morning before research within same date)
+      const merged = [...morning, ...research].sort((a, b) => {
+        if (a.brief_date !== b.brief_date) return a.brief_date < b.brief_date ? 1 : -1;
+        return a.brief_type === b.brief_type ? 0 : a.brief_type === 'morning' ? -1 : 1;
       });
-      console.log('[Briefings] Response status:', response.status);
-      if (response.ok) {
-        const data = await response.json();
-        console.log('[Briefings] Loaded', data.length, 'briefs');
-        setBriefs(data);
-        if (data.length > 0) {
-          await loadBriefDetail(data[0].brief_date);
-        }
-      } else {
-        console.error('[Briefings] Failed to load briefs:', response.status, await response.text());
+
+      console.log(`[Briefings] Loaded morning=${morning.length} research=${research.length} merged=${merged.length}`);
+      setBriefs(merged);
+      if (merged.length > 0) {
+        await loadBriefDetail(merged[0]);
       }
     } catch (error) {
       console.error('Failed to load briefs:', error);
@@ -137,16 +183,26 @@ export default function BriefingsScreen() {
     }
   };
 
-  const loadBriefDetail = async (briefDate: string) => {
+  const loadBriefDetail = async (summary: BriefSummary | { brief_type: BriefType; brief_date: string }) => {
     try {
       const headers = await getAuthHeaders();
-      const response = await fetch(
-        `${apiClient.baseURL}/api/morning-brief/${briefDate}?include_recovery=true`,
-        { headers }
-      );
+      const url = summary.brief_type === 'research'
+        ? `${apiClient.baseURL}/api/research-brief/${summary.brief_date}`
+        : `${apiClient.baseURL}/api/morning-brief/${summary.brief_date}?include_recovery=true`;
+      const response = await fetch(url, { headers });
       if (response.ok) {
         const data = await response.json();
-        setSelectedBrief(data);
+        setSelectedBrief({
+          ...data,
+          brief_type: summary.brief_type,
+          id: (data as any).id || `${summary.brief_type}-${summary.brief_date}`,
+          // ensure research detail has nulled morning fields
+          news_summary: (data as any).news_summary ?? null,
+          weather_summary: (data as any).weather_summary ?? null,
+          calendar_summary: (data as any).calendar_summary ?? null,
+          recovery_text: (data as any).recovery_text ?? null,
+          has_recovery_audio: (data as any).has_recovery_audio ?? false,
+        });
       }
     } catch (error) {
       console.error('Failed to load brief detail:', error);
@@ -157,10 +213,12 @@ export default function BriefingsScreen() {
     setGenerating(true);
     try {
       const headers = await getAuthHeaders();
-      const response = await fetch(`${apiClient.baseURL}/api/morning-brief/generate`, {
-        method: 'POST',
-        headers,
-      });
+      // Refresh the currently-viewed brief type; default to morning when nothing selected.
+      const type: BriefType = selectedBrief?.brief_type ?? 'morning';
+      const url = type === 'research'
+        ? `${apiClient.baseURL}/api/research-brief/generate`
+        : `${apiClient.baseURL}/api/morning-brief/generate`;
+      const response = await fetch(url, { method: 'POST', headers });
       if (response.ok) {
         await loadBriefs();
       }
@@ -236,9 +294,12 @@ export default function BriefingsScreen() {
       const token = await apiClient.getToken();
       const authHeaders = token ? { 'Authorization': `Bearer ${token}` } : {};
 
-      // Use the selected brief's date for the audio endpoint
+      // Use the selected brief's date + type for the audio endpoint
       const briefDate = selectedBrief.brief_date;
-      const audioUrl = `${apiClient.baseURL}/api/morning-brief/${briefDate}/audio`;
+      const audioBase = selectedBrief.brief_type === 'research'
+        ? `${apiClient.baseURL}/api/research-brief`
+        : `${apiClient.baseURL}/api/morning-brief`;
+      const audioUrl = `${audioBase}/${briefDate}/audio`;
 
       console.log('[Briefings] Loading audio from:', audioUrl);
 
@@ -257,6 +318,22 @@ export default function BriefingsScreen() {
       setPlaying(true);
       setPaused(false);
 
+      // Start progress polling
+      if (progressTimerRef.current) clearInterval(progressTimerRef.current);
+      progressTimerRef.current = setInterval(async () => {
+        if (soundRef.current) {
+          try {
+            const st = await soundRef.current.getStatusAsync();
+            if (st.isLoaded) {
+              setAudioProgress({
+                positionMs: st.positionMillis,
+                durationMs: st.durationMillis || 0,
+              });
+            }
+          } catch {}
+        }
+      }, 1000);
+
       sound.setOnPlaybackStatusUpdate(async (playbackStatus) => {
         if (!playbackStatus.isLoaded) {
           // Handle unloaded state
@@ -269,8 +346,8 @@ export default function BriefingsScreen() {
         }
 
         if (playbackStatus.didJustFinish) {
-          // Main brief finished - check if there's recovery audio to play
-          if (selectedBrief?.has_recovery_audio) {
+          // Main brief finished - check if there's recovery audio to play (morning brief only)
+          if (selectedBrief?.brief_type === 'morning' && selectedBrief?.has_recovery_audio) {
             try {
               // Unload main brief audio
               await sound.unloadAsync();
@@ -306,6 +383,8 @@ export default function BriefingsScreen() {
       console.error('Failed to play audio:', error);
       setPlaying(false);
       setPaused(false);
+      setAudioProgress(null);
+      if (progressTimerRef.current) clearInterval(progressTimerRef.current);
     }
   };
 
@@ -330,6 +409,36 @@ export default function BriefingsScreen() {
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
+  const briefReaderText = selectedBrief
+    ? normalizeReaderText(
+        selectedBrief.full_text ||
+        [selectedBrief.weather_summary, selectedBrief.calendar_summary, selectedBrief.news_summary]
+          .filter(Boolean)
+          .join('\n\n')
+      )
+    : '';
+
+  const recoveryReaderText = normalizeReaderText(selectedBrief?.recovery_text);
+  const briefPreview = splitReaderBlocks(briefReaderText)[0] || 'Generate or open a brief to see the current morning summary.';
+  const weatherSummary = weather
+    ? `${iconToEmoji[weather.current.icon] || '🌤️'} ${Math.round(weather.current.temperature)}° in ${weather.location}`
+    : 'Weather unavailable';
+  const briefMetaLabel = selectedBrief?.generated_at
+    ? `Generated ${new Date(selectedBrief.generated_at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`
+    : 'No generation timestamp yet';
+  const hasRecovery = Boolean(selectedBrief?.recovery_text);
+
+  const copyReaderText = async () => {
+    const combined = [briefReaderText, recoveryReaderText].filter(Boolean).join('\n\n');
+    if (!combined) return;
+
+    try {
+      await ExpoClipboard.setStringAsync(combined);
+    } catch (error) {
+      console.error('Failed to copy brief:', error);
+    }
+  };
+
   if (loading) {
     return (
       <View style={styles.loadingContainer}>
@@ -340,38 +449,103 @@ export default function BriefingsScreen() {
 
   return (
     <View style={styles.container}>
-      {/* Weather Widget */}
-      {weather && (
-        <View style={styles.weatherWidget}>
-          <Text style={styles.weatherEmoji}>
-            {iconToEmoji[weather.current.icon] || '🌡️'}
+      <View style={styles.heroWrap}>
+        <View style={styles.heroCard}>
+          <Text style={styles.heroEyebrow}>
+            {selectedBrief?.brief_type === 'research' ? 'Nightly Research Brief' : 'Morning Brief'}
           </Text>
-          <View style={styles.weatherInfo}>
-            <Text style={styles.weatherTemp}>{Math.round(weather.current.temperature)}°F</Text>
-            <Text style={styles.weatherDesc}>{weather.current.description}</Text>
+          <Text style={styles.heroTitle}>
+            {selectedBrief
+              ? `${formatDate(selectedBrief.brief_date)} ${selectedBrief.brief_type === 'research' ? 'research' : 'overview'}`
+              : 'Start your day with Sara'}
+          </Text>
+          <Text style={styles.heroSubtitle} numberOfLines={3}>
+            {briefPreview}
+          </Text>
+
+          <View style={styles.heroStatsRow}>
+            {selectedBrief?.brief_type === 'research' ? (
+              <>
+                <View style={styles.heroStatCard}>
+                  <Text style={styles.heroStatLabel}>Papers</Text>
+                  <Text style={styles.heroStatValue}>{selectedBrief.paper_count ?? '—'}</Text>
+                  <Text style={styles.heroStatMeta}>arXiv · HF · Interconnects</Text>
+                </View>
+                <View style={styles.heroStatCard}>
+                  <Text style={styles.heroStatLabel}>Audio</Text>
+                  <Text style={styles.heroStatValue}>
+                    {selectedBrief.has_audio ? formatDuration(selectedBrief.audio_duration_seconds) || 'Ready' : 'None'}
+                  </Text>
+                  <Text style={styles.heroStatMeta}>
+                    {selectedBrief.has_audio ? 'spoken version available' : 'text only right now'}
+                  </Text>
+                </View>
+                <View style={styles.heroStatCard}>
+                  <Text style={styles.heroStatLabel}>Generated</Text>
+                  <Text style={styles.heroStatValue}>{selectedBrief.generated_at ? new Date(selectedBrief.generated_at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '—'}</Text>
+                  <Text style={styles.heroStatMeta}>{briefMetaLabel}</Text>
+                </View>
+              </>
+            ) : (
+              <>
+                <View style={styles.heroStatCard}>
+                  <Text style={styles.heroStatLabel}>Weather</Text>
+                  <Text style={styles.heroStatValue}>
+                    {weather ? `${Math.round(weather.current.temperature)}°` : '—'}
+                  </Text>
+                  <Text style={styles.heroStatMeta}>{weatherSummary}</Text>
+                </View>
+                <View style={styles.heroStatCard}>
+                  <Text style={styles.heroStatLabel}>Audio</Text>
+                  <Text style={styles.heroStatValue}>
+                    {selectedBrief?.has_audio ? formatDuration(selectedBrief.audio_duration_seconds) || 'Ready' : 'None'}
+                  </Text>
+                  <Text style={styles.heroStatMeta}>
+                    {selectedBrief?.has_audio ? 'spoken version available' : 'text only right now'}
+                  </Text>
+                </View>
+                <View style={styles.heroStatCard}>
+                  <Text style={styles.heroStatLabel}>Recovery</Text>
+                  <Text style={styles.heroStatValue}>{hasRecovery ? 'Included' : 'Off'}</Text>
+                  <Text style={styles.heroStatMeta}>{briefMetaLabel}</Text>
+                </View>
+              </>
+            )}
           </View>
-          <View style={styles.weatherDetails}>
-            <Text style={styles.weatherLocation}>{weather.location.split(',')[0]}</Text>
-            <Text style={styles.weatherFeels}>Feels {Math.round(weather.current.feels_like)}°</Text>
+
+          <View style={styles.heroActions}>
+            <TouchableOpacity
+              onPress={generateBrief}
+              disabled={generating}
+              style={[styles.heroActionButton, styles.heroActionPrimary, generating && styles.heroActionDisabled]}
+            >
+              {generating ? (
+                <ActivityIndicator size="small" color={colors.text} />
+              ) : (
+                <Text style={styles.heroActionPrimaryText}>Refresh Brief</Text>
+              )}
+            </TouchableOpacity>
+            {briefReaderText ? (
+              <TouchableOpacity
+                onPress={() => setReaderVisible(true)}
+                style={[styles.heroActionButton, styles.heroActionSecondary]}
+              >
+                <Text style={styles.heroActionSecondaryText}>Open Full Brief</Text>
+              </TouchableOpacity>
+            ) : null}
+            {selectedBrief?.has_audio ? (
+              <TouchableOpacity
+                onPress={playAudio}
+                style={[styles.heroActionButton, styles.heroActionSecondary]}
+              >
+                <Text style={styles.heroActionSecondaryText}>
+                  {playing ? 'Pause Audio' : paused ? 'Resume Audio' : 'Play Audio'}
+                </Text>
+              </TouchableOpacity>
+            ) : null}
           </View>
         </View>
-      )}
-
-      {/* Generate Button */}
-      <TouchableOpacity
-        onPress={generateBrief}
-        disabled={generating}
-        style={styles.generateButton}
-      >
-        {generating ? (
-          <ActivityIndicator size="small" color="#fff" />
-        ) : (
-          <>
-            <Text style={styles.generateIcon}>🔄</Text>
-            <Text style={styles.generateText}>Generate Brief</Text>
-          </>
-        )}
-      </TouchableOpacity>
+      </View>
 
       {/* Brief Content */}
       {selectedBrief ? (
@@ -389,17 +563,41 @@ export default function BriefingsScreen() {
               )}
             </View>
             {selectedBrief.has_audio && (
-              <TouchableOpacity
-                onPress={playAudio}
-                style={[styles.playButton, playing && styles.playButtonActive]}
-              >
-                <Text style={styles.playIcon}>{playing ? '⏸' : (paused ? '▶️' : '▶️')}</Text>
-                <Text style={styles.playText}>
-                  {playing ? 'Pause' : (paused ? 'Resume' : 'Play')}
-                </Text>
-              </TouchableOpacity>
+              <View>
+                <TouchableOpacity
+                  onPress={playAudio}
+                  style={[styles.playButton, playing && styles.playButtonActive]}
+                >
+                  <Text style={styles.playIcon}>{playing ? '⏸' : (paused ? '▶️' : '▶️')}</Text>
+                  <Text style={styles.playText}>
+                    {playing ? 'Pause' : (paused ? 'Resume' : 'Play')}
+                  </Text>
+                </TouchableOpacity>
+                {(playing || paused) && audioProgress && audioProgress.durationMs > 0 && (
+                  <Text style={styles.audioProgressText}>
+                    {formatDuration(Math.floor(audioProgress.positionMs / 1000))} / {formatDuration(Math.floor(audioProgress.durationMs / 1000))}
+                  </Text>
+                )}
+              </View>
             )}
           </View>
+
+          {briefReaderText ? (
+            <View style={styles.readerActions}>
+              <TouchableOpacity
+                onPress={() => setReaderVisible(true)}
+                style={[styles.readerActionButton, styles.readerActionPrimary]}
+              >
+                <Text style={styles.readerActionText}>Open Full Brief</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={copyReaderText}
+                style={[styles.readerActionButton, styles.readerActionSecondary]}
+              >
+                <Text style={styles.readerActionText}>Copy Text</Text>
+              </TouchableOpacity>
+            </View>
+          ) : null}
 
           {/* Brief Content */}
           {selectedBrief.full_text ? (
@@ -448,29 +646,78 @@ export default function BriefingsScreen() {
         </View>
       )}
 
+      <Modal
+        visible={readerVisible}
+        animationType="slide"
+        presentationStyle="fullScreen"
+        onRequestClose={() => setReaderVisible(false)}
+      >
+        <SafeAreaView style={styles.readerModal} edges={['bottom']}>
+          <View style={[styles.readerModalHeader, { paddingTop: insets.top + spacing.sm }]}>
+            <TouchableOpacity onPress={() => setReaderVisible(false)}>
+              <Text style={styles.readerModalControl}>Close</Text>
+            </TouchableOpacity>
+            <Text style={styles.readerModalTitle}>
+              {selectedBrief ? `${formatDate(selectedBrief.brief_date)} Brief` : 'Full Brief'}
+            </Text>
+            <TouchableOpacity onPress={copyReaderText}>
+              <Text style={styles.readerModalControl}>Copy</Text>
+            </TouchableOpacity>
+          </View>
+
+          <ScrollView
+            style={styles.readerScroll}
+            contentContainerStyle={styles.readerScrollContent}
+            showsVerticalScrollIndicator
+          >
+            {briefReaderText ? (
+              <Markdown style={readerMarkdownStyles}>{briefReaderText}</Markdown>
+            ) : null}
+
+            {recoveryReaderText ? (
+              <View style={styles.readerRecoverySection}>
+                <Text style={styles.readerSectionLabel}>Recovery</Text>
+                <Markdown style={readerMarkdownStyles}>{recoveryReaderText}</Markdown>
+              </View>
+            ) : null}
+          </ScrollView>
+        </SafeAreaView>
+      </Modal>
+
       {/* Recent Briefs List */}
       {briefs.length > 0 && (
         <View style={styles.briefsList}>
           <Text style={styles.listTitle}>Recent Briefs</Text>
           <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-            {briefs.map((brief) => (
-              <TouchableOpacity
-                key={brief.id}
-                onPress={() => loadBriefDetail(brief.brief_date)}
-                style={[
-                  styles.briefCard,
-                  selectedBrief?.brief_date === brief.brief_date && styles.briefCardActive,
-                ]}
-              >
-                <Text style={styles.briefCardDate}>{formatDate(brief.brief_date)}</Text>
-                {brief.has_audio && (
-                  <Text style={styles.briefCardDuration}>
-                    🔊 {formatDuration(brief.audio_duration_seconds)}
-                  </Text>
-                )}
-                {brief.viewed_at && <Text style={styles.briefCardRead}>✓ Read</Text>}
-              </TouchableOpacity>
-            ))}
+            {briefs.map((brief) => {
+              const isActive =
+                selectedBrief?.brief_date === brief.brief_date &&
+                selectedBrief?.brief_type === brief.brief_type;
+              const isResearch = brief.brief_type === 'research';
+              return (
+                <TouchableOpacity
+                  key={brief.id}
+                  onPress={() => loadBriefDetail(brief)}
+                  style={[styles.briefCard, isActive && styles.briefCardActive]}
+                >
+                  <View style={[styles.briefTypeChip, isResearch ? styles.briefTypeChipResearch : styles.briefTypeChipMorning]}>
+                    <Text style={styles.briefTypeChipText}>
+                      {isResearch ? 'RESEARCH' : 'MORNING'}
+                    </Text>
+                  </View>
+                  <Text style={styles.briefCardDate}>{formatDate(brief.brief_date)}</Text>
+                  {isResearch && brief.paper_count ? (
+                    <Text style={styles.briefCardDuration}>📄 {brief.paper_count} papers</Text>
+                  ) : null}
+                  {brief.has_audio && (
+                    <Text style={styles.briefCardDuration}>
+                      🔊 {formatDuration(brief.audio_duration_seconds)}
+                    </Text>
+                  )}
+                  {brief.viewed_at && <Text style={styles.briefCardRead}>✓ Read</Text>}
+                </TouchableOpacity>
+              );
+            })}
           </ScrollView>
         </View>
       )}
@@ -489,62 +736,104 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     backgroundColor: colors.background,
   },
-  weatherWidget: {
+  heroWrap: {
+    paddingHorizontal: spacing.md,
+    paddingTop: spacing.md,
+    paddingBottom: spacing.sm,
+  },
+  heroCard: {
+    backgroundColor: colors.assistant.panel,
+    borderRadius: borderRadius.xl,
+    borderWidth: 1,
+    borderColor: colors.assistant.borderStrong,
+    padding: spacing.lg,
+    ...shadows.sm,
+  },
+  heroEyebrow: {
+    color: colors.accent,
+    fontSize: fontSizes.xs,
+    fontWeight: '700',
+    letterSpacing: 0.8,
+    textTransform: 'uppercase',
+    marginBottom: spacing.xs,
+  },
+  heroTitle: {
+    color: colors.text,
+    fontSize: fontSizes.xxl,
+    fontWeight: '700',
+  },
+  heroSubtitle: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    lineHeight: 20,
+    marginTop: spacing.xs,
+  },
+  heroStatsRow: {
     flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: colors.surface,
-    margin: spacing.md,
-    padding: spacing.md,
+    gap: spacing.sm,
+    marginTop: spacing.md,
+    flexWrap: 'wrap',
+  },
+  heroStatCard: {
+    flex: 1,
+    minWidth: 96,
+    backgroundColor: colors.assistant.panelRaised,
     borderRadius: borderRadius.lg,
     borderWidth: 1,
-    borderColor: colors.border,
-  },
-  weatherEmoji: {
-    fontSize: 40,
-    marginRight: spacing.md,
-  },
-  weatherInfo: {
-    flex: 1,
-  },
-  weatherTemp: {
-    fontSize: fontSizes.xl,
-    fontWeight: 'bold',
-    color: colors.text,
-  },
-  weatherDesc: {
-    fontSize: fontSizes.sm,
-    color: colors.textMuted,
-    textTransform: 'capitalize',
-  },
-  weatherDetails: {
-    alignItems: 'flex-end',
-  },
-  weatherLocation: {
-    fontSize: fontSizes.sm,
-    color: colors.textMuted,
-  },
-  weatherFeels: {
-    fontSize: fontSizes.xs,
-    color: colors.textMuted,
-  },
-  generateButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: colors.primary,
-    marginHorizontal: spacing.md,
-    marginBottom: spacing.md,
+    borderColor: colors.assistant.border,
     padding: spacing.md,
-    borderRadius: borderRadius.lg,
+  },
+  heroStatLabel: {
+    color: colors.textMuted,
+    fontSize: fontSizes.xs,
+    fontWeight: '700',
+    letterSpacing: 0.6,
+    textTransform: 'uppercase',
+  },
+  heroStatValue: {
+    color: colors.text,
+    fontSize: fontSizes.lg,
+    fontWeight: '700',
+    marginTop: 2,
+  },
+  heroStatMeta: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.xs,
+    lineHeight: 16,
+    marginTop: 2,
+  },
+  heroActions: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
     gap: spacing.sm,
+    marginTop: spacing.md,
   },
-  generateIcon: {
-    fontSize: 18,
+  heroActionButton: {
+    borderRadius: borderRadius.full,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderWidth: 1,
   },
-  generateText: {
-    color: '#fff',
+  heroActionPrimary: {
+    backgroundColor: colors.assistant.action,
+    borderColor: colors.assistant.action,
+  },
+  heroActionSecondary: {
+    backgroundColor: colors.assistant.panelRaised,
+    borderColor: colors.assistant.border,
+  },
+  heroActionDisabled: {
+    opacity: 0.7,
+  },
+  heroActionPrimaryText: {
+    color: colors.text,
+    fontSize: fontSizes.sm,
+    fontWeight: '700',
+  },
+  heroActionSecondaryText: {
+    color: colors.text,
+    fontSize: fontSizes.sm,
     fontWeight: '600',
-    fontSize: fontSizes.md,
   },
   contentArea: {
     flex: 1,
@@ -585,12 +874,41 @@ const styles = StyleSheet.create({
     fontSize: 16,
   },
   playText: {
-    color: '#fff',
+    color: colors.text,
     fontWeight: '600',
     fontSize: fontSizes.sm,
   },
+  audioProgressText: {
+    color: colors.textMuted,
+    fontSize: fontSizes.xs,
+    textAlign: 'center',
+    marginTop: 4,
+  },
   briefContent: {
     paddingBottom: spacing.lg,
+  },
+  readerActions: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+    marginBottom: spacing.md,
+  },
+  readerActionButton: {
+    borderRadius: borderRadius.full,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+  },
+  readerActionPrimary: {
+    backgroundColor: colors.primary,
+  },
+  readerActionSecondary: {
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  readerActionText: {
+    color: colors.text,
+    fontSize: fontSizes.sm,
+    fontWeight: '600',
   },
   sectionTitle: {
     fontSize: fontSizes.lg,
@@ -625,6 +943,60 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     marginTop: spacing.xs,
   },
+  readerModal: {
+    flex: 1,
+    backgroundColor: colors.background,
+  },
+  readerModalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.md,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+    backgroundColor: colors.surface,
+  },
+  readerModalControl: {
+    color: colors.primary,
+    fontSize: fontSizes.md,
+    fontWeight: '600',
+  },
+  readerModalTitle: {
+    flex: 1,
+    color: colors.text,
+    fontSize: fontSizes.md,
+    fontWeight: '700',
+    textAlign: 'center',
+    marginHorizontal: spacing.md,
+  },
+  readerScroll: {
+    flex: 1,
+  },
+  readerScrollContent: {
+    padding: spacing.lg,
+    paddingBottom: spacing.xxl,
+  },
+  readerParagraph: {
+    color: colors.text,
+    fontSize: fontSizes.md,
+    lineHeight: 26,
+    marginBottom: spacing.md,
+  },
+  readerRecoverySection: {
+    marginTop: spacing.lg,
+    paddingTop: spacing.lg,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+  },
+  readerSectionLabel: {
+    color: colors.textMuted,
+    fontSize: fontSizes.xs,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+    marginBottom: spacing.md,
+  },
   briefsList: {
     backgroundColor: colors.surface,
     borderTopWidth: 1,
@@ -638,7 +1010,7 @@ const styles = StyleSheet.create({
     marginBottom: spacing.sm,
   },
   briefCard: {
-    width: 100,
+    width: 116,
     padding: spacing.md,
     marginRight: spacing.sm,
     backgroundColor: colors.background,
@@ -650,6 +1022,28 @@ const styles = StyleSheet.create({
   briefCardActive: {
     borderColor: colors.primary,
     borderWidth: 2,
+  },
+  briefTypeChip: {
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: borderRadius.full,
+    marginBottom: spacing.xs,
+  },
+  briefTypeChipMorning: {
+    backgroundColor: 'rgba(251, 191, 36, 0.13)',
+    borderColor: 'rgba(251, 191, 36, 0.40)',
+    borderWidth: 1,
+  },
+  briefTypeChipResearch: {
+    backgroundColor: 'rgba(139, 92, 246, 0.13)',
+    borderColor: 'rgba(139, 92, 246, 0.40)',
+    borderWidth: 1,
+  },
+  briefTypeChipText: {
+    fontSize: 9,
+    fontWeight: '800',
+    letterSpacing: 0.6,
+    color: colors.text,
   },
   briefCardDate: {
     fontSize: fontSizes.sm,
@@ -706,9 +1100,67 @@ const markdownStyles = {
     fontWeight: 'bold' as const,
     color: colors.text,
   },
+  code_inline: {
+    color: colors.primary,
+    backgroundColor: 'transparent',
+    fontSize: fontSizes.md - 1,
+    fontFamily: undefined,
+  },
+  code_block: {
+    color: colors.text,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderColor: 'rgba(255,255,255,0.1)',
+    borderRadius: 8,
+    padding: spacing.sm,
+    fontSize: fontSizes.md - 2,
+  },
+  fence: {
+    color: colors.text,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderColor: 'rgba(255,255,255,0.1)',
+    borderRadius: 8,
+    padding: spacing.sm,
+    fontSize: fontSizes.md - 2,
+  },
   hr: {
     backgroundColor: colors.border,
     height: 1,
     marginVertical: spacing.md,
+  },
+};
+
+const readerMarkdownStyles = {
+  ...markdownStyles,
+  body: {
+    color: colors.text,
+    fontSize: fontSizes.lg,
+    lineHeight: 30,
+  },
+  paragraph: {
+    marginBottom: spacing.md,
+    color: colors.text,
+    fontSize: fontSizes.lg,
+    lineHeight: 30,
+  },
+  heading1: {
+    fontSize: fontSizes.xxl + 2,
+    fontWeight: 'bold' as const,
+    color: colors.text,
+    marginTop: spacing.lg,
+    marginBottom: spacing.md,
+  },
+  heading2: {
+    fontSize: fontSizes.xxl,
+    fontWeight: '700' as const,
+    color: colors.text,
+    marginTop: spacing.lg,
+    marginBottom: spacing.sm,
+  },
+  heading3: {
+    fontSize: fontSizes.xl,
+    fontWeight: '600' as const,
+    color: colors.text,
+    marginTop: spacing.md,
+    marginBottom: spacing.xs,
   },
 };

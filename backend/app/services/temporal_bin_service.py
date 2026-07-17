@@ -66,6 +66,7 @@ class TemporalBinService:
         food_metrics = await self._aggregate_food_metrics(db, user_id, bin_date)
         home_metrics = await self._aggregate_home_metrics(db, user_id, bin_date)
         mood_metrics = await self._aggregate_mood_metrics(db, user_id, bin_date)
+        calendar_metrics = await self._aggregate_calendar_metrics(db, user_id, bin_date)
 
         # Calculate day context
         day_of_week = bin_date.weekday()  # 0=Monday in Python
@@ -84,6 +85,7 @@ class TemporalBinService:
                 food_metrics = :food_metrics,
                 home_metrics = :home_metrics,
                 mood_metrics = :mood_metrics,
+                calendar_metrics = :calendar_metrics,
                 day_of_week = :day_of_week,
                 is_weekend = :is_weekend,
                 updated_at = NOW()
@@ -98,6 +100,7 @@ class TemporalBinService:
             "food_metrics": json.dumps(food_metrics) if food_metrics else None,
             "home_metrics": json.dumps(home_metrics) if home_metrics else None,
             "mood_metrics": json.dumps(mood_metrics) if mood_metrics else None,
+            "calendar_metrics": json.dumps(calendar_metrics) if calendar_metrics else None,
             "day_of_week": day_of_week_sunday,
             "is_weekend": is_weekend,
         })
@@ -108,10 +111,12 @@ class TemporalBinService:
                 INSERT INTO temporal_bin
                     (id, user_id, bin_date, bin_hour, bin_type,
                      git_metrics, health_metrics, food_metrics, home_metrics, mood_metrics,
+                     calendar_metrics,
                      day_of_week, is_weekend, updated_at)
                 VALUES
                     (:id, :user_id, :bin_date, -1, 'daily',
                      :git_metrics, :health_metrics, :food_metrics, :home_metrics, :mood_metrics,
+                     :calendar_metrics,
                      :day_of_week, :is_weekend, NOW())
             """), {
                 "id": str(uuid4()),
@@ -122,6 +127,7 @@ class TemporalBinService:
                 "food_metrics": json.dumps(food_metrics) if food_metrics else None,
                 "home_metrics": json.dumps(home_metrics) if home_metrics else None,
                 "mood_metrics": json.dumps(mood_metrics) if mood_metrics else None,
+                "calendar_metrics": json.dumps(calendar_metrics) if calendar_metrics else None,
                 "day_of_week": day_of_week_sunday,
                 "is_weekend": is_weekend,
             })
@@ -135,12 +141,14 @@ class TemporalBinService:
             "food": food_metrics,
             "home": home_metrics,
             "mood": mood_metrics,
+            "calendar": calendar_metrics,
             "day_of_week": day_of_week_sunday,
             "is_weekend": is_weekend,
         }
 
         logger.info(f"✅ Aggregated daily bin: git={bool(git_metrics)}, health={bool(health_metrics)}, "
-                   f"food={bool(food_metrics)}, home={bool(home_metrics)}, mood={bool(mood_metrics)}")
+                   f"food={bool(food_metrics)}, home={bool(home_metrics)}, mood={bool(mood_metrics)}, "
+                   f"calendar={bool(calendar_metrics)}")
 
         return result
 
@@ -322,6 +330,53 @@ class TemporalBinService:
                 return metrics
         except Exception as e:
             logger.warning(f"Mood metrics aggregation failed: {e}")
+            db.rollback()
+        return None
+
+    async def _aggregate_calendar_metrics(self, db: Session, user_id: str, bin_date: date) -> Optional[Dict]:
+        """Aggregate calendar event metrics for the day."""
+        try:
+            from app.services.calendar_intelligence import classify_event
+
+            result = db.execute(text("""
+                SELECT title, start_time, end_time, all_day
+                FROM calendar_event
+                WHERE user_id = :user_id
+                  AND start_time::date = :bin_date
+                  AND is_completed = FALSE
+            """), {"user_id": user_id, "bin_date": bin_date}).fetchall()
+
+            if not result:
+                return None
+
+            event_count = len(result)
+            categories = {}
+            total_hours = 0.0
+            evening_events = 0
+
+            for row in result:
+                # Classify
+                classification = classify_event(row[0])
+                cat = classification["category"]
+                categories[cat] = categories.get(cat, 0) + 1
+
+                # Duration
+                if row[1] and row[2] and not row[3]:
+                    duration = (row[2] - row[1]).total_seconds() / 3600
+                    total_hours += duration
+
+                # Evening events (after 5 PM)
+                if row[1] and row[1].hour >= 17:
+                    evening_events += 1
+
+            return {
+                "event_count": event_count,
+                "scheduled_hours": round(total_hours, 1),
+                "evening_events": evening_events,
+                "categories": categories,
+            }
+        except Exception as e:
+            logger.warning(f"Calendar metrics aggregation failed: {e}")
             db.rollback()
         return None
 

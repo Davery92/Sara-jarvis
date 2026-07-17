@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { FileText, MessageSquare, Dumbbell, Briefcase, Timer, Settings, ChevronUp, LayoutGrid, GitBranch, Search } from 'lucide-react'
+import { FileText, MessageSquare, Dumbbell, Briefcase, Timer, Settings, ChevronUp, LayoutGrid, GitBranch, Search, Mail, GraduationCap, Radio } from 'lucide-react'
 import { useCanvasStore } from '../store/canvasStore'
 import type { WindowType } from '../types'
 
@@ -13,11 +13,15 @@ interface AppConfig {
 
 const apps: AppConfig[] = [
   { id: 'chat', icon: MessageSquare, label: 'Chat', color: 'bg-teal-500' },
+  { id: 'email', icon: Mail, label: 'Email', color: 'bg-cyan-500' },
   { id: 'research', icon: Search, label: 'Research', color: 'bg-purple-500' },
+  { id: 'learning', icon: GraduationCap, label: 'Learning', color: 'bg-indigo-500' },
+  { id: 'documents', icon: FileText, label: 'Docs', color: 'bg-blue-600' },
   { id: 'note', icon: FileText, label: 'Notes', color: 'bg-blue-500' },
   { id: 'maps', icon: GitBranch, label: 'Maps', color: 'bg-teal-600', opensPickerFirst: true },
   { id: 'fitness', icon: Dumbbell, label: 'Fitness', color: 'bg-green-500' },
   { id: 'projects', icon: Briefcase, label: 'Projects', color: 'bg-indigo-500' },
+  { id: 'intelligence', icon: Radio, label: 'Intel', color: 'bg-emerald-600' },
   { id: 'timers', icon: Timer, label: 'Timers', color: 'bg-orange-500' },
   { id: 'settings', icon: Settings, label: 'Settings', color: 'bg-gray-500' },
 ]
@@ -25,7 +29,6 @@ const apps: AppConfig[] = [
 export default function ModeWheel() {
   const { openWindow, setMapPickerOpen } = useCanvasStore()
   const [isExpanded, setIsExpanded] = useState(false)
-
   const handleAppClick = (app: AppConfig) => {
     // Special case for maps - open the picker
     if (app.id === 'maps') {

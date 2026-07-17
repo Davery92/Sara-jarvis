@@ -37,7 +37,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Configuration from environment
-DATABASE_URL = os.getenv('DATABASE_URL', 'postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub')
+DATABASE_URL = os.getenv('DATABASE_URL')
 HA_HOST = os.getenv('HA_HOST', '10.185.1.61')
 HA_PORT = int(os.getenv('HA_PORT', '8123'))
 HA_TOKEN = os.getenv('HA_TOKEN', 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJjODhkZGQ0ZWVlOWI0ODNjOTIwMTU1YTA0ZTM3YTk0NCIsImlhdCI6MTc2NTU2OTczNiwiZXhwIjoyMDgwOTI5NzM2fQ.oLO_hR-RzJFP-TsrKWEteDZbUReVEUdtENIeMAE5Teg')

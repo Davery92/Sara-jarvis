@@ -13,6 +13,29 @@ interface Phase {
   notes?: string
   created_at: string
   updated_at: string
+  // Nutrition single (weekly average / fallback)
+  calories_target?: number | null
+  protein_target?: number | null
+  carbs_target?: number | null
+  fat_target?: number | null
+  // Calorie cycling
+  calories_training_day?: number | null
+  calories_rest_day?: number | null
+  carbs_training_day?: number | null
+  carbs_rest_day?: number | null
+  fat_training_day?: number | null
+  fat_rest_day?: number | null
+  // Daily targets + periodization
+  daily_steps_target?: number | null
+  training_days_per_week?: number | null
+  duration_weeks?: number | null
+  deload_week?: number | null
+}
+
+const numOrNull = (s: string): number | null => {
+  if (s === '' || s == null) return null
+  const n = parseInt(s, 10)
+  return isNaN(n) ? null : n
 }
 
 export default function PhaseManager() {
@@ -27,6 +50,32 @@ export default function PhaseManager() {
   const [startDate, setStartDate] = useState('')
   const [endDate, setEndDate] = useState('')
   const [notes, setNotes] = useState('')
+  // Nutrition + periodization
+  const [proteinTarget, setProteinTarget] = useState('')
+  const [caloriesTrainingDay, setCaloriesTrainingDay] = useState('')
+  const [caloriesRestDay, setCaloriesRestDay] = useState('')
+  const [carbsTrainingDay, setCarbsTrainingDay] = useState('')
+  const [carbsRestDay, setCarbsRestDay] = useState('')
+  const [fatTrainingDay, setFatTrainingDay] = useState('')
+  const [fatRestDay, setFatRestDay] = useState('')
+  const [dailyStepsTarget, setDailyStepsTarget] = useState('')
+  const [trainingDaysPerWeek, setTrainingDaysPerWeek] = useState('')
+  const [durationWeeks, setDurationWeeks] = useState('')
+  const [deloadWeek, setDeloadWeek] = useState('')
+
+  const resetNutritionForm = () => {
+    setProteinTarget('')
+    setCaloriesTrainingDay('')
+    setCaloriesRestDay('')
+    setCarbsTrainingDay('')
+    setCarbsRestDay('')
+    setFatTrainingDay('')
+    setFatRestDay('')
+    setDailyStepsTarget('')
+    setTrainingDaysPerWeek('')
+    setDurationWeeks('')
+    setDeloadWeek('')
+  }
 
   useEffect(() => {
     fetchPhases()
@@ -53,6 +102,7 @@ export default function PhaseManager() {
     setStartDate('')
     setEndDate('')
     setNotes('')
+    resetNutritionForm()
     setShowModal(true)
   }
 
@@ -63,6 +113,17 @@ export default function PhaseManager() {
     setStartDate(phase.start_date || '')
     setEndDate(phase.end_date || '')
     setNotes(phase.notes || '')
+    setProteinTarget(phase.protein_target?.toString() || '')
+    setCaloriesTrainingDay(phase.calories_training_day?.toString() || '')
+    setCaloriesRestDay(phase.calories_rest_day?.toString() || '')
+    setCarbsTrainingDay(phase.carbs_training_day?.toString() || '')
+    setCarbsRestDay(phase.carbs_rest_day?.toString() || '')
+    setFatTrainingDay(phase.fat_training_day?.toString() || '')
+    setFatRestDay(phase.fat_rest_day?.toString() || '')
+    setDailyStepsTarget(phase.daily_steps_target?.toString() || '')
+    setTrainingDaysPerWeek(phase.training_days_per_week?.toString() || '')
+    setDurationWeeks(phase.duration_weeks?.toString() || '')
+    setDeloadWeek(phase.deload_week?.toString() || '')
     setShowModal(true)
   }
 
@@ -74,6 +135,7 @@ export default function PhaseManager() {
     setStartDate('')
     setEndDate('')
     setNotes('')
+    resetNutritionForm()
   }
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -82,42 +144,42 @@ export default function PhaseManager() {
 
     setIsLoading(true)
     try {
-      if (editingPhase) {
-        // Update
-        const response = await fetch(`${APP_CONFIG.apiUrl}/api/fitness/phases/${editingPhase.id}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'include',
-          body: JSON.stringify({
-            name,
-            goal,
-            start_date: startDate || null,
-            end_date: endDate || null,
-            notes
-          })
-        })
-        if (response.ok) {
-          await fetchPhases()
-          closeModal()
-        }
+      const payload = {
+        name,
+        goal,
+        start_date: startDate || null,
+        end_date: endDate || null,
+        notes,
+        protein_target: numOrNull(proteinTarget),
+        calories_training_day: numOrNull(caloriesTrainingDay),
+        calories_rest_day: numOrNull(caloriesRestDay),
+        carbs_training_day: numOrNull(carbsTrainingDay),
+        carbs_rest_day: numOrNull(carbsRestDay),
+        fat_training_day: numOrNull(fatTrainingDay),
+        fat_rest_day: numOrNull(fatRestDay),
+        daily_steps_target: numOrNull(dailyStepsTarget),
+        training_days_per_week: numOrNull(trainingDaysPerWeek),
+        duration_weeks: numOrNull(durationWeeks),
+        deload_week: numOrNull(deloadWeek),
+      }
+
+      const url = editingPhase
+        ? `${APP_CONFIG.apiUrl}/api/fitness/phases/${editingPhase.id}`
+        : `${APP_CONFIG.apiUrl}/api/fitness/phases`
+      const method = editingPhase ? 'PATCH' : 'POST'
+
+      const response = await fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify(payload),
+      })
+      if (response.ok) {
+        await fetchPhases()
+        closeModal()
       } else {
-        // Create
-        const response = await fetch(`${APP_CONFIG.apiUrl}/api/fitness/phases`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'include',
-          body: JSON.stringify({
-            name,
-            goal,
-            start_date: startDate || null,
-            end_date: endDate || null,
-            notes
-          })
-        })
-        if (response.ok) {
-          await fetchPhases()
-          closeModal()
-        }
+        const err = await response.text()
+        alert(`Failed to save phase: ${err.slice(0, 200)}`)
       }
     } catch (error) {
       console.error('Failed to save phase:', error)
@@ -259,6 +321,39 @@ export default function PhaseManager() {
                       {phase.end_date && (
                         <span>→ {new Date(phase.end_date).toLocaleDateString()}</span>
                       )}
+                      {phase.duration_weeks && <span>· {phase.duration_weeks}w</span>}
+                      {phase.training_days_per_week && <span>· {phase.training_days_per_week}d/wk</span>}
+                      {phase.deload_week && <span className="text-amber-400">· deload wk {phase.deload_week}</span>}
+                    </div>
+                  )}
+
+                  {/* Cycling + steps chips */}
+                  {(phase.calories_training_day || phase.calories_rest_day || phase.daily_steps_target || phase.protein_target) && (
+                    <div className="flex flex-wrap gap-2 mt-2">
+                      {phase.calories_training_day && (
+                        <span className="px-2 py-0.5 text-xs rounded bg-purple-600/20 text-purple-300">
+                          Train: {phase.calories_training_day}kcal
+                          {phase.carbs_training_day != null && ` · ${phase.carbs_training_day}C`}
+                          {phase.fat_training_day != null && ` · ${phase.fat_training_day}F`}
+                        </span>
+                      )}
+                      {phase.calories_rest_day && (
+                        <span className="px-2 py-0.5 text-xs rounded bg-blue-600/20 text-blue-300">
+                          Rest: {phase.calories_rest_day}kcal
+                          {phase.carbs_rest_day != null && ` · ${phase.carbs_rest_day}C`}
+                          {phase.fat_rest_day != null && ` · ${phase.fat_rest_day}F`}
+                        </span>
+                      )}
+                      {phase.protein_target && (
+                        <span className="px-2 py-0.5 text-xs rounded bg-pink-600/20 text-pink-300">
+                          {phase.protein_target}g protein/day
+                        </span>
+                      )}
+                      {phase.daily_steps_target && (
+                        <span className="px-2 py-0.5 text-xs rounded bg-emerald-600/20 text-emerald-300">
+                          {phase.daily_steps_target.toLocaleString()} steps/day
+                        </span>
+                      )}
                     </div>
                   )}
 
@@ -373,6 +468,135 @@ export default function PhaseManager() {
                       className="w-full px-4 py-2 bg-gray-900 rounded-lg border border-gray-700 focus:border-purple-500 focus:outline-none"
                     />
                   </div>
+                </div>
+
+                {/* Periodization */}
+                <div className="grid grid-cols-3 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium mb-2">Duration (weeks)</label>
+                    <input
+                      type="number"
+                      value={durationWeeks}
+                      onChange={(e) => setDurationWeeks(e.target.value)}
+                      className="w-full px-4 py-2 bg-gray-900 rounded-lg border border-gray-700 focus:border-purple-500 focus:outline-none"
+                      placeholder="8"
+                      min="1"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium mb-2">Training days/wk</label>
+                    <input
+                      type="number"
+                      value={trainingDaysPerWeek}
+                      onChange={(e) => setTrainingDaysPerWeek(e.target.value)}
+                      className="w-full px-4 py-2 bg-gray-900 rounded-lg border border-gray-700 focus:border-purple-500 focus:outline-none"
+                      placeholder="4"
+                      min="1"
+                      max="7"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium mb-2">Deload week</label>
+                    <input
+                      type="number"
+                      value={deloadWeek}
+                      onChange={(e) => setDeloadWeek(e.target.value)}
+                      className="w-full px-4 py-2 bg-gray-900 rounded-lg border border-gray-700 focus:border-purple-500 focus:outline-none"
+                      placeholder="(none)"
+                      min="1"
+                    />
+                  </div>
+                </div>
+
+                {/* Calorie cycling */}
+                <div className="border border-gray-700 rounded-lg p-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h4 className="text-sm font-semibold text-purple-300">Calorie Cycling</h4>
+                    <span className="text-xs text-gray-500">Training days fuel work, rest days recover</span>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-400 mb-1">Protein (g/day, constant)</label>
+                    <input
+                      type="number"
+                      value={proteinTarget}
+                      onChange={(e) => setProteinTarget(e.target.value)}
+                      className="w-full px-3 py-2 bg-gray-800 rounded border border-gray-700 focus:border-purple-500 focus:outline-none"
+                      placeholder="230"
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs text-purple-400 mb-1">Training day kcal</label>
+                      <input
+                        type="number"
+                        value={caloriesTrainingDay}
+                        onChange={(e) => setCaloriesTrainingDay(e.target.value)}
+                        className="w-full px-3 py-2 bg-gray-800 rounded border border-gray-700 focus:border-purple-500 focus:outline-none"
+                        placeholder="2650"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-blue-400 mb-1">Rest day kcal</label>
+                      <input
+                        type="number"
+                        value={caloriesRestDay}
+                        onChange={(e) => setCaloriesRestDay(e.target.value)}
+                        className="w-full px-3 py-2 bg-gray-800 rounded border border-gray-700 focus:border-purple-500 focus:outline-none"
+                        placeholder="2200"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-purple-400 mb-1">Training day carbs (g)</label>
+                      <input
+                        type="number"
+                        value={carbsTrainingDay}
+                        onChange={(e) => setCarbsTrainingDay(e.target.value)}
+                        className="w-full px-3 py-2 bg-gray-800 rounded border border-gray-700 focus:border-purple-500 focus:outline-none"
+                        placeholder="250"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-blue-400 mb-1">Rest day carbs (g)</label>
+                      <input
+                        type="number"
+                        value={carbsRestDay}
+                        onChange={(e) => setCarbsRestDay(e.target.value)}
+                        className="w-full px-3 py-2 bg-gray-800 rounded border border-gray-700 focus:border-purple-500 focus:outline-none"
+                        placeholder="130"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-purple-400 mb-1">Training day fat (g)</label>
+                      <input
+                        type="number"
+                        value={fatTrainingDay}
+                        onChange={(e) => setFatTrainingDay(e.target.value)}
+                        className="w-full px-3 py-2 bg-gray-800 rounded border border-gray-700 focus:border-purple-500 focus:outline-none"
+                        placeholder="80"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-blue-400 mb-1">Rest day fat (g)</label>
+                      <input
+                        type="number"
+                        value={fatRestDay}
+                        onChange={(e) => setFatRestDay(e.target.value)}
+                        className="w-full px-3 py-2 bg-gray-800 rounded border border-gray-700 focus:border-purple-500 focus:outline-none"
+                        placeholder="95"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium mb-2">Daily steps target</label>
+                  <input
+                    type="number"
+                    value={dailyStepsTarget}
+                    onChange={(e) => setDailyStepsTarget(e.target.value)}
+                    className="w-full px-4 py-2 bg-gray-900 rounded-lg border border-gray-700 focus:border-purple-500 focus:outline-none"
+                    placeholder="9000"
+                  />
                 </div>
 
                 <div>

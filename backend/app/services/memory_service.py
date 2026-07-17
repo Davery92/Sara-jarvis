@@ -315,13 +315,17 @@ class MemoryService:
 
                 sql = f"""
                     SELECT t.id, t.content, t.role, t.created_at, e.head,
-                           (e.embedding <=> :qvec::vector) AS distance
+                           (e.embedding <=> CAST(:qvec AS vector)) AS distance,
+                           COALESCE(t.salience, 0.5) AS salience
                     FROM memory_embedding e
                     JOIN memory_trace t ON t.id = e.trace_id
                     WHERE t.user_id = :user_id
                     {head_filter}
                     {time_filter}
-                    ORDER BY e.embedding <=> :qvec::vector
+                    ORDER BY (
+                        0.65 * (1.0 - (e.embedding <=> CAST(:qvec AS vector)))
+                      + 0.35 * COALESCE(t.salience, 0.5)
+                    ) DESC
                     LIMIT :k
                 """
 
@@ -419,99 +423,8 @@ class MemoryService:
         finally:
             db.close()
 
-    async def consolidate_day(self, user_id: str, day: Optional[datetime] = None) -> Dict[str, Any]:
-        """
-        Consolidate memories for a specific day:
-        1. Create daily summary trace
-        2. Extract temporal edges between same-day traces
-        3. Prepare for LLM-based pattern extraction (Phase 2)
-
-        Args:
-            user_id: User identifier (optional, for scheduled consolidation)
-            day: Date to consolidate (default: yesterday)
-
-        Returns:
-            Dict with consolidation stats
-        """
-        from app.main_simple import MemoryTrace, MemoryEmbedding, MemoryEdge, PGVECTOR_AVAILABLE, DATABASE_URL
-
-        if day is None:
-            day = datetime.utcnow() - timedelta(days=1)
-
-        start = day.replace(hour=0, minute=0, second=0, microsecond=0)
-        end = start + timedelta(days=1)
-
-        db: Session = self.SessionLocal()
-        try:
-            # Fetch traces from that day
-            traces = db.query(MemoryTrace).filter(
-                MemoryTrace.user_id == user_id,
-                MemoryTrace.created_at >= start,
-                MemoryTrace.created_at < end,
-            ).order_by(MemoryTrace.created_at.asc()).all()
-
-            if not traces:
-                logger.info(f"No traces to consolidate for {start.date()}")
-                return {"status": "ok", "message": "No traces to consolidate"}
-
-            # Generate summary using LLM with heuristic fallback
-            summary_content = await self._generate_consolidation_summary(traces, start.date())
-
-            summary_id = str(uuid.uuid4())
-            summary = MemoryTrace(
-                id=summary_id,
-                user_id=user_id,
-                content=summary_content,
-                role="summary",
-                salience=0.5,
-                source=json.dumps({"type": "consolidation"}),
-                meta=json.dumps({"day": str(start.date())}),
-            )
-            db.add(summary)
-
-            # Generate summary embedding
-            embedding_fn = self._get_embedding_service()
-            if embedding_fn:
-                try:
-                    emb = await embedding_fn(summary_content)
-                    if emb:
-                        me = MemoryEmbedding(
-                            trace_id=summary_id,
-                            head="semantic",
-                            embedding=emb if (PGVECTOR_AVAILABLE and DATABASE_URL.startswith("postgresql")) else json.dumps(emb),
-                        )
-                        db.add(me)
-                except Exception as e:
-                    logger.warning(f"Failed to generate summary embedding: {e}")
-
-            # Create temporal edges between consecutive traces
-            edges_created = 0
-            for a, b in zip(traces, traces[1:]):
-                edge = MemoryEdge(src=a.id, dst=b.id, type="temporal", weight=0.1)
-                db.merge(edge)
-                edges_created += 1
-
-            # Connect summary to day traces
-            for t in traces:
-                db.merge(MemoryEdge(src=summary_id, dst=t.id, type="summary_of", weight=0.05))
-                edges_created += 1
-
-            db.commit()
-            logger.info(f"✅ Consolidated {len(traces)} traces for {start.date()}, created {edges_created} edges")
-
-            return {
-                "status": "ok",
-                "summary_trace": summary_id,
-                "traces_consolidated": len(traces),
-                "edges_created": edges_created
-            }
-
-        except Exception as e:
-            db.rollback()
-            logger.error(f"Consolidation failed: {e}")
-            raise
-        finally:
-            db.close()
+    # consolidate_day() removed — legacy MemoryTrace-based consolidation
+    # superseded by NightlyDreamService (Episode-based, runs at 2 AM)
 
     async def forget(self, user_id: str, trace_id: str) -> bool:
         """
@@ -604,24 +517,44 @@ class MemoryService:
         Returns:
             List of search results with type, text, score, etc.
         """
+        from app.services import retrieval_observer
+        import time as _time
+        _funnel_start = _time.monotonic()
+
         if scopes is None:
             scopes = ["episodes", "notes", "docs", "summaries"]
 
-        results = []
+        results: List[Dict[str, Any]] = []
 
         # Get embedding for query
         embedding_fn = self._get_embedding_service()
         if not embedding_fn:
             logger.error("Embedding service not available")
+            retrieval_observer.record(
+                "memory_service.search_memory", query, 0,
+                (_time.monotonic() - _funnel_start) * 1000.0,
+                degraded=True, error="embedding_service_unavailable",
+                metadata={"scopes": scopes},
+            )
             return results
 
         query_embedding = await embedding_fn(query)
         if not query_embedding:
             logger.error("Failed to generate query embedding")
+            retrieval_observer.record(
+                "memory_service.search_memory", query, 0,
+                (_time.monotonic() - _funnel_start) * 1000.0,
+                degraded=True, error="query_embedding_failed",
+                metadata={"scopes": scopes},
+            )
             return results
 
-        # Get db session - support both init patterns
-        if hasattr(self, 'db'):
+        # Get db session - support both init patterns. NOTE: __init__ always
+        # sets self.db (to None on the factory path), so the old
+        # `hasattr(self, 'db')` guard was always True and crashed with
+        # `NoneType has no attribute 'execute'` whenever the service was
+        # created with a db_session_factory. Check for a real session instead.
+        if getattr(self, 'db', None) is not None:
             db = self.db
             should_close = False
         elif self.SessionLocal:
@@ -637,19 +570,30 @@ class MemoryService:
                 from app.main_simple import Episode, PGVECTOR_AVAILABLE, DATABASE_URL
 
                 if PGVECTOR_AVAILABLE and DATABASE_URL.startswith("postgresql"):
-                    # Use vector similarity search
-                    embedding_str = "[" + ",".join(map(str, query_embedding)) + "]"
-
-                    episode_results = db.execute(sql_text(f"""
+                    # Parameterized pgvector similarity with composite scoring.
+                    # Mirrors main_simple.py retrieve_episodes_with_window so memory
+                    # search and context retrieval rank consistently.
+                    episode_results = db.execute(sql_text("""
                         SELECT
-                            id, content, role, source, created_at,
-                            1 - (embedding <=> '{embedding_str}'::vector) as score
-                        FROM episode
-                        WHERE user_id = :user_id
-                          AND embedding IS NOT NULL
-                        ORDER BY embedding <=> '{embedding_str}'::vector
+                            e.id, e.content, e.role, e.source, e.created_at,
+                            1 - (e.embedding <=> CAST(:qvec AS vector)) as similarity,
+                            (
+                                (1 - (e.embedding <=> CAST(:qvec AS vector))) * 0.55 +
+                                COALESCE(e.importance, 0.5) * 0.25 +
+                                LEAST(LN(COALESCE(e.access_count, 0) + 1) / 4.6, 1.0) * 0.10 +
+                                COALESCE(e.rating_boost, 0.0) * 0.05 +
+                                COALESCE(e.exploration_bonus, 0.0) * 0.05
+                            ) as composite_score
+                        FROM episode e
+                        WHERE e.user_id = :user_id
+                          AND e.embedding IS NOT NULL
+                        ORDER BY composite_score DESC
                         LIMIT :limit
-                    """), {"user_id": user_id, "limit": limit}).fetchall()
+                    """), {
+                        "user_id": user_id,
+                        "qvec": str(query_embedding),
+                        "limit": limit,
+                    }).fetchall()
 
                     for row in episode_results:
                         results.append({
@@ -659,7 +603,8 @@ class MemoryService:
                             "role": row[2],
                             "source": row[3] or "chat",
                             "created_at": row[4].isoformat() if row[4] else "",
-                            "score": float(row[5])
+                            "similarity": float(row[5]),
+                            "score": float(row[6]),
                         })
 
             # Search notes if in scope
@@ -692,100 +637,26 @@ class MemoryService:
             # Sort all results by score
             results.sort(key=lambda x: x.get("score", 0), reverse=True)
 
-            return results[:limit * 2]  # Return top results across all scopes
+            top = results[:limit * 2]
+            retrieval_observer.record(
+                "memory_service.search_memory", query, len(top),
+                (_time.monotonic() - _funnel_start) * 1000.0,
+                metadata={"scopes": scopes, "raw_count": len(results)},
+            )
+            return top  # Return top results across all scopes
 
         except Exception as e:
             logger.error(f"Memory search failed: {e}")
+            retrieval_observer.record(
+                "memory_service.search_memory", query, 0,
+                (_time.monotonic() - _funnel_start) * 1000.0,
+                error=type(e).__name__,
+                metadata={"scopes": scopes},
+            )
             raise
         finally:
             if should_close:
                 db.close()
-
-    async def _generate_consolidation_summary(self, traces, date) -> str:
-        """
-        Generate a summary of memory traces using LLM with heuristic fallback.
-
-        Uses same LLM failover pattern as memory scorer:
-        - Primary: gpt-oss:120b on primary endpoint
-        - Fallback: gpt-oss:20b on local endpoint
-        - Final fallback: keyword-based summary
-        """
-        import httpx
-
-        # Prepare trace content for summarization (limit to first 20 traces, 500 chars each)
-        combined = "\n".join([
-            f"[{t.role}] {(t.content or '')[:500]}"
-            for t in traces[:20]
-        ])
-
-        prompt = f"""Summarize these {len(traces)} memory traces from {date} into 2-3 concise sentences.
-Focus on: key decisions made, main topics discussed, tasks or commitments mentioned, and emotional themes if any.
-
-Traces:
-{combined}
-
-Provide a natural, conversational daily summary."""
-
-        # LLM endpoints with failover (same as subconscious/memory_scorer)
-        endpoints = [
-            ("http://100.104.68.115:11434", "gpt-oss:120b"),
-            ("http://10.185.1.8:11434", "gpt-oss:20b")
-        ]
-
-        for llm_url, model in endpoints:
-            try:
-                async with httpx.AsyncClient(timeout=30.0) as client:
-                    # Check if endpoint is available
-                    health = await client.get(f"{llm_url}/v1/models")
-                    if health.status_code != 200:
-                        continue
-
-                    response = await client.post(
-                        f"{llm_url}/v1/chat/completions",
-                        json={
-                            "model": model,
-                            "messages": [{"role": "user", "content": prompt}],
-                            "temperature": 0.3,
-                            "max_tokens": 200
-                        }
-                    )
-
-                    if response.status_code == 200:
-                        result = response.json()
-                        summary = result["choices"][0]["message"]["content"].strip()
-                        logger.info(f"✅ Generated LLM summary for {date} using {model}")
-                        return summary
-
-            except Exception as e:
-                logger.warning(f"LLM summary failed for {llm_url}: {e}")
-                continue
-
-        # Fallback to keyword-based summary
-        logger.info(f"Using keyword-based summary fallback for {date}")
-        return self._keyword_summary(traces, date)
-
-    def _keyword_summary(self, traces, date) -> str:
-        """Fallback keyword-based summary when LLM is unavailable"""
-        key_phrases = []
-        keywords = [
-            "meeting", "call", "email", "note", "vector", "graph",
-            "habit", "calendar", "document", "task", "decision",
-            "idea", "question", "project", "deadline", "reminder"
-        ]
-
-        for t in traces:
-            content_low = (t.content or "").lower()
-            for kw in keywords:
-                if kw in content_low:
-                    key_phrases.append(kw)
-
-        key_phrases = list(dict.fromkeys(key_phrases))[:8]  # Dedupe, limit to 8
-
-        summary = f"Daily summary for {date}: {len(traces)} events captured."
-        if key_phrases:
-            summary += f" Key topics: {', '.join(key_phrases)}."
-
-        return summary
 
     def _auto_calculate_salience(self, content: str, role: str) -> float:
         """

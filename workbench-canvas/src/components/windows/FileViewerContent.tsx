@@ -3,7 +3,7 @@ import { FileText, Download, Copy, Check, Loader2, AlertCircle } from 'lucide-re
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { FileViewerWindowData } from '../../types'
-import { projectsApi } from '../../services/api'
+import { projectsApi, getToken } from '../../services/api'
 
 interface FileViewerContentProps {
   data: FileViewerWindowData
@@ -59,6 +59,28 @@ function getLanguageFromFilename(filename: string): string {
   return languageMap[ext] || 'text'
 }
 
+// Check if file is a PDF
+function isPdfFile(filename: string, mimeType?: string): boolean {
+  if (mimeType === 'application/pdf') return true
+  const ext = filename.split('.').pop()?.toLowerCase() || ''
+  return ext === 'pdf'
+}
+
+// Check if file is an image
+function isImageFile(filename: string, mimeType?: string): boolean {
+  if (mimeType?.startsWith('image/')) return true
+  const imageExtensions = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico']
+  const ext = filename.split('.').pop()?.toLowerCase() || ''
+  return imageExtensions.includes(ext)
+}
+
+// Check if file is a Word document
+function isWordFile(filename: string, mimeType?: string): boolean {
+  if (mimeType?.includes('wordprocessingml') || mimeType?.includes('msword')) return true
+  const ext = filename.split('.').pop()?.toLowerCase() || ''
+  return ext === 'docx' || ext === 'doc'
+}
+
 // Check if file is likely text-based
 function isTextFile(filename: string, mimeType?: string): boolean {
   if (mimeType?.startsWith('text/')) return true
@@ -77,6 +99,7 @@ function isTextFile(filename: string, mimeType?: string): boolean {
 
 export default function FileViewerContent({ data }: FileViewerContentProps) {
   const [content, setContent] = useState<string | null>(data.content || null)
+  const [resolvedContent, setResolvedContent] = useState<string | null>(null)
   const [loading, setLoading] = useState(!data.content && data.projectId && data.fileId)
   const [error, setError] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
@@ -84,7 +107,11 @@ export default function FileViewerContent({ data }: FileViewerContentProps) {
   const { filename, mimeType, source, projectId, fileId } = data
   const language = getLanguageFromFilename(filename)
   const isMarkdown = language === 'markdown'
+  const isPdf = isPdfFile(filename, mimeType)
+  const isImage = isImageFile(filename, mimeType)
+  const isWord = isWordFile(filename, mimeType)
   const isText = isTextFile(filename, mimeType)
+  const viewerContent = resolvedContent || content
 
   // Fetch content if not provided
   useEffect(() => {
@@ -106,6 +133,42 @@ export default function FileViewerContent({ data }: FileViewerContentProps) {
 
     fetchContent()
   }, [projectId, fileId, content])
+
+  useEffect(() => {
+    let objectUrl: string | null = null
+    const raw = content || ''
+    const isRemoteUrl = raw.startsWith('http://') || raw.startsWith('https://') || raw.startsWith('/')
+    const shouldResolveToBlob = isRemoteUrl && (isPdf || isImage || isWord)
+    if (!shouldResolveToBlob) {
+      setResolvedContent(null)
+      return
+    }
+
+    const fetchBlob = async () => {
+      try {
+        const token = getToken()
+        const response = await fetch(raw, {
+          credentials: 'include',
+          headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+        })
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`)
+        }
+        const blob = await response.blob()
+        objectUrl = URL.createObjectURL(blob)
+        setResolvedContent(objectUrl)
+      } catch (err) {
+        console.warn('FileViewer blob fetch failed, falling back to direct URL', err)
+        setResolvedContent(null)
+      }
+    }
+
+    fetchBlob()
+
+    return () => {
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
+    }
+  }, [content, isImage, isPdf, isWord])
 
   const handleCopy = async () => {
     if (!content) return
@@ -165,6 +228,125 @@ export default function FileViewerContent({ data }: FileViewerContentProps) {
     )
   }
 
+  // PDF viewer
+  if (isPdf && viewerContent) {
+    return (
+      <div className="flex flex-col h-full bg-canvas-bg">
+        {/* Header */}
+        <div className="flex items-center justify-between px-4 py-2 border-b border-canvas-border bg-canvas-surface/50">
+          <div className="flex items-center gap-3">
+            <FileText size={18} className="text-red-400" />
+            <span className="text-white font-medium">{filename}</span>
+            <span className="text-xs text-canvas-muted px-2 py-0.5 bg-canvas-elevated rounded">
+              PDF
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <a
+              href={viewerContent}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="p-2 hover:bg-canvas-elevated rounded-lg text-canvas-muted hover:text-white transition-colors"
+              title="Open in new tab"
+            >
+              <FileText size={18} />
+            </a>
+            <a
+              href={viewerContent}
+              download={filename}
+              className="p-2 hover:bg-canvas-elevated rounded-lg text-canvas-muted hover:text-white transition-colors"
+              title="Download file"
+            >
+              <Download size={18} />
+            </a>
+          </div>
+        </div>
+        {/* PDF Embed */}
+        <div className="flex-1 overflow-hidden bg-gray-800">
+          <iframe
+            src={viewerContent}
+            title={filename}
+            className="w-full h-full"
+          />
+          <div className="hidden">
+            <div className="flex flex-col items-center justify-center h-full text-canvas-muted p-8">
+              <FileText size={64} className="mb-4 opacity-30" />
+              <p className="text-lg mb-2">PDF Preview not available</p>
+              <p className="text-sm text-center mb-4">Open it in a new tab instead.</p>
+              <a
+                href={viewerContent}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="px-4 py-2 bg-purple-500 hover:bg-purple-600 rounded-lg text-white transition-colors"
+              >
+                Open PDF in New Tab
+              </a>
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  // Image viewer
+  if (isImage && viewerContent) {
+    return (
+      <div className="flex flex-col h-full bg-canvas-bg">
+        {/* Header */}
+        <div className="flex items-center justify-between px-4 py-2 border-b border-canvas-border bg-canvas-surface/50">
+          <div className="flex items-center gap-3">
+            <FileText size={18} className="text-green-400" />
+            <span className="text-white font-medium">{filename}</span>
+            <span className="text-xs text-canvas-muted px-2 py-0.5 bg-canvas-elevated rounded">
+              Image
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <a
+              href={viewerContent}
+              download={filename}
+              className="p-2 hover:bg-canvas-elevated rounded-lg text-canvas-muted hover:text-white transition-colors"
+              title="Download file"
+            >
+              <Download size={18} />
+            </a>
+          </div>
+        </div>
+        {/* Image Display */}
+        <div className="flex-1 overflow-auto flex items-center justify-center p-4 bg-gray-900">
+          <img
+            src={viewerContent}
+            alt={filename}
+            className="max-w-full max-h-full object-contain"
+          />
+        </div>
+      </div>
+    )
+  }
+
+  // Word document - show download prompt
+  if (isWord) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full text-canvas-muted">
+        <FileText size={64} className="mb-4 opacity-30 text-blue-400" />
+        <p className="text-lg">Word Document</p>
+        <p className="text-sm mt-1">{filename}</p>
+        <p className="text-sm text-canvas-muted mt-2 text-center max-w-md">
+          Word documents cannot be previewed in the browser.
+          Download to view in Microsoft Word or another compatible app.
+        </p>
+        <a
+          href={viewerContent || '#'}
+          download={filename}
+          className="mt-6 px-4 py-2 bg-blue-500 hover:bg-blue-600 rounded-lg text-white transition-colors flex items-center gap-2"
+        >
+          <Download size={16} />
+          Download Document
+        </a>
+      </div>
+    )
+  }
+
   if (!isText) {
     return (
       <div className="flex flex-col items-center justify-center h-full text-canvas-muted">
@@ -172,13 +354,14 @@ export default function FileViewerContent({ data }: FileViewerContentProps) {
         <p className="text-lg">Binary file</p>
         <p className="text-sm mt-1">{filename}</p>
         <p className="text-sm text-canvas-muted mt-1">{mimeType || 'Unknown type'}</p>
-        <button
-          onClick={handleDownload}
+        <a
+          href={content || '#'}
+          download={filename}
           className="mt-6 px-4 py-2 bg-purple-500 hover:bg-purple-600 rounded-lg text-white transition-colors flex items-center gap-2"
         >
           <Download size={16} />
           Download File
-        </button>
+        </a>
       </div>
     )
   }

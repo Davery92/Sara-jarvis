@@ -8,6 +8,7 @@ import aiohttp
 import logging
 import os
 import json
+import re
 from datetime import datetime, date, timedelta, timezone as dt_timezone
 from app.core.timezone import now as local_now, today as local_today, USER_TIMEZONE
 from pathlib import Path
@@ -17,12 +18,58 @@ from dataclasses import dataclass, asdict
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
+from app.core.config import settings
 from .news_aggregator_service import news_aggregator_service, NewsItem
 from .weather_service import weather_service, WeatherData
 from .notification_service import notification_service, NotificationPriority
-from .health_insight_service import health_insight_service
 
 logger = logging.getLogger(__name__)
+
+# --- LLM Brief Prompts ---
+
+BRIEF_SYSTEM_PROMPT = """You are Sara, David's personal AI assistant. Write his morning brief.
+
+Rules:
+- First person ("you have", "your"), {word_min}-{word_max} words
+- Use light markdown: **bold** for emphasis, bullets where natural, but keep it speakable
+- Prioritize by relevance: busy day → lead with calendar; rest day → lighter brief
+- Pick the 2-3 most interesting news items, skip the rest
+- Do NOT include any health, fitness, body, or biometric data (no HRV, heart rate, sleep stats, recovery scores, workout plans, nutrition advice)
+- Do NOT include action items, to-do lists, micro-tasks, suggestions, or productivity advice — this is an informational brief, not a task list
+- If dream insights exist, integrate them conversationally — don't label them "Dream Insights"
+- No "Good morning David!" clichés — start with something specific and useful
+- End with a brief, natural sendoff (1 sentence max)
+
+Tone directive: {tone_directive}"""
+
+BRIEF_USER_PROMPT = """Generate David's morning brief for today, {today_date}.
+
+== WHO DAVID IS ==
+{stable_layer}
+
+== ACTIVE CONTEXT (filtered for today) ==
+{context_layer}
+
+== YESTERDAY ==
+{yesterday_summary}
+
+== WEATHER ==
+{weather}
+
+== CALENDAR ==
+{calendar}
+
+== DREAM INSIGHTS ==
+{dream_insights}
+
+== TECH NEWS ==
+{news}
+
+Remember: today is {today_date}. Do not reference events, locations, or meals from previous days
+as if they are current. If the active context mentions something from yesterday or earlier,
+treat it as past — do not present it as today's plan.
+
+Write the brief now."""
 
 
 @dataclass
@@ -69,6 +116,7 @@ class CalendarEvent:
     starts_at: str
     ends_at: str
     location: Optional[str] = None
+    calendar_name: Optional[str] = None
 
     def to_dict(self) -> Dict:
         return asdict(self)
@@ -99,10 +147,213 @@ class MorningBriefService:
 
     def __init__(self):
         self.timeout = aiohttp.ClientTimeout(total=120)  # Generous timeout for TTS
-        # LLM Configuration (from environment)
-        self.llm_base_url = os.environ.get("OPENAI_BASE_URL", "http://100.104.68.115:11434/v1")
-        self.llm_model = os.environ.get("OPENAI_MODEL", "gpt-oss:120b")
+        self._refresh_llm_config()
         self.llm_api_key = os.environ.get("OPENAI_API_KEY", "dummy")
+
+    def _refresh_llm_config(self):
+        """Reload background LLM settings so model switches apply live."""
+        # Background LLM configuration (separate from interactive chat model)
+        self.llm_base_url = settings.bg_llm_primary_url
+        self.llm_model = settings.bg_llm_primary_model
+
+    async def _bootstrap_stable_layer(self, user_id: str, db: Session) -> str:
+        """
+        Generate a lightweight stable layer on-the-fly when the weekly synthesis
+        hasn't run yet. Uses PKG summary + recent episodic memory to build a
+        minimal personal context so the morning brief personal section isn't empty.
+        """
+        logger.info(f"Bootstrapping stable layer for user {user_id[:8]} (weekly synthesis not yet available)")
+        parts = []
+
+        # 1. Pull from Personal Knowledge Graph
+        try:
+            from app.services.pkg_context_provider import pkg_context
+            pkg_summary = pkg_context.get_david_summary_brief(user_id, max_facts=10)
+            if pkg_summary and pkg_summary.strip():
+                parts.append(pkg_summary.strip())
+                logger.debug(f"PKG contributed {len(pkg_summary)} chars to stable bootstrap")
+        except Exception as e:
+            logger.warning(f"PKG unavailable for stable bootstrap: {e}")
+
+        # 2. Pull recent episodic memory highlights (high-importance episodes).
+        # Recency cutoff is critical: without it, a single high-importance
+        # assistant message from weeks ago (e.g. "your 10:30 with Matt about the
+        # operating agreement") gets recycled into the morning brief every day
+        # and the LLM rephrases it as if it's still pending. Restrict to the
+        # last 3 days and to user-stated content (assistant turns are advice,
+        # not facts about David).
+        try:
+            rows = db.execute(text("""
+                SELECT content, importance
+                FROM episode
+                WHERE user_id = :user_id
+                  AND importance >= 0.7
+                  AND role = 'user'
+                  AND created_at >= NOW() - INTERVAL '3 days'
+                ORDER BY created_at DESC
+                LIMIT 8
+            """), {"user_id": user_id}).fetchall()
+
+            if rows:
+                memory_lines = []
+                for row in rows:
+                    # Truncate long episodes for the brief summary
+                    snippet = (row.content or "")[:200]
+                    if len(row.content or "") > 200:
+                        snippet += "..."
+                    memory_lines.append(f"- {snippet}")
+                parts.append("Key recent memories:\n" + "\n".join(memory_lines))
+                logger.debug(f"Episodic memory contributed {len(rows)} items to stable bootstrap")
+        except Exception as e:
+            logger.warning(f"Episodic memory unavailable for stable bootstrap: {e}")
+
+        if not parts:
+            logger.info("Stable bootstrap produced no content (PKG and memory both empty)")
+            return ""
+
+        bootstrapped = "\n\n".join(parts)
+        logger.info(f"Stable layer bootstrapped with {len(bootstrapped)} chars for user {user_id[:8]}")
+        return bootstrapped
+
+    def _get_fresh_context_content(self, user_id: str, raw_context: str) -> str:
+        """
+        Return context layer content only if it is fresh enough for a morning brief.
+        Prevents stale project/nutrition context from older days bleeding into today's brief.
+        """
+        try:
+            context_path = Path("/home/david/jarvis/data/briefs") / user_id / "layers" / "context.md"
+            if not context_path.exists() or not raw_context:
+                return ""
+
+            modified_at = datetime.fromtimestamp(context_path.stat().st_mtime, tz=dt_timezone.utc)
+            age = local_now() - modified_at
+            if age > timedelta(hours=18):
+                logger.info(
+                    "Skipping stale context layer for morning brief: age=%sh user=%s",
+                    round(age.total_seconds() / 3600, 1),
+                    user_id[:8],
+                )
+                return ""
+
+            # Guard against content that was rewritten recently but still references old dates.
+            # Extract all date references and reject content where the *latest* mention
+            # is before yesterday.  Also strip out individual lines/paragraphs that
+            # reference dates older than yesterday so partial staleness doesn't leak through.
+            today_local = local_today()
+            yesterday = today_local - timedelta(days=1)
+
+            month_map = {
+                "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+                "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+            }
+
+            # Also match day-of-week references like "Monday", "Tuesday" etc.
+            # to catch phrases like "Monday ribs" or "in Sparta today" with a weekday anchor.
+            day_of_week_map = {
+                "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+                "friday": 4, "saturday": 5, "sunday": 6,
+            }
+
+            def _parse_date_refs(text: str) -> list[date]:
+                """Extract all date references from text."""
+                refs = []
+                # Match "Month Day" patterns (e.g. "Feb 18", "February 18")
+                for m in re.finditer(
+                    r"\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+(\d{1,2})\b",
+                    text,
+                    re.IGNORECASE,
+                ):
+                    month_num = month_map.get(m.group(1)[:3].lower())
+                    if not month_num:
+                        continue
+                    try:
+                        refs.append(date(today_local.year, month_num, int(m.group(2))))
+                    except ValueError:
+                        continue
+
+                # Match "YYYY-MM-DD" patterns
+                for m in re.finditer(r"\b(\d{4})-(\d{2})-(\d{2})\b", text):
+                    try:
+                        refs.append(date(int(m.group(1)), int(m.group(2)), int(m.group(3))))
+                    except ValueError:
+                        continue
+
+                # Match weekday names and map to most recent occurrence
+                for m in re.finditer(
+                    r"\b(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\b",
+                    text,
+                    re.IGNORECASE,
+                ):
+                    target_dow = day_of_week_map.get(m.group(1).lower())
+                    if target_dow is None:
+                        continue
+                    # Find the most recent past occurrence of this weekday
+                    days_back = (today_local.weekday() - target_dow) % 7
+                    if days_back == 0:
+                        # Could be today — include it (it's fresh)
+                        refs.append(today_local)
+                    else:
+                        refs.append(today_local - timedelta(days=days_back))
+
+                return refs
+
+            # Detect relative temporal phrases that are stale when read the next morning.
+            # These are phrases written "yesterday evening" that reference "tonight" or "tomorrow"
+            # which have now passed.
+            _STALE_RELATIVE_PATTERNS = [
+                r"\bpending\s+(?:tonight|this\s+evening)\b",
+                r"\bawaiting\s+.*?\btonight\b",
+                r"\btonight['']?s?\b.*?\b(?:evaluation|assessment|verdict|check)\b",
+                r"\b(?:evaluation|assessment|verdict|check)\b.*?\btonight\b",
+                r"\bwill\s+(?:be\s+)?(?:checking|evaluating|assessing)\b",
+            ]
+            _stale_relative_re = re.compile("|".join(_STALE_RELATIVE_PATTERNS), re.IGNORECASE)
+
+            # First: check if ALL date references in the entire content are stale
+            all_refs = _parse_date_refs(raw_context)
+            if all_refs:
+                latest_ref = max(all_refs)
+                if latest_ref < yesterday:
+                    logger.info(
+                        "Skipping stale context layer by content date: latest_ref=%s today=%s user=%s",
+                        latest_ref.isoformat(),
+                        today_local.isoformat(),
+                        user_id[:8],
+                    )
+                    return ""
+
+            # Second: line-by-line filtering to strip stale paragraphs while keeping fresh ones.
+            # Lines referencing yesterday or older are stripped (the brief is for TODAY).
+            # Lines with stale relative phrases ("pending tonight") are also stripped.
+            cleaned_lines = []
+            for line in raw_context.split("\n"):
+                # Strip lines with stale relative temporal phrases
+                if _stale_relative_re.search(line):
+                    logger.debug("Stripping stale relative-time line: %.80s", line)
+                    continue
+
+                line_refs = _parse_date_refs(line)
+                if line_refs:
+                    line_latest = max(line_refs)
+                    # Strip lines referencing yesterday or older — the brief is for TODAY
+                    if line_latest <= yesterday:
+                        logger.debug(
+                            "Stripping stale context line (ref=%s): %.80s",
+                            line_latest.isoformat(),
+                            line,
+                        )
+                        continue
+                cleaned_lines.append(line)
+
+            cleaned = "\n".join(cleaned_lines).strip()
+            if not cleaned:
+                logger.info("Context layer entirely stale after line filtering, user=%s", user_id[:8])
+                return ""
+
+            return cleaned
+        except Exception as e:
+            logger.warning(f"Failed context freshness check, using raw context: {e}")
+            return raw_context
 
     async def gather_news(self) -> tuple[str, List[Dict]]:
         """Gather and synthesize news from all sources."""
@@ -130,6 +381,7 @@ class MorningBriefService:
     async def _synthesize_news(self, raw_news: str) -> str:
         """Use LLM to synthesize news into conversational summary."""
         try:
+            self._refresh_llm_config()
             prompt = f"""Create a conversational tech news summary for a morning briefing.
 
 Focus on:
@@ -164,8 +416,8 @@ Synthesized summary:"""
                         "model": self.llm_model,
                         "messages": [{"role": "user", "content": prompt}],
                         "temperature": 0.7,
-                        "max_tokens": 2000,
-                        "stream": False
+                        "stream": False,
+                        "chat_template_kwargs": {"enable_thinking": False},
                     }
                 ) as response:
                     if response.status != 200:
@@ -174,9 +426,13 @@ Synthesized summary:"""
                         return raw_news  # Fall back to raw news
 
                     data = await response.json()
-                    content = data["choices"][0]["message"]["content"]
+                    content = data["choices"][0]["message"]["content"] or ""
                     finish_reason = data["choices"][0].get("finish_reason", "unknown")
                     logger.info(f"News synthesis complete: {len(content)} chars, finish_reason: {finish_reason}")
+                    # If thinking mode consumed all tokens, fall back to raw news
+                    if not content.strip():
+                        logger.warning("News synthesis returned empty content, falling back to raw news")
+                        return raw_news
                     return content
 
         except Exception as e:
@@ -283,10 +539,25 @@ Synthesized summary:"""
                 metric_display = {
                     'resting_hr': ('Resting HR', 'bpm'),
                     'hrv': ('HRV', 'ms'),
+                    'hrv_morning': ('HRV (morning)', 'ms'),
                     'sleep_hours': ('Sleep', 'hrs'),
-                    'weight': ('Weight', 'kg'),
+                    'sleep_deep_min': ('Deep sleep', 'min'),
+                    'sleep_rem_min': ('REM sleep', 'min'),
+                    'sleep_core_min': ('Core sleep', 'min'),
+                    'sleep_awake_min': ('Awake', 'min'),
+                    'weight': ('Weight', 'lbs'),
                     'steps': ('Steps', ''),
                     'active_energy': ('Active Cal', 'kcal'),
+                    'spo2': ('Blood Oxygen', '%'),
+                    'respiratory_rate': ('Resp Rate', 'br/min'),
+                    'body_temp': ('Body Temp', '°F'),
+                    'vo2_max': ('VO2 max', 'ml/kg/min'),
+                    'walking_hr_avg': ('Walking HR', 'bpm'),
+                    'hr_recovery_1min': ('HR Recovery', 'bpm'),
+                    'stand_minutes': ('Stand', 'min'),
+                    'exercise_minutes': ('Exercise', 'min'),
+                    'flights_climbed': ('Flights', ''),
+                    'mindful_minutes': ('Mindful', 'min'),
                 }
 
                 for metric_type, data in metrics.items():
@@ -299,11 +570,15 @@ Synthesized summary:"""
                     status = data.get('status', 'normal')
 
                     # Format the value
-                    if metric_type in ['resting_hr', 'hrv', 'steps']:
+                    if metric_type in ['resting_hr', 'hrv', 'hrv_morning', 'steps',
+                                       'walking_hr_avg', 'hr_recovery_1min',
+                                       'stand_minutes', 'exercise_minutes',
+                                       'flights_climbed', 'mindful_minutes',
+                                       'sleep_deep_min', 'sleep_rem_min',
+                                       'sleep_core_min', 'sleep_awake_min']:
                         value_str = f"{int(value)}"
-                    elif metric_type == 'sleep_hours':
-                        value_str = f"{value:.1f}"
-                    elif metric_type == 'weight':
+                    elif metric_type in ('sleep_hours', 'weight', 'body_temp',
+                                         'spo2', 'respiratory_rate', 'vo2_max'):
                         value_str = f"{value:.1f}"
                     else:
                         value_str = f"{value:.0f}"
@@ -319,11 +594,15 @@ Synthesized summary:"""
 
                     # Add baseline comparison if available
                     if baseline:
-                        if metric_type in ['resting_hr', 'hrv', 'steps']:
+                        if metric_type in ['resting_hr', 'hrv', 'hrv_morning', 'steps',
+                                           'walking_hr_avg', 'hr_recovery_1min',
+                                           'stand_minutes', 'exercise_minutes',
+                                           'flights_climbed', 'mindful_minutes',
+                                           'sleep_deep_min', 'sleep_rem_min',
+                                           'sleep_core_min', 'sleep_awake_min']:
                             baseline_str = f"{int(baseline)}"
-                        elif metric_type == 'sleep_hours':
-                            baseline_str = f"{baseline:.1f}"
-                        elif metric_type == 'weight':
+                        elif metric_type in ('sleep_hours', 'weight', 'body_temp',
+                                             'spo2', 'respiratory_rate', 'vo2_max'):
                             baseline_str = f"{baseline:.1f}"
                         else:
                             baseline_str = f"{baseline:.0f}"
@@ -394,47 +673,120 @@ Synthesized summary:"""
             logger.error(f"Error gathering health digest: {e}")
             return "", {}
 
-    async def gather_calendar(self, user_id: str, db: Session) -> tuple[str, List[Dict]]:
-        """Gather today's calendar events."""
+    def _check_calendar_sync_freshness(self, user_id: str, db: Session) -> tuple[bool, Optional[datetime]]:
+        """
+        Check how fresh the calendar data is by looking at the most recent updated_at
+        on the calendar_event table (iOS-synced events). Returns (is_fresh, last_sync_time).
+        Fresh = updated within the last 24 hours.
+        """
         try:
-            # Use user's timezone to determine "today", then convert to UTC for query
-            today = local_today()
-            start_of_day = datetime.combine(today, datetime.min.time()).replace(tzinfo=USER_TIMEZONE).astimezone(dt_timezone.utc)
-            end_of_day = datetime.combine(today, datetime.max.time()).replace(tzinfo=USER_TIMEZONE).astimezone(dt_timezone.utc)
-
-            result = db.execute(text("""
-                SELECT title, starts_at, ends_at, location
-                FROM event
+            row = db.execute(text("""
+                SELECT MAX(updated_at) AS last_sync
+                FROM calendar_event
                 WHERE user_id = :user_id
-                  AND starts_at >= :start_of_day
-                  AND starts_at <= :end_of_day
-                ORDER BY starts_at
+            """), {"user_id": user_id}).fetchone()
+
+            if not row or not row.last_sync:
+                return False, None
+
+            last_sync = row.last_sync
+            if last_sync.tzinfo is None:
+                last_sync = last_sync.replace(tzinfo=dt_timezone.utc)
+
+            age = local_now() - last_sync
+            is_fresh = age < timedelta(hours=24)
+            return is_fresh, last_sync
+        except Exception as e:
+            logger.warning(f"Could not check calendar sync freshness: {e}")
+            return False, None
+
+    async def gather_calendar(self, user_id: str, db: Session) -> tuple[str, List[Dict]]:
+        """Gather today's calendar events from iOS-synced calendar_event table."""
+        try:
+            # Check sync freshness before querying
+            is_fresh, last_sync_time = self._check_calendar_sync_freshness(user_id, db)
+
+            # calendar_event stores naive local times (already in user's timezone)
+            today = local_today()
+            start_of_day = datetime.combine(today, datetime.min.time())
+            end_of_day = datetime.combine(today, datetime.max.time())
+
+            # Exclude gym/workout calendar entries — David's split routine
+            # doesn't belong in the morning brief schedule. Workouts get
+            # surfaced through the dedicated fitness section instead.
+            result = db.execute(text("""
+                SELECT title, start_time, end_time, location, all_day, ios_calendar_name, attendees, organizer
+                FROM calendar_event
+                WHERE user_id = :user_id
+                  AND start_time >= :start_of_day
+                  AND start_time <= :end_of_day
+                  AND title NOT LIKE '%🏋️%'
+                  AND LOWER(title) NOT LIKE '%push a%'
+                  AND LOWER(title) NOT LIKE '%push b%'
+                  AND LOWER(title) NOT LIKE '%pull a%'
+                  AND LOWER(title) NOT LIKE '%pull b%'
+                  AND LOWER(title) NOT LIKE '%legs a%'
+                  AND LOWER(title) NOT LIKE '%legs b%'
+                ORDER BY start_time
             """), {
                 "user_id": user_id,
                 "start_of_day": start_of_day,
                 "end_of_day": end_of_day
             })
 
+            from app.services.calendar_ownership import classify_event, ownership_prefix, attendance_role
+
             events = []
             for row in result.fetchall():
+                # Skip events David declined — showing them as "today's schedule" is misleading.
+                role = attendance_role(row.organizer, row.attendees)
+                if role.declined:
+                    continue
+
+                ownership = classify_event(row.title, row.ios_calendar_name)
+                title = f"{ownership_prefix(ownership)}{row.title}"
+                if role.is_broadcast:
+                    title += " (FYI)"
                 events.append(CalendarEvent(
-                    title=row.title,
-                    starts_at=row.starts_at.strftime("%H:%M") if row.starts_at else "",
-                    ends_at=row.ends_at.strftime("%H:%M") if row.ends_at else "",
-                    location=row.location
+                    title=title,
+                    starts_at=row.start_time.strftime("%H:%M") if row.start_time and not row.all_day else ("All day" if row.all_day else ""),
+                    ends_at=row.end_time.strftime("%H:%M") if row.end_time and not row.all_day else "",
+                    location=row.location,
+                    calendar_name=row.ios_calendar_name
                 ))
 
+            # Build staleness warning if needed
+            stale_warning = ""
+            if not is_fresh:
+                if last_sync_time:
+                    age_hours = (local_now() - last_sync_time).total_seconds() / 3600
+                    stale_warning = f"\n\n*Note: Calendar data may be outdated (last sync {age_hours:.0f}h ago). Some events might be missing.*"
+                else:
+                    stale_warning = "\n\n*Note: Calendar sync status unknown. Events shown may be incomplete.*"
+
             if not events:
+                if not is_fresh:
+                    return "No calendar events found — Google Calendar sync is not active. Check your Google Calendar directly for today's schedule.", []
                 return "No events scheduled for today.", []
 
-            # Format calendar summary
+            # Format calendar summary. Titles carry an owner prefix ("Everett: …")
+            # for events that aren't David's, so downstream phrasing never
+            # claims someone else's appointment as his.
             lines = ["## Today's Schedule"]
+            lines.append(
+                "*(Events prefixed with a name belong to that family member, "
+                "not David.)*"
+            )
             for event in events:
                 time_str = event.starts_at
                 if event.ends_at:
                     time_str += f" - {event.ends_at}"
                 loc_str = f" @ {event.location}" if event.location else ""
-                lines.append(f"- **{time_str}**: {event.title}{loc_str}")
+                cal_str = f" [{event.calendar_name}]" if event.calendar_name else ""
+                lines.append(f"- **{time_str}**: {event.title}{loc_str}{cal_str}")
+
+            if stale_warning:
+                lines.append(stale_warning)
 
             return "\n".join(lines), [e.to_dict() for e in events]
 
@@ -442,170 +794,99 @@ Synthesized summary:"""
             logger.error(f"Error gathering calendar: {e}")
             return "Calendar data unavailable.", []
 
-    def _compose_full_brief(
-        self,
-        weekday: str,
-        news_summary: str,
-        weather_summary: str,
-        calendar_summary: str,
-        insights_summary: str = "",
-        health_digest: str = "",
-        fitness_brief: Optional[FitnessRecoveryBrief] = None
+    def _strip_markdown_for_tts(self, text: str) -> str:
+        """Remove markdown formatting for clean TTS output."""
+        s = text
+        s = re.sub(r'^#{1,6}\s+', '', s, flags=re.MULTILINE)  # headers
+        s = re.sub(r'\*\*(.+?)\*\*', r'\1', s)                 # bold
+        s = re.sub(r'\*(.+?)\*', r'\1', s)                     # italic
+        s = re.sub(r'`(.+?)`', r'\1', s)                       # inline code
+        s = re.sub(r'\[(.+?)\]\(.+?\)', r'\1', s)              # links
+        s = re.sub(r'^-\s+', '', s, flags=re.MULTILINE)        # bullets
+        s = re.sub(r'^---+$', '', s, flags=re.MULTILINE)       # rules
+        s = re.sub(r'\n{3,}', '\n\n', s)                       # collapse newlines
+        s = re.sub(r'\.\.+', '.', s)                           # double periods
+        return s.strip()
+
+    def _fallback_brief(self, weekday: str, date_str: str, weather_summary: str,
+                        calendar_summary: str, news_summary: str) -> str:
+        """Minimal template brief when LLM is unavailable."""
+        return (
+            f"Here's your brief for {weekday}, {date_str}.\n\n"
+            f"{weather_summary}\n\n"
+            f"{calendar_summary}\n\n"
+            f"**Tech News**\n{news_summary}\n\n"
+            f"Have a great day."
+        )
+
+    async def _generate_llm_brief(
+        self, weekday: str, date_str: str, news_summary: str,
+        weather_summary: str, calendar_summary: str, calendar_events: List[Dict],
+        insights_summary: str,
+        stable_layer: str, context_layer: str, yesterday_summary: str,
+        tone_directive: str,
     ) -> str:
-        """Compose the full morning brief text."""
-        today_date = date.today().strftime("%B %d, %Y")
+        """Generate a cohesive morning brief via a single LLM call."""
+        try:
+            self._refresh_llm_config()
+            from app.services.tunables import get_tunable_int
+            word_min = get_tunable_int("morning_brief.target_word_count_min", 300)
+            word_max = get_tunable_int("morning_brief.target_word_count_max", 500)
+            system_msg = BRIEF_SYSTEM_PROMPT.format(
+                tone_directive=tone_directive,
+                word_min=word_min,
+                word_max=word_max,
+            )
 
-        sections = [
-            f"# Good Morning! It's {weekday}, {today_date}",
-            "",
-            weather_summary,
-            "",
-            "---",
-            "",
-        ]
+            today_str = local_today().strftime("%B %d, %Y")
+            user_msg = BRIEF_USER_PROMPT.format(
+                stable_layer=stable_layer or "Not available yet.",
+                context_layer=context_layer or "No active context.",
+                yesterday_summary=yesterday_summary or "No summary from yesterday.",
+                weather=weather_summary,
+                calendar=calendar_summary,
+                dream_insights=insights_summary or "None.",
+                news=news_summary,
+                today_date=today_str,
+            )
 
-        # FITNESS SECTIONS FIRST (per user preference)
-        if fitness_brief and fitness_brief.has_data:
-            # 1. Recovery Status (FIRST)
-            if fitness_brief.recovery_text:
-                sections.extend([
-                    fitness_brief.recovery_text,
-                    "",
-                    "---",
-                    "",
-                ])
+            llm_timeout = aiohttp.ClientTimeout(total=180)
+            async with aiohttp.ClientSession(timeout=llm_timeout) as session:
+                async with session.post(
+                    f"{self.llm_base_url}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self.llm_api_key}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "model": self.llm_model,
+                        "messages": [
+                            {"role": "system", "content": system_msg},
+                            {"role": "user", "content": user_msg},
+                        ],
+                        "temperature": 0.7,
+                        "stream": False,
+                        "chat_template_kwargs": {"enable_thinking": False},
+                    }
+                ) as response:
+                    if response.status != 200:
+                        error = await response.text()
+                        logger.error(f"LLM brief generation failed ({response.status}): {error}")
+                        return self._fallback_brief(weekday, date_str, weather_summary, calendar_summary, news_summary)
 
-            # 2. Yesterday's Nutrition
-            if fitness_brief.nutrition_text:
-                sections.extend([
-                    fitness_brief.nutrition_text,
-                    "",
-                    "---",
-                    "",
-                ])
+                    data = await response.json()
+                    content = data["choices"][0]["message"]["content"] or ""
+                    word_count = len(content.split())
+                    logger.info(f"LLM brief generated: {len(content)} chars, {word_count} words")
+                    # If thinking mode consumed all tokens, use fallback
+                    if not content.strip():
+                        logger.warning("LLM brief returned empty content, using fallback")
+                        return self._fallback_brief(weekday, date_str, weather_summary, calendar_summary, news_summary)
+                    return content
 
-            # 3. Yesterday's Workout
-            if fitness_brief.workout_recap_text:
-                sections.extend([
-                    fitness_brief.workout_recap_text,
-                    "",
-                    "---",
-                    "",
-                ])
-
-            # 4. Today's Plan
-            if fitness_brief.today_plan_text:
-                sections.extend([
-                    fitness_brief.today_plan_text,
-                    "",
-                    "---",
-                    "",
-                ])
-
-            # 5. Smart Insights (data-driven analysis)
-            if fitness_brief.insights_text:
-                sections.extend([
-                    fitness_brief.insights_text,
-                    "",
-                    "---",
-                    "",
-                ])
-
-        # Add health digest if we have data (may overlap with fitness - can be removed if redundant)
-        if health_digest and not (fitness_brief and fitness_brief.recovery_text):
-            sections.extend([
-                health_digest,
-                "",
-                "---",
-                "",
-            ])
-
-        # Add proactive insights if we have any
-        if insights_summary:
-            sections.extend([
-                insights_summary,
-                "",
-                "---",
-                "",
-            ])
-
-        sections.extend([
-            "## Tech News",
-            news_summary,
-            "",
-            "---",
-            "",
-            calendar_summary,
-            "",
-            "---",
-            "",
-            "Have a great day!"
-        ])
-
-        return "\n".join(sections)
-
-    def _compose_tts_text(
-        self,
-        weekday: str,
-        news_summary: str,
-        weather_tts: str,
-        calendar_events: List[Dict],
-        fitness_brief: Optional[FitnessRecoveryBrief] = None
-    ) -> str:
-        """Compose text optimized for TTS (more conversational)."""
-        parts = [
-            f"Good morning! It's {weekday}.",
-            "",
-            weather_tts,
-            "",
-        ]
-
-        # FITNESS SECTIONS (full TTS as requested by user)
-        if fitness_brief and fitness_brief.has_data:
-            # 1. Recovery Status
-            if fitness_brief.recovery_tts:
-                parts.append(fitness_brief.recovery_tts)
-                parts.append("")
-
-            # 2. Yesterday's Nutrition
-            if fitness_brief.nutrition_tts:
-                parts.append(fitness_brief.nutrition_tts)
-                parts.append("")
-
-            # 3. Yesterday's Workout
-            if fitness_brief.workout_recap_tts:
-                parts.append(fitness_brief.workout_recap_tts)
-                parts.append("")
-
-            # 4. Today's Plan
-            if fitness_brief.today_plan_tts:
-                parts.append(fitness_brief.today_plan_tts)
-                parts.append("")
-
-            # 5. Smart Insights
-            if fitness_brief.insights_tts:
-                parts.append(fitness_brief.insights_tts)
-                parts.append("")
-
-        # Calendar
-        if calendar_events:
-            if len(calendar_events) == 1:
-                event = calendar_events[0]
-                parts.append(f"You have one thing on the calendar today: {event['title']} at {event['starts_at']}.")
-            else:
-                parts.append(f"You have {len(calendar_events)} things scheduled today.")
-                for event in calendar_events[:3]:  # Limit to 3 for TTS
-                    parts.append(f"{event['title']} at {event['starts_at']}.")
-        else:
-            parts.append("Your calendar is clear today.")
-
-        parts.append("")
-        parts.append("Now for the tech news.")
-        parts.append(news_summary)
-        parts.append("")
-        parts.append("That's your morning brief. Have a great day!")
-
-        return " ".join(parts)
+        except Exception as e:
+            logger.error(f"Error generating LLM brief: {e}")
+            return self._fallback_brief(weekday, date_str, weather_summary, calendar_summary, news_summary)
 
     async def generate_tts_audio(self, text: str, output_path: Path) -> Optional[float]:
         """Generate TTS audio using Kokoro."""
@@ -649,10 +930,8 @@ Synthesized summary:"""
     async def send_notification(self, user_id: str, weekday: str, db: Session = None) -> bool:
         """Send iOS push notification that brief is ready."""
         try:
-            import httpx
-            from sqlalchemy import text
-            from sqlalchemy.orm import Session
-            from app.core.database import SessionLocal
+            from app.db.base import SessionLocal
+            from app.services.unified_notification import send_notification as unified_send_notification
 
             # Get database session if not provided
             close_db = False
@@ -661,46 +940,35 @@ Synthesized summary:"""
                 close_db = True
 
             try:
-                # Get user's push tokens
-                result = db.execute(text("""
-                    SELECT push_token FROM user_push_token
+                unread_row = db.execute(text("""
+                    SELECT COUNT(*)::int AS unread_count
+                    FROM shared_content
                     WHERE user_id = :user_id
-                """), {"user_id": user_id})
-                tokens = [row[0] for row in result.fetchall()]
+                      AND status = 'unread'
+                """), {"user_id": user_id}).fetchone()
+                unread_count = int(unread_row.unread_count if unread_row else 0)
 
-                if not tokens:
-                    logger.warning(f"No push tokens found for user {user_id}")
-                    return False
+                body = f"Your {weekday} briefing is ready with tech news, weather, and your schedule."
+                if unread_count > 0:
+                    item_word = "item" if unread_count == 1 else "items"
+                    body += f" Plus {unread_count} unread inbox {item_word}."
 
-                # Build Expo push messages
-                messages = []
-                for token in tokens:
-                    messages.append({
-                        "to": token,
-                        "sound": "default",
-                        "title": "Morning Brief Ready",
-                        "body": f"Your {weekday} briefing is ready with tech news, weather, and your schedule.",
-                        "data": {"screen": "MorningBrief"},
-                        "priority": "high",
-                    })
-
-                # Send to Expo push notification service
-                async with httpx.AsyncClient() as client:
-                    response = await client.post(
-                        "https://exp.host/--/api/v2/push/send",
-                        json=messages,
-                        headers={
-                            "Accept": "application/json",
-                            "Content-Type": "application/json",
-                        }
-                    )
-
-                    if response.status_code == 200:
-                        logger.info(f"📱 iOS push notification sent for morning brief to user {user_id}")
-                        return True
-                    else:
-                        logger.error(f"Push notification failed: {response.text}")
-                        return False
+                result = await unified_send_notification(
+                    user_id=user_id,
+                    title="Morning Brief Ready",
+                    message=body,
+                    priority="high",
+                    topic=f"morning_brief:{local_today().isoformat()}",
+                    category="general",
+                    source="morning_brief",
+                    cooldown_hours=24.0,
+                    db=db,
+                )
+                if result.get("sent"):
+                    logger.info(f"📱 iOS push notification sent for morning brief to user {user_id}")
+                    return True
+                logger.info(f"Morning brief push not sent for user {user_id}: {result}")
+                return False
 
             finally:
                 if close_db:
@@ -714,7 +982,7 @@ Synthesized summary:"""
         """Generate complete morning brief."""
         logger.info(f"Generating morning brief for user {user_id}")
 
-        today = date.today()
+        today = local_today()
         weekday = today.strftime("%A")
         brief_date = today.strftime("%Y-%m-%d")
 
@@ -731,39 +999,72 @@ Synthesized summary:"""
         if insights_data:
             logger.info(f"Including {len(insights_data)} proactive insights in morning brief")
 
-        # Gather health digest from the new health monitoring system
-        health_digest, health_data = await self.gather_health_digest(user_id, db)
-        if health_data:
-            logger.info(f"Including health digest with {len(health_data.get('metrics', {}))} metrics in morning brief")
+        # Phase 2: Read daily brief context layers
+        stable_content = ""
+        context_content = ""
+        yesterday_summary = ""
+        try:
+            from app.services.daily_brief import stable_layer as sl, context_layer as cl, archiver
+            stable_content = sl.read(user_id)
+            context_content = self._get_fresh_context_content(user_id, cl.read(user_id))
+            archives = archiver.get_recent_archives(user_id, days=1)
+            yesterday_summary = archives[0]["content"] if archives else ""
+            logger.info(f"Context layers: stable={len(stable_content)} chars, context={len(context_content)} chars, yesterday={len(yesterday_summary)} chars")
+        except Exception as e:
+            logger.warning(f"Failed to read context layers: {e}")
 
-        # Build comprehensive fitness and recovery brief
-        fitness_brief = await self.build_fitness_recovery_brief(user_id, db)
-        if fitness_brief.has_data:
-            logger.info(f"Including fitness brief with readiness score {fitness_brief.readiness_score}/100")
+        # Bootstrap stable layer if empty (prevents blank personal sections
+        # when the weekly synthesis hasn't run yet)
+        if not stable_content.strip():
+            stable_content = await self._bootstrap_stable_layer(user_id, db)
 
-        # Get weather TTS format if available
-        weather_tts = ""
-        if weather_data:
-            from .weather_service import WeatherData, WeatherCondition, DailyForecast
-            # Reconstruct for TTS formatting
-            try:
-                weather_obj = await weather_service.get_weather()
-                if weather_obj:
-                    weather_tts = weather_service.format_for_tts(weather_obj)
-            except:
-                weather_tts = weather_summary
+        # Check if PKG has items needing review and append to context
+        try:
+            from app.services.personal_knowledge_graph import personal_kg
+            review_items = personal_kg.get_needs_review()
+            if review_items:
+                count = len(review_items)
+                pkg_note = (
+                    f"\n\nBy the way, I have {count} knowledge item{'s' if count != 1 else ''} "
+                    "that may need your review — some things I know about you might be outdated."
+                )
+                context_content = (context_content or "") + pkg_note
+                logger.info(f"Morning brief: {count} PKG items need review, note added to context")
+        except Exception as e:
+            logger.debug(f"Morning brief: PKG review check failed: {e}")
 
-        # Compose full brief with insights, health digest, and fitness sections
-        full_text = self._compose_full_brief(
-            weekday, news_summary, weather_summary, calendar_summary,
-            insights_summary, health_digest, fitness_brief
+        # Rhythm deviation note — only surfaced when today is actually off,
+        # not a daily nag. get_off_rhythm_flags covers gym/bedtime; the wake
+        # comparison is brief-specific (compares "now" to the usual window).
+        try:
+            from app.services.daily_rhythm import get_off_rhythm_flags, get_wake_deviation_note
+            rhythm_notes = []
+            wake_note = get_wake_deviation_note(db, user_id)
+            if wake_note:
+                rhythm_notes.append(wake_note)
+            rhythm_notes += [f["message"] for f in get_off_rhythm_flags(db, user_id)]
+            if rhythm_notes:
+                context_content = (context_content or "") + "\n\nRhythm note: " + " ".join(rhythm_notes)
+        except Exception as e:
+            logger.debug(f"Morning brief: rhythm check failed: {e}")
+
+        from app.services.tunables import get_tunable_str
+        tone_directive = get_tunable_str(
+            "morning_brief.tone_directive",
+            "Warm and natural morning energy.",
         )
 
-        # Compose TTS text with fitness sections
-        tts_text = self._compose_tts_text(
-            weekday, news_summary, weather_tts or weather_summary,
-            calendar_events, fitness_brief
+        # Phase 3: Single LLM call for cohesive brief
+        date_str = today.strftime("%B %d, %Y")
+        full_text = await self._generate_llm_brief(
+            weekday, date_str, news_summary, weather_summary,
+            calendar_summary, calendar_events, insights_summary,
+            stable_content, context_content,
+            yesterday_summary, tone_directive,
         )
+
+        # Phase 5: Strip markdown for TTS
+        tts_text = self._strip_markdown_for_tts(full_text)
 
         # Generate TTS audio
         audio_dir = BRIEFINGS_BASE_PATH / user_id / brief_date
@@ -872,7 +1173,7 @@ Synthesized summary:"""
     async def get_today_brief(self, user_id: str, db: Session) -> Optional[Dict]:
         """Get today's brief from database."""
         try:
-            today = date.today().strftime("%Y-%m-%d")
+            today = local_today().strftime("%Y-%m-%d")
 
             result = db.execute(text("""
                 SELECT * FROM morning_brief
@@ -893,14 +1194,14 @@ Synthesized summary:"""
         Includes: recovery status, yesterday's nutrition, yesterday's workout, today's plan, smart insights.
         """
         try:
-            today = date.today()
+            today = local_today()
             yesterday = today - timedelta(days=1)
             today_str = today.strftime("%Y-%m-%d")
             yesterday_str = yesterday.strftime("%Y-%m-%d")
 
-            # Build all sections
+            # Build all sections (nutrition skipped — Sara has its own nutrition section)
             recovery_result = await self._build_recovery_status_section(user_id, db, today_str)
-            nutrition_result = await self._build_nutrition_recap_section(user_id, db, yesterday_str)
+            nutrition_result = {"text": "", "tts": ""}
             workout_result = await self._build_workout_recap_section(user_id, db, yesterday_str)
             today_plan_result = await self._build_today_plan_section(user_id, db, today_str)
             insights_result = await self._build_smart_insights_section(user_id, db, yesterday_str)
@@ -950,7 +1251,7 @@ Synthesized summary:"""
             """), {"user_id": user_id, "today": today_str}).fetchone()
 
             # Get 7-day averages for comparison
-            seven_days_ago = (date.today() - timedelta(days=7)).strftime("%Y-%m-%d")
+            seven_days_ago = (local_today() - timedelta(days=7)).strftime("%Y-%m-%d")
             averages = db.execute(text("""
                 SELECT
                     AVG(sleep_hours) as avg_sleep,
@@ -969,63 +1270,29 @@ Synthesized summary:"""
                     "readiness_score": 100
                 }
 
-            # Calculate readiness score (0-100)
-            readiness_score = 100
-            factors = []
-
-            # Sleep factor (30% weight) - target 7-8 hrs
-            if recovery.sleep_hours:
-                if recovery.sleep_hours < 6:
-                    readiness_score -= 30
-                    factors.append(f"only {recovery.sleep_hours:.1f} hours of sleep")
-                elif recovery.sleep_hours < 7:
-                    readiness_score -= 15
-                    factors.append(f"{recovery.sleep_hours:.1f} hours of sleep")
-                elif recovery.sleep_hours > 9:
-                    readiness_score -= 5  # Oversleep can indicate issues
-
-            # HRV factor (25% weight) - compare to baseline
-            if recovery.hrv and averages and averages.avg_hrv:
-                hrv_diff = recovery.hrv - averages.avg_hrv
-                if hrv_diff < -15:  # Significantly below baseline
-                    readiness_score -= 25
-                    factors.append(f"HRV {abs(hrv_diff):.0f}ms below baseline")
-                elif hrv_diff < -8:
-                    readiness_score -= 12
-                    factors.append(f"HRV slightly below baseline")
-
-            # Resting HR factor (20% weight) - elevated HR = poor recovery
-            if recovery.heart_rate and averages and averages.avg_hr:
-                hr_diff = recovery.heart_rate - averages.avg_hr
-                if hr_diff > 10:  # Elevated
-                    readiness_score -= 20
-                    factors.append(f"elevated resting HR ({recovery.heart_rate} bpm)")
-                elif hr_diff > 5:
-                    readiness_score -= 10
-
-            # Soreness factor (15% weight)
-            if recovery.soreness_level:
-                if recovery.soreness_level >= 8:
-                    readiness_score -= 15
-                    factors.append(f"high soreness ({recovery.soreness_level}/10)")
-                elif recovery.soreness_level >= 6:
-                    readiness_score -= 10
-                    factors.append(f"moderate soreness ({recovery.soreness_level}/10)")
-                elif recovery.soreness_level >= 4:
-                    readiness_score -= 5
-
-            # Cap score
-            readiness_score = max(0, min(100, readiness_score))
-
-            # Determine status message
-            if readiness_score >= 85:
-                status_msg = "Well recovered - good to push it today"
-            elif readiness_score >= 70:
-                status_msg = "Moderate recovery - train but listen to your body"
-            elif readiness_score >= 50:
-                status_msg = "Low recovery - consider lighter weights"
-            else:
-                status_msg = "Poor recovery - rest day recommended"
+            # Calculate readiness score via the single shared scorer (same
+            # weights the recovery API + iOS app now display — no drift).
+            from app.services.recovery_score import compute_readiness
+            _readiness = compute_readiness(
+                {
+                    "sleep_hours": recovery.sleep_hours,
+                    "hrv": recovery.hrv,
+                    "heart_rate": recovery.heart_rate,
+                    "soreness_level": recovery.soreness_level,
+                },
+                {
+                    "avg_hrv": averages.avg_hrv if averages else None,
+                    "avg_hr": averages.avg_hr if averages else None,
+                },
+            )
+            readiness_score = _readiness["score"]
+            # Keep the brief's original hyphenated phrasing for TTS continuity.
+            status_msg = {
+                "Excellent": "Well recovered - good to push it today",
+                "Good": "Moderate recovery - train but listen to your body",
+                "Low": "Low recovery - consider lighter weights",
+                "Poor": "Poor recovery - rest day recommended",
+            }[_readiness["label"]]
 
             # Build markdown text
             lines = ["## Recovery Status"]
@@ -1412,7 +1679,7 @@ Synthesized summary:"""
     async def _build_today_plan_section(self, user_id: str, db: Session, today_str: str) -> Dict:
         """Build today's workout plan section."""
         try:
-            today = date.today()
+            today = local_today()
             day_of_week = today.strftime("%A").lower()
 
             # Find active phase
@@ -1444,6 +1711,15 @@ Synthesized summary:"""
                         break
 
             if not today_template:
+                # No scheduled template — but a logged/started session still
+                # makes it a training day. Use the shared definition so this
+                # never contradicts the nutrition targets.
+                from app.services.training_day import is_training_day
+                if is_training_day(db, user_id, today)["is_training_day"]:
+                    return {
+                        "text": "## Today's Plan\n**Training Day** - Workout logged. No template scheduled for today.",
+                        "tts": "You've got a workout logged today, though nothing was scheduled from your plan."
+                    }
                 return {
                     "text": "## Today's Plan\n**Rest Day** - No workout scheduled. Focus on recovery.",
                     "tts": "Today is a rest day. No workout scheduled. Focus on recovery and stay hydrated."
@@ -1484,7 +1760,7 @@ Synthesized summary:"""
     async def _get_extended_baselines(self, user_id: str, db: Session) -> Dict:
         """Get 7-day, 30-day, and 90-day baselines for recovery metrics."""
         try:
-            today = date.today()
+            today = local_today()
             baselines = {}
 
             for period_name, days in [("7d", 7), ("30d", 30), ("90d", 90)]:
@@ -1564,7 +1840,7 @@ Synthesized summary:"""
     async def _check_fatigue_indicators(self, user_id: str, db: Session) -> Optional[str]:
         """Check for fatigue indicators that might suggest a deload."""
         try:
-            today = date.today()
+            today = local_today()
             two_weeks_ago = (today - timedelta(days=14)).strftime("%Y-%m-%d")
 
             # Check consecutive training days
@@ -1625,7 +1901,7 @@ Synthesized summary:"""
     async def _check_nutrition_patterns(self, user_id: str, db: Session) -> Optional[str]:
         """Check for nutrition patterns and streaks."""
         try:
-            today = date.today()
+            today = local_today()
             two_weeks_ago = (today - timedelta(days=14)).strftime("%Y-%m-%d")
 
             # Get daily nutrition totals for past 2 weeks
@@ -1712,7 +1988,7 @@ Synthesized summary:"""
     async def _check_progression(self, user_id: str, db: Session) -> Optional[str]:
         """Check for progressive overload on key lifts."""
         try:
-            today = date.today()
+            today = local_today()
             four_weeks_ago = (today - timedelta(days=28)).strftime("%Y-%m-%d")
             eight_weeks_ago = (today - timedelta(days=56)).strftime("%Y-%m-%d")
 
@@ -1782,10 +2058,7 @@ Synthesized summary:"""
             if fatigue_insight:
                 insights.append(("fatigue", fatigue_insight))
 
-            # Check nutrition patterns
-            nutrition_insight = await self._check_nutrition_patterns(user_id, db)
-            if nutrition_insight:
-                insights.append(("nutrition", nutrition_insight))
+            # Nutrition patterns skipped — Sara has its own nutrition section
 
             # Check progression
             progression_insight = await self._check_progression(user_id, db)
@@ -1822,7 +2095,7 @@ Synthesized summary:"""
         Returns (text, audio_path) tuple.
         """
         try:
-            today = date.today()
+            today = local_today()
             today_str = today.strftime("%Y-%m-%d")
             day_of_week = today.strftime("%A").lower()
 

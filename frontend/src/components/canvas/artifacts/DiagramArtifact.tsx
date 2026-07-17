@@ -5,11 +5,11 @@
  */
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Copy, Check, RefreshCw, AlertCircle } from 'lucide-react';
-import mermaid from 'mermaid';
+import type { MermaidConfig } from 'mermaid';
 import { Artifact, DiagramContent, ArtifactContent } from '../types';
+import { loadMermaid } from '../../../utils/mermaid';
 
-// Initialize mermaid
-mermaid.initialize({
+const MERMAID_DARK_CONFIG: MermaidConfig = {
   startOnLoad: false,
   theme: 'dark',
   themeVariables: {
@@ -31,7 +31,7 @@ mermaid.initialize({
     curve: 'basis',
     padding: 20,
   },
-});
+};
 
 interface DiagramArtifactProps {
   artifact: Artifact;
@@ -57,6 +57,9 @@ export const DiagramArtifact: React.FC<DiagramArtifactProps> = ({
     const renderId = ++renderIdRef.current;
 
     try {
+      const mermaid = await loadMermaid();
+
+      mermaid.initialize(MERMAID_DARK_CONFIG);
       setError(null);
 
       // Validate syntax first

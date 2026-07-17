@@ -5,7 +5,6 @@ import {
   TextInput,
   TouchableOpacity,
   StyleSheet,
-  KeyboardAvoidingView,
   Platform,
   Animated,
   Image,
@@ -13,13 +12,17 @@ import {
   ActionSheetIOS,
   Alert,
 } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
 import { voiceService } from '../../services/voice';
 import { imagePickerService, ImageAttachment } from '../../services/imagePicker';
+import { documentPickerService, DocumentAttachment } from '../../services/documentPicker';
 
 interface ChatInputProps {
-  onSend: (message: string, images?: ImageAttachment[]) => void;
+  onSend: (message: string, images?: ImageAttachment[], documents?: DocumentAttachment[]) => void;
   onVoiceMessage?: (audioUri: string) => void;
+  onHoldToTalkStart?: () => void;
+  onFocus?: () => void;
   disabled?: boolean;
   placeholder?: string;
   voiceEnabled?: boolean;
@@ -31,6 +34,8 @@ interface ChatInputProps {
 export default function ChatInput({
   onSend,
   onVoiceMessage,
+  onHoldToTalkStart,
+  onFocus,
   disabled = false,
   placeholder = 'Ask Sara anything...',
   voiceEnabled = true,
@@ -41,65 +46,69 @@ export default function ChatInput({
   const [message, setMessage] = useState('');
   const [isRecording, setIsRecording] = useState(false);
   const [attachedImages, setAttachedImages] = useState<ImageAttachment[]>([]);
+  const [attachedDocuments, setAttachedDocuments] = useState<DocumentAttachment[]>([]);
   const scaleAnim = useState(new Animated.Value(1))[0];
 
   // Show recording indicator for both manual and continuous modes
   const showRecording = isRecording || isListeningContinuous;
 
+  const hasAttachments = attachedImages.length > 0 || attachedDocuments.length > 0;
+
   const handleSend = () => {
-    if ((message.trim() || attachedImages.length > 0) && !disabled) {
-      onSend(message.trim(), attachedImages.length > 0 ? attachedImages : undefined);
+    if ((message.trim() || hasAttachments) && !disabled) {
+      onSend(
+        message.trim(),
+        attachedImages.length > 0 ? attachedImages : undefined,
+        attachedDocuments.length > 0 ? attachedDocuments : undefined,
+      );
       setMessage('');
       setAttachedImages([]);
+      setAttachedDocuments([]);
     }
+  };
+
+  const pickGallery = async () => {
+    const image = await imagePickerService.pickFromGallery();
+    if (image) setAttachedImages(prev => [...prev, image]);
+  };
+
+  const takePhoto = async () => {
+    const image = await imagePickerService.takePhoto();
+    if (image) setAttachedImages(prev => [...prev, image]);
+  };
+
+  const pickDocument = async () => {
+    const doc = await documentPickerService.pickDocument();
+    if (doc) setAttachedDocuments(prev => [...prev, doc]);
   };
 
   const handleAddImage = () => {
     if (Platform.OS === 'ios') {
       ActionSheetIOS.showActionSheetWithOptions(
         {
-          options: ['Cancel', 'Choose from Gallery', 'Take a Photo'],
+          options: ['Cancel', 'Choose from Gallery', 'Take a Photo', 'Choose a File'],
           cancelButtonIndex: 0,
         },
         async (buttonIndex) => {
           if (buttonIndex === 1) {
-            const image = await imagePickerService.pickFromGallery();
-            if (image) {
-              setAttachedImages(prev => [...prev, image]);
-            }
+            await pickGallery();
           } else if (buttonIndex === 2) {
-            const image = await imagePickerService.takePhoto();
-            if (image) {
-              setAttachedImages(prev => [...prev, image]);
-            }
+            await takePhoto();
+          } else if (buttonIndex === 3) {
+            await pickDocument();
           }
         }
       );
     } else {
       // Android fallback - show Alert with options
       Alert.alert(
-        'Add Image',
+        'Add Attachment',
         'Choose an option',
         [
           { text: 'Cancel', style: 'cancel' },
-          {
-            text: 'Choose from Gallery',
-            onPress: async () => {
-              const image = await imagePickerService.pickFromGallery();
-              if (image) {
-                setAttachedImages(prev => [...prev, image]);
-              }
-            },
-          },
-          {
-            text: 'Take a Photo',
-            onPress: async () => {
-              const image = await imagePickerService.takePhoto();
-              if (image) {
-                setAttachedImages(prev => [...prev, image]);
-              }
-            },
-          },
+          { text: 'Choose from Gallery', onPress: pickGallery },
+          { text: 'Take a Photo', onPress: takePhoto },
+          { text: 'Choose a File', onPress: pickDocument },
         ]
       );
     }
@@ -109,12 +118,24 @@ export default function ChatInput({
     setAttachedImages(prev => prev.filter((_, i) => i !== index));
   };
 
+  const removeDocument = (index: number) => {
+    setAttachedDocuments(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const formatFileSize = (bytes?: number) => {
+    if (!bytes) return '';
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  };
+
   const handleVoicePressIn = async () => {
     if (disabled || !onVoiceMessage) return;
 
     try {
       await voiceService.startRecording();
       setIsRecording(true);
+      onHoldToTalkStart?.();
 
       // Pulse animation
       Animated.loop(
@@ -154,33 +175,55 @@ export default function ChatInput({
   };
 
   return (
-    <KeyboardAvoidingView
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-      keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
-    >
       <View style={styles.container}>
-        {/* Continuous Voice Mode Toggle */}
-        {voiceEnabled && onToggleContinuousVoice && (
-          <TouchableOpacity
-            style={[
-              styles.continuousModeToggle,
-              continuousVoiceMode && styles.continuousModeActive
-            ]}
-            onPress={onToggleContinuousVoice}
-          >
-            <Text style={styles.toggleIcon}>{continuousVoiceMode ? '🔊' : '🔇'}</Text>
-            <Text style={styles.toggleText}>
-              {continuousVoiceMode ? 'Continuous Voice: ON' : 'Continuous Voice: OFF'}
-            </Text>
-          </TouchableOpacity>
+        {voiceEnabled && (
+          <View style={styles.voiceModesRow}>
+            {!continuousVoiceMode && (
+              <View style={styles.voiceHintChip}>
+                <Ionicons name="mic-outline" size={15} color={colors.textSecondary} />
+                <Text style={styles.voiceHintText}>Hold mic to talk</Text>
+              </View>
+            )}
+            {voiceEnabled && onToggleContinuousVoice && (
+              <TouchableOpacity
+                style={[
+                  styles.handsFreeChip,
+                  continuousVoiceMode && styles.handsFreeChipActive,
+                ]}
+                onPress={onToggleContinuousVoice}
+                activeOpacity={0.8}
+              >
+                <Ionicons
+                  name={continuousVoiceMode ? 'radio-outline' : 'headset-outline'}
+                  size={15}
+                  color={continuousVoiceMode ? colors.primary : colors.textSecondary}
+                />
+                <Text
+                  style={[
+                    styles.handsFreeChipText,
+                    continuousVoiceMode && styles.handsFreeChipTextActive,
+                  ]}
+                >
+                  {continuousVoiceMode
+                    ? (isListeningContinuous ? 'Hands-free listening' : 'Hands-free on')
+                    : 'Hands-free'}
+                </Text>
+              </TouchableOpacity>
+            )}
+          </View>
         )}
 
         {showRecording && (
           <View style={styles.recordingIndicator}>
             <Animated.View style={[styles.recordingDot, { transform: [{ scale: scaleAnim }] }]} />
-            <Text style={styles.recordingText}>
-              {continuousVoiceMode ? 'Listening... (speak now)' : 'Recording... Release to send'}
-            </Text>
+            <View style={styles.recordingCopy}>
+              <Text style={styles.recordingLabel}>
+                {continuousVoiceMode ? 'Hands-free is listening' : 'Recording your message'}
+              </Text>
+              <Text style={styles.recordingText}>
+                {continuousVoiceMode ? 'Speak naturally. Sara will reply, then listen again.' : 'Lift your finger to send.'}
+              </Text>
+            </View>
           </View>
         )}
 
@@ -206,6 +249,31 @@ export default function ChatInput({
           </ScrollView>
         )}
 
+        {/* Attached Documents Preview */}
+        {attachedDocuments.length > 0 && (
+          <View style={styles.documentPreviewContainer}>
+            {attachedDocuments.map((doc, index) => (
+              <View key={index} style={styles.documentChip}>
+                <Ionicons name="document-text-outline" size={18} color={colors.primary} />
+                <View style={styles.documentChipInfo}>
+                  <Text style={styles.documentChipName} numberOfLines={1}>
+                    {doc.name}
+                  </Text>
+                  {!!formatFileSize(doc.size) && (
+                    <Text style={styles.documentChipSize}>{formatFileSize(doc.size)}</Text>
+                  )}
+                </View>
+                <TouchableOpacity
+                  style={styles.removeDocumentButton}
+                  onPress={() => removeDocument(index)}
+                >
+                  <Ionicons name="close" size={14} color={colors.text} />
+                </TouchableOpacity>
+              </View>
+            ))}
+          </View>
+        )}
+
         <View style={styles.inputContainer}>
           {/* Add image button */}
           <TouchableOpacity
@@ -213,22 +281,22 @@ export default function ChatInput({
             onPress={handleAddImage}
             disabled={disabled}
           >
-            <Text style={styles.imageButtonText}>📎</Text>
+            <Ionicons name="attach-outline" size={18} color={colors.textSecondary} />
           </TouchableOpacity>
 
           <TextInput
             style={styles.input}
             value={message}
-            onChangeText={setMessage}
-            placeholder={placeholder}
-            placeholderTextColor={colors.textMuted}
-            multiline
-            maxLength={2000}
-            editable={!disabled && !isRecording && !continuousVoiceMode}
+          onChangeText={setMessage}
+          placeholder={placeholder}
+          placeholderTextColor={colors.textMuted}
+          onFocus={onFocus}
+          multiline
+          editable={!disabled && !isRecording && !continuousVoiceMode}
             onSubmitEditing={handleSend}
             blurOnSubmit={false}
           />
-          {voiceEnabled && onVoiceMessage && !message.trim() && attachedImages.length === 0 && !continuousVoiceMode ? (
+          {voiceEnabled && onVoiceMessage && !message.trim() && !hasAttachments && !continuousVoiceMode ? (
             <TouchableOpacity
               style={[
                 styles.voiceButton,
@@ -240,25 +308,26 @@ export default function ChatInput({
               disabled={disabled}
               activeOpacity={1}
             >
-              <Text style={styles.voiceButtonText}>
-                {isRecording ? '🎙️' : '🎤'}
-              </Text>
+              <Ionicons
+                name={isRecording ? 'mic' : 'mic-outline'}
+                size={18}
+                color={colors.text}
+              />
             </TouchableOpacity>
-          ) : (message.trim() || attachedImages.length > 0) && !continuousVoiceMode ? (
+          ) : (message.trim() || hasAttachments) && !continuousVoiceMode ? (
             <TouchableOpacity
               style={[
                 styles.sendButton,
-                ((!message.trim() && attachedImages.length === 0) || disabled) && styles.sendButtonDisabled,
+                ((!message.trim() && !hasAttachments) || disabled) && styles.sendButtonDisabled,
               ]}
               onPress={handleSend}
-              disabled={(!message.trim() && attachedImages.length === 0) || disabled}
+              disabled={(!message.trim() && !hasAttachments) || disabled}
             >
-              <Text style={styles.sendButtonText}>➤</Text>
+              <Ionicons name="arrow-up" size={18} color={colors.text} />
             </TouchableOpacity>
           ) : null}
         </View>
       </View>
-    </KeyboardAvoidingView>
   );
 }
 
@@ -270,36 +339,61 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.sm,
   },
-  continuousModeToggle: {
+  voiceModesRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
+    justifyContent: 'space-between',
+    gap: spacing.sm,
+    marginBottom: spacing.sm,
+  },
+  voiceHintChip: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.md,
+    backgroundColor: colors.background,
+    borderRadius: borderRadius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  voiceHintText: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    fontWeight: '500',
+  },
+  handsFreeChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.md,
+    backgroundColor: colors.background,
+    borderRadius: borderRadius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  handsFreeChipActive: {
+    backgroundColor: 'rgba(13, 127, 242, 0.12)',
+    borderColor: colors.primary,
+  },
+  handsFreeChipText: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    fontWeight: '600',
+  },
+  handsFreeChipTextActive: {
+    color: colors.primary,
+  },
+  recordingIndicator: {
+    flexDirection: 'row',
+    alignItems: 'center',
     paddingVertical: spacing.sm,
     paddingHorizontal: spacing.md,
     backgroundColor: colors.background,
     borderRadius: borderRadius.md,
     marginBottom: spacing.sm,
-    borderWidth: 2,
-    borderColor: colors.border,
-  },
-  continuousModeActive: {
-    backgroundColor: colors.primary + '20',
-    borderColor: colors.primary,
-  },
-  toggleIcon: {
-    fontSize: 20,
-    marginRight: spacing.sm,
-  },
-  toggleText: {
-    color: colors.text,
-    fontSize: fontSizes.sm,
-    fontWeight: '600',
-  },
-  recordingIndicator: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: spacing.sm,
   },
   recordingDot: {
     width: 12,
@@ -308,10 +402,19 @@ const styles = StyleSheet.create({
     backgroundColor: colors.error,
     marginRight: spacing.sm,
   },
-  recordingText: {
-    color: colors.error,
+  recordingCopy: {
+    flex: 1,
+  },
+  recordingLabel: {
+    color: colors.text,
     fontSize: fontSizes.sm,
     fontWeight: '600',
+    marginBottom: 2,
+  },
+  recordingText: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.xs,
+    lineHeight: 17,
   },
   inputContainer: {
     flexDirection: 'row',
@@ -410,5 +513,41 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: 'bold',
     lineHeight: 18,
+  },
+  documentPreviewContainer: {
+    marginBottom: spacing.sm,
+    gap: spacing.xs,
+  },
+  documentChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.background,
+    borderRadius: borderRadius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.md,
+    gap: spacing.sm,
+  },
+  documentChipInfo: {
+    flex: 1,
+  },
+  documentChipName: {
+    color: colors.text,
+    fontSize: fontSizes.sm,
+    fontWeight: '600',
+  },
+  documentChipSize: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.xs,
+    marginTop: 1,
+  },
+  removeDocumentButton: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: colors.error,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
 });

@@ -6,9 +6,16 @@ import { formatSleepHours } from '../../utils/formatters'
 interface Exercise {
   name: string
   sets: number
+  sets_original?: number          // pre-deload set count, when deload is active
   reps: string
   rpe_target?: number
+  rest_seconds?: number
   notes?: string
+  // Advanced execution markers
+  metric_type?: 'reps' | 'time_seconds'
+  is_per_side?: boolean
+  superset_group?: string | null
+  set_technique?: 'drop_set' | 'rest_pause' | 'amrap' | 'myo_reps' | null
   weight_suggestion?: {
     suggested_weight: number | null
     confidence: string
@@ -20,6 +27,27 @@ interface Exercise {
       trend: string
     }
   }
+}
+
+interface PhaseNutrition {
+  calories_target?: number | null
+  protein_target?: number | null
+  carbs_target?: number | null
+  fat_target?: number | null
+  calories_training_day?: number | null
+  calories_rest_day?: number | null
+  carbs_training_day?: number | null
+  carbs_rest_day?: number | null
+  fat_training_day?: number | null
+  fat_rest_day?: number | null
+  daily_steps_target?: number | null
+}
+
+const SET_TECHNIQUE_LABEL: Record<string, string> = {
+  drop_set: 'Drop set on last',
+  rest_pause: 'Rest-pause on last',
+  amrap: 'AMRAP on last',
+  myo_reps: 'Myo-reps on last',
 }
 
 interface LoggedSet {
@@ -42,6 +70,11 @@ interface WorkoutSession {
   started_at?: string
   exercises: Exercise[]
   logged_sets: LoggedSet[]
+  is_deload?: boolean
+  week_of_phase?: number | null
+  deload_week?: number | null
+  phase_name?: string | null
+  phase_nutrition?: PhaseNutrition | null
   recovery_data?: {
     hrv?: number
     heart_rate?: number
@@ -232,25 +265,53 @@ export default function ActiveWorkout({ sessionId, onClose }: ActiveWorkoutProps
             </div>
           </div>
 
-          {/* Recovery Badge */}
-          {session.recovery_data && (
-            <div className="flex gap-2 text-xs">
-              {session.recovery_data.soreness_level && (
-                <div className={`px-2 py-1 rounded ${
-                  session.recovery_data.soreness_level <= 3 ? 'bg-green-600/20 text-green-400' :
-                  session.recovery_data.soreness_level <= 6 ? 'bg-yellow-600/20 text-yellow-400' :
-                  'bg-red-600/20 text-red-400'
-                }`}>
-                  Soreness: {session.recovery_data.soreness_level}/10
-                </div>
-              )}
-              {session.recovery_data.sleep_hours && (
-                <div className="px-2 py-1 rounded bg-blue-600/20 text-blue-400">
-                  Sleep: {formatSleepHours(session.recovery_data.sleep_hours)}
-                </div>
-              )}
+          {/* Deload banner */}
+          {session.is_deload && (
+            <div className="mb-3 px-4 py-3 rounded-lg bg-amber-900/40 border border-amber-600/60 text-amber-200 text-sm font-medium">
+              ⚠ DELOAD WEEK · {session.phase_name} · week {session.week_of_phase} of phase
+              <div className="text-xs text-amber-300/80 mt-1 font-normal">
+                Working weights cut to 60%, sets halved. Recover, don't grind.
+              </div>
             </div>
           )}
+
+          {/* Recovery Badge + nutrition targets */}
+          <div className="flex gap-2 text-xs flex-wrap">
+            {session.recovery_data?.soreness_level && (
+              <div className={`px-2 py-1 rounded ${
+                session.recovery_data.soreness_level <= 3 ? 'bg-green-600/20 text-green-400' :
+                session.recovery_data.soreness_level <= 6 ? 'bg-yellow-600/20 text-yellow-400' :
+                'bg-red-600/20 text-red-400'
+              }`}>
+                Soreness: {session.recovery_data.soreness_level}/10
+              </div>
+            )}
+            {session.recovery_data?.sleep_hours && (
+              <div className="px-2 py-1 rounded bg-blue-600/20 text-blue-400">
+                Sleep: {formatSleepHours(session.recovery_data.sleep_hours)}
+              </div>
+            )}
+            {/* Today is a training day — show training-day macros if cycling is configured */}
+            {session.phase_nutrition?.calories_training_day && (
+              <div className="px-2 py-1 rounded bg-purple-600/20 text-purple-300">
+                Training-day target: {session.phase_nutrition.calories_training_day} kcal
+                {session.phase_nutrition.carbs_training_day != null && (
+                  <span> · {session.phase_nutrition.carbs_training_day}C</span>
+                )}
+                {session.phase_nutrition.fat_training_day != null && (
+                  <span> · {session.phase_nutrition.fat_training_day}F</span>
+                )}
+                {session.phase_nutrition.protein_target != null && (
+                  <span> · {session.phase_nutrition.protein_target}P</span>
+                )}
+              </div>
+            )}
+            {session.phase_nutrition?.daily_steps_target && (
+              <div className="px-2 py-1 rounded bg-emerald-600/20 text-emerald-300">
+                Steps target: {session.phase_nutrition.daily_steps_target.toLocaleString()}
+              </div>
+            )}
+          </div>
 
           {/* Start Button */}
           {!isWorkoutStarted && (
@@ -299,7 +360,36 @@ export default function ActiveWorkout({ sessionId, onClose }: ActiveWorkoutProps
               {/* Exercise Details */}
               {currentExercise && (
                 <div className="bg-gray-900 rounded-lg p-6 mb-6">
-                  <h3 className="text-xl font-bold text-white mb-4">{currentExercise.name}</h3>
+                  <div className="flex items-start justify-between gap-3 mb-4">
+                    <h3 className="text-xl font-bold text-white">{currentExercise.name}</h3>
+                    <div className="flex gap-1.5 flex-wrap justify-end">
+                      {currentExercise.is_per_side && (
+                        <span className="px-2 py-0.5 rounded text-xs font-medium bg-cyan-600/20 text-cyan-300 border border-cyan-700/40">
+                          per side
+                        </span>
+                      )}
+                      {currentExercise.metric_type === 'time_seconds' && (
+                        <span className="px-2 py-0.5 rounded text-xs font-medium bg-indigo-600/20 text-indigo-300 border border-indigo-700/40">
+                          hold (seconds)
+                        </span>
+                      )}
+                      {currentExercise.superset_group && (
+                        <span className="px-2 py-0.5 rounded text-xs font-medium bg-pink-600/20 text-pink-300 border border-pink-700/40">
+                          Superset {currentExercise.superset_group}
+                        </span>
+                      )}
+                      {currentExercise.set_technique && (
+                        <span className="px-2 py-0.5 rounded text-xs font-medium bg-orange-600/20 text-orange-300 border border-orange-700/40">
+                          {SET_TECHNIQUE_LABEL[currentExercise.set_technique] || currentExercise.set_technique}
+                        </span>
+                      )}
+                      {currentExercise.sets_original && currentExercise.sets_original !== currentExercise.sets && (
+                        <span className="px-2 py-0.5 rounded text-xs font-medium bg-amber-600/20 text-amber-300 border border-amber-700/40">
+                          deload {currentExercise.sets}/{currentExercise.sets_original} sets
+                        </span>
+                      )}
+                    </div>
+                  </div>
 
                   <div className="grid grid-cols-3 gap-4 mb-4">
                     <div className="text-center">
@@ -308,7 +398,10 @@ export default function ActiveWorkout({ sessionId, onClose }: ActiveWorkoutProps
                     </div>
                     <div className="text-center">
                       <div className="text-2xl font-bold text-blue-400">{currentExercise.reps}</div>
-                      <div className="text-sm text-gray-400">Reps</div>
+                      <div className="text-sm text-gray-400">
+                        {currentExercise.metric_type === 'time_seconds' ? 'Seconds' : 'Reps'}
+                        {currentExercise.is_per_side ? ' / side' : ''}
+                      </div>
                     </div>
                     <div className="text-center">
                       <div className="text-2xl font-bold text-green-400">{currentExercise.rpe_target || '-'}</div>
@@ -403,13 +496,14 @@ export default function ActiveWorkout({ sessionId, onClose }: ActiveWorkoutProps
                     </div>
                     <div>
                       <label className="block text-sm font-medium text-gray-300 mb-2">
-                        Reps
+                        {currentExercise?.metric_type === 'time_seconds' ? 'Seconds held' : 'Reps'}
+                        {currentExercise?.is_per_side ? ' (per side)' : ''}
                       </label>
                       <input
                         type="number"
                         value={reps}
                         onChange={(e) => setReps(e.target.value)}
-                        placeholder="10"
+                        placeholder={currentExercise?.metric_type === 'time_seconds' ? '45' : '10'}
                         className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:outline-none focus:border-purple-500"
                       />
                     </div>

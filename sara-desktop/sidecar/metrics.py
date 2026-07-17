@@ -4,6 +4,7 @@ System Metrics Collection for Sara Headless Agent
 Collects CPU, RAM, disk, network, and optional GPU metrics.
 """
 import logging
+import os
 import platform
 from dataclasses import dataclass, asdict
 from typing import Dict, List, Optional, Any
@@ -145,7 +146,6 @@ class MetricsCollector:
         # Load average (Unix only)
         load_avg = None
         if hasattr(os, 'getloadavg'):
-            import os
             load_avg = os.getloadavg()
 
         return CPUMetrics(

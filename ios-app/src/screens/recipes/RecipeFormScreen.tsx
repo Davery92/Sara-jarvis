@@ -467,7 +467,7 @@ const styles = StyleSheet.create({
     fontStyle: 'italic',
   },
   removeText: {
-    color: '#FF6B6B',
+    color: colors.error,
     fontSize: fontSizes.sm,
     fontWeight: '600',
   },

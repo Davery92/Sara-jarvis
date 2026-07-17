@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "Sara Desktop Context",
+  "version": "1.0.0",
+  "description": "Streams the active browser tab's URL and title to the Sara desktop sidecar so Sara knows which site you're on.",
+  "permissions": ["tabs"],
+  "background": {
+    "service_worker": "background.js"
+  }
+}

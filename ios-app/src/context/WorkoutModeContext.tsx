@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { fitnessService, ActiveWorkoutSession, LogSetParams, RestTimerStatus } from '../services/fitness';
+import { startEvent, updateEvent, endEvent } from '../services/eventActivity';
 
 interface WorkoutModeContextType {
   // State
@@ -12,8 +13,15 @@ interface WorkoutModeContextType {
 
   // Actions
   startWorkout: (templateId: string) => Promise<ActiveWorkoutSession | null>;
-  logSet: (params: LogSetParams) => Promise<{ success: boolean; coaching_feedback?: string }>;
+  logSet: (params: LogSetParams) => Promise<{
+    success: boolean;
+    coaching_feedback?: string;
+    rest_seconds?: number;
+    pr?: { is_pr: boolean; estimated_1rm?: number; previous_best?: number | null } | null;
+  }>;
   skipExercise: () => Promise<void>;
+  selectExercise: (exerciseIndex: number) => Promise<void>;
+  setVariant: (exerciseIndex: number, variant: string | null) => Promise<void>;
   startRestTimer: (duration?: number) => Promise<void>;
   stopRestTimer: () => Promise<void>;
   completeWorkout: () => Promise<{ summary?: any }>;
@@ -40,6 +48,29 @@ export function WorkoutModeProvider({ children }: { children: React.ReactNode })
   const restTimerIntervalRef = useRef<NodeJS.Timeout | null>(null);
   // Local timer tracking (independent of session refresh)
   const localTimerRef = useRef<{ startTime: number; duration: number } | null>(null);
+
+  // Drive the workout Live Activity (count-up) off the active session.
+  const workoutActivityRef = useRef<string | null>(null);
+  useEffect(() => {
+    const active = session && session.status === 'active';
+    if (active) {
+      const title = session.workout_snapshot?.name || 'Workout';
+      const ex = session.workout_snapshot?.exercises?.[session.current_exercise_index];
+      const subtitle = ex?.name || 'In progress';
+      const startMsRaw = session.started_at ? new Date(session.started_at).getTime() : Date.now();
+      const startMs = isNaN(startMsRaw) ? Date.now() : startMsRaw;
+      if (workoutActivityRef.current !== session.id) {
+        if (workoutActivityRef.current) endEvent(workoutActivityRef.current);
+        startEvent(session.id, 'workout', title, subtitle, startMs);
+        workoutActivityRef.current = session.id;
+      } else {
+        updateEvent(session.id, subtitle, startMs);
+      }
+    } else if (workoutActivityRef.current) {
+      endEvent(workoutActivityRef.current);
+      workoutActivityRef.current = null;
+    }
+  }, [session]);
 
   // Check for active session on mount
   useEffect(() => {
@@ -179,6 +210,8 @@ export function WorkoutModeProvider({ children }: { children: React.ReactNode })
       return {
         success: result.success,
         coaching_feedback: result.coaching_feedback,
+        rest_seconds: result.next_set?.rest_seconds,
+        pr: result.pr ?? null,
       };
     } catch (err: any) {
       console.error('Failed to log set:', err);
@@ -198,12 +231,39 @@ export function WorkoutModeProvider({ children }: { children: React.ReactNode })
     }
   };
 
+  const selectExercise = async (exerciseIndex: number) => {
+    try {
+      setError(null);
+      // Optimistically move the cursor so the UI responds instantly; the next
+      // poll / refresh reconciles current_set_index from the backend.
+      setSession(prev => prev ? { ...prev, current_exercise_index: exerciseIndex } : prev);
+      await fitnessService.selectExercise(exerciseIndex);
+      await refreshSession();
+    } catch (err: any) {
+      console.error('Failed to select exercise:', err);
+      setError(err.message);
+      await refreshSession();
+    }
+  };
+
+  const setVariant = async (exerciseIndex: number, variant: string | null) => {
+    try {
+      setError(null);
+      await fitnessService.setExerciseVariant(exerciseIndex, variant);
+      await refreshSession();
+    } catch (err: any) {
+      console.error('Failed to set exercise variant:', err);
+      setError(err.message);
+    }
+  };
+
   const startRestTimer = async (duration?: number) => {
     try {
       const defaultDuration = duration || 120;
+      const startedAt = Date.now();
       // Set local ref for immediate countdown (avoids stale closure issues)
       localTimerRef.current = {
-        startTime: Date.now(),
+        startTime: startedAt,
         duration: defaultDuration,
       };
       // Immediately show the timer
@@ -212,6 +272,15 @@ export function WorkoutModeProvider({ children }: { children: React.ReactNode })
         remaining_seconds: defaultDuration,
         total_seconds: defaultDuration,
       });
+      // Keep the session's timer fields in sync too, so the resume-fallback in
+      // updateRestTimer can never resurrect a stale (pre-log) countdown after a
+      // refreshSession races in with the old backend timer. This is what made
+      // logging a set mid-countdown fail to reset the timer.
+      setSession(prev => prev ? {
+        ...prev,
+        rest_timer_started_at: new Date(startedAt).toISOString(),
+        rest_timer_duration_seconds: defaultDuration,
+      } : prev);
       // Persist to backend (non-blocking)
       fitnessService.manageRestTimer('start', defaultDuration).catch(err => {
         console.error('Failed to persist rest timer:', err);
@@ -244,6 +313,14 @@ export function WorkoutModeProvider({ children }: { children: React.ReactNode })
     } catch (err: any) {
       console.error('Failed to complete workout:', err);
       setError(err.message);
+      // David tried to end the workout — even though the server call failed,
+      // the Live Activity must not keep ticking as if it's still in progress
+      // (the session-effect's endEvent only fires when `session` clears,
+      // which doesn't happen on this error path).
+      if (workoutActivityRef.current) {
+        endEvent(workoutActivityRef.current);
+        workoutActivityRef.current = null;
+      }
       return {};
     } finally {
       setIsLoading(false);
@@ -260,6 +337,10 @@ export function WorkoutModeProvider({ children }: { children: React.ReactNode })
     } catch (err: any) {
       console.error('Failed to abandon workout:', err);
       setError(err.message);
+      if (workoutActivityRef.current) {
+        endEvent(workoutActivityRef.current);
+        workoutActivityRef.current = null;
+      }
     } finally {
       setIsLoading(false);
     }
@@ -286,6 +367,8 @@ export function WorkoutModeProvider({ children }: { children: React.ReactNode })
     startWorkout,
     logSet,
     skipExercise,
+    selectExercise,
+    setVariant,
     startRestTimer,
     stopRestTimer,
     completeWorkout,

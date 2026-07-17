@@ -6,24 +6,34 @@ class BackgroundTaskService {
   private listeners: Set<(tasks: BackgroundTask[]) => void> = new Set();
   private clarificationListeners: Set<(task: BackgroundTask | null) => void> = new Set();
   private lastTasks: BackgroundTask[] = [];
+  private baseIntervalMs: number = 30000;
 
   /**
    * Start polling for background tasks
    */
-  startPolling(intervalMs: number = 5000): void {
+  startPolling(intervalMs: number = 30000): void {
     if (this.pollingInterval) {
       return; // Already polling
     }
 
+    this.baseIntervalMs = intervalMs;
+
     // Fetch immediately
     this.fetchTasks();
 
-    // Then poll at interval
-    this.pollingInterval = setInterval(() => {
-      this.fetchTasks();
-    }, intervalMs);
+    // Start adaptive polling
+    this.scheduleNextPoll();
 
     console.log('[BackgroundTasks] Started polling');
+  }
+
+  private scheduleNextPoll(): void {
+    const hasActive = this.lastTasks.some(t => t.status === 'pending' || t.status === 'running');
+    const interval = hasActive ? this.baseIntervalMs : 60000; // active: base (10s); idle: 60s
+
+    this.pollingInterval = setTimeout(() => {
+      this.fetchTasks().then(() => this.scheduleNextPoll());
+    }, interval);
   }
 
   /**
@@ -31,7 +41,7 @@ class BackgroundTaskService {
    */
   stopPolling(): void {
     if (this.pollingInterval) {
-      clearInterval(this.pollingInterval);
+      clearTimeout(this.pollingInterval);
       this.pollingInterval = null;
       console.log('[BackgroundTasks] Stopped polling');
     }

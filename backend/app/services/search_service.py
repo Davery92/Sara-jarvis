@@ -1,5 +1,7 @@
 import asyncio
+import base64
 import hashlib
+import io
 import json
 import logging
 from typing import Any, Dict, List, Optional, Tuple
@@ -9,9 +11,12 @@ from readability import Document
 from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 from redis.asyncio import Redis
 from app.core.config import settings
+from app.core.llm_config import llm_config
+from app.core.vision_formatters import OllamaVisionFormatter
 from app.core.llm import llm_client
 
 logger = logging.getLogger(__name__)
+PAGE_CACHE_VERSION = "v2"
 
 
 def _strip_tracking_params(url: str) -> str:
@@ -86,6 +91,234 @@ class SearchService:
         if r in ("month", "30d"):
             return "month"
         return None
+
+    @staticmethod
+    def _is_pdf_response(request_url: str, final_url: str, content_type: str) -> bool:
+        """Treat explicit PDF content-types and .pdf URLs as PDF documents."""
+        ct = (content_type or "").lower()
+        if "application/pdf" in ct:
+            return True
+
+        for candidate in (request_url, final_url):
+            if candidate and candidate.lower().split("?", 1)[0].endswith(".pdf"):
+                return True
+
+        return False
+
+    @staticmethod
+    def _pdf_title_from_url(url: str) -> str:
+        path = urlparse(url).path.rsplit("/", 1)[-1]
+        return path or "PDF document"
+
+    @staticmethod
+    def _extract_pdf_text_sync(pdf_bytes: bytes, source_url: str) -> Tuple[str, str, bool]:
+        """Extract text from PDF bytes using pypdf in a worker thread."""
+        try:
+            import pypdf
+        except ImportError:
+            logger.warning("pypdf not installed - PDF extraction unavailable")
+            return (
+                SearchService._pdf_title_from_url(source_url),
+                "[PDF detected, but text extraction is unavailable because pypdf is not installed.]",
+                False,
+            )
+
+        title = SearchService._pdf_title_from_url(source_url)
+
+        try:
+            reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+        except Exception as e:
+            logger.warning(f"Failed to open PDF {source_url}: {e}")
+            return (
+                title,
+                f"[PDF detected, but the file could not be parsed: {e}]",
+                False,
+            )
+
+        metadata = getattr(reader, "metadata", None)
+        if metadata:
+            meta_title = getattr(metadata, "title", None) or metadata.get("/Title")
+            if meta_title:
+                title = str(meta_title).strip() or title
+
+        chunks: List[str] = []
+        total_chars = 0
+        max_chars = 200_000
+
+        for page_number, page in enumerate(reader.pages, start=1):
+            try:
+                page_text = (page.extract_text() or "").strip()
+            except Exception as e:
+                logger.debug(f"PDF page extraction failed for {source_url} page {page_number}: {e}")
+                continue
+
+            if not page_text:
+                continue
+
+            remaining = max_chars - total_chars
+            if remaining <= 0:
+                break
+
+            if len(page_text) > remaining:
+                page_text = page_text[:remaining]
+
+            chunks.append(page_text)
+            total_chars += len(page_text)
+
+            if total_chars >= max_chars:
+                chunks.append("\n\n[PDF text truncated]")
+                break
+
+        plain_text = "\n\n".join(chunks).strip()
+        if not plain_text:
+            plain_text = (
+                "[PDF detected, but no readable text was extracted. "
+                "The document may be image-based, encrypted, or malformed.]"
+            )
+            return title, plain_text, False
+
+        return title, plain_text, True
+
+    async def _extract_pdf_text(self, pdf_bytes: bytes, source_url: str) -> Tuple[str, str, bool]:
+        return await asyncio.to_thread(self._extract_pdf_text_sync, pdf_bytes, source_url)
+
+    @staticmethod
+    def _extract_pdf_page_images_sync(
+        pdf_bytes: bytes,
+        source_url: str,
+        max_pages: int = 3,
+    ) -> List[Dict[str, Any]]:
+        """Extract the largest embedded image from up to `max_pages` PDF pages."""
+        try:
+            import pypdf
+        except ImportError:
+            return []
+
+        try:
+            reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+        except Exception as e:
+            logger.warning(f"Failed to open PDF for vision fallback {source_url}: {e}")
+            return []
+
+        images: List[Dict[str, Any]] = []
+        total_pages = min(len(reader.pages), max_pages)
+
+        for page_number in range(total_pages):
+            try:
+                page_images = list(reader.pages[page_number].images)
+            except Exception as e:
+                logger.debug(
+                    f"Failed to enumerate PDF images for {source_url} page {page_number + 1}: {e}"
+                )
+                continue
+
+            if not page_images:
+                continue
+
+            image_file = max(
+                page_images,
+                key=lambda img: len(getattr(img, "data", b"") or b""),
+            )
+
+            image_bytes: Optional[bytes] = None
+            media_type = "image/png"
+
+            pil_image = getattr(image_file, "image", None)
+            if pil_image is not None:
+                try:
+                    with io.BytesIO() as buffer:
+                        pil_image.save(buffer, format="PNG")
+                        image_bytes = buffer.getvalue()
+                except Exception as e:
+                    logger.debug(
+                        f"Failed to normalize PDF page image for {source_url} page {page_number + 1}: {e}"
+                    )
+
+            if image_bytes is None:
+                raw_data = getattr(image_file, "data", None)
+                if not raw_data:
+                    continue
+                image_bytes = raw_data
+                name = (getattr(image_file, "name", "") or "").lower()
+                if name.endswith((".jpg", ".jpeg")):
+                    media_type = "image/jpeg"
+
+            images.append({
+                "page_number": page_number + 1,
+                "media_type": media_type,
+                "data": base64.b64encode(image_bytes).decode("utf-8"),
+            })
+
+        return images
+
+    async def _extract_pdf_page_images(
+        self,
+        pdf_bytes: bytes,
+        source_url: str,
+        max_pages: int = 3,
+    ) -> List[Dict[str, Any]]:
+        return await asyncio.to_thread(
+            self._extract_pdf_page_images_sync,
+            pdf_bytes,
+            source_url,
+            max_pages,
+        )
+
+    async def _ocr_pdf_with_vision(self, pdf_bytes: bytes, source_url: str) -> Optional[str]:
+        """Use the configured vision model to OCR embedded PDF page images."""
+        page_images = await self._extract_pdf_page_images(pdf_bytes, source_url, max_pages=3)
+        if not page_images:
+            return None
+
+        formatter = OllamaVisionFormatter()
+        prompt = (
+            "These are images extracted from the first pages of a PDF document. "
+            "Transcribe all readable text as faithfully as possible. Preserve exact names, "
+            "numbers, dates, headings, patent identifiers, and structured labels. "
+            "If some text is unreadable, note that briefly. Return plain text only."
+        )
+
+        content_blocks: List[Dict[str, Any]] = [
+            {
+                "type": "image",
+                "data": image["data"],
+                "media_type": image["media_type"],
+            }
+            for image in page_images
+        ]
+        content_blocks.append({"type": "text", "text": prompt})
+
+        formatted = formatter.format_message_content(content_blocks)
+        request_body = {
+            "model": llm_config.vision_model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": formatted["content"],
+                    "images": formatted["images"],
+                }
+            ],
+            "stream": False,
+        }
+
+        endpoint = llm_config.vision_url.rstrip("/")
+        try:
+            async with httpx.AsyncClient(timeout=45.0) as client:
+                response = await client.post(f"{endpoint}/api/chat", json=request_body)
+                response.raise_for_status()
+                result = response.json()
+        except Exception as e:
+            logger.warning(f"Vision OCR fallback failed for {source_url}: {e}")
+            return None
+
+        ocr_text = (result.get("message", {}) or {}).get("content", "").strip()
+        if not ocr_text:
+            return None
+
+        return (
+            "[Vision OCR from embedded PDF page images; extracted from the first 3 pages]\n\n"
+            + ocr_text
+        )
 
     async def _tavily_search(self, query: str, recency: Optional[str], sites: Optional[List[str]], limit: int = 12) -> List[Dict[str, Any]]:
         """Search using Tavily API"""
@@ -182,7 +415,7 @@ class SearchService:
     async def _fetch_and_extract(self, url: str) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
         # Returns: title, final_url, readable_html, plain_text
         can_url = _strip_tracking_params(url)
-        cache_key = f"page:{_hash_key([can_url])}"
+        cache_key = f"page:{PAGE_CACHE_VERSION}:{_hash_key([can_url])}"
         if self.redis:
             cached = await self.redis.get(cache_key)
             if cached:
@@ -195,6 +428,25 @@ class SearchService:
         try:
             resp = await self.http.get(can_url, follow_redirects=True)
             resp.raise_for_status()
+            final_url = str(resp.url)
+            content_type = resp.headers.get("content-type", "")
+
+            if self._is_pdf_response(can_url, final_url, content_type):
+                title, plain_text, extracted_text = await self._extract_pdf_text(resp.content, final_url)
+                if not extracted_text:
+                    vision_text = await self._ocr_pdf_with_vision(resp.content, final_url)
+                    if vision_text:
+                        plain_text = vision_text
+                bundle = {
+                    "title": title,
+                    "final_url": final_url,
+                    "readable_html": "",
+                    "plain_text": plain_text,
+                }
+                if self.redis:
+                    await self.redis.set(cache_key, json.dumps(bundle), ex=self.page_ttl)
+                return title, final_url, "", plain_text
+
             html = resp.text
             doc = Document(html)
             readable_html = doc.summary(html_partial=True)
@@ -207,7 +459,6 @@ class SearchService:
                 plain_text = tree.text_content()
             except Exception:
                 pass
-            final_url = str(resp.url)
             bundle = {
                 "title": title,
                 "final_url": final_url,

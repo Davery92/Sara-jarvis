@@ -11,6 +11,7 @@ import {
   RefreshControl,
   TextInput,
   Platform,
+  Linking,
 } from 'react-native';
 import { Picker } from '@react-native-picker/picker';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -23,11 +24,14 @@ import {
   UserPreferences,
   Episode,
 } from '../../services/settings';
-import { apiClient } from '../../services/api';
+import { apiClient, CodexOAuthStatus } from '../../services/api';
 import ProfileSection from '../../components/settings/ProfileSection';
 import MemoryListItem from '../../components/settings/MemoryListItem';
+import SchedulesSection from '../../components/settings/SchedulesSection';
+import TunablesSection from '../../components/settings/TunablesSection';
 import { colors, spacing, fontSizes, borderRadius } from '../../styles/theme';
 import { iosCalendarSyncService, IOSCalendar } from '../../services/iosCalendarSync';
+import { isLocationTrackingEnabled, setLocationTrackingEnabled } from '../../services/locationTracking';
 
 type Props = MainTabScreenProps<'Settings'>;
 
@@ -45,34 +49,85 @@ export default function SettingsScreen({ navigation }: Props) {
   const [episodes, setEpisodes] = useState<Episode[]>([]);
 
   // AI Configuration states
-  const [aiProvider, setAiProvider] = useState<'local' | 'gemini' | 'claude'>('local');
+  const [aiProvider, setAiProvider] = useState<'local' | 'gemini' | 'claude' | 'codex'>('local');
   const [localUrl, setLocalUrl] = useState<string>('http://100.104.68.115:11434/v1');
   const [selectedModel, setSelectedModel] = useState<string>('gpt-oss:120b');
   const [apiKey, setApiKey] = useState<string>('');
   const [savingAISettings, setSavingAISettings] = useState(false);
+  const [codexOAuthStatus, setCodexOAuthStatus] = useState<CodexOAuthStatus | null>(null);
+  const [codexOAuthBusy, setCodexOAuthBusy] = useState(false);
 
   // Calendar sync states (iOS only)
   const [calendarSyncEnabled, setCalendarSyncEnabled] = useState(false);
+  const [locationTrackingEnabled, setLocationTrackingEnabledState] = useState(false);
   const [iosCalendars, setIosCalendars] = useState<IOSCalendar[]>([]);
   const [selectedCalendarIds, setSelectedCalendarIds] = useState<string[]>([]);
   const [lastCalendarSync, setLastCalendarSync] = useState<Date | null>(null);
   const [syncingCalendar, setSyncingCalendar] = useState(false);
   const [loadingCalendars, setLoadingCalendars] = useState(false);
 
+  // Notification preferences
+  const [notifPrefs, setNotifPrefs] = useState<Array<{ category: string; enabled: boolean; custom_ban_phrases: string[] }>>([]);
+  const [notifPrefsLoading, setNotifPrefsLoading] = useState(false);
+
   // Claude model options
   const CLAUDE_MODELS = [
-    { value: 'claude-opus-4-5-20251101', label: 'Claude Opus 4.5' },
-    { value: 'claude-sonnet-4-5-20250929', label: 'Claude Sonnet 4.5' },
+    { value: 'claude-opus-4-6', label: 'Claude Opus 4.6' },
+    { value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
     { value: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5' },
   ];
+  const CODEX_MODELS = [
+    { value: 'gpt-5.3-codex', label: 'GPT-5.3 Codex' },
+    { value: 'gpt-5.3-codex-spark', label: 'GPT-5.3 Codex Spark' },
+  ];
+
+  const loadNotifPrefs = async () => {
+    try {
+      setNotifPrefsLoading(true);
+      const result = await apiClient.getNotificationPreferences();
+      setNotifPrefs(result.preferences || []);
+    } catch (error) {
+      console.error('Failed to load notification preferences:', error);
+    } finally {
+      setNotifPrefsLoading(false);
+    }
+  };
+
+  const handleNotifPrefToggle = async (category: string, enabled: boolean) => {
+    const updated = notifPrefs.map(p =>
+      p.category === category ? { ...p, enabled } : p
+    );
+    setNotifPrefs(updated);
+    try {
+      await apiClient.updateNotificationPreferences(updated);
+    } catch (error) {
+      console.error('Failed to update notification preferences:', error);
+      // Revert on failure
+      setNotifPrefs(notifPrefs);
+      Alert.alert('Error', 'Failed to update notification preferences');
+    }
+  };
 
   useEffect(() => {
     loadData();
     loadAISettings();
+    loadCodexOAuthStatus();
+    loadNotifPrefs();
     if (Platform.OS === 'ios') {
       loadCalendarSyncSettings();
     }
+    loadLocationTrackingSettings();
   }, []);
+
+  const loadCodexOAuthStatus = async () => {
+    try {
+      const status = await apiClient.getCodexOAuthStatus();
+      setCodexOAuthStatus(status);
+    } catch (error) {
+      console.error('Failed to load Codex OAuth status:', error);
+      setCodexOAuthStatus(null);
+    }
+  };
 
   const loadCalendarSyncSettings = async () => {
     try {
@@ -142,6 +197,27 @@ export default function SettingsScreen({ navigation }: Props) {
     }
   };
 
+  const loadLocationTrackingSettings = async () => {
+    try {
+      const enabled = await isLocationTrackingEnabled();
+      setLocationTrackingEnabledState(enabled);
+    } catch (error) {
+      console.error('Failed to load location tracking settings:', error);
+    }
+  };
+
+  const handleLocationTrackingToggle = async (enabled: boolean) => {
+    setLocationTrackingEnabledState(enabled);
+    const ok = await setLocationTrackingEnabled(enabled);
+    if (enabled && !ok) {
+      setLocationTrackingEnabledState(false);
+      Alert.alert(
+        'Location Access Required',
+        'Please enable location access in Settings for Sara to give location-based reminders.'
+      );
+    }
+  };
+
   const handleCalendarSelect = async (calendarId: string) => {
     const newSelection = selectedCalendarIds.includes(calendarId)
       ? selectedCalendarIds.filter(id => id !== calendarId)
@@ -199,9 +275,16 @@ export default function SettingsScreen({ navigation }: Props) {
       const backendSettings = await apiClient.getAISettings();
 
       if (backendSettings) {
+        const normalizeProvider = (value: any): 'local' | 'gemini' | 'claude' | 'codex' => {
+          if (value === 'local' || value === 'gemini' || value === 'claude' || value === 'codex') {
+            return value;
+          }
+          return 'local';
+        };
+
         // Update state from backend
         if (backendSettings.ai_provider) {
-          setAiProvider(backendSettings.ai_provider as 'local' | 'gemini' | 'claude');
+          setAiProvider(normalizeProvider(backendSettings.ai_provider));
         }
         if (backendSettings.openai_base_url) {
           setLocalUrl(backendSettings.openai_base_url);
@@ -216,7 +299,7 @@ export default function SettingsScreen({ navigation }: Props) {
 
         // Also save to AsyncStorage for quick access
         if (backendSettings.ai_provider) {
-          await AsyncStorage.setItem('@sara_ai_provider', backendSettings.ai_provider);
+          await AsyncStorage.setItem('@sara_ai_provider', normalizeProvider(backendSettings.ai_provider));
         }
         if (backendSettings.openai_base_url) {
           await AsyncStorage.setItem('@sara_local_url', backendSettings.openai_base_url);
@@ -234,7 +317,11 @@ export default function SettingsScreen({ navigation }: Props) {
         const savedUrl = await AsyncStorage.getItem('@sara_local_url');
         const savedModel = await AsyncStorage.getItem('@sara_model');
 
-        if (savedProvider) setAiProvider(savedProvider as 'local' | 'gemini' | 'claude');
+        if (savedProvider === 'local' || savedProvider === 'gemini' || savedProvider === 'claude' || savedProvider === 'codex') {
+          setAiProvider(savedProvider);
+        } else if (savedProvider) {
+          setAiProvider('local');
+        }
         if (savedUrl) setLocalUrl(savedUrl);
         if (savedModel) setSelectedModel(savedModel);
       } catch (storageError) {
@@ -245,7 +332,7 @@ export default function SettingsScreen({ navigation }: Props) {
 
   const handleRefresh = async () => {
     setRefreshing(true);
-    await loadData();
+    await Promise.all([loadData(), loadAISettings(), loadCodexOAuthStatus(), loadNotifPrefs()]);
     setRefreshing(false);
   };
 
@@ -363,7 +450,7 @@ export default function SettingsScreen({ navigation }: Props) {
     }
   };
 
-  const handleProviderChange = async (provider: 'local' | 'gemini' | 'claude') => {
+  const handleProviderChange = async (provider: 'local' | 'gemini' | 'claude' | 'codex') => {
     // Save current API key to provider-specific storage before switching
     if (apiKey && apiKey !== '***') {
       await AsyncStorage.setItem(`@sara_${aiProvider}_api_key`, apiKey);
@@ -380,8 +467,11 @@ export default function SettingsScreen({ navigation }: Props) {
       newModel = 'gemini-3-flash-preview';
       newUrl = 'https://generativelanguage.googleapis.com/v1beta/openai/';
     } else if (provider === 'claude') {
-      newModel = 'claude-sonnet-4-5-20250929';
+      newModel = 'claude-sonnet-4-6';
       newUrl = 'https://api.anthropic.com/v1';
+    } else if (provider === 'codex') {
+      newModel = 'gpt-5.3-codex';
+      newUrl = 'https://chatgpt.com/backend-api';
     } else {
       // Reset to default local model based on current URL
       newModel = localUrl.includes('100.104.68.115') ? 'gpt-oss:120b' : 'gpt-oss:20b';
@@ -389,7 +479,9 @@ export default function SettingsScreen({ navigation }: Props) {
     }
 
     // Load provider-specific API key
-    const savedApiKey = await AsyncStorage.getItem(`@sara_${provider}_api_key`) || '';
+    const savedApiKey = provider === 'codex'
+      ? ''
+      : (await AsyncStorage.getItem(`@sara_${provider}_api_key`) || '');
     setApiKey(savedApiKey);
 
     setSelectedModel(newModel);
@@ -431,6 +523,10 @@ export default function SettingsScreen({ navigation }: Props) {
     // Save to backend immediately
     const baseUrl = aiProvider === 'gemini'
       ? 'https://generativelanguage.googleapis.com/v1beta/openai/'
+      : aiProvider === 'claude'
+      ? 'https://api.anthropic.com/v1'
+      : aiProvider === 'codex'
+      ? 'https://chatgpt.com/backend-api'
       : localUrl;
 
     await saveSettingsToBackend({
@@ -455,6 +551,8 @@ export default function SettingsScreen({ navigation }: Props) {
         settings.openai_base_url = 'https://generativelanguage.googleapis.com/v1beta/openai/';
       } else if (aiProvider === 'claude') {
         settings.openai_base_url = 'https://api.anthropic.com/v1';
+      } else if (aiProvider === 'codex') {
+        settings.openai_base_url = 'https://chatgpt.com/backend-api';
       }
 
       // Include API key if provided (for Gemini or Claude)
@@ -482,6 +580,10 @@ export default function SettingsScreen({ navigation }: Props) {
       return CLAUDE_MODELS.map(m => m.value);
     }
 
+    if (aiProvider === 'codex') {
+      return CODEX_MODELS.map(m => m.value);
+    }
+
     if (localUrl.includes('100.104.68.115')) {
       return ['gpt-oss:120b'];
     } else {
@@ -494,7 +596,85 @@ export default function SettingsScreen({ navigation }: Props) {
       const model = CLAUDE_MODELS.find(m => m.value === modelValue);
       return model ? model.label : modelValue;
     }
+    if (aiProvider === 'codex') {
+      const model = CODEX_MODELS.find(m => m.value === modelValue);
+      return model ? model.label : modelValue;
+    }
     return modelValue;
+  };
+
+  const handleConnectCodexOAuth = async () => {
+    try {
+      setCodexOAuthBusy(true);
+      const result = await apiClient.startCodexOAuth();
+      const authUrl = result?.auth_url;
+      const manualFlow = !!result?.requires_manual_code || /localhost:1455|127\.0\.0\.1:1455/.test(result?.redirect_uri || '');
+      if (!authUrl) {
+        Alert.alert('Error', 'Failed to start ChatGPT OAuth');
+        return;
+      }
+      const canOpen = await Linking.canOpenURL(authUrl);
+      if (!canOpen) {
+        Alert.alert('Error', 'Could not open browser for ChatGPT OAuth');
+        return;
+      }
+      await Linking.openURL(authUrl);
+      if (!manualFlow) {
+        Alert.alert('Browser Opened', 'Complete OAuth in browser, then return here and tap Refresh Status.');
+        return;
+      }
+
+      if (Platform.OS === 'ios' && typeof (Alert as any).prompt === 'function') {
+        (Alert as any).prompt(
+          'Complete ChatGPT OAuth',
+          'After sign-in, copy the full callback URL (http://localhost:1455/auth/callback?...) and paste it here.',
+          [
+            { text: 'Cancel', style: 'cancel' },
+            {
+              text: 'Submit',
+              onPress: async (value: string) => {
+                if (!value || !value.trim()) {
+                  return;
+                }
+                try {
+                  await apiClient.completeCodexOAuth({ redirect_url: value.trim() });
+                  await loadCodexOAuthStatus();
+                  Alert.alert('Connected', 'ChatGPT OAuth connected successfully.');
+                } catch (err) {
+                  console.error('Failed to complete Codex OAuth:', err);
+                  Alert.alert('Error', 'Failed to complete ChatGPT OAuth. Verify the full callback URL and try again.');
+                }
+              },
+            },
+          ],
+          'plain-text'
+        );
+      } else {
+        Alert.alert(
+          'Manual Step Required',
+          'After sign-in, copy the full callback URL from browser and paste it into a future update of this screen.'
+        );
+      }
+    } catch (error) {
+      console.error('Failed to start Codex OAuth:', error);
+      Alert.alert('Error', 'Failed to start ChatGPT OAuth');
+    } finally {
+      setCodexOAuthBusy(false);
+    }
+  };
+
+  const handleDisconnectCodexOAuth = async () => {
+    try {
+      setCodexOAuthBusy(true);
+      await apiClient.disconnectCodexOAuth();
+      await loadCodexOAuthStatus();
+      Alert.alert('Disconnected', 'ChatGPT OAuth has been disconnected.');
+    } catch (error) {
+      console.error('Failed to disconnect Codex OAuth:', error);
+      Alert.alert('Error', 'Failed to disconnect ChatGPT OAuth');
+    } finally {
+      setCodexOAuthBusy(false);
+    }
   };
 
   if (loading && !userProfile) {
@@ -532,6 +712,7 @@ export default function SettingsScreen({ navigation }: Props) {
               <Picker.Item label="Local (Ollama)" value="local" color={colors.text} />
               <Picker.Item label="Google Gemini" value="gemini" color={colors.text} />
               <Picker.Item label="Anthropic Claude" value="claude" color={colors.text} />
+              <Picker.Item label="ChatGPT Codex (OAuth)" value="codex" color={colors.text} />
             </Picker>
           </View>
         </View>
@@ -589,6 +770,57 @@ export default function SettingsScreen({ navigation }: Props) {
                 ? 'Get key from console.anthropic.com'
                 : 'Get key from aistudio.google.com'}
             </Text>
+          </View>
+        )}
+
+        {aiProvider === 'codex' && (
+          <View style={styles.codexCard}>
+            <Text style={styles.pickerLabel}>ChatGPT OAuth</Text>
+            <Text style={styles.pickerHint}>
+              {codexOAuthStatus?.connected
+                ? `Connected${codexOAuthStatus.email ? ` as ${codexOAuthStatus.email}` : ''}`
+                : 'Not connected. If prompted, paste the localhost callback URL to finish.'}
+            </Text>
+            {codexOAuthStatus?.expires_at && codexOAuthStatus.connected && (
+              <Text style={styles.pickerHint}>
+                Token expiry: {new Date(codexOAuthStatus.expires_at).toLocaleString()}
+              </Text>
+            )}
+            <View style={styles.codexActions}>
+              {!codexOAuthStatus?.connected ? (
+                <TouchableOpacity
+                  style={[styles.codexButton, codexOAuthBusy && styles.saveButtonDisabled]}
+                  onPress={handleConnectCodexOAuth}
+                  disabled={codexOAuthBusy}
+                >
+                  {codexOAuthBusy ? (
+                    <ActivityIndicator size="small" color={colors.text} />
+                  ) : (
+                    <Text style={styles.codexButtonText}>Connect ChatGPT</Text>
+                  )}
+                </TouchableOpacity>
+              ) : (
+                <TouchableOpacity
+                  style={[styles.codexButtonSecondary, codexOAuthBusy && styles.saveButtonDisabled]}
+                  onPress={handleDisconnectCodexOAuth}
+                  disabled={codexOAuthBusy}
+                >
+                  {codexOAuthBusy ? (
+                    <ActivityIndicator size="small" color={colors.text} />
+                  ) : (
+                    <Text style={styles.codexButtonText}>Disconnect</Text>
+                  )}
+                </TouchableOpacity>
+              )}
+
+              <TouchableOpacity
+                style={styles.codexButtonSecondary}
+                onPress={loadCodexOAuthStatus}
+                disabled={codexOAuthBusy}
+              >
+                <Text style={styles.codexButtonText}>Refresh Status</Text>
+              </TouchableOpacity>
+            </View>
           </View>
         )}
 
@@ -663,6 +895,66 @@ export default function SettingsScreen({ navigation }: Props) {
           />
         </View>
       </View>
+
+      {/* Notification Preferences Section */}
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>Notification Categories</Text>
+        <Text style={[styles.settingHint, { marginBottom: spacing.sm }]}>
+          Control which types of proactive notifications Sara can send.
+        </Text>
+        {notifPrefsLoading ? (
+          <ActivityIndicator size="small" color={colors.primary} />
+        ) : (
+          notifPrefs.map((pref) => {
+            const labels: Record<string, string> = {
+              health: 'Health',
+              fitness: 'Fitness',
+              calendar: 'Calendar',
+              email: 'Email',
+              security: 'Security',
+              home: 'Home',
+              general: 'General',
+            };
+            return (
+              <View key={pref.category} style={styles.settingRow}>
+                <Text style={styles.settingLabel}>{labels[pref.category] || pref.category}</Text>
+                <Switch
+                  value={pref.enabled}
+                  onValueChange={(value) => handleNotifPrefToggle(pref.category, value)}
+                  trackColor={{ false: colors.background, true: colors.primary }}
+                />
+              </View>
+            );
+          })
+        )}
+      </View>
+
+      {/* Scheduled Jobs (DB-backed Celery beat) */}
+      <SchedulesSection />
+
+      {/* Behavior Tunables (cooldowns, ACS thresholds, brief tone) */}
+      <TunablesSection />
+
+      {/* Location Awareness (iOS only) */}
+      {Platform.OS === 'ios' && (
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Location</Text>
+
+          <View style={styles.settingRow}>
+            <View style={styles.settingLabelContainer}>
+              <Text style={styles.settingLabel}>Location Awareness</Text>
+              <Text style={styles.settingHint}>
+                Let Sara know where you are and trigger reminders when you arrive at or leave places
+              </Text>
+            </View>
+            <Switch
+              value={locationTrackingEnabled}
+              onValueChange={handleLocationTrackingToggle}
+              trackColor={{ false: colors.background, true: colors.primary }}
+            />
+          </View>
+        </View>
+      )}
 
       {/* Calendar Sync Section (iOS only) */}
       {Platform.OS === 'ios' && (
@@ -996,6 +1288,41 @@ const styles = StyleSheet.create({
   saveButtonText: {
     color: colors.text,
     fontSize: fontSizes.md,
+    fontWeight: '600',
+  },
+  codexCard: {
+    backgroundColor: colors.background,
+    borderRadius: borderRadius.md,
+    borderWidth: 1,
+    borderColor: colors.textMuted,
+    padding: spacing.md,
+    marginBottom: spacing.md,
+  },
+  codexActions: {
+    flexDirection: 'column',
+    marginTop: spacing.sm,
+  },
+  codexButton: {
+    flex: 1,
+    backgroundColor: colors.primary,
+    borderRadius: borderRadius.md,
+    paddingVertical: spacing.sm,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  codexButtonSecondary: {
+    flex: 1,
+    backgroundColor: colors.surface,
+    borderRadius: borderRadius.md,
+    borderWidth: 1,
+    borderColor: colors.textMuted,
+    paddingVertical: spacing.sm,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  codexButtonText: {
+    color: colors.text,
+    fontSize: fontSizes.sm,
     fontWeight: '600',
   },
   // Calendar Sync styles

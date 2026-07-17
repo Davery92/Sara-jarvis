@@ -38,8 +38,9 @@ Write-Host "Building executable..."
 Set-Location $SidecarDir
 pyinstaller --clean sidecar.spec
 
-# Copy to release location
-$DistDir = Join-Path $ProjectDir "release\sidecar"
+# Copy to the location electron-builder's extraResources reads from
+# (package.json: extraResources.from = "sidecar/dist-frozen").
+$DistDir = Join-Path $SidecarDir "dist-frozen"
 New-Item -ItemType Directory -Force -Path $DistDir | Out-Null
 
 Copy-Item (Join-Path $SidecarDir "dist\sidecar.exe") $DistDir

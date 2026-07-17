@@ -32,7 +32,7 @@ interface MindmapArtifactProps {
   onUpdate?: (content: MindmapContent) => Promise<void>
 }
 
-interface MindmapNodeData {
+interface MindmapNodeData extends Record<string, unknown> {
   label: string
   color?: string
   notes?: string
@@ -53,7 +53,7 @@ function MindmapNodeComponent({ data, selected }: NodeProps<Node<MindmapNodeData
 
   return (
     <div
-      className={`px-4 py-3 rounded-xl border-2 ${colors.border} ${
+      className={`px-4 py-3 rounded-md border-2 ${colors.border} ${
         selected ? `${colors.bg}/80 ring-2 ${colors.ring}` : 'bg-gray-800'
       } min-w-[100px] max-w-[200px] text-center shadow-lg transition-all`}
     >

@@ -1,143 +1,165 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
-import SyntaxHighlighter from 'react-syntax-highlighter/dist/esm/prism'
-import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { APP_CONFIG } from './config'
-import Notes from './components/Notes'
-import CalendarView from './components/CalendarView'
-import Settings from './pages/Settings'
-import HabitToday from './components/HabitToday'
-import HabitCreate from './components/HabitCreate'
-import HabitInsights from './components/HabitInsights'
-import ChatInterface from './components/ChatInterface'
-import FitnessSection from './components/fitness/FitnessSection'
-import RecipesSection from './components/fitness/RecipesSection'
-import LearningSection from './components/learning/LearningSection'
-import ProjectSection from './components/projects/ProjectSection'
-// Moved GTKY into Settings; reflection features removed from UI
-import { PrivacyDashboard } from './components/privacy/PrivacyDashboard'
+import { AppView, pathForView } from './navigation/views'
 import { useActivityMonitor } from './hooks/useActivityMonitor'
-import { getCalmMode } from './utils/prefs'
+import { useDashboardWorkspace } from './hooks/useDashboardWorkspace'
+import { useDocumentWorkspace } from './hooks/useDocumentWorkspace'
+import { useShellNavigation } from './hooks/useShellNavigation'
+import { useShellAuth } from './hooks/useShellAuth'
+import { useTaskEventStream } from './hooks/useTaskEventStream'
 import { CommandPalette } from './components/CommandPalette'
-import MorningBrief from './components/MorningBrief'
-import OrchestratorLab from './components/OrchestratorLab'
 import NotificationBanner from './components/NotificationBanner'
-import BackgroundTasksIndicator from './components/BackgroundTasksIndicator'
 import MiniChatOverlay from './components/MiniChatOverlay'
-import HealthAlertChat from './components/HealthAlertChat'
-import { PatternsDashboard } from './components/patterns'
-
-// LiveTimer component that updates every second without causing parent re-renders
-function LiveTimer({ endTime, className = "" }) {
-  const [timeLeft, setTimeLeft] = useState("")
-  
-  useEffect(() => {
-    const updateTimer = () => {
-      const now = new Date()
-      const end = new Date(endTime)
-      const diff = end - now
-      
-      if (diff <= 0) {
-        setTimeLeft('FINISHED')
-        return
-      }
-      
-      const hours = Math.floor(diff / (1000 * 60 * 60))
-      const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60))
-      const seconds = Math.floor((diff % (1000 * 60)) / 1000)
-      
-      if (hours > 0) {
-        setTimeLeft(`${hours}h ${minutes}m ${seconds}s`)
-      } else if (minutes > 0) {
-        setTimeLeft(`${minutes}m ${seconds}s`)
-      } else {
-        setTimeLeft(`${seconds}s`)
-      }
-    }
-    
-    // Update immediately
-    updateTimer()
-    
-    // Then update every second
-    const interval = setInterval(updateTimer, 1000)
-    
-    return () => clearInterval(interval)
-  }, [endTime])
-  
-  return <span className={className}>{timeLeft}</span>
-}
+import SaraOverlayHost from './components/overlay/SaraOverlayHost'
+// import HealthAlertChat from './components/HealthAlertChat'  // Disabled: health notifications are hard-banned per HEARTBEAT.md
+import ConfirmDialog from './components/ConfirmDialog'
+import AuthScreen from './components/shell/AuthScreen'
+import ShellHeader from './components/shell/ShellHeader'
+import ShellNavigation, { type ShellNavItem } from './components/shell/ShellNavigation'
+import { EMOTION_EMOJI, formatRelativeTime, getGreeting, WEATHER_EMOJI } from './components/shell/shellDisplay'
+import ToastStack from './components/shell/ToastStack'
+import ShellWorkspaceContent, { preloadPrimaryShellModules } from './components/shell/ShellWorkspaceContent'
 
 function App() {
-  const [isAuthenticated, setIsAuthenticated] = useState(false)
-  const [user, setUser] = useState(null)
-  const [view, setView] = useState('login') // login, dashboard, chat, notes, habits, documents, calendar, fitness, recipes, settings, briefings, context-mode, smart-insights, orchestrator-lab
-  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false)
-  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false)
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [isLogin, setIsLogin] = useState(true)
+  const location = useLocation()
+  const navigate = useNavigate()
   const [message, setMessage] = useState('')
   const [chatMessages, setChatMessages] = useState([])
-  const [loading, setLoading] = useState(false)
-  const [notes, setNotes] = useState([])
-  const [newNote, setNewNote] = useState('')
-  const [editingNote, setEditingNote] = useState(null)
-  const [editNoteContent, setEditNoteContent] = useState('')
-  const [editNoteTitle, setEditNoteTitle] = useState('')
-  const [timers, setTimers] = useState([])
-  const [reminders, setReminders] = useState([])
-  const [currentTime, setCurrentTime] = useState(new Date())
-  const [quickChatResponse, setQuickChatResponse] = useState('')
-  const [showQuickResponse, setShowQuickResponse] = useState(false)
   const [toasts, setToasts] = useState([])
-  const [finishedTimers, setFinishedTimers] = useState(new Set())
-  const [notifiedReminders, setNotifiedReminders] = useState(new Set())
-  const [timerTick, setTimerTick] = useState(0) // Force re-render for timer displays
-  const [documents, setDocuments] = useState([])
-  
-  // Habit-related state
-  const [habitView, setHabitView] = useState('today') // today, insights, create
-  const [showHabitCreate, setShowHabitCreate] = useState(false)
-  const [selectedFile, setSelectedFile] = useState(null)
-  const [uploading, setUploading] = useState(false)
-  const [analytics, setAnalytics] = useState(null)
-  const [editingDocumentId, setEditingDocumentId] = useState(null)
-  const [editingDocumentTitle, setEditingDocumentTitle] = useState('')
-
-  // Health alert chat state
-  const [activeHealthAlert, setActiveHealthAlert] = useState<{
-    severity: string
+  const [chatAutoSendToken, setChatAutoSendToken] = useState<number | undefined>(undefined)
+  const [inboxTab, setInboxTab] = useState<'attention' | 'content'>('content')
+  const [confirmDialog, setConfirmDialog] = useState<{
+    isOpen: boolean
     title: string
-    body: string
-    insightId?: string
-  } | null>(null)
-  const [dismissedHealthAlertIds, setDismissedHealthAlertIds] = useState<Set<string>>(() => {
-    // Load dismissed IDs from localStorage on mount
-    try {
-      const stored = localStorage.getItem('dismissedHealthAlertIds')
-      if (stored) {
-        const parsed = JSON.parse(stored)
-        // Only keep IDs from last 24 hours (they're timestamped as id:timestamp)
-        const now = Date.now()
-        const valid = parsed.filter((entry: string) => {
-          const [, timestamp] = entry.split(':')
-          return timestamp && (now - parseInt(timestamp)) < 24 * 60 * 60 * 1000
-        })
-        return new Set(valid.map((entry: string) => entry.split(':')[0]))
-      }
-    } catch {}
-    return new Set()
+    message: string
+    confirmLabel: string
+    tone: 'danger' | 'neutral'
+    busy: boolean
+    action: null | (() => Promise<void> | void)
+  }>({
+    isOpen: false,
+    title: '',
+    message: '',
+    confirmLabel: 'Confirm',
+    tone: 'danger',
+    busy: false,
+    action: null,
   })
 
-  // Ref for auto-scrolling chat messages
-  const chatMessagesEndRef = useRef(null)
+  // Health alert chat state — DISABLED: health notifications are hard-banned per HEARTBEAT.md
+  // const [activeHealthAlert, setActiveHealthAlert] = useState(null)
+  // const [dismissedHealthAlertIds, setDismissedHealthAlertIds] = useState(new Set())
+
+  // Ref for scrolling main content to top on view change
+  const mainContentRef = useRef<HTMLDivElement>(null)
 
   // Ref to track and cancel ongoing chat requests
   const abortControllerRef = useRef(null)
 
+  const getInitialChatMessages = useCallback(() => ([{
+    role: 'assistant',
+    content: `Hello! I'm ${APP_CONFIG.assistantName}, your personal AI assistant. How can I help you today?`,
+    timestamp: new Date(),
+  }]), [])
+
+  const {
+    view,
+    isMobileMenuOpen,
+    setIsMobileMenuOpen,
+    commandPaletteOpen,
+    setCommandPaletteOpen,
+    openWorkspaceCanvas,
+    navigateToView,
+  } = useShellNavigation({
+    locationPathname: location.pathname,
+    navigate,
+  })
+
+  const {
+    isAuthenticated,
+    user,
+    email,
+    setEmail,
+    password,
+    setPassword,
+    isLogin,
+    setIsLogin,
+    message: authMessage,
+    loading: authLoading,
+    handleAuth,
+    logout,
+  } = useShellAuth({
+    locationPathname: location.pathname,
+    onSessionStart: (nextView, options) => {
+      navigateToView(nextView)
+      if (options?.resetChat) {
+        setChatMessages(getInitialChatMessages())
+      }
+    },
+    onSessionEnd: () => {
+      navigateToView('login')
+      setChatMessages([])
+    },
+  })
+
+  // Scroll main content to top on view change
+  useEffect(() => {
+    const scrollable = mainContentRef.current?.querySelector('[data-shell-active-scroll="true"] .overflow-y-auto')
+      || mainContentRef.current?.querySelector('.overflow-y-auto')
+    scrollable?.scrollTo(0, 0)
+  }, [view])
+
+  useEffect(() => {
+    if (!isAuthenticated) return
+
+    const preload = () => {
+      preloadPrimaryShellModules()
+    }
+
+    if ('requestIdleCallback' in window) {
+      const idleId = window.requestIdleCallback(preload, { timeout: 1200 })
+      return () => window.cancelIdleCallback(idleId)
+    }
+
+    const timeoutId = setTimeout(preload, 300)
+    return () => clearTimeout(timeoutId)
+  }, [isAuthenticated])
+
+  async function fetchAndDisplayLatestInsight(
+    threshold: string,
+    _delivery: 'companion' | 'toast' = 'companion',
+  ) {
+    try {
+      const response = await fetch(`${APP_CONFIG.apiUrl}/autonomous/insights?limit=1`, {
+        credentials: 'include',
+      })
+      if (!response.ok) {
+        throw new Error(`Failed to load latest insight: ${response.status}`)
+      }
+
+      const data = await response.json()
+      const latestInsight = Array.isArray(data)
+        ? data[0]
+        : data?.insights?.[0] || data?.items?.[0] || data
+
+      if (!latestInsight) {
+        showToast(`Sara completed a ${threshold} sweep with new insight(s).`, 'success', true)
+        return
+      }
+
+      const title = latestInsight.title || 'New insight'
+      const message = latestInsight.message || latestInsight.content || latestInsight.summary || ''
+      const preview = message ? `${title}: ${message}` : `${title} is ready for review.`
+      showToast(preview.slice(0, 180) + (preview.length > 180 ? '...' : ''), 'success', true)
+    } catch (error) {
+      console.error('Failed to fetch latest insight:', error)
+      showToast(`Sara completed a ${threshold} sweep with new insight(s).`, 'success', true)
+    }
+  }
+
   // Activity monitoring for autonomous behaviors
-  const { activityState, getIdleMinutes } = useActivityMonitor({
+  useActivityMonitor({
     thresholds: {
       quickSweep: 25 * 60 * 1000,      // 25 minutes - short idle
       standardSweep: 2.5 * 60 * 60 * 1000, // 2.5 hours - medium idle
@@ -180,106 +202,70 @@ function App() {
   })
 
 
-  // Check authentication on load
-  useEffect(() => {
-    checkAuth()
-  }, [])
-
-  // Update current time only when day changes, but check timers every second
-  useEffect(() => {
-    const interval = setInterval(() => {
-      const now = new Date()
-      
-      // Only update currentTime state if the day changed (to prevent constant re-renders)
-      if (now.getDate() !== currentTime.getDate() || 
-          now.getMonth() !== currentTime.getMonth() || 
-          now.getFullYear() !== currentTime.getFullYear()) {
-        setCurrentTime(now)
-      }
-      
-      // Increment timer tick to force re-render of timer displays (disabled to prevent constant re-renders)
-      // setTimerTick(prev => prev + 1)
-      
-      // Check for timer completions globally (to avoid duplicates)
-      timers.forEach(timer => {
-        const endTime = new Date(timer.end_time)
-        if (endTime <= now && timer.is_active && !finishedTimers.has(timer.id)) {
-          setFinishedTimers(prev => new Set([...prev, timer.id]))
-          showToast(`🔔 Timer finished: ${timer.title}`, 'success', true, true)
-          // Automatically stop the timer on the backend
-          stopTimer(timer.id)
-        }
-      })
-    }, 5000) // Reduced from 1s to 5s to prevent constant re-renders
-    return () => clearInterval(interval)
-  }, [timers, finishedTimers, currentTime])
-
-  // Load timers and reminders periodically when authenticated
-  useEffect(() => {
-    if (isAuthenticated) {
-      loadTimersAndReminders()
-      const interval = setInterval(loadTimersAndReminders, 60000) // Reduced from 30s to 60s
-      return () => clearInterval(interval)
-    }
-  }, [isAuthenticated])
-
-  // Poll for health alerts that need attention
+  // --- Presence heartbeat: reports current view every 30s ---
   useEffect(() => {
     if (!isAuthenticated) return
 
-    const checkHealthAlerts = async () => {
-      try {
-        const res = await fetch(`${APP_CONFIG.apiUrl}/api/health/insights?limit=1&severity=warning`, {
-          credentials: 'include'
-        })
-        if (!res.ok) return
-
-        const data = await res.json()
-        if (data.insights && data.insights.length > 0) {
-          const insight = data.insights[0]
-          // Only show if not dismissed and not already showing
-          if (!dismissedHealthAlertIds.has(insight.id) && !activeHealthAlert) {
-            setActiveHealthAlert({
-              severity: insight.severity,
-              title: insight.title,
-              body: insight.content,
-              insightId: insight.id
-            })
-          }
-        }
-      } catch (error) {
-        // Log error but don't block - health alerts are optional
-        console.warn('Health alerts check failed:', error instanceof Error ? error.message : error)
+    const clientId = (() => {
+      let id = sessionStorage.getItem('sara_client_id')
+      if (!id) {
+        id = `web_${Math.random().toString(36).slice(2, 10)}`
+        sessionStorage.setItem('sara_client_id', id)
       }
+      return id
+    })()
+
+    const sendHeartbeat = () => {
+      fetch(`${APP_CONFIG.apiUrl}/api/presence/heartbeat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          platform: 'web',
+          client_id: clientId,
+          current_view: view,
+          visible: !document.hidden,
+        }),
+      }).catch(() => {})
     }
 
-    checkHealthAlerts()
-    const interval = setInterval(checkHealthAlerts, 60000) // Check every minute
-    return () => clearInterval(interval)
-  }, [isAuthenticated, dismissedHealthAlertIds, activeHealthAlert])
+    // Send immediately, then every 30s
+    sendHeartbeat()
+    const interval = setInterval(sendHeartbeat, 30_000)
 
-  // Load analytics and notes when view changes to dashboard
-  useEffect(() => {
-    if (isAuthenticated && view === 'dashboard') {
-      console.log('Dashboard view activated, loading analytics, notes, timers, and reminders...')
-      loadAnalytics()
-      loadNotes()
-      loadTimersAndReminders()
+    // Also send on tab visibility change
+    const onVisibility = () => sendHeartbeat()
+    document.addEventListener('visibilitychange', onVisibility)
+
+    return () => {
+      clearInterval(interval)
+      document.removeEventListener('visibilitychange', onVisibility)
     }
   }, [isAuthenticated, view])
 
-  // Auto-scroll chat to bottom when messages change
-  useEffect(() => {
-    if (view === 'chat' && chatMessagesEndRef.current) {
-      setTimeout(() => {
-        chatMessagesEndRef.current?.scrollIntoView({ 
-          behavior: 'smooth',
-          block: 'end',
-          inline: 'nearest'
-        })
-      }, 100)
-    }
-  }, [chatMessages, view, loading])
+  // --- Task event SSE: smart delivery of background worker results ---
+  useTaskEventStream({
+    enabled: isAuthenticated,
+    onInjectChatMessage: (data) => {
+      if (view === 'chat') {
+        setChatMessages(prev => [...prev, {
+          role: 'assistant',
+          content: data.content,
+          timestamp: new Date(),
+        }])
+      } else {
+        // User navigated away since backend decided — downgrade to toast
+        showToast(data.content.slice(0, 120) + (data.content.length > 120 ? '...' : ''), 'success', true)
+      }
+    },
+    onShowNotification: (data) => {
+      showToast(`${data.title}: ${data.message}`, 'success', true)
+    },
+  })
+
+  // Health alert polling — DISABLED: health notifications are hard-banned per HEARTBEAT.md
+  // The old useEffect polled /api/health/insights every 60s and showed popups.
+  // Removed to enforce the ban system consistently.
 
   // Cleanup: cancel any ongoing chat requests when component unmounts
   useEffect(() => {
@@ -290,1702 +276,365 @@ function App() {
     }
   }, [])
 
-  // Command Palette keyboard shortcut (Cmd+K / Ctrl+K)
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
-        e.preventDefault()
-        e.stopPropagation()
-        setCommandPaletteOpen(prev => !prev)
-      }
-    }
-
-    // Use capture phase to intercept before browser handles it
-    window.addEventListener('keydown', handleKeyDown, true)
-    return () => window.removeEventListener('keydown', handleKeyDown, true)
+  const openConfirmDialog = useCallback((config: {
+    title: string
+    message: string
+    confirmLabel?: string
+    tone?: 'danger' | 'neutral'
+    action: () => Promise<void> | void
+  }) => {
+    setConfirmDialog({
+      isOpen: true,
+      title: config.title,
+      message: config.message,
+      confirmLabel: config.confirmLabel || 'Confirm',
+      tone: config.tone || 'danger',
+      busy: false,
+      action: config.action,
+    })
   }, [])
 
-  // Custom navigation event listener (used by Settings page for Orchestrator Lab)
-  useEffect(() => {
-    const handleNavigate = (e: CustomEvent<{ view: string }>) => {
-      if (e.detail?.view) {
-        setView(e.detail.view)
-      }
-    }
-
-    window.addEventListener('navigate', handleNavigate as EventListener)
-    return () => window.removeEventListener('navigate', handleNavigate as EventListener)
+  const closeConfirmDialog = useCallback(() => {
+    setConfirmDialog(prev => {
+      if (prev.busy) return prev
+      return { ...prev, isOpen: false, action: null }
+    })
   }, [])
 
-  const loadTimersAndReminders = async () => {
+  const confirmDialogAction = useCallback(async () => {
+    const action = confirmDialog.action
+    if (!action || confirmDialog.busy) return
+
+    setConfirmDialog(prev => ({ ...prev, busy: true }))
     try {
-      // Load timers
-      const timersResponse = await fetch(`${APP_CONFIG.apiUrl}/timers`, {
-        credentials: 'include'
-      })
-      if (timersResponse.ok) {
-        const timersData = await timersResponse.json()
-        setTimers(timersData)
-      }
-
-      // Load reminders
-      const remindersResponse = await fetch(`${APP_CONFIG.apiUrl}/reminders`, {
-        credentials: 'include'
-      })
-      if (remindersResponse.ok) {
-        const remindersData = await remindersResponse.json()
-        
-        // Check for due reminders
-        remindersData.forEach(reminder => {
-          const reminderTime = new Date(reminder.reminder_time)
-          const now = currentTime
-          const timeDiff = Math.abs(reminderTime - now)
-          
-          // If reminder is due (within 30 seconds) and we haven't notified yet
-          if (timeDiff < 30000 && !notifiedReminders.has(reminder.id)) {
-            setNotifiedReminders(prev => new Set([...prev, reminder.id]))
-            showToast(`🔔 Reminder: ${reminder.title}`, 'info', true, true)
-          }
-        })
-        
-        setReminders(remindersData)
-      }
+      await action()
+      setConfirmDialog(prev => ({ ...prev, isOpen: false, busy: false, action: null }))
     } catch (error) {
-      console.error('Failed to load timers/reminders:', error)
+      console.error('Confirm action failed:', error)
+      setConfirmDialog(prev => ({ ...prev, busy: false }))
     }
-  }
-
-  const formatTimeLeft = (endTime) => {
-    const now = new Date() // Use current time instead of state
-    const end = new Date(endTime)
-    const diff = end - now
-    
-    if (diff <= 0) {
-      return 'FINISHED'
-    }
-    
-    const hours = Math.floor(diff / (1000 * 60 * 60))
-    const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60))
-    const seconds = Math.floor((diff % (1000 * 60)) / 1000)
-    
-    return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`
-  }
-
-  const stopTimer = async (timerId) => {
-    try {
-      const response = await fetch(`${APP_CONFIG.apiUrl}/timers/${timerId}/stop`, {
-        method: 'PATCH',
-        credentials: 'include'
-      })
-      if (response.ok) {
-        await loadTimersAndReminders()
-      }
-    } catch (error) {
-      console.error('Failed to stop timer:', error)
-    }
-  }
-
-  const completeReminder = async (reminderId) => {
-    try {
-      const response = await fetch(`${APP_CONFIG.apiUrl}/reminders/${reminderId}/complete`, {
-        method: 'PATCH',
-        credentials: 'include'
-      })
-      if (response.ok) {
-        await loadTimersAndReminders()
-      }
-    } catch (error) {
-      console.error('Failed to complete reminder:', error)
-    }
-  }
-
-  const createQuickTimer = async (minutes, title) => {
-    try {
-      const response = await fetch(`${APP_CONFIG.apiUrl}/timers`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({
-          title: title,
-          duration_minutes: minutes
-        })
-      })
-      if (response.ok) {
-        await loadTimersAndReminders()
-      }
-    } catch (error) {
-      console.error('Failed to create timer:', error)
-    }
-  }
-
-  const checkAuth = async () => {
-    try {
-      const response = await fetch(`${APP_CONFIG.apiUrl}/auth/me`, {
-        credentials: 'include'
-      })
-      if (response.ok) {
-        const userData = await response.json()
-        setUser(userData)
-        setIsAuthenticated(true)
-        setView('dashboard')
-      }
-    } catch (error) {
-      console.log('Not authenticated')
-    }
-  }
-
-  const handleAuth = async (e) => {
-    e.preventDefault()
-    setLoading(true)
-    
-    try {
-      const endpoint = isLogin ? '/auth/login' : '/auth/signup'
-      const response = await fetch(`${APP_CONFIG.apiUrl}${endpoint}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({ email, password })
-      })
-
-      if (response.ok) {
-        const userData = await response.json()
-        setUser(userData)
-        setIsAuthenticated(true)
-        setView('dashboard')
-        setChatMessages([{
-          role: 'assistant',
-          content: `Hello! I'm ${APP_CONFIG.assistantName}, your personal AI assistant. How can I help you today?`,
-          timestamp: new Date()
-        }])
-      } else {
-        const error = await response.json()
-        setMessage(error.detail || 'Authentication failed')
-      }
-    } catch (error) {
-      setMessage('Connection error. Please try again.')
-    }
-    setLoading(false)
-  }
-
-  const sendMessage = async (e, isQuickChat = false) => {
-    e.preventDefault()
-    if (!message.trim() || loading) return // Prevent multiple concurrent requests
-
-    // Cancel any existing request
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort()
-    }
-    
-    // Create new abort controller for this request
-    abortControllerRef.current = new AbortController()
-
-    const userMessage = { role: 'user', content: message, timestamp: new Date() }
-    if (!isQuickChat) {
-      setChatMessages(prev => [...prev, userMessage])
-    }
-    setMessage('')
-    setLoading(true)
-    
-    if (isQuickChat) {
-      setShowQuickResponse(true)
-      setQuickChatResponse('Sara is typing...')
-    }
-
-    // State for streaming
-    let streamingContent = ''
-    let isFirstStreamChunk = true
-    let isUsingTools = false
-    let toolActivity = ''
-
-    try {
-      const response = await fetch(`${APP_CONFIG.apiUrl}/chat/stream`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        signal: abortControllerRef.current.signal,
-        body: JSON.stringify({
-          messages: [...chatMessages, userMessage].map(m => ({ role: m.role, content: m.content }))
-        })
-      })
-
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`)
-      }
-
-      const reader = response.body?.getReader()
-      if (!reader) {
-        throw new Error('No response body reader available')
-      }
-
-      const decoder = new TextDecoder()
-      
-      try {
-        while (true) {
-          const { done, value } = await reader.read()
-          
-          if (done) break
-          
-          const chunk = decoder.decode(value)
-          const lines = chunk.split('\n')
-          
-          for (const line of lines) {
-            if (line.startsWith('data: ')) {
-              try {
-                const eventData = JSON.parse(line.slice(6))
-                console.log('Received SSE event:', eventData)
-                
-                // Debug tool events specifically
-                if (eventData.type?.includes('tool')) {
-                  console.log('🔧 TOOL EVENT RECEIVED:', eventData)
-                }
-                
-                switch (eventData.type) {
-                  case 'tool_calls_start':
-                    isUsingTools = true
-                    toolActivity = `🔧 Using Tools (Round ${eventData.data.round})`
-                    if (isQuickChat) {
-                      setQuickChatResponse(toolActivity)
-                    }
-                    break
-                    
-                  case 'tool_executing':
-                    toolActivity = `🔧 Using ${eventData.data.tool}...`
-                    if (isQuickChat) {
-                      setQuickChatResponse(toolActivity)
-                    }
-                    break
-                    
-                  case 'thinking':
-                    toolActivity = '💭 Processing results...'
-                    if (isQuickChat) {
-                      setQuickChatResponse(toolActivity)
-                    }
-                    break
-                    
-                  case 'text_chunk':
-                    streamingContent = eventData.data.full_content
-                    if (isFirstStreamChunk) {
-                      // Brief "breath to talk" surge on first streamed token
-                      isFirstStreamChunk = false
-                    }
-                    if (isQuickChat) {
-                      setQuickChatResponse(streamingContent)
-                    } else {
-                      // Update the last message with streaming content
-                      setChatMessages(prev => {
-                        const newMessages = [...prev]
-                        if (newMessages[newMessages.length - 1]?.role === 'assistant') {
-                          newMessages[newMessages.length - 1].content = streamingContent
-                        } else {
-                          newMessages.push({
-                            role: 'assistant',
-                            content: streamingContent,
-                            timestamp: new Date()
-                          })
-                        }
-                        return newMessages
-                      })
-                    }
-                    break
-                    
-                  case 'final_response':
-                    const finalContent = eventData.data.content
-                    const finalCitations = eventData.data.citations || []
-                    if (isQuickChat) {
-                      setQuickChatResponse(finalContent)
-                    } else {
-                      setChatMessages(prev => {
-                        const newMessages = [...prev]
-                        if (newMessages[newMessages.length - 1]?.role === 'assistant') {
-                          newMessages[newMessages.length - 1].content = finalContent
-                          newMessages[newMessages.length - 1].citations = finalCitations
-                        } else {
-                          newMessages.push({
-                            role: 'assistant',
-                            content: finalContent,
-                            citations: finalCitations,
-                            timestamp: new Date()
-                          })
-                        }
-                        return newMessages
-                      })
-                    }
-                    break
-                    
-                  case 'response_ready':
-                    setLoading(false)
-                    isUsingTools = false
-                    break
-                    
-                  case 'error':
-                    console.error('Streaming error:', eventData.message)
-                    setLoading(false)
-                    break
-                }
-              } catch (e) {
-                console.warn('Failed to parse SSE data:', line)
-              }
-            }
-          }
-        }
-      } finally {
-        reader.releaseLock()
-      }
-      
-      // Refresh timers/reminders after chat in case something was created
-      await loadTimersAndReminders()
-    } catch (error) {
-      // Don't show error if request was aborted (user sent another message)
-      if (error.name === 'AbortError') {
-        console.log('Chat request was cancelled')
-        return
-      }
-      
-      const errorMsg = 'Connection error. Please check your network and try again.'
-      if (isQuickChat) {
-        setQuickChatResponse(errorMsg)
-      } else {
-        setChatMessages(prev => [...prev, {
-          role: 'assistant',
-          content: errorMsg,
-          timestamp: new Date()
-        }])
-      }
-    } finally {
-      setLoading(false)
-      // Clear the abort controller when done
-      if (abortControllerRef.current) {
-        abortControllerRef.current = null
-      }
-    }
-  }
-
-  const createNote = async (e) => {
-    e.preventDefault()
-    if (!newNote.trim()) return
-
-    setLoading(true)
-    try {
-      const response = await fetch(`${APP_CONFIG.apiUrl}/notes`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({ content: newNote })
-      })
-
-      if (response.ok) {
-        const note = await response.json()
-        setNotes(prev => [note, ...prev])
-        setNewNote('')
-      }
-    } catch (error) {
-      console.error('Failed to create note:', error)
-    }
-    setLoading(false)
-  }
-
-  const updateNote = async (noteId) => {
-    if (!editNoteContent.trim()) return
-
-    setLoading(true)
-    try {
-      const response = await fetch(`${APP_CONFIG.apiUrl}/notes/${noteId}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({ 
-          title: editNoteTitle, 
-          content: editNoteContent 
-        })
-      })
-
-      if (response.ok) {
-        const updatedNote = await response.json()
-        setNotes(prev => prev.map(note => 
-          note.id === noteId ? updatedNote : note
-        ))
-        setEditingNote(null)
-        setEditNoteContent('')
-        setEditNoteTitle('')
-      }
-    } catch (error) {
-      console.error('Failed to update note:', error)
-    }
-    setLoading(false)
-  }
-
-  const deleteNote = async (noteId) => {
-    if (!confirm('Are you sure you want to delete this note?')) return
-
-    setLoading(true)
-    try {
-      const response = await fetch(`${APP_CONFIG.apiUrl}/notes/${noteId}`, {
-        method: 'DELETE',
-        credentials: 'include'
-      })
-
-      if (response.ok) {
-        setNotes(prev => prev.filter(note => note.id !== noteId))
-      }
-    } catch (error) {
-      console.error('Failed to delete note:', error)
-    }
-    setLoading(false)
-  }
-
-  const startEditNote = (note) => {
-    setEditingNote(note.id)
-    setEditNoteTitle(note.title || '')
-    setEditNoteContent(note.content)
-  }
-
-  const cancelEditNote = () => {
-    setEditingNote(null)
-    setEditNoteContent('')
-    setEditNoteTitle('')
-  }
-
-  const loadNotes = async () => {
-    try {
-      const response = await fetch(`${APP_CONFIG.apiUrl}/notes`, {
-        credentials: 'include'
-      })
-      if (response.ok) {
-        const notesData = await response.json()
-        setNotes(notesData)
-      }
-    } catch (error) {
-      console.error('Failed to load notes:', error)
-    }
-  }
-
-  const loadDocuments = async () => {
-    try {
-      const response = await fetch(`${APP_CONFIG.apiUrl}/documents`, {
-        credentials: 'include'
-      })
-      if (response.ok) {
-        const documentsData = await response.json()
-        setDocuments(documentsData)
-      }
-    } catch (error) {
-      console.error('Failed to load documents:', error)
-    }
-  }
-
-  const loadAnalytics = async () => {
-    try {
-      console.log('Loading analytics...')
-      const response = await fetch(`${APP_CONFIG.apiUrl}/analytics/dashboard`, {
-        credentials: 'include'
-      })
-      console.log('Analytics response status:', response.status)
-      if (response.ok) {
-        const analyticsData = await response.json()
-        console.log('Analytics data loaded:', analyticsData)
-        setAnalytics(analyticsData)
-      } else {
-        console.error('Analytics response error:', response.status, response.statusText)
-        const errorText = await response.text()
-        console.error('Error details:', errorText)
-      }
-    } catch (error) {
-      console.error('Failed to load analytics:', error)
-    }
-  }
-
-  const uploadDocument = async (file) => {
-    if (!file) return
-    
-    setUploading(true)
-    try {
-      const formData = new FormData()
-      formData.append('file', file)
-      
-      const response = await fetch(`${APP_CONFIG.apiUrl}/documents`, {
-        method: 'POST',
-        body: formData,
-        credentials: 'include'
-      })
-      
-      if (response.ok) {
-        const newDocument = await response.json()
-        setDocuments(prev => [newDocument, ...prev])
-        setSelectedFile(null)
-        showToast('Document uploaded successfully!', 'success')
-      } else {
-        const error = await response.json()
-        showToast(error.detail || 'Failed to upload document', 'error')
-      }
-    } catch (error) {
-      console.error('Upload error:', error)
-      showToast('Failed to upload document', 'error')
-    } finally {
-      setUploading(false)
-    }
-  }
-
-  const downloadDocument = async (documentId, filename) => {
-    try {
-      const response = await fetch(`${APP_CONFIG.apiUrl}/documents/${documentId}/file`, {
-        credentials: 'include'
-      })
-      
-      if (response.ok) {
-        const blob = await response.blob()
-        const url = window.URL.createObjectURL(blob)
-        const a = document.createElement('a')
-        a.style.display = 'none'
-        a.href = url
-        a.download = filename
-        document.body.appendChild(a)
-        a.click()
-        window.URL.revokeObjectURL(url)
-        document.body.removeChild(a)
-      } else {
-        showToast('Failed to download document', 'error')
-      }
-    } catch (error) {
-      console.error('Download error:', error)
-      showToast('Failed to download document', 'error')
-    }
-  }
-
-  const deleteDocument = async (documentId) => {
-    if (!confirm('Are you sure you want to delete this document?')) return
-    
-    try {
-      const response = await fetch(`${APP_CONFIG.apiUrl}/documents/${documentId}`, {
-        method: 'DELETE',
-        credentials: 'include'
-      })
-      
-      if (response.ok) {
-        setDocuments(prev => prev.filter(doc => doc.id !== documentId))
-        showToast('Document deleted successfully', 'success')
-      } else {
-        showToast('Failed to delete document', 'error')
-      }
-    } catch (error) {
-      console.error('Delete error:', error)
-      showToast('Failed to delete document', 'error')
-    }
-  }
-
-  const updateDocumentTitle = async (documentId, newTitle) => {
-    if (!newTitle.trim()) return
-    
-    try {
-      const response = await fetch(`${APP_CONFIG.apiUrl}/documents/${documentId}?title=${encodeURIComponent(newTitle)}`, {
-        method: 'PUT',
-        credentials: 'include'
-      })
-      
-      if (response.ok) {
-        const updatedDocument = await response.json()
-        setDocuments(prev => prev.map(doc => 
-          doc.id === documentId ? updatedDocument : doc
-        ))
-        setEditingDocumentId(null)
-        setEditingDocumentTitle('')
-        showToast('Document title updated successfully', 'success')
-      } else {
-        showToast('Failed to update document title', 'error')
-      }
-    } catch (error) {
-      console.error('Update error:', error)
-      showToast('Failed to update document title', 'error')
-    }
-  }
-
-  const startEditDocumentTitle = (doc) => {
-    setEditingDocumentId(doc.id)
-    setEditingDocumentTitle(doc.title || doc.original_filename)
-  }
-
-  const cancelEditDocumentTitle = () => {
-    setEditingDocumentId(null)
-    setEditingDocumentTitle('')
-  }
-
-  // Memoize the onNodeClick function to prevent unnecessary re-renders of the knowledge graph
-  const handleGraphNodeClick = useCallback((nodeId, nodeType) => {
-    if (nodeType === 'note') {
-      const noteIdString = nodeId.replace('note-', '')
-      const noteId = parseInt(noteIdString)
-      const note = notes.find(n => n.id === noteId)
-      if (note) {
-        setEditingNote(noteId)
-        setEditNoteTitle(note.title || '')
-        setEditNoteContent(note.content || '')
-        setView('notes') // Switch to notes view when clicking a note node
-      }
-    } else if (nodeType === 'episode') {
-      console.log('Episode clicked:', nodeId)
-      // Could implement episode details view
-    } else if (nodeType === 'document') {
-      console.log('Document clicked:', nodeId)
-      // Could navigate to document view
-      setView('documents')
-    }
-  }, [notes, setEditingNote, setEditNoteTitle, setEditNoteContent, setView])
+  }, [confirmDialog.action, confirmDialog.busy])
 
   const clearChat = () => {
-    setChatMessages([{
-      role: 'assistant',
-      content: `Hello! I'm ${APP_CONFIG.assistantName}, your personal AI assistant. How can I help you today?`,
-      timestamp: new Date()
-    }])
+    setChatMessages(getInitialChatMessages())
   }
 
-  const showToast = (message, type = 'info', persistent = false) => {
-    const id = Date.now()
-    const toast = { id, message, type, persistent }
-    setToasts(prev => [...prev, toast])
+  const showToast = useCallback((message, type = 'info', persistent = false, _highlight = false) => {
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+    setToasts(prev => {
+      // Don't stack duplicates of the same message
+      if (prev.some(t => t.message === message)) return prev
+      return [...prev.slice(-9), { id, message, type, persistent }]
+    })
 
-    // Auto-remove toast after 5 seconds (unless persistent)
-    if (!persistent) {
-      setTimeout(() => {
-        setToasts(prev => prev.filter(t => t.id !== id))
-      }, 5000)
-    }
-  }
+    // Nothing camps on screen forever — history belongs in the notification
+    // indicators, not in a stack covering the page.
+    setTimeout(() => {
+      setToasts(prev => prev.filter(t => t.id !== id))
+    }, persistent ? 30000 : 5000)
+  }, [])
   
   const removeToast = (id) => {
     setToasts(prev => prev.filter(t => t.id !== id))
   }
 
-  const logout = async () => {
-    try {
-      await fetch(`${APP_CONFIG.apiUrl}/auth/logout`, {
-        method: 'POST',
-        credentials: 'include'
-      })
-    } catch (error) {
-      console.error('Logout error:', error)
+  const {
+    timers,
+    reminders,
+    currentTime,
+    morningBrief,
+    morningBriefLoading,
+    weather,
+    calendarEvents,
+    saraStatus,
+    connectedDevices,
+    standingOrders,
+    journalEntries,
+    expandedJournalEntries,
+    attentionItems,
+    missions,
+    contentInboxStats,
+    briefAudioPlaying,
+    setBriefAudioPlaying,
+    briefAudioRef,
+    playBriefAudio,
+    toggleJournalEntry,
+    attentionUnreadCount,
+    awaitingDecisionCount,
+    inboxUnreadCount,
+    missionAwaitingCount,
+    runningMissionCount,
+  } = useDashboardWorkspace({
+    isAuthenticated,
+    view,
+    onShowToast: showToast,
+  })
+
+  const {
+    documents,
+    selectedFile,
+    setSelectedFile,
+    uploading,
+    editingDocumentId,
+    editingDocumentTitle,
+    setEditingDocumentTitle,
+    loadDocuments,
+    uploadDocument,
+    downloadDocument,
+    deleteDocument,
+    updateDocumentTitle,
+    startEditDocumentTitle,
+    cancelEditDocumentTitle,
+  } = useDocumentWorkspace({
+    onShowToast: showToast,
+    onConfirm: openConfirmDialog,
+  })
+
+  // Load primary view data when switching views (including URL-driven navigation).
+  useEffect(() => {
+    if (!isAuthenticated) return
+
+    if (view === 'documents') {
+      loadDocuments()
     }
-    setIsAuthenticated(false)
-    setUser(null)
-    setView('login')
-    setChatMessages([])
-    setNotes([])
+  }, [isAuthenticated, loadDocuments, view])
+
+  const handleWorkspaceNavigation = async (noteId: string) => {
+    if (noteId === 'workspace') {
+      navigateToView('workspace')
+      return
+    }
+
+    navigate({
+      pathname: pathForView('notes'),
+      search: `?id=${encodeURIComponent(noteId)}`,
+    })
   }
+
+  const getNavBadgeCount = (navView: AppView): number => {
+    if (navView === 'inbox') return inboxUnreadCount
+    if (navView === 'dashboard') return awaitingDecisionCount
+    return 0
+  }
+
+  const handleChatQuickAction = (actionId: 'inbox_attention' | 'missions' | 'standing_orders') => {
+    if (actionId === 'inbox_attention') {
+      setInboxTab('attention')
+      navigateToView('inbox')
+      return
+    }
+    if (actionId === 'missions') {
+      navigateToView('dashboard')
+      return
+    }
+    if (actionId === 'standing_orders') {
+      setMessage('Review my active standing orders and tell me what is scheduled next.')
+    }
+  }
+
+  // Primary nav: 6 flagship surfaces (PHENOMENAL_ASSISTANT_PLAN.md Phase 8 —
+  // 24 views collapsed to 6 + a More drawer; nothing deleted, only demoted,
+  // and the command palette still reaches everything). 'notes' carries the
+  // Knowledge label since NotesKnowledgeGarden already covers notes + graph
+  // + connections; the raw PKG facts/people browser ('knowledge' view) moves
+  // to More to avoid a two-items-named-"Knowledge" collision.
+  const primaryNavItems: ShellNavItem[] = [
+    { view: 'dashboard', label: 'Home', icon: 'home' },
+    { view: 'chat', label: 'Chat', icon: 'chat' },
+    { view: 'inbox', label: 'Today', icon: 'inbox' },
+    { view: 'notes', label: 'Knowledge', icon: 'edit_note' },
+    { view: 'fitness', label: 'Fitness', icon: 'fitness_center' },
+    { view: 'system', label: 'System', icon: 'hub' },
+  ]
+
+  // "More" tier first, then the more specialized/introspective "Advanced"
+  // tier, then Settings last — same flat array renders both the desktop
+  // rail's More popover and the mobile menu's More section, so the order
+  // here is the only grouping signal (no nested collapse UI this pass).
+  const secondaryNavItems: ShellNavItem[] = [
+    { view: 'calendar', label: 'Calendar', icon: 'calendar_today' },
+    { view: 'email', label: 'Email', icon: 'email' },
+    { view: 'documents', label: 'Documents', icon: 'description' },
+    { view: 'tasks', label: 'Tasks', icon: 'check_circle' },
+    { view: 'projects', label: 'Projects', icon: 'work' },
+    { view: 'recipes', label: 'Recipes', icon: 'restaurant_menu' },
+    { view: 'learn', label: 'Learn', icon: 'school' },
+    { view: 'briefings', label: 'Briefings', icon: 'wb_sunny' },
+    { view: 'workspace', label: 'Canvas', icon: 'grid_view' },
+    { view: 'automations', label: 'Agent Tasks', icon: 'bolt' },
+    { view: 'knowledge', label: 'Facts & People', icon: 'psychology' },
+    { view: 'acs', label: 'ACS', icon: 'smart_toy' },
+    { view: 'sensory-monitor', label: 'Sensory', icon: 'sensors' },
+    { view: 'orchestrator-lab', label: 'Orchestrator Lab', icon: 'science' },
+    { view: 'system-status', label: 'System Status', icon: 'monitoring' },
+    { view: 'privacy-dashboard', label: 'Privacy', icon: 'lock' },
+    { view: 'settings', label: 'Settings', icon: 'settings' },
+  ]
+
+  const mobileBottomNavItems: ShellNavItem[] = primaryNavItems
 
   if (!isAuthenticated) {
     return (
-      <div className="min-h-screen flex items-center justify-center p-8" style={{backgroundColor: '#0d1117', color: '#c9d1d9'}}>
-        <div className="max-w-md w-full bg-card border border-card rounded-xl p-8">
-          <div className="text-center mb-8">
-            <div className="w-16 h-16 bg-white text-black rounded-lg mx-auto mb-4 flex items-center justify-center text-2xl font-bold">
-              S
-            </div>
-            <h1 className="text-2xl font-bold text-white">Welcome to {APP_CONFIG.assistantName}</h1>
-            <p className="text-gray-400 mt-2">{APP_CONFIG.ui.subtitle}</p>
-          </div>
-
-          <form onSubmit={handleAuth}>
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-1">Email</label>
-                <input
-                  type="email"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500 text-white"
-                  required
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-1">Password</label>
-                <input
-                  type="password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500 text-white"
-                  required
-                />
-              </div>
-            </div>
-
-            {message && (
-              <div className="mt-4 p-3 bg-red-900/20 border border-red-800 rounded-lg text-red-400 text-sm">
-                {message}
-              </div>
-            )}
-
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full bg-teal-600 hover:bg-teal-700 text-white font-medium py-2 px-4 rounded-lg transition-colors mt-6"
-            >
-              {loading ? 'Please wait...' : (isLogin ? 'Sign In' : 'Sign Up')}
-            </button>
-
-            <div className="mt-4 text-center">
-              <button
-                type="button"
-                onClick={() => setIsLogin(!isLogin)}
-                className="text-teal-400 hover:text-teal-300 text-sm"
-              >
-                {isLogin ? "Don't have an account? Sign up" : "Already have an account? Sign in"}
-              </button>
-            </div>
-          </form>
-        </div>
-      </div>
+      <AuthScreen
+        assistantName={APP_CONFIG.assistantName}
+        subtitle={APP_CONFIG.ui.subtitle}
+        email={email}
+        password={password}
+        isLogin={isLogin}
+        loading={authLoading}
+        message={authMessage}
+        onEmailChange={setEmail}
+        onPasswordChange={setPassword}
+        onToggleMode={() => setIsLogin((prev) => !prev)}
+        onSubmit={handleAuth}
+      />
     )
   }
 
   return (
-    <div className="p-4 md:p-8 pb-20 md:pb-8" style={{backgroundColor: '#0d1117', color: '#c9d1d9', minHeight: '100vh'}}>
+    <div className="h-screen overflow-hidden flex flex-col px-4 pb-20 pt-4 text-slate-100 md:px-6 md:pb-4 md:pt-6">
       {/* Command Palette */}
       <CommandPalette
         isOpen={commandPaletteOpen}
         onClose={() => setCommandPaletteOpen(false)}
-        onNavigate={(v) => { setView(v); if (v === 'notes') loadNotes(); }}
+        onNavigate={navigateToView}
         currentView={view}
       />
 
-      <div className="flex flex-col md:flex-row md:space-x-8">
-        
-        {/* Mobile Header */}
-        <div className="md:hidden flex justify-between items-center mb-4">
-          <h1 className="text-2xl font-bold">{APP_CONFIG.assistantName}</h1>
-          <button 
-            onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
-            className="p-2 text-gray-400 hover:text-white"
-          >
-            <span className="text-2xl">{isMobileMenuOpen ? '✕' : '☰'}</span>
-          </button>
-        </div>
-
-        {/* Mobile Navigation Overlay */}
-        {isMobileMenuOpen && (
-          <div className="md:hidden fixed inset-0 bg-black bg-opacity-50 z-50" onClick={() => setIsMobileMenuOpen(false)}>
-            <div className="bg-gray-900 w-full max-w-sm h-full flex flex-col overflow-hidden" onClick={e => e.stopPropagation()}>
-              <div className="flex justify-between items-center p-4 border-b border-gray-700 flex-shrink-0">
-                <div className="p-3 bg-white text-black rounded-lg font-bold text-xl">S</div>
-                <button onClick={() => setIsMobileMenuOpen(false)} className="text-gray-400 text-2xl tap-target">✕</button>
-              </div>
-              <nav className="flex-1 overflow-y-auto p-4 space-y-2">
-                <button
-                  onClick={() => { setView('dashboard'); loadNotes(); loadAnalytics(); loadTimersAndReminders(); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'dashboard' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
-                >
-                  <span className="material-icons">home</span>
-                  <span>Home</span>
-                </button>
-                <button
-                  onClick={() => { setView('chat'); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'chat' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
-                >
-                  <span className="material-icons">chat</span>
-                  <span>Chat</span>
-                </button>
-                <button
-                  onClick={() => { setView('notes'); loadNotes(); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'notes' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
-                >
-                  <span className="material-icons">notes</span>
-                  <span>Notes</span>
-                </button>
-                <button
-                  onClick={() => { setView('habits'); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'habits' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
-                >
-                  <span className="material-icons">track_changes</span>
-                  <span>Habits</span>
-                </button>
-                <button
-                  onClick={() => { setView('documents'); loadDocuments(); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'documents' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
-                >
-                  <span className="material-icons">description</span>
-                  <span>Documents</span>
-                </button>
-                <button
-                  onClick={() => { setView('calendar'); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'calendar' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
-                >
-                  <span className="material-icons">calendar_today</span>
-                  <span>Calendar</span>
-                </button>
-                <button
-                  onClick={() => { setView('fitness'); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'fitness' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
-                >
-                  <span className="text-xl">💪</span>
-                  <span>Fitness</span>
-                </button>
-                <button
-                  onClick={() => { setView('learn'); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'learn' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
-                >
-                  <span className="material-icons">school</span>
-                  <span>Learn</span>
-                </button>
-                <button
-                  onClick={() => { setView('projects'); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'projects' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
-                >
-                  <span className="material-icons">work</span>
-                  <span>Projects</span>
-                </button>
-                <button
-                  onClick={() => { setView('recipes'); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'recipes' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
-                >
-                  <span className="text-xl">👨‍🍳</span>
-                  <span>Recipes</span>
-                </button>
-                <button
-                  onClick={() => { setView('briefings'); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'briefings' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
-                >
-                  <span className="material-icons">wb_sunny</span>
-                  <span>Morning Brief</span>
-                </button>
-                <button
-                  onClick={() => { setView('patterns'); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'patterns' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
-                >
-                  <span className="material-icons">insights</span>
-                  <span>Patterns</span>
-                </button>
-                <button
-                  onClick={() => { setView('settings'); setIsMobileMenuOpen(false); }}
-                  className={`flex items-center space-x-3 p-3 rounded w-full tap-target ${view === 'settings' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400 hover:text-white'}`}
-                >
-                  <span className="material-icons">settings</span>
-                  <span>Settings</span>
-                </button>
-                <button
-                  onClick={() => { logout(); setIsMobileMenuOpen(false); }}
-                  className="flex items-center space-x-3 p-3 rounded w-full text-gray-400 hover:text-white mt-6 border-t border-gray-700 pt-6 tap-target"
-                >
-                  <span className="material-icons">logout</span>
-                  <span>Logout</span>
-                </button>
-              </nav>
-            </div>
-          </div>
-        )}
-
-        {/* Desktop Sidebar */}
-        <aside className="hidden md:flex flex-col items-center space-y-6 bg-card border border-card rounded-xl p-4" style={{height: 'fit-content'}}>
-          <div className="p-3 bg-white text-black rounded-lg font-bold text-2xl">S</div>
-          <nav className="flex flex-col items-center space-y-6">
-            <button
-              onClick={() => { setView('dashboard'); loadNotes(); loadAnalytics(); loadTimersAndReminders(); }}
-              className={`flex flex-col items-center ${view === 'dashboard' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
-            >
-              <span className="material-icons">home</span>
-              <span className="text-xs">Home</span>
-            </button>
-            <button
-              onClick={() => setView('chat')}
-              className={`flex flex-col items-center ${view === 'chat' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
-            >
-              <span className="material-icons">chat</span>
-              <span className="text-xs">Chat</span>
-            </button>
-            <button
-              onClick={() => { setView('notes'); loadNotes(); }}
-              className={`flex flex-col items-center ${view === 'notes' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
-            >
-              <span className="material-icons">notes</span>
-              <span className="text-xs">Notes</span>
-            </button>
-            <button
-              onClick={() => setView('habits')}
-              className={`flex flex-col items-center ${view === 'habits' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
-            >
-              <span className="material-icons">track_changes</span>
-              <span className="text-xs">Habits</span>
-            </button>
-            <button
-              onClick={() => { setView('documents'); loadDocuments(); }}
-              className={`flex flex-col items-center ${view === 'documents' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
-            >
-              <span className="material-icons">description</span>
-              <span className="text-xs">Documents</span>
-            </button>
-            <button
-              onClick={() => setView('calendar')}
-              className={`flex flex-col items-center ${view === 'calendar' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
-            >
-              <span className="material-icons">calendar_today</span>
-              <span className="text-xs">Calendar</span>
-            </button>
-            <button
-              onClick={() => setView('fitness')}
-              className={`flex flex-col items-center ${view === 'fitness' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
-            >
-              <span className="text-xl">💪</span>
-              <span className="text-xs">Fitness</span>
-            </button>
-            <button
-              onClick={() => setView('learn')}
-              className={`flex flex-col items-center ${view === 'learn' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
-            >
-              <span className="material-icons">school</span>
-              <span className="text-xs">Learn</span>
-            </button>
-            <button
-              onClick={() => setView('projects')}
-              className={`flex flex-col items-center ${view === 'projects' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
-            >
-              <span className="material-icons">work</span>
-              <span className="text-xs">Projects</span>
-            </button>
-            <button
-              onClick={() => setView('recipes')}
-              className={`flex flex-col items-center ${view === 'recipes' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
-            >
-              <span className="text-xl">👨‍🍳</span>
-              <span className="text-xs">Recipes</span>
-            </button>
-            <button
-              onClick={() => setView('briefings')}
-              className={`flex flex-col items-center ${view === 'briefings' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
-            >
-              <span className="material-icons">wb_sunny</span>
-              <span className="text-xs">Brief</span>
-            </button>
-            <button
-              onClick={() => setView('patterns')}
-              className={`flex flex-col items-center ${view === 'patterns' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
-            >
-              <span className="material-icons">insights</span>
-              <span className="text-xs">Patterns</span>
-            </button>
-            <button
-              onClick={() => setView('settings')}
-              className={`flex flex-col items-center ${view === 'settings' ? 'text-teal-400' : 'text-gray-400 hover:text-white'}`}
-            >
-              <span className="material-icons">settings</span>
-              <span className="text-xs">Settings</span>
-            </button>
-          </nav>
-          <div className="mt-auto">
-            <button
-              onClick={logout}
-              className="flex flex-col items-center text-gray-400 hover:text-white"
-            >
-              <span className="material-icons">logout</span>
-            </button>
-          </div>
-        </aside>
+      <div className="flex flex-col md:flex-row md:space-x-6 flex-1 min-h-0">
+        <ShellNavigation
+          assistantName={APP_CONFIG.assistantName}
+          view={view}
+          primaryNavItems={primaryNavItems}
+          secondaryNavItems={secondaryNavItems}
+          mobileBottomNavItems={mobileBottomNavItems}
+          isMobileMenuOpen={isMobileMenuOpen}
+          getNavBadgeCount={getNavBadgeCount}
+          onNavigate={navigateToView}
+          onLogout={logout}
+          onSetMobileMenuOpen={setIsMobileMenuOpen}
+        />
 
         {/* Main Content */}
-        <main className="flex-1 min-w-0">
-          <header className="hidden md:flex justify-between items-center mb-8">
-            <h1 className="text-4xl font-bold">{APP_CONFIG.assistantName}</h1>
-            <div className="flex items-center space-x-4">
-              <BackgroundTasksIndicator
-                onNavigateToWorkspace={(noteId) => {
-                  setView('notes')
-                  console.log('Navigate to workspace note:', noteId)
-                }}
-              />
-              <span className="text-gray-400 text-sm">Hello, {user?.email}</span>
-            </div>
-          </header>
+        <main ref={mainContentRef} className="flex-1 min-w-0 flex flex-col min-h-0 overflow-hidden">
+          <ShellHeader
+            assistantName={APP_CONFIG.assistantName}
+            userEmail={user?.email}
+            onOpenAutomations={() => navigateToView('automations')}
+            onNavigateToWorkspace={handleWorkspaceNavigation}
+          />
 
-          {view === 'dashboard' && (
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 md:gap-8">
-              <div className="lg:col-span-2 space-y-4 md:space-y-8">
-                {/* System Monitoring & Analytics */}
-                <div className="bg-card border border-card rounded-xl p-6">
-                  <div className="flex items-center justify-between mb-4">
-                    <h2 className="text-lg font-semibold">SYSTEM MONITORING & ANALYTICS</h2>
-                    <div className={`px-3 py-1 rounded-full text-xs font-medium ${
-                      analytics?.system_health?.status === 'healthy' 
-                        ? 'bg-green-500/20 text-green-400 border border-green-500/30' 
-                        : 'bg-red-500/20 text-red-400 border border-red-500/30'
-                    }`}>
-                      {analytics?.system_health?.status?.toUpperCase() || 'LOADING...'}
-                    </div>
-                  </div>
-                  
-                  {analytics ? (
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                      <div className="space-y-4">
-                        <h3 className="font-semibold text-gray-300">Memory System</h3>
-                        <div className="space-y-2 text-sm text-gray-400">
-                          <div className="flex justify-between">
-                            <span>Total Messages:</span>
-                            <span className="text-white font-medium">{analytics.memory.total_messages.toLocaleString()}</span>
-                          </div>
-                          <div className="flex justify-between">
-                            <span>Conversations:</span>
-                            <span className="text-white font-medium">{analytics.memory.total_conversations}</span>
-                          </div>
-                          <div className="flex justify-between">
-                            <span>Archived:</span>
-                            <span className="text-white font-medium">{analytics.memory.archived_count} ({analytics.memory.archival_percentage}%)</span>
-                          </div>
-                        </div>
-                      </div>
-                      
-                      <div className="space-y-4">
-                        <h3 className="font-semibold text-gray-300">AI System Performance</h3>
-                        <div className="space-y-2 text-sm text-gray-400">
-                          <div className="flex justify-between">
-                            <span>Responses (7d):</span>
-                            <span className="text-white font-medium">{analytics.ai_system.successful_responses_7d}</span>
-                          </div>
-                          <div className="flex justify-between">
-                            <span>Tool Calls (7d):</span>
-                            <span className="text-white font-medium">{analytics.ai_system.tool_calls_successful_7d}</span>
-                          </div>
-                          <div className="flex justify-between">
-                            <span>Embedding Service:</span>
-                            <span className={`font-medium ${analytics.ai_system.embedding_service_health ? 'text-green-400' : 'text-red-400'}`}>
-                              {analytics.ai_system.embedding_service_health ? 'HEALTHY' : 'DOWN'}
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-                      
-                      <div className="space-y-4">
-                        <h3 className="font-semibold text-gray-300">Database Health</h3>
-                        <div className="space-y-2 text-sm text-gray-400">
-                          <div className="flex justify-between">
-                            <span>Size:</span>
-                            <span className="text-white font-medium">{analytics.database.size}</span>
-                          </div>
-                          <div className="flex justify-between">
-                            <span>Connections:</span>
-                            <span className="text-white font-medium">{analytics.database.connections}</span>
-                          </div>
-                          <div className="flex justify-between">
-                            <span>Status:</span>
-                            <span className={`font-medium ${analytics.database.health ? 'text-green-400' : 'text-red-400'}`}>
-                              {analytics.database.health ? 'HEALTHY' : 'ERROR'}
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-                      
-                      <div className="space-y-4">
-                        <h3 className="font-semibold text-gray-300">User Activity</h3>
-                        <div className="space-y-2 text-sm text-gray-400">
-                          <div className="flex justify-between">
-                            <span>Active Timers:</span>
-                            <span className="text-white font-medium">{analytics.user_data.active_timers}</span>
-                          </div>
-                          <div className="flex justify-between">
-                            <span>Pending Reminders:</span>
-                            <span className="text-white font-medium">{analytics.user_data.active_reminders}</span>
-                          </div>
-                          <div className="flex justify-between">
-                            <span>Last Activity:</span>
-                            <span className="text-white font-medium">
-                              {analytics.ai_system.last_activity 
-                                ? new Date(analytics.ai_system.last_activity).toLocaleDateString()
-                                : 'Never'}
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="text-center text-gray-400 py-8">
-                      <div className="animate-spin inline-block w-6 h-6 border-2 border-gray-400 border-t-transparent rounded-full mb-2"></div>
-                      <p>Loading analytics...</p>
-                    </div>
-                  )}
-                </div>
-
-                {/* Stats Grid */}
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 md:gap-8">
-                  <div className="bg-card border border-card rounded-xl p-6 text-center">
-                    <h3 className="text-gray-400 font-medium">NOTES</h3>
-                    <p className="text-5xl font-bold my-2">{notes.length}</p>
-                    <p className="text-sm text-gray-500">notes</p>
-                  </div>
-                  <div className="bg-card border border-card rounded-xl p-6 text-center">
-                    <h3 className="text-gray-400 font-medium">REMINDERS</h3>
-                    <p className="text-5xl font-bold my-2">{reminders.length}</p>
-                    <p className="text-sm text-gray-500">reminders</p>
-                  </div>
-                  <div className="bg-card border border-card rounded-xl p-6">
-                    <h3 className="text-gray-400 font-medium mb-2">CALENDAR</h3>
-                    <p className="text-white font-semibold">{currentTime.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}</p>
-                    <div className="text-xs text-gray-500 mt-2">
-                      <div className="text-2xl font-bold text-white">
-                        {currentTime.getDate()}
-                      </div>
-                      <div className="text-gray-400">
-                        {currentTime.toLocaleDateString('en-US', { weekday: 'long' })}
-                      </div>
-                    </div>
-                  </div>
-                  <div className="bg-card border border-card rounded-xl p-6 text-center">
-                    <h3 className="text-gray-400 font-medium">TIMER</h3>
-                    {timers.length > 0 ? (
-                      <div>
-                        <p className="text-3xl font-mono my-2 text-teal-400">
-                          <LiveTimer endTime={timers[0].end_time} />
-                        </p>
-                        <p className="text-sm text-gray-500">{timers[0].title}</p>
-                        <button
-                          onClick={() => stopTimer(timers[0].id)}
-                          className="mt-2 text-xs bg-red-600/20 hover:bg-red-600/30 text-red-400 px-2 py-1 rounded"
-                        >
-                          Stop
-                        </button>
-                      </div>
-                    ) : (
-                      <div>
-                        <p className="text-3xl font-mono my-2 text-gray-500">--:--:--</p>
-                        <p className="text-sm text-gray-500">no timer</p>
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                {/* Quick Chat */}
-                <div className="bg-card border border-card rounded-xl p-6">
-                  <h2 className="text-lg font-semibold mb-4">QUICK CHAT</h2>
-                  <form onSubmit={(e) => sendMessage(e, true)}>
-                    <div className="flex">
-                      <input
-                        type="text"
-                        value={message}
-                        onChange={(e) => setMessage(e.target.value)}
-                        placeholder="How can I assist you today?"
-                        className="flex-grow bg-gray-800 border border-gray-700 rounded-l-lg p-3 focus:outline-none focus:ring-2 focus:ring-teal-500 text-white"
-                        disabled={loading}
-                      />
-                      <button
-                        type="submit"
-                        disabled={loading}
-                        className="bg-gray-700 text-white font-semibold px-6 rounded-r-lg hover:bg-gray-600"
-                      >
-                        SEND
-                      </button>
-                    </div>
-                  </form>
-                  
-                  {showQuickResponse && (
-                    <div className="mt-4 p-4 bg-gray-800 rounded-lg border border-gray-700">
-                      <div className="flex justify-between items-start mb-2">
-                        <div className="flex items-center">
-                          <div className="w-6 h-6 bg-teal-600 rounded-full flex items-center justify-center text-white text-xs font-medium mr-2">
-                            S
-                          </div>
-                          <span className="text-sm text-gray-400">Sara</span>
-                        </div>
-                        <button
-                          onClick={() => setShowQuickResponse(false)}
-                          className="text-gray-400 hover:text-white"
-                        >
-                          <span className="material-icons text-sm">close</span>
-                        </button>
-                      </div>
-                      <ReactMarkdown
-                        remarkPlugins={[remarkGfm]}
-                        skipHtml={false}
-                        components={{
-                          code({node, inline, className, children, ...props}) {
-                            const match = /language-(\w+)/.exec(className || '')
-                            const language = match ? match[1] : ''
-                            const codeContent = String(children).replace(/\n$/, '')
-                            
-                            // Handle Mermaid diagrams - temporarily disabled
-                            if (!inline && language === 'mermaid') {
-                              return (
-                                <div className="my-2 p-3 bg-blue-900/20 border border-blue-500 rounded">
-                                  <p className="text-blue-300 text-xs mb-1">🎨 Mermaid Diagram</p>
-                                  <code className="bg-gray-600 px-1 py-0.5 rounded text-xs">{codeContent}</code>
-                                </div>
-                              )
-                            }
-                            
-                            return (
-                              <code className="bg-gray-600 px-1 py-0.5 rounded text-xs" {...props}>
-                                {children}
-                              </code>
-                            )
-                          },
-                          p: ({children}) => <p className="text-gray-100 text-sm">{children}</p>,
-                          ul: ({children}) => <ul className="list-disc list-inside text-gray-100 text-sm">{children}</ul>,
-                          ol: ({children}) => <ol className="list-decimal list-inside text-gray-100 text-sm">{children}</ol>,
-                          table: ({children}) => (
-                            <div className="overflow-x-auto my-4">
-                              <table className="w-full border-collapse border border-gray-600 bg-gray-800/50 rounded-lg">
-                                {children}
-                              </table>
-                            </div>
-                          ),
-                          thead: ({children}) => <thead className="bg-gray-700/50">{children}</thead>,
-                          tbody: ({children}) => <tbody>{children}</tbody>,
-                          tr: ({children}) => <tr className="border-b border-gray-600 hover:bg-gray-700/30">{children}</tr>,
-                          th: ({children}) => (
-                            <th className="border border-gray-600 px-3 py-2 text-left font-semibold text-teal-300">
-                              {children}
-                            </th>
-                          ),
-                          td: ({children}) => (
-                            <td className="border border-gray-600 px-3 py-2 text-gray-300">
-                              {children}
-                            </td>
-                          ),
-                        }}
-                      >
-                        {quickChatResponse}
-                      </ReactMarkdown>
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {/* Right Sidebar */}
-              <div className="lg:col-span-1 space-y-4 md:space-y-8">
-                {/* Active Items */}
-                <div className="bg-card border border-card rounded-xl p-6">
-                  <h2 className="text-lg font-semibold mb-4">ACTIVE TIMERS</h2>
-                  {timers.length > 0 ? (
-                    <div className="space-y-3">
-                      {timers.map((timer) => (
-                        <div key={timer.id} className="bg-gray-800 p-3 rounded-lg">
-                          <div className="flex justify-between items-center">
-                            <span className="font-medium">{timer.title}</span>
-                            <LiveTimer 
-                              endTime={timer.end_time} 
-                              className="text-teal-400 font-mono text-sm"
-                            />
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <p className="text-gray-400 text-center py-4">No active timers</p>
-                  )}
-                </div>
-
-                {/* Recent Reminders */}
-                <div className="bg-card border border-card rounded-xl p-6">
-                  <h2 className="text-lg font-semibold mb-4">REMINDERS</h2>
-                  {reminders.length > 0 ? (
-                    <div className="space-y-3">
-                      {reminders.slice(0, 3).map((reminder) => (
-                        <div key={reminder.id} className="bg-gray-800 p-3 rounded-lg">
-                          <div className="flex justify-between items-start">
-                            <div className="flex-1">
-                              <div className="font-medium">{reminder.title}</div>
-                              <div className="text-xs text-gray-400 mt-1">
-                                {new Date(reminder.reminder_time).toLocaleDateString()}
-                              </div>
-                            </div>
-                            <button
-                              onClick={() => completeReminder(reminder.id)}
-                              className="text-xs bg-green-600/20 hover:bg-green-600/30 text-green-400 px-2 py-1 rounded"
-                            >
-                              ✓
-                            </button>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <p className="text-gray-400 text-center py-4">No reminders</p>
-                  )}
-                </div>
-
-                {/* Recent Notes */}
-                <div className="bg-card border border-card rounded-xl p-6">
-                  <h2 className="text-lg font-semibold mb-4">RECENT NOTES</h2>
-                  {notes.slice(0, 3).length > 0 ? (
-                    <div className="space-y-3">
-                      {notes.slice(0, 3).map((note) => (
-                        <div key={note.id} className="bg-gray-800 p-3 rounded-lg">
-                          <p className="text-sm text-gray-300 font-medium">
-                            {note.title || 'Untitled Note'}
-                          </p>
-                          <div className="text-xs text-gray-500 mt-1">
-                            {new Date(note.created_at).toLocaleDateString()}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <p className="text-gray-400 text-center py-4">No notes yet</p>
-                  )}
-                </div>
-              </div>
-            </div>
-          )}
-
-          {view === 'chat' && (
-            <ChatInterface
-              messages={chatMessages}
-              setMessages={setChatMessages}
-              loading={loading}
-              onSendMessage={null} // Let ChatInterface handle its own message sending
-              onClearChat={clearChat}
-              message={message}
-              setMessage={setMessage}
-              abortControllerRef={abortControllerRef}
-            />
-          )}
-
-          {view === 'notes' && (
-            <Notes
-              notes={notes}
-              setNotes={setNotes}
-              editingNote={editingNote}
-              setEditingNote={setEditingNote}
-              editNoteContent={editNoteContent}
-              setEditNoteContent={setEditNoteContent}
-              editNoteTitle={editNoteTitle}
-              setEditNoteTitle={setEditNoteTitle}
-            />
-          )}
-
-          {view === 'documents' && (
-            <div className="space-y-6">
-              {/* Document Upload Section */}
-              <div className="bg-card border border-card rounded-xl p-6">
-                <h2 className="text-lg font-semibold mb-4">UPLOAD DOCUMENT</h2>
-                <div className="space-y-4">
-                  <div className="border-2 border-dashed border-gray-600 rounded-lg p-8 text-center">
-                    <input
-                      type="file"
-                      id="document-upload"
-                      className="hidden"
-                      accept=".pdf,.doc,.docx,.txt,.md"
-                      onChange={(e) => setSelectedFile(e.target.files[0])}
-                    />
-                    <label htmlFor="document-upload" className="cursor-pointer">
-                      <div className="space-y-2">
-                        <span className="material-icons text-4xl text-gray-400">cloud_upload</span>
-                        <p className="text-gray-400">Click to select a document or drag and drop</p>
-                        <p className="text-sm text-gray-500">Supports PDF, DOC, DOCX, TXT, MD files</p>
-                      </div>
-                    </label>
-                  </div>
-                  
-                  {selectedFile && (
-                    <div className="bg-gray-800 p-4 rounded-lg">
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center space-x-3">
-                          <span className="material-icons text-teal-400">description</span>
-                          <div>
-                            <p className="text-white font-medium">{selectedFile.name}</p>
-                            <p className="text-sm text-gray-400">{(selectedFile.size / 1024 / 1024).toFixed(2)} MB</p>
-                          </div>
-                        </div>
-                        <div className="space-x-2">
-                          <button
-                            onClick={() => uploadDocument(selectedFile)}
-                            disabled={uploading}
-                            className="bg-teal-600 hover:bg-teal-700 text-white px-4 py-2 rounded-lg disabled:opacity-50"
-                          >
-                            {uploading ? 'Uploading...' : 'Upload'}
-                          </button>
-                          <button
-                            onClick={() => setSelectedFile(null)}
-                            className="bg-gray-600 hover:bg-gray-700 text-white px-4 py-2 rounded-lg"
-                          >
-                            Cancel
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {/* Documents List */}
-              <div className="bg-card border border-card rounded-xl p-6">
-                <h2 className="text-lg font-semibold mb-4">YOUR DOCUMENTS</h2>
-                {documents.length === 0 ? (
-                  <p className="text-gray-400 text-center py-8">No documents uploaded yet</p>
-                ) : (
-                  <div className="space-y-3">
-                    {documents.map((doc) => (
-                      <div key={doc.id} className="bg-gray-800 p-4 rounded-lg">
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center space-x-3 flex-1">
-                            <span className="material-icons text-teal-400">
-                              {doc.mime_type?.includes('pdf') ? 'picture_as_pdf' : 
-                               doc.mime_type?.includes('word') ? 'article' : 
-                               'description'}
-                            </span>
-                            <div className="flex-1">
-                              {editingDocumentId === doc.id ? (
-                                <div className="flex items-center space-x-2">
-                                  <input
-                                    type="text"
-                                    value={editingDocumentTitle}
-                                    onChange={(e) => setEditingDocumentTitle(e.target.value)}
-                                    className="flex-1 bg-gray-700 border border-gray-600 rounded px-2 py-1 text-white text-sm"
-                                    onKeyPress={(e) => {
-                                      if (e.key === 'Enter') {
-                                        updateDocumentTitle(doc.id, editingDocumentTitle)
-                                      }
-                                      if (e.key === 'Escape') {
-                                        cancelEditDocumentTitle()
-                                      }
-                                    }}
-                                    autoFocus
-                                  />
-                                  <button
-                                    onClick={() => updateDocumentTitle(doc.id, editingDocumentTitle)}
-                                    className="text-green-400 hover:text-green-300 p-1"
-                                    title="Save"
-                                  >
-                                    <span className="material-icons text-sm">check</span>
-                                  </button>
-                                  <button
-                                    onClick={cancelEditDocumentTitle}
-                                    className="text-gray-400 hover:text-gray-300 p-1"
-                                    title="Cancel"
-                                  >
-                                    <span className="material-icons text-sm">close</span>
-                                  </button>
-                                </div>
-                              ) : (
-                                <div className="flex items-center space-x-2">
-                                  <p className="text-white font-medium flex-1">{doc.title || doc.original_filename}</p>
-                                  <button
-                                    onClick={() => startEditDocumentTitle(doc)}
-                                    className="text-gray-400 hover:text-gray-300 p-1"
-                                    title="Edit title"
-                                  >
-                                    <span className="material-icons text-sm">edit</span>
-                                  </button>
-                                </div>
-                              )}
-                              <div className="flex items-center space-x-4 text-sm text-gray-400 mt-1">
-                                <span>{(doc.file_size / 1024 / 1024).toFixed(2)} MB</span>
-                                <span>•</span>
-                                <span>Uploaded {new Date(doc.created_at).toLocaleDateString()}</span>
-                                <span>•</span>
-                                <span className={`px-2 py-1 rounded text-xs ${
-                                  doc.is_processed === 'true' ? 'bg-green-900 text-green-300' :
-                                  doc.is_processed === 'error' ? 'bg-red-900 text-red-300' :
-                                  'bg-yellow-900 text-yellow-300'
-                                }`}>
-                                  {doc.is_processed === 'true' ? 'Processed' :
-                                   doc.is_processed === 'error' ? 'Error' :
-                                   'Processing...'}
-                                </span>
-                              </div>
-                            </div>
-                          </div>
-                          <div className="flex items-center space-x-2">
-                            <button
-                              onClick={() => downloadDocument(doc.id, doc.original_filename)}
-                              className="text-teal-400 hover:text-teal-300 p-2"
-                              title="Download"
-                            >
-                              <span className="material-icons">download</span>
-                            </button>
-                            <button
-                              onClick={() => deleteDocument(doc.id)}
-                              className="text-red-400 hover:text-red-300 p-2"
-                              title="Delete"
-                            >
-                              <span className="material-icons">delete</span>
-                            </button>
-                          </div>
-                        </div>
-                        
-                        {doc.content_text && doc.is_processed === 'true' && (
-                          <div className="mt-3 pt-3 border-t border-gray-700">
-                            <p className="text-sm text-gray-400 mb-2">Document Preview:</p>
-                            <p className="text-xs text-gray-500 line-clamp-3">
-                              {doc.content_text.substring(0, 200)}...
-                            </p>
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-
-          {view === 'calendar' && (
-            <CalendarView />
-          )}
-
-          {view === 'habits' && (
-            <div className="space-y-6">
-              {/* Habit Sub-Navigation */}
-              <div className="bg-card border border-card rounded-xl p-4">
-                <div className="flex items-center justify-between">
-                  <div className="flex space-x-4">
-                    <button
-                      onClick={() => setHabitView('today')}
-                      className={`px-4 py-2 rounded-lg font-medium transition-colors ${
-                        habitView === 'today'
-                          ? 'bg-blue-600 text-white'
-                          : 'text-gray-600 hover:text-gray-900 hover:bg-gray-100'
-                      }`}
-                    >
-                      Today
-                    </button>
-                    <button
-                      onClick={() => setHabitView('insights')}
-                      className={`px-4 py-2 rounded-lg font-medium transition-colors ${
-                        habitView === 'insights'
-                          ? 'bg-blue-600 text-white'
-                          : 'text-gray-600 hover:text-gray-900 hover:bg-gray-100'
-                      }`}
-                    >
-                      Insights
-                    </button>
-                  </div>
-                  
-                  <button
-                    onClick={() => setShowHabitCreate(true)}
-                    className="flex items-center px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
-                  >
-                    <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-                    </svg>
-                    Create Habit
-                  </button>
-                </div>
-              </div>
-
-              {/* Habit Content */}
-              {habitView === 'today' && (
-                <HabitToday />
-              )}
-              
-              {habitView === 'insights' && (
-                <HabitInsights />
-              )}
-
-              {/* Create Habit Modal */}
-              <HabitCreate
-                isOpen={showHabitCreate}
-                onClose={() => setShowHabitCreate(false)}
-                onCreated={() => {
-                  setShowHabitCreate(false);
-                  showToast('Habit created successfully!', 'success');
-                  // Refresh today view if that's active
-                  if (habitView === 'today') {
-                    // HabitToday component will automatically refresh
-                  }
-                }}
-              />
-            </div>
-          )}
-
-          {view === 'fitness' && (
-            <FitnessSection />
-          )}
-
-          {view === 'learn' && (
-            <LearningSection />
-          )}
-
-          {view === 'projects' && (
-            <ProjectSection />
-          )}
-
-          {view === 'recipes' && (
-            <RecipesSection />
-          )}
-
-          {/* GTKY now managed within Settings; reflection views removed */}
-
-          {view === 'privacy-dashboard' && (
-            <div className="max-w-4xl mx-auto">
-              <PrivacyDashboard
-                onToast={(message, type) => {
-                  showToast(message, type || 'info')
-                }}
-              />
-            </div>
-          )}
-
-          {view === 'settings' && (
-            <div className="space-y-6">
-              <Settings />
-
-            </div>
-          )}
-
-          {view === 'orchestrator-lab' && (
-            <OrchestratorLab onBack={() => setView('settings')} />
-          )}
-
-          {view === 'briefings' && (
-            <MorningBrief />
-          )}
-
-          {view === 'patterns' && (
-            <PatternsDashboard />
-          )}
+          <ShellWorkspaceContent
+            view={view}
+            onNavigate={navigateToView}
+            greeting={getGreeting()}
+            attentionItems={attentionItems}
+            attentionUnreadCount={attentionUnreadCount}
+            missions={missions}
+            reminders={reminders}
+            timers={timers}
+            calendarEvents={calendarEvents}
+            weather={weather}
+            weatherEmoji={WEATHER_EMOJI}
+            contentInboxStats={contentInboxStats}
+            missionAwaitingCount={missionAwaitingCount}
+            runningMissionCount={runningMissionCount}
+            morningBrief={morningBrief}
+            morningBriefLoading={morningBriefLoading}
+            briefAudioPlaying={briefAudioPlaying}
+            briefAudioRef={briefAudioRef}
+            onPlayBriefAudio={playBriefAudio}
+            onBriefAudioEnded={() => setBriefAudioPlaying(false)}
+            onBriefAudioPaused={() => setBriefAudioPlaying(false)}
+            onBriefAudioError={() => {
+              setBriefAudioPlaying(false)
+              showToast('Unable to load brief audio.', 'error')
+            }}
+            onReviewAttentionInbox={() => {
+              setInboxTab('attention')
+              navigateToView('inbox')
+            }}
+            currentTime={currentTime}
+            journalEntries={journalEntries}
+            expandedJournalEntries={expandedJournalEntries}
+            onToggleJournalEntry={toggleJournalEntry}
+            emotionEmoji={EMOTION_EMOJI}
+            saraStatus={saraStatus}
+            connectedDevices={connectedDevices}
+            standingOrders={standingOrders}
+            formatRelativeTime={formatRelativeTime}
+            chatMessages={chatMessages}
+            setChatMessages={setChatMessages}
+            loading={false}
+            onClearChat={clearChat}
+            message={message}
+            setMessage={setMessage}
+            abortControllerRef={abortControllerRef}
+            inboxUnreadCount={inboxUnreadCount}
+            standingOrdersCount={standingOrders.length}
+            onChatQuickAction={handleChatQuickAction}
+            workbenchUrl={APP_CONFIG.workbenchUrl}
+            onOpenCanvas={openWorkspaceCanvas}
+            onBackToChat={() => navigateToView('chat')}
+            selectedFile={selectedFile}
+            uploading={uploading}
+            documents={documents}
+            editingDocumentId={editingDocumentId}
+            editingDocumentTitle={editingDocumentTitle}
+            onSelectFile={setSelectedFile}
+            onUploadDocument={uploadDocument}
+            onEditDocumentTitleChange={setEditingDocumentTitle}
+            onStartEditDocumentTitle={startEditDocumentTitle}
+            onUpdateDocumentTitle={updateDocumentTitle}
+            onCancelEditDocumentTitle={cancelEditDocumentTitle}
+            onDownloadDocument={downloadDocument}
+            onDeleteDocument={deleteDocument}
+            onToast={showToast}
+            onOrchestratorBack={() => navigateToView('settings')}
+            inboxTab={inboxTab}
+            onSelectInboxTab={setInboxTab}
+            onOpenContentChat={(inboxItemId, title, excerpt) => {
+              const trimmed = (excerpt || '').trim()
+              const clipped = trimmed.length > 600 ? `${trimmed.slice(0, 600)}…` : trimmed
+              const itemName = (title || '').trim() || 'this'
+              setMessage(
+                clipped
+                  ? `Let's talk about this: "${itemName}"\n\n${clipped}`
+                  : `Let's talk about this: ${itemName}`
+              )
+              setChatMessages([])
+              navigateToView('chat')
+              ;(window as any).__inboxItemId = inboxItemId
+            }}
+            onOpenAttentionChat={(prompt) => {
+              setMessage(prompt)
+              navigateToView('chat')
+            }}
+            onAskSara={(prompt) => {
+              setMessage(prompt)
+              setChatAutoSendToken(Date.now())
+              navigateToView('chat')
+            }}
+            chatAutoSendToken={chatAutoSendToken}
+            onChatAboutNote={(title, content) => {
+              const trimmed = (content || '').trim()
+              const excerpt = trimmed.length > 600 ? `${trimmed.slice(0, 600)}…` : trimmed
+              const noteName = (title || '').trim() || 'this note'
+              setMessage(
+                excerpt
+                  ? `Let's talk about my note "${noteName}":\n\n${excerpt}`
+                  : `Let's talk about my note "${noteName}".`
+              )
+              navigateToView('chat')
+            }}
+            onNavigateToWorkspace={handleWorkspaceNavigation}
+          />
         </main>
       </div>
       
-      {/* Mobile Bottom Navigation */}
-      <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-gray-900 border-t border-gray-700 z-40 overflow-x-auto scrollbar-hidden">
-        <div className="flex py-2 px-2 gap-1" style={{minWidth: 'fit-content'}}>
-          <button
-            onClick={() => { setView('dashboard'); loadNotes(); loadAnalytics(); loadTimersAndReminders(); }}
-            className={`flex flex-col items-center px-3 py-2 rounded flex-shrink-0 tap-target ${view === 'dashboard' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400'}`}
-          >
-            <span className="material-icons text-lg">home</span>
-            <span className="text-xs whitespace-nowrap">Home</span>
-          </button>
-          <button
-            onClick={() => setView('chat')}
-            className={`flex flex-col items-center px-3 py-2 rounded flex-shrink-0 tap-target ${view === 'chat' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400'}`}
-          >
-            <span className="material-icons text-lg">chat</span>
-            <span className="text-xs whitespace-nowrap">Chat</span>
-          </button>
-          <button
-            onClick={() => { setView('notes'); loadNotes(); }}
-            className={`flex flex-col items-center px-3 py-2 rounded flex-shrink-0 tap-target ${view === 'notes' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400'}`}
-          >
-            <span className="material-icons text-lg">notes</span>
-            <span className="text-xs whitespace-nowrap">Notes</span>
-          </button>
-          <button
-            onClick={() => setView('calendar')}
-            className={`flex flex-col items-center px-3 py-2 rounded flex-shrink-0 tap-target ${view === 'calendar' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400'}`}
-          >
-            <span className="material-icons text-lg">calendar_today</span>
-            <span className="text-xs whitespace-nowrap">Calendar</span>
-          </button>
-          <button
-            onClick={() => setView('fitness')}
-            className={`flex flex-col items-center px-3 py-2 rounded flex-shrink-0 tap-target ${view === 'fitness' ? 'text-teal-400 bg-teal-400/10' : 'text-gray-400'}`}
-          >
-            <span className="text-xl">💪</span>
-            <span className="text-xs whitespace-nowrap">Fitness</span>
-          </button>
-          <button
-            onClick={() => setIsMobileMenuOpen(true)}
-            className="flex flex-col items-center px-3 py-2 rounded flex-shrink-0 text-gray-400 tap-target"
-          >
-            <span className="material-icons text-lg">more_horiz</span>
-            <span className="text-xs whitespace-nowrap">More</span>
-          </button>
-        </div>
-      </nav>
-
-
       {/* Background Task Notifications */}
       <NotificationBanner
-        onNavigateToWorkspace={(noteId) => {
-          // Navigate to notes view and select the result note
-          setView('notes')
-          // You can pass the noteId to Notes component to auto-select it
-          console.log('Navigate to workspace note:', noteId)
-        }}
+        onNavigateToWorkspace={handleWorkspaceNavigation}
         onShowToast={(message, type) => {
           const newToast = { id: Date.now().toString(), message, type }
           setToasts(prev => [...prev, newToast])
@@ -1998,70 +647,23 @@ function App() {
       {/* Mini Chat Overlay for Agent Clarifications */}
       <MiniChatOverlay />
 
-      {/* Health Alert Chat Overlay */}
-      {activeHealthAlert && (
-        <HealthAlertChat
-          alert={activeHealthAlert}
-          onClose={() => {
-            // Mark as dismissed so it doesn't reappear (persisted to localStorage)
-            if (activeHealthAlert.insightId) {
-              const newDismissed = new Set([...dismissedHealthAlertIds, activeHealthAlert.insightId!])
-              setDismissedHealthAlertIds(newDismissed)
-              // Save to localStorage with timestamp for 24-hour expiry
-              try {
-                const entries = Array.from(newDismissed).map(id => `${id}:${Date.now()}`)
-                localStorage.setItem('dismissedHealthAlertIds', JSON.stringify(entries))
-              } catch {}
-            }
-            setActiveHealthAlert(null)
-          }}
-        />
-      )}
+      {/* Jarvis-style overlays summoned from chat ("bring up my morning brief") */}
+      <SaraOverlayHost />
 
-      {/* Toast Notifications */}
-      <div className="fixed top-4 right-4 z-50 space-y-2">
-        {toasts.map((toast) => (
-          <div
-            key={toast.id}
-            className={`max-w-sm w-full border-2 rounded-lg shadow-lg p-4 transform transition-all duration-300 ${
-              toast.type === 'success' ? 'border-green-500 bg-green-900' : 
-              toast.type === 'error' ? 'border-red-500 bg-red-900' : 
-              'border-blue-500 bg-blue-900'
-            } ${toast.persistent ? 'ring-2 ring-yellow-400 ring-opacity-50' : ''}`}
-          >
-            <div className="flex items-center justify-between">
-              <div className="flex items-center flex-1">
-                <span className={`material-icons text-sm mr-2 ${
-                  toast.type === 'success' ? 'text-green-400' : 
-                  toast.type === 'error' ? 'text-red-400' : 
-                  'text-blue-400'
-                }`}>
-                  {toast.type === 'success' ? 'check_circle' : 
-                   toast.type === 'error' ? 'error' : 
-                   'info'}
-                </span>
-                <p className="text-white text-sm font-medium">{toast.message}</p>
-              </div>
-              <button
-                onClick={() => removeToast(toast.id)}
-                className={`text-gray-400 hover:text-white ml-2 ${
-                  toast.persistent ? 'bg-gray-700 hover:bg-gray-600 rounded p-1' : ''
-                }`}
-                title={toast.persistent ? 'Click to acknowledge' : 'Close'}
-              >
-                <span className="material-icons text-sm">
-                  {toast.persistent ? 'check' : 'close'}
-                </span>
-              </button>
-            </div>
-            {toast.persistent && (
-              <div className="mt-2 text-xs text-yellow-400">
-                Click ✓ to acknowledge
-              </div>
-            )}
-          </div>
-        ))}
-      </div>
+      {/* Health Alert Chat Overlay — DISABLED: health notifications are hard-banned per HEARTBEAT.md */}
+
+      <ConfirmDialog
+        isOpen={confirmDialog.isOpen}
+        title={confirmDialog.title}
+        message={confirmDialog.message}
+        confirmLabel={confirmDialog.confirmLabel}
+        tone={confirmDialog.tone}
+        busy={confirmDialog.busy}
+        onConfirm={confirmDialogAction}
+        onCancel={closeConfirmDialog}
+      />
+
+      <ToastStack toasts={toasts} onRemoveToast={removeToast} onClearAll={() => setToasts([])} />
     </div>
   )
 }

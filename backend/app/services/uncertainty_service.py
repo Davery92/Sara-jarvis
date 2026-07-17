@@ -71,7 +71,9 @@ class UncertaintyService:
             "messages": messages,
             "temperature": kwargs.get("temperature", 0.7),
             "max_tokens": kwargs.get("max_tokens", 8000),
-            "stream": False
+            "stream": False,
+            # Local qwen: disable thinking or `content` comes back empty.
+            "chat_template_kwargs": {"enable_thinking": False},
         }
 
         # Add thinking parameter if supported by the endpoint

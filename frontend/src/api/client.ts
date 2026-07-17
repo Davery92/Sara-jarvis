@@ -42,7 +42,7 @@ export interface ToolEffect {
 export interface ChatModel {
   id: string
   name: string
-  provider: 'anthropic' | 'google' | 'local'
+  provider: 'anthropic' | 'google' | 'local' | 'openai' | 'codex'
 }
 
 export interface ChatModelsResponse {
@@ -59,9 +59,11 @@ export interface Note {
   id: string
   title: string
   content: string
+  folder_id?: string | null
   tags: string[]
-  created_at: Date
-  updated_at: Date
+  starred: boolean
+  created_at: string
+  updated_at: string
 }
 
 export interface Document {
@@ -112,6 +114,14 @@ export interface AISettings {
   bg_llm_primary_model?: string
   bg_llm_fallback_url?: string
   bg_llm_fallback_model?: string
+  codex_oauth_connected?: boolean
+  codex_oauth_email?: string
+  codex_oauth_expires_at?: string
+  codex_oauth_account_id?: string
+  // VM sandbox settings
+  vm_sandbox_host?: string
+  vm_sandbox_username?: string
+  vm_sandbox_ssh_key_path?: string
 }
 
 export interface AISettingsUpdate {
@@ -128,6 +138,19 @@ export interface AISettingsUpdate {
   bg_llm_primary_model?: string
   bg_llm_fallback_url?: string
   bg_llm_fallback_model?: string
+  // VM sandbox settings
+  vm_sandbox_host?: string
+  vm_sandbox_username?: string
+  vm_sandbox_ssh_key_path?: string
+}
+
+export interface CodexOAuthStatus {
+  connected: boolean
+  email?: string
+  account_id?: string
+  expires_at?: string
+  expires_in_seconds?: number | null
+  error?: string | null
 }
 
 export interface TokenStats {
@@ -182,6 +205,95 @@ export interface Device {
 export interface DeviceListResponse {
   devices: Device[]
 }
+
+export interface AutonomyFlags {
+  autonomy_traces_enabled: boolean
+  autonomy_structured_plan: boolean
+  autonomy_policy_engine: boolean
+  autonomy_attention_enabled: boolean
+  autonomy_missions_enabled: boolean
+  autonomy_policy_candidates_enabled: boolean
+  automation_admin_configured: boolean
+  automation_admin_email_count: number
+  automation_admin_role_count: number
+}
+
+export interface NotificationPrefItem {
+  category: string
+  enabled: boolean
+  custom_ban_phrases: string[]
+}
+
+export interface NotificationPrefsResponse {
+  preferences: NotificationPrefItem[]
+}
+
+export interface AutonomyRolloutEvaluation {
+  status: 'flag_off' | 'insufficient_data' | 'healthy' | 'unhealthy'
+  healthy: boolean | null
+  rollback_recommended: boolean
+  reasons: string[]
+}
+
+export interface AutonomyRolloutSummary {
+  window_hours: number
+  flags: {
+    autonomy_traces_enabled: boolean
+    autonomy_structured_plan: boolean
+    autonomy_policy_engine: boolean
+    autonomy_attention_enabled: boolean
+    autonomy_missions_enabled: boolean
+    autonomy_policy_candidates_enabled: boolean
+  }
+  trace_stats: {
+    total: number
+    failed: number
+    succeeded?: number
+    runs?: number
+    unique_actions?: number
+    avg_duration_ms?: number | null
+  }
+  run_log: {
+    total_runs: number
+    fallback_runs: number
+    fallback_rate: number
+  }
+  notifications: {
+    sent_total: number
+    dedup_blocked_total: number
+    attention_linked_sent: number
+    direct_sent: number
+  }
+  attention_queue: {
+    new: number
+    in_progress: number
+    done: number
+  }
+  missions: {
+    total: number
+    by_state: Array<{ state: string; count: number }>
+  }
+  thresholds: {
+    min_runs_for_eval: number
+    max_fallback_rate: number
+    max_action_failure_rate: number
+    max_dedup_block_rate: number
+    max_attention_backlog_ratio: number
+    max_mission_failure_rate: number
+    max_mission_nonterminal_ratio: number
+  }
+  rates: {
+    fallback_rate: number
+    action_failure_rate: number
+    dedup_block_rate: number
+    attention_backlog_ratio: number
+    mission_failure_rate: number
+    mission_nonterminal_ratio: number
+  }
+  evaluations: Record<string, AutonomyRolloutEvaluation>
+  rollback_recommendations: Array<{ flag: string; reasons: string[] }>
+}
+
 
 class ApiClient {
   private client: AxiosInstance
@@ -460,6 +572,48 @@ class ApiClient {
     return response.data
   }
 
+  async getCodexOAuthStatus(): Promise<CodexOAuthStatus> {
+    const response = await this.client.get('/settings/ai/codex/oauth/status')
+    return response.data
+  }
+
+  async startCodexOAuth(returnTo?: string): Promise<{ auth_url: string; redirect_uri: string; return_to: string; requires_manual_code?: boolean }> {
+    const response = await this.client.post('/settings/ai/codex/oauth/start', {
+      return_to: returnTo,
+    })
+    return response.data
+  }
+
+  async completeCodexOAuth(payload: { redirect_url?: string; code?: string; state?: string }): Promise<{ ok: boolean; connected: boolean; email: string; expires_at: string }> {
+    const response = await this.client.post('/settings/ai/codex/oauth/complete', payload)
+    return response.data
+  }
+
+  async disconnectCodexOAuth(): Promise<{ ok: boolean; message: string }> {
+    const response = await this.client.post('/settings/ai/codex/oauth/disconnect')
+    return response.data
+  }
+
+  async getAutonomyFlags(): Promise<AutonomyFlags> {
+    const response = await this.client.get('/api/settings/autonomy-flags')
+    return response.data
+  }
+
+  async getNotificationPreferences(): Promise<NotificationPrefsResponse> {
+    const response = await this.client.get('/api/settings/notification-preferences')
+    return response.data
+  }
+
+  async updateNotificationPreferences(prefs: NotificationPrefItem[]): Promise<NotificationPrefsResponse> {
+    const response = await this.client.put('/api/settings/notification-preferences', { preferences: prefs })
+    return response.data
+  }
+
+  async getAutonomyRolloutSummary(hours: number = 24): Promise<AutonomyRolloutSummary> {
+    const response = await this.client.get(`/autonomy/rollout/summary?hours=${hours}`)
+    return response.data
+  }
+
   // Token Usage endpoints
   async getTokenStats(): Promise<TokenStats> {
     const response = await this.client.get('/api/token-usage/stats')
@@ -607,27 +761,6 @@ class ApiClient {
     return response.data
   }
 
-  // Proactive Suggestions endpoints
-  async getProactiveSuggestions(): Promise<any[]> {
-    const response = await this.client.get('/api/suggestions')
-    return response.data
-  }
-
-  async updateSuggestionStatus(suggestionId: string, status: 'accepted' | 'dismissed'): Promise<any> {
-    const response = await this.client.patch(`/api/suggestions/${suggestionId}`, { status })
-    return response.data
-  }
-
-  // Detected Patterns endpoints
-  async getDetectedPatterns(): Promise<any[]> {
-    const response = await this.client.get('/api/patterns')
-    return response.data
-  }
-
-  async getPattern(patternId: string): Promise<any> {
-    const response = await this.client.get(`/api/patterns/${patternId}`)
-    return response.data
-  }
 
   // Device Management endpoints
   async getDevices(): Promise<DeviceListResponse> {
@@ -644,6 +777,282 @@ class ApiClient {
   async removeDevice(deviceId: string): Promise<void> {
     await this.client.delete(`/api/devices/${encodeURIComponent(deviceId)}`)
   }
+
+  // Agent Orchestration endpoints
+  async testVMConnection(): Promise<{ status: string; host: string; username: string }> {
+    const response = await this.client.post('/api/agents/vm/test')
+    return response.data
+  }
+
+  async dispatchAgentTask(data: { task_description: string; mode?: string; working_directory?: string }): Promise<any> {
+    const response = await this.client.post('/api/agents/dispatch', data)
+    return response.data
+  }
+
+  async listAgentTasks(limit?: number): Promise<{ tasks: any[] }> {
+    const params = limit ? `?limit=${limit}` : ''
+    const response = await this.client.get(`/api/agents/tasks${params}`)
+    return response.data
+  }
+
+  async getAgentTask(taskId: string): Promise<any> {
+    const response = await this.client.get(`/api/agents/tasks/${taskId}`)
+    return response.data
+  }
+
+  async resumeAgentTask(taskId: string, instruction: string): Promise<any> {
+    const response = await this.client.post(`/api/agents/tasks/${taskId}/resume`, { instruction })
+    return response.data
+  }
+
+  async listCandidateSkills(status?: string): Promise<{ candidates: any[] }> {
+    const params = status ? `?status=${status}` : ''
+    const response = await this.client.get(`/api/agents/skills/candidates${params}`)
+    return response.data
+  }
+
+  async getCandidateSkill(skillId: string): Promise<any> {
+    const response = await this.client.get(`/api/agents/skills/candidates/${skillId}`)
+    return response.data
+  }
+
+  async reviewCandidateSkill(skillId: string, action: string, reviewNotes?: string): Promise<any> {
+    const response = await this.client.post(`/api/agents/skills/candidates/${skillId}/review`, {
+      action,
+      review_notes: reviewNotes,
+    })
+    return response.data
+  }
+
+  async sendNotificationFeedback(
+    notificationId: number,
+    action: 'read' | 'engaged' | 'dismissed',
+    responseText?: string,
+  ): Promise<void> {
+    try {
+      await this.client.post(`/api/notifications/${notificationId}/feedback`, {
+        action,
+        response_text: responseText || undefined,
+      })
+    } catch (error) {
+      // Best-effort — don't fail the calling flow
+      console.warn('[API] Notification feedback failed (non-critical):', error)
+    }
+  }
+
+  async getNotificationEngagementStats(days: number = 7): Promise<any> {
+    const response = await this.client.get(`/api/notifications/engagement-stats?days=${days}`)
+    return response.data
+  }
+
+  // ── Settings → Schedules (DB-backed Celery beat) ─────────────────
+  async listSchedules(): Promise<ScheduledJob[]> {
+    const response = await this.client.get('/api/settings/schedules')
+    return response.data
+  }
+
+  async getSchedule(key: string): Promise<ScheduledJob> {
+    const response = await this.client.get(`/api/settings/schedules/${encodeURIComponent(key)}`)
+    return response.data
+  }
+
+  async updateSchedule(key: string, patch: SchedulePatch): Promise<ScheduledJob> {
+    const response = await this.client.patch(
+      `/api/settings/schedules/${encodeURIComponent(key)}`,
+      patch,
+    )
+    return response.data
+  }
+
+  async runScheduleNow(key: string): Promise<{ ok: boolean; task_id: string; task_name: string }> {
+    const response = await this.client.post(
+      `/api/settings/schedules/${encodeURIComponent(key)}/run-now`,
+    )
+    return response.data
+  }
+
+  // ── Settings → Tunables (cooldowns, deliberation thresholds, brief tone) ──
+  async listTunables(): Promise<TunableSetting[]> {
+    const response = await this.client.get('/api/settings/tunables')
+    return response.data
+  }
+
+  async updateTunable(key: string, value: unknown): Promise<TunableSetting> {
+    const response = await this.client.patch(
+      `/api/settings/tunables/${encodeURIComponent(key)}`,
+      { value },
+    )
+    return response.data
+  }
+
+  async resetTunable(key: string): Promise<TunableSetting> {
+    const response = await this.client.post(
+      `/api/settings/tunables/${encodeURIComponent(key)}/reset`,
+    )
+    return response.data
+  }
+
+  // ── Settings → Location (places + location-triggered reminders) ──────
+  async listPlaces(): Promise<KnownPlace[]> {
+    const response = await this.client.get('/api/location/places')
+    return response.data.places
+  }
+
+  async listSuggestedPlaces(): Promise<KnownPlace[]> {
+    const response = await this.client.get('/api/location/places/suggestions')
+    return response.data.suggestions
+  }
+
+  async createPlace(data: PlaceCreate): Promise<KnownPlace> {
+    const response = await this.client.post('/api/location/places', data)
+    return response.data
+  }
+
+  async updatePlace(placeId: string, data: Partial<PlaceCreate>): Promise<KnownPlace> {
+    const response = await this.client.patch(`/api/location/places/${placeId}`, data)
+    return response.data
+  }
+
+  async deletePlace(placeId: string): Promise<void> {
+    await this.client.delete(`/api/location/places/${placeId}`)
+  }
+
+  async confirmSuggestedPlace(placeId: string, name: string, placeType: string): Promise<KnownPlace> {
+    const response = await this.client.post(`/api/location/places/${placeId}/confirm`, {
+      name,
+      place_type: placeType,
+    })
+    return response.data
+  }
+
+  async dismissSuggestedPlace(placeId: string): Promise<void> {
+    await this.client.post(`/api/location/places/${placeId}/dismiss`)
+  }
+
+  async geocodeAddress(address: string): Promise<{ latitude: number; longitude: number }> {
+    const response = await this.client.post('/api/location/geocode', { address })
+    return response.data
+  }
+
+  async listLocationTriggers(): Promise<LocationTrigger[]> {
+    const response = await this.client.get('/api/location/triggers')
+    return response.data.triggers
+  }
+
+  async cancelLocationTrigger(triggerId: string): Promise<void> {
+    await this.client.delete(`/api/location/triggers/${triggerId}`)
+  }
+
+  // ── Settings → Daily Rhythm (learned model of David's typical day) ────
+  async getRhythm(): Promise<RhythmResponse> {
+    const response = await this.client.get('/api/rhythm')
+    return response.data
+  }
+}
+
+export interface KnownPlace {
+  id: string
+  name: string
+  place_type: string
+  latitude: number
+  longitude: number
+  radius_m: number
+  source: string
+  status: 'active' | 'suggested' | 'dismissed'
+  visit_count: number
+  last_seen_at: string | null
+  is_active: boolean
+  created_at: string
+}
+
+export interface PlaceCreate {
+  name: string
+  place_type: string
+  latitude: number
+  longitude: number
+  radius_m?: number
+}
+
+export interface LocationTrigger {
+  id: string
+  trigger_on: 'enter' | 'exit'
+  place_id: string | null
+  label: string
+  reminder_title: string
+  reminder_description: string | null
+  recurring: boolean
+  cooldown_minutes: number
+  status: string
+  expires_at: string | null
+  last_fired_at: string | null
+  created_at: string
+}
+
+export interface RhythmRow {
+  rhythm_key: string
+  day_scope: string
+  window_start: string | null
+  window_end: string | null
+  median_time: string | null
+  confidence: number
+  sample_count: number
+  variance_minutes: number | null
+  computed_at: string | null
+  place_name?: string
+}
+
+export interface RhythmResponse {
+  summary: string | null
+  core: RhythmRow[]
+  places: RhythmRow[]
+}
+
+export interface TunableSetting {
+  key: string
+  display_name: string
+  description: string | null
+  category: string
+  value_type: 'int' | 'float' | 'string' | 'bool' | 'json'
+  value: any
+  default_value: any
+  min_value: any
+  max_value: any
+  unit: string | null
+  editable: boolean
+}
+
+export interface ScheduledJob {
+  key: string
+  display_name: string
+  description: string | null
+  category: string
+  task_name: string
+  schedule_kind: 'cron' | 'interval'
+  cron_expr: string | null
+  interval_seconds: number | null
+  timezone: string
+  args: unknown[]
+  kwargs: Record<string, unknown>
+  queue: string | null
+  expires_seconds: number | null
+  enabled: boolean
+  editable: boolean
+  source: string
+  visibility: 'user' | 'system'
+  last_run_at: string | null
+  last_status: string | null
+  last_error: string | null
+  last_run_duration_ms: number | null
+  human_readable: string
+}
+
+export interface SchedulePatch {
+  schedule_kind?: 'cron' | 'interval'
+  cron_expr?: string | null
+  interval_seconds?: number | null
+  timezone?: string
+  enabled?: boolean
+  kwargs?: Record<string, unknown>
 }
 
 // Create and export a singleton instance

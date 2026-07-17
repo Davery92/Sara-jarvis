@@ -54,6 +54,12 @@ class CalendarEventResponse(BaseModel):
 
 
 # iOS Calendar Sync models
+class IOSEventAttendee(BaseModel):
+    name: Optional[str] = None
+    email: Optional[str] = None
+    status: Optional[str] = None  # accepted|declined|tentative|pending
+
+
 class IOSCalendarEventSync(BaseModel):
     ios_event_id: str
     ios_calendar_id: str
@@ -64,12 +70,21 @@ class IOSCalendarEventSync(BaseModel):
     end_time: str
     location: Optional[str] = None
     all_day: bool = False
+    attendees: Optional[List[IOSEventAttendee]] = None
+    organizer: Optional[str] = None
 
 
 class IOSCalendarSyncRequest(BaseModel):
     events: List[IOSCalendarEventSync]
+    # Sync window — when provided, the backend reconciles deletions by removing
+    # any iOS-sourced events inside this window (from the listed calendars) that
+    # are NOT present in the payload. Optional for backwards compat.
+    window_start: Optional[str] = None  # ISO datetime (UTC)
+    window_end: Optional[str] = None    # ISO datetime (UTC)
+    calendar_ids: Optional[List[str]] = None  # iOS calendar IDs included in this sync
 
 
 class IOSCalendarSyncResponse(BaseModel):
     synced: int
     errors: int
+    deleted: int = 0

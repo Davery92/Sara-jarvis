@@ -2,7 +2,7 @@ import apiClient from './api';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 export interface User {
-  id: number;
+  id: string;
   email: string;
   username?: string;
   created_at: string;
@@ -19,13 +19,31 @@ export interface UserPreferences {
 }
 
 export interface Episode {
-  id: number;
-  user_id: number;
+  id: string;
   content: string;
   episode_type: string;
   timestamp: string;
   importance_score: number;
+  source?: string;
+  role?: string;
   metadata?: any;
+}
+
+interface EpisodesApiItem {
+  id: string;
+  source?: string;
+  role?: string;
+  content?: string;
+  importance?: number;
+  meta?: any;
+  created_at?: string;
+}
+
+interface EpisodesApiResponse {
+  episodes?: EpisodesApiItem[];
+  total?: number;
+  page?: number;
+  per_page?: number;
 }
 
 export interface UpdateUserParams {
@@ -79,16 +97,32 @@ class SettingsService {
    * Get memory episodes
    */
   async getEpisodes(limit?: number, offset?: number): Promise<Episode[]> {
+    const perPage = limit ?? 20;
+    const page = offset !== undefined ? Math.floor(offset / perPage) + 1 : 1;
+
     const params = new URLSearchParams();
-    if (limit) params.append('limit', limit.toString());
-    if (offset) params.append('offset', offset.toString());
-    return await apiClient.get<Episode[]>(`/memory/episodes?${params}`);
+    params.append('per_page', perPage.toString());
+    params.append('page', page.toString());
+
+    const raw = await apiClient.get<EpisodesApiResponse | EpisodesApiItem[]>(`/memory/episodes?${params.toString()}`);
+    const items = Array.isArray(raw) ? raw : (raw.episodes || []);
+
+    return items.map((item) => ({
+      id: String(item.id),
+      content: item.content || '',
+      episode_type: item.meta?.memory_type || item.source || 'memory',
+      timestamp: item.created_at || new Date().toISOString(),
+      importance_score: typeof item.importance === 'number' ? item.importance : 0,
+      source: item.source,
+      role: item.role,
+      metadata: item.meta,
+    }));
   }
 
   /**
    * Delete a specific episode
    */
-  async deleteEpisode(episodeId: number): Promise<void> {
+  async deleteEpisode(episodeId: string): Promise<void> {
     await apiClient.delete(`/memory/episodes/${episodeId}`);
   }
 

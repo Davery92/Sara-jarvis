@@ -56,6 +56,7 @@ export interface Message {
   episode_id?: string;  // For rating episodes
   metadata?: Record<string, any>;
   attachments?: Attachment[];
+  cards?: any[];  // Content cards from tool execution
 }
 
 export interface Attachment {
@@ -67,18 +68,21 @@ export interface Attachment {
 }
 
 export interface Note {
-  id: number;
+  id: string | number;
   title: string;
   content: string;
   created_at: string;
   updated_at: string;
-  folder_id?: number;
+  folder_id?: string | number | null;
 }
 
 export interface Folder {
-  id: number;
+  id: string | number;
   name: string;
-  parent_id?: number;
+  parent_id?: string | number | null;
+  notes_count?: number;
+  subfolders_count?: number;
+  updated_at?: string;
 }
 
 export interface Habit {
@@ -163,8 +167,10 @@ export interface CalendarEvent {
 
 export interface IngredientItem {
   name: string;
-  quantity: number;
-  unit: string;
+  // Null when Sara couldn't parse a freeform ingredient line (e.g. "3/4 cup
+  // mayonnaise" pasted from a recipe) into structured quantity/unit.
+  quantity: number | null;
+  unit: string | null;
   calories?: number;
   protein?: number;
   carbs?: number;
@@ -310,6 +316,7 @@ export interface BackgroundTask {
   workspace_folder_id: string | null;
   clarification_question: string | null;
   error_message: string | null;
+  status_label?: string | null;  // friendly current-step label (e.g. "editing mul.py")
   created_at: string;
   started_at: string | null;
   completed_at: string | null;

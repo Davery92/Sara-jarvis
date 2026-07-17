@@ -50,6 +50,11 @@ export interface RecoveryLog {
   notes?: string;
   created_at?: string;
   updated_at?: string;
+  // Server-computed readiness (single source of truth — see utils/recovery.ts).
+  readiness_score?: number;   // 0-100
+  readiness_label?: string;   // Excellent / Good / Low / Poor
+  readiness_status?: string;  // human sentence
+  readiness_color?: 'success' | 'primary' | 'warning' | 'error';
 }
 
 export interface HabitLog {
@@ -72,6 +77,21 @@ export interface HabitStreak {
 export interface CreateFoodLogParams {
   meal_type: string;
   food_items: Array<{ name: string; quantity: number; unit: string }>;
+  // Rich per-item snapshot (food_id, per-item macros, serving) so the Recent
+  // tab can one-tap re-log with correct macros. Optional for backward compat.
+  detailed_items?: Array<{
+    food_id?: string;
+    name: string;
+    quantity: number;
+    serving_unit: string;
+    serving_description?: string;
+    calories?: number;
+    protein?: number;
+    carbs?: number;
+    fats?: number;
+    source?: string;
+    is_custom?: boolean;
+  }>;
   calories?: number;
   protein?: number;
   carbs?: number;
@@ -111,13 +131,101 @@ export interface Phase {
   user_id: string;
   name: string;
   goal?: string;
+  program_id?: string;
+  order_index?: number;
+  duration_weeks?: number;
   parent_phase_id?: string;
   start_date?: string;  // YYYY-MM-DD
   end_date?: string;    // YYYY-MM-DD
   status: 'planned' | 'active' | 'completed' | 'archived';
+
+  // Baseline macro targets (used when training/rest-day variants aren't set)
+  calories_target?: number;
+  protein_target?: number;
+  carbs_target?: number;
+  fat_target?: number;
+
+  // Calorie/macro cycling — training day vs rest day
+  calories_training_day?: number;
+  calories_rest_day?: number;
+  carbs_training_day?: number;
+  carbs_rest_day?: number;
+  fat_training_day?: number;
+  fat_rest_day?: number;
+
+  daily_steps_target?: number;
+  training_days_per_week?: number;
+  deload_week?: boolean;
+
   notes?: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface Program {
+  id: string;
+  user_id?: string;
+  name: string;
+  goal?: string;
+  start_date?: string;
+  end_date?: string;
+  is_active?: boolean;
+  notes?: string;
+  plan_markdown?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface ActiveProgramResponse {
+  program: Program | null;
+  phases: Phase[];
+}
+
+// --- Nutrition guide ("The Forge") ---
+export interface GuideMacro { label: string; training: string; rest: string }
+export interface GuideRule { title: string; body: string }
+export interface GuideCarbTiming { days?: string; pre?: string; post?: string; note?: string }
+export interface GuideStaples { carbs?: string; protein?: string; watch_out?: string }
+export interface NutritionGuideData {
+  goal?: string;
+  how_it_works?: string;
+  weekly_average?: string;
+  macros?: GuideMacro[];
+  rules?: GuideRule[];
+  carb_timing?: GuideCarbTiming | null;
+  staples?: GuideStaples | null;
+  self_check?: string[];
+}
+
+/**
+ * Resolve the effective macro targets for a phase on a given day.
+ *
+ * Precedence:
+ *   1. Training/rest-day variant (when set and today's training state is known)
+ *   2. Baseline *_target field on the phase
+ *   3. Fallback goals (user's manual NutritionGoals)
+ */
+export function getEffectiveTargets(
+  phase: Phase | null,
+  isTrainingDay: boolean | null,
+  fallback: NutritionGoals | null
+): NutritionGoals {
+  const fb = fallback ?? { calories: 2000, protein: 150, carbs: 200, fats: 70 };
+  if (!phase) return fb;
+
+  const pick = <T,>(training: T | undefined, rest: T | undefined, base: T | undefined, fb: T): T => {
+    if (isTrainingDay === true && training != null) return training;
+    if (isTrainingDay === false && rest != null) return rest;
+    if (base != null) return base;
+    return fb;
+  };
+
+  return {
+    calories: pick(phase.calories_training_day, phase.calories_rest_day, phase.calories_target, fb.calories),
+    protein: phase.protein_target ?? fb.protein,
+    carbs: pick(phase.carbs_training_day, phase.carbs_rest_day, phase.carbs_target, fb.carbs),
+    fats: pick(phase.fat_training_day, phase.fat_rest_day, phase.fat_target, fb.fats),
+  };
 }
 
 export interface CreatePhaseParams {
@@ -209,6 +317,16 @@ export interface WorkoutSession {
   session_date?: string;
   created_at: string;
   exercises: WorkoutSet[];
+  // Melded from the Apple Watch workout that overlapped this session.
+  heart_rate?: {
+    activity?: string;
+    avg_heart_rate?: number;
+    max_heart_rate?: number;
+    min_heart_rate?: number;
+    calories?: number;
+    distance_m?: number | null;
+    duration_min?: number | null;
+  } | null;
 }
 
 export interface CreateWorkoutSetParams {
@@ -245,6 +363,30 @@ export interface FoodItem {
   source: string;
 }
 
+// One predefined serving option for a food (from FatSecret / custom DB). Each
+// carries its OWN macros, so switching servings just swaps numbers — no fragile
+// unit conversion. This is how MyFitnessPal / Lose It model servings.
+export interface FoodServing {
+  serving_id?: string;
+  serving_description: string;   // "1/2 cup", "1 oz", "100 g"
+  metric_serving_amount?: number;
+  metric_serving_unit?: string;
+  calories?: number;
+  protein?: number;
+  carbs?: number;
+  fat?: number;
+}
+
+export interface FoodDetail {
+  id: string;
+  name: string;
+  brand?: string;
+  food_type?: string;
+  servings: FoodServing[];
+  is_custom?: boolean;
+  source?: string;
+}
+
 export interface CreateCustomFoodParams {
   name: string;
   brand?: string;
@@ -262,11 +404,16 @@ export interface CreateCustomFoodParams {
 // Active Workout Session Types (Real-time Sara Coaching)
 export interface ActiveWorkoutExercise {
   name: string;
+  variant?: string | null;  // actual machine/variation used (e.g. "Hack Squat" for a "Squat" slot)
   sets: number;
   reps: string;  // e.g., "6-8" or "10"
   rpe_target?: number;
   suggested_weight?: number;
   progression_note?: string;
+  notes?: string;              // coaching cue from the template
+  is_per_side?: boolean;       // log each side (unilateral)
+  superset_group?: string | number | null;
+  set_technique?: string;      // e.g. "dropset", "rest-pause"
   last_session?: {
     weights: number[];
     reps: number[];
@@ -276,8 +423,12 @@ export interface ActiveWorkoutExercise {
 }
 
 export interface ActiveWorkoutSnapshot {
+  name?: string;
   template_name: string;
   exercises: ActiveWorkoutExercise[];
+  is_deload?: boolean;
+  deload_week?: number | null;
+  week_of_phase?: number | null;
 }
 
 export interface ActiveWorkoutSession {
@@ -347,6 +498,10 @@ class FitnessService {
 
     const foodLogs: FoodLog[] = [];
     mealLogs.forEach((meal) => {
+      // Parse food_items if backend returned it as a JSON string
+      if (typeof meal.food_items === 'string') {
+        try { meal.food_items = JSON.parse(meal.food_items); } catch { meal.food_items = []; }
+      }
       if (meal.food_items && Array.isArray(meal.food_items)) {
         // Check if this is a recipe - all detailed_items have source='recipe' with same recipe ID prefix
         const isRecipe = meal.detailed_items &&
@@ -360,7 +515,7 @@ class FitnessService {
           const firstDetailedItem = meal.detailed_items[0];
           const recipeIdParts = firstDetailedItem.id?.split('-') || [];
           // Try to find recipe name, fallback to combined ingredient names
-          const ingredientNames = meal.food_items.map((i: any) => i.name).join(', ');
+          const ingredientNames = meal.food_items.map((i: any) => typeof i === 'string' ? i : (i.name || 'Unknown')).join(', ');
           const displayName = `Recipe: ${ingredientNames.substring(0, 30)}${ingredientNames.length > 30 ? '...' : ''}`;
 
           foodLogs.push({
@@ -380,14 +535,20 @@ class FitnessService {
           });
         } else {
           // Regular food items - show each separately
-          meal.food_items.forEach((item: any, index: number) => {
+          // Parse food_items if it came back as a string
+          const items = typeof meal.food_items === 'string'
+            ? (() => { try { return JSON.parse(meal.food_items); } catch { return meal.food_items; } })()
+            : meal.food_items;
+
+          (Array.isArray(items) ? items : []).forEach((item: any, index: number) => {
+            const itemName = typeof item === 'string' ? item : String(item.name || item.food_name || 'Unknown food');
             foodLogs.push({
               id: `${meal.log_id}-${index}`,
               meal_log_id: meal.log_id,
               user_id: meal.user_id,
               logged_at: meal.logged_at,
               meal_type: meal.meal_type,
-              food_name: item.name,
+              food_name: itemName,
               quantity: item.quantity,
               unit: item.unit,
               // If single item, use full calories; if multiple non-recipe items, distribute
@@ -415,6 +576,10 @@ class FitnessService {
 
   async createFoodLog(params: CreateFoodLogParams): Promise<FoodLog> {
     return await apiClient.post<FoodLog>('/api/fitness/food-log', params);
+  }
+
+  async updateFoodLogMealType(id: string, mealType: string): Promise<void> {
+    await apiClient.patch(`/api/fitness/food-log/${id}`, { meal_type: mealType });
   }
 
   async deleteFoodLog(id: string): Promise<void> {
@@ -499,6 +664,17 @@ class FitnessService {
     return await apiClient.get('/api/fitness/phases/active');
   }
 
+  async getActiveProgram(): Promise<ActiveProgramResponse> {
+    return await apiClient.get<ActiveProgramResponse>('/api/fitness/programs/active');
+  }
+
+  // Structured recomp nutrition guide stored on the active program (set by the
+  // Plan Importer). Returns { guide: null } when nothing has been imported —
+  // the client falls back to its built-in default.
+  async getNutritionGuide(): Promise<{ guide: NutritionGuideData | null }> {
+    return await apiClient.get<{ guide: NutritionGuideData | null }>('/api/fitness/nutrition-guide');
+  }
+
   async createPhase(params: CreatePhaseParams): Promise<{ success: boolean; phase_id: string; message: string }> {
     return await apiClient.post('/api/fitness/phases', params);
   }
@@ -546,6 +722,25 @@ class FitnessService {
     return await apiClient.put('/api/fitness/goals', goals);
   }
 
+  async getTodayTarget(onDate?: string): Promise<{
+    date: string;
+    is_training_day: boolean;
+    phase: { id: string; name: string } | null;
+    target: { calories: number; protein: number; carbs: number; fat: number } | null;
+  }> {
+    const params = onDate ? `?on_date=${onDate}` : '';
+    return await apiClient.get(`/api/fitness/today-target${params}`);
+  }
+
+  async toggleTrainingDay(targetDate?: string): Promise<{
+    date: string;
+    is_training_day: boolean;
+    action: 'created' | 'removed';
+  }> {
+    const params = targetDate ? `?target_date=${targetDate}` : '';
+    return await apiClient.post(`/api/fitness/toggle-training-day${params}`, {});
+  }
+
   // Workout Sets (for detailed workout logging)
   async getWorkoutSets(startDate?: string, endDate?: string): Promise<{ workouts: WorkoutSet[] }> {
     const params = new URLSearchParams();
@@ -588,6 +783,17 @@ class FitnessService {
       limit: limit.toString(),
     });
     return await apiClient.get(`/api/fitness/foods/search?${params}`);
+  }
+
+  // Full serving list for a food (FatSecret 'fs-<id>' or a custom-food id).
+  // Returns null if unavailable so callers can fall back gracefully.
+  async getFoodDetails(foodId: string): Promise<FoodDetail | null> {
+    try {
+      return await apiClient.get<FoodDetail>(`/api/fitness/foods/${encodeURIComponent(foodId)}/details`);
+    } catch (error) {
+      console.warn('Failed to fetch food details (servings):', error);
+      return null;
+    }
   }
 
   async createCustomFood(params: CreateCustomFoodParams): Promise<FoodItem> {
@@ -682,6 +888,7 @@ class FitnessService {
     success: boolean;
     logged?: { exercise: string; set_number: number; weight: number; reps: number };
     coaching_feedback?: string;
+    pr?: { is_pr: boolean; estimated_1rm?: number; previous_best?: number | null } | null;
     next_set?: {
       exercise?: string;
       set_number?: number;
@@ -689,6 +896,8 @@ class FitnessService {
       workout_complete?: boolean;
       exercise_complete?: boolean;
       next_exercise?: string;
+      rest_seconds?: number;
+      weight_adjustment?: number | null;
     };
     total_sets_completed?: number;
     total_volume?: number;
@@ -703,8 +912,83 @@ class FitnessService {
     success: boolean;
     skipped_exercise?: string;
     next_exercise?: string;
+    workout_complete?: boolean;
   }> {
     return apiClient.post('/api/fitness/workout-session/skip');
+  }
+
+  /**
+   * Jump to a specific exercise (do exercises in any order / come back later)
+   */
+  async selectExercise(exerciseIndex: number): Promise<{
+    success: boolean;
+    current_exercise_index: number;
+    current_set_index: number;
+    exercise?: string;
+  }> {
+    return apiClient.post('/api/fitness/workout-session/select-exercise', {
+      exercise_index: exerciseIndex,
+    });
+  }
+
+  /**
+   * Record the machine/variation used for an exercise (scopes weight history so a
+   * hack-squat doesn't get logged against your barbell squat). Pass null to revert.
+   */
+  async setExerciseVariant(exerciseIndex: number, variant: string | null): Promise<{
+    success: boolean;
+    variant: string | null;
+    effective_name: string;
+    suggested_weight?: number;
+  }> {
+    return apiClient.post('/api/fitness/workout-session/set-variant', {
+      exercise_index: exerciseIndex,
+      variant,
+    });
+  }
+
+  /**
+   * Every variant ever logged for the same movement as `exerciseName` (e.g. every
+   * bench variant for "Flat DB Bench"), each with last-performed date, last
+   * weight x reps, and PR — backs the Workout Mode variant picker (SARA_UNLEASHED
+   * Phase U.7 layer 3).
+   */
+  async getExerciseVariants(exerciseName: string): Promise<{
+    movement: string | null;
+    variants: Array<{
+      exercise_id: string;
+      name: string;
+      movement_pattern: string;
+      equipment: string[];
+      last_performed: string | null;
+      last_weight: number | null;
+      last_reps: number | null;
+      pr_weight: number | null;
+      pr_reps: number | null;
+      total_sets: number;
+    }>;
+  }> {
+    return apiClient.get(
+      `/api/fitness/exercises?for_exercise_name=${encodeURIComponent(exerciseName)}`
+    );
+  }
+
+  /**
+   * Create a new exercise_library row inline — backs the picker's "Add exercise..."
+   * action. movementPattern should come from the variant list this was opened from
+   * (movement is inherited from the slot, not re-derived from the new name).
+   */
+  async createExerciseVariant(name: string, movementPattern: string, equipment?: string): Promise<{
+    exercise_id: string;
+    name: string;
+    movement_pattern?: string;
+    created: boolean;
+  }> {
+    return apiClient.post('/api/fitness/exercises', {
+      name,
+      movement_pattern: movementPattern,
+      equipment,
+    });
   }
 
   /**

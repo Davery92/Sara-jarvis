@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Depends, HTTPException, status, Response, Request, Query, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
+from fastapi.responses import StreamingResponse, JSONResponse, FileResponse, RedirectResponse
+from fastapi.routing import APIRoute
 from sqlalchemy import create_engine, Column, String, DateTime, Text, Integer, Float, Boolean, text, and_, or_, desc, ForeignKey
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import declarative_base
@@ -16,6 +17,7 @@ from pydantic import BaseModel, EmailStr
 from typing import Optional, Dict, Any, List, Union
 # CryptContext imported via app.core.auth.pwd_context
 from datetime import datetime, timedelta, timezone, date
+from zoneinfo import ZoneInfo
 from app.core.timezone import now as local_now, today as local_today, format_datetime as format_local_datetime, USER_TIMEZONE, format_iso_utc, format_memory_timestamp, relative_time
 from jose import jwt, JWTError
 import uuid
@@ -23,23 +25,29 @@ import httpx
 import json
 import logging
 import os
+import base64
+import hashlib
+import secrets
 import aiofiles
 import asyncio
 import json
 from fastapi import UploadFile
 from app.tools.registry import tool_registry
 from fastapi import APIRouter
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qsl, urlencode
 import pytz
 from app.tools.registry import tool_registry
 from app.services.search_service import search_service
+from app.services.soul_loader import load_soul_for_prompt
 from app.services.embedding_service import embedding_service
 from app.services.insight_injection import InsightInjectionService
 from app.services.intent_classifier import get_tool_intent_classifier
-from app.services.body_state_calibration import calibration_service
+# body_state_calibration removed — body state no longer injected into chat
 from app.services.sara_journal_service import sara_journal
 from app.services.context_router import get_context_router
 from app.services.workout_session_service import workout_session_service
+from app.services.cognitive.working_memory import get_working_memory_service
+from app.services.cognitive.raw_buffer import get_raw_buffer_service, StreamType
 from app.core import config
 from app.core.prompt_template import render_prompt_template
 from app.core.auth import (
@@ -89,8 +97,15 @@ except ImportError as e:
     logging.warning(f"Chess command handler not available: {e}")
     CHESS_COMMANDS_AVAILABLE = False
 
-# Configure logging first
-logging.basicConfig(level=logging.INFO)
+# Configure structured logging
+import os as _os
+from app.core.logging import setup_logging, RequestLoggingMiddleware
+setup_logging(
+    service_name="sara-backend",
+    environment=_os.environ.get("SENTRY_ENVIRONMENT", "development"),
+    log_level=_os.environ.get("LOG_LEVEL", "INFO"),
+    json_output=_os.environ.get("LOG_FORMAT", "text") == "json",
+)
 logger = logging.getLogger(__name__)
 
 # Optional imports for vectorization (graceful degradation)
@@ -108,114 +123,210 @@ except ImportError:
     SENTENCE_TRANSFORMERS_AVAILABLE = False
     logger.warning("Sentence Transformers not available - embeddings will be disabled")
 
-# Configuration
-ASSISTANT_NAME = os.getenv("ASSISTANT_NAME", "Sara")
-# IMPORTANT: Always use PostgreSQL, never SQLite
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg://sara:sara123@db:5432/sara_hub")
-# JWT settings now in app.core.config.settings
-# CORS configuration for frontend origins
-# Prefer CORS_ORIGINS from environment as a JSON array or comma-separated list
-_cors_env = os.getenv("CORS_ORIGINS", "")
-_parsed_env_origins = []
-if _cors_env:
-    try:
-        _parsed = json.loads(_cors_env)
-        if isinstance(_parsed, list):
-            _parsed_env_origins = [str(x) for x in _parsed]
-    except Exception:
-        # Fallback: comma-separated
-        _parsed_env_origins = [o.strip() for o in _cors_env.split(",") if o.strip()]
+# ── Centralized app state (Phase 6A extraction foundation) ──
+from app.core.app_state import get_app_state, AppState
+_app_state = get_app_state()
 
-# Default allowed origins (overridden by CORS_ORIGINS env when provided)
-CORS_ORIGINS = _parsed_env_origins or [
-    "https://sara.avery.cloud",
-    "http://sara.avery.cloud",
-    "http://localhost:3000",
-    "http://localhost:3001",
-    "http://localhost:3002",
-    "http://127.0.0.1:3000",
-    "http://127.0.0.1:3001",
-    "http://127.0.0.1:3002",
-    "http://10.185.1.180:3000",
-    "http://10.185.1.180:3001",
-    "http://10.185.1.180:3002",
-    "http://10.185.1.188:3000",
-    "http://10.185.1.180",
-    "http://10.185.1.188",
-]
+# Backward-compatible aliases — existing code reads these globals directly.
+# New code should use get_app_state() instead.
+ASSISTANT_NAME = _app_state.assistant_name
+# Backward-compatible global aliases — all values sourced from _app_state.
+# Code that mutates these (e.g. `global OPENAI_MODEL; OPENAI_MODEL = x`)
+# must ALSO update _app_state to keep them in sync.
+DATABASE_URL = _app_state.database_url
+CORS_ORIGINS = _app_state.cors_origins
+ALLOWED_ORIGIN_REGEX = _app_state.allowed_origin_regex
+NTFY_SERVER_URL = _app_state.ntfy_server_url
+NTFY_ENABLED = _app_state.ntfy_enabled
+NTFY_TIMERS_TOPIC = _app_state.ntfy_timers_topic
+NTFY_REMINDERS_TOPIC = _app_state.ntfy_reminders_topic
+NTFY_DOCUMENTS_TOPIC = _app_state.ntfy_documents_topic
+NTFY_SYSTEM_TOPIC = _app_state.ntfy_system_topic
+AI_PROVIDER = _app_state.ai_provider
+OPENAI_BASE_URL = _app_state.openai_base_url
+OPENAI_MODEL = _app_state.openai_model
+CHAT_DEFAULT_MODEL = _app_state.chat_default_model
+OPENAI_API_KEY = _app_state.openai_api_key
+ANTHROPIC_API_KEY = _app_state.anthropic_api_key
+GOOGLE_API_KEY = _app_state.google_api_key
+CODEX_OAUTH_CLIENT_ID = _app_state.codex_oauth_client_id
+CODEX_OAUTH_AUTHORIZE_URL = _app_state.codex_oauth_authorize_url
+CODEX_OAUTH_TOKEN_URL = _app_state.codex_oauth_token_url
+CODEX_OAUTH_SCOPE = _app_state.codex_oauth_scope
+CODEX_OAUTH_ORIGINATOR = _app_state.codex_oauth_originator
+CODEX_OAUTH_REDIRECT_URI = _app_state.codex_oauth_redirect_uri
+CODEX_DEFAULT_BASE_URL = _app_state.codex_default_base_url
+CODEX_DEFAULT_MODEL = _app_state.codex_default_model
+CODEX_JWT_CLAIM_PATH = "https://api.openai.com/auth"
+CODEX_OAUTH_ACCESS_TOKEN = _app_state.codex_oauth_access_token
+CODEX_OAUTH_REFRESH_TOKEN = _app_state.codex_oauth_refresh_token
+CODEX_OAUTH_EXPIRES_AT = _app_state.codex_oauth_expires_at
+CODEX_OAUTH_ACCOUNT_ID = _app_state.codex_oauth_account_id
+CODEX_OAUTH_EMAIL = _app_state.codex_oauth_email
+AVAILABLE_MODELS = _app_state.available_models
 
-# Optional regex for dynamic IPs; leave unset by default
-ALLOWED_ORIGIN_REGEX = os.getenv("CORS_ALLOW_REGEX") or r"^https?://(10\.185\.1\.(180|188))(\:\d+)?$"
+# Text utilities extracted to app.core.text_utils
+from app.core.text_utils import extract_text_content as _extract_text_content
+from app.core.text_utils import is_local_base_url as _is_local_base_url
+from app.core.text_utils import safe_parse_iso_datetime as _safe_parse_iso_datetime
+from app.core.text_utils import parse_glm45_tool_calls, parse_json_text_tool_calls
+from app.core.text_utils import claude_rejects_sampling_params, claude_thinking_always_on
 
-# NTFY Configuration
-NTFY_SERVER_URL = os.getenv("NTFY_SERVER_URL", "http://10.185.1.8:8889")
-NTFY_ENABLED = os.getenv("NTFY_ENABLED", "true").lower() == "true"
-NTFY_TIMERS_TOPIC = os.getenv("NTFY_TIMERS_TOPIC", "sara")
-NTFY_REMINDERS_TOPIC = os.getenv("NTFY_REMINDERS_TOPIC", "sara")
-NTFY_DOCUMENTS_TOPIC = os.getenv("NTFY_DOCUMENTS_TOPIC", "sara")
-NTFY_SYSTEM_TOPIC = os.getenv("NTFY_SYSTEM_TOPIC", "sara")
-AI_PROVIDER = os.getenv("AI_PROVIDER", "local")  # Options: local, gemini, openai, claude, custom
-OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://100.104.68.115:11434/v1")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-oss:120b")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "dummy")  # Runtime configurable
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")  # Separate key for Anthropic Claude API
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")  # Google Gemini API key
 
-# Available models for chat model selector
-AVAILABLE_MODELS = [
-    {"id": "claude-opus-4-5-20250514", "name": "Claude Opus 4.5", "provider": "anthropic"},
-    {"id": "claude-sonnet-4-5-20250514", "name": "Claude Sonnet 4.5", "provider": "anthropic"},
-    {"id": "claude-haiku-3-5-20241022", "name": "Claude Haiku 3.5", "provider": "anthropic"},
-    {"id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro", "provider": "google"},
-    {"id": "gemini-2.5-flash", "name": "Gemini 2.5 Flash", "provider": "google"},
-    {"id": "gpt-oss:120b", "name": "Local 120B", "provider": "local"},
-    {"id": "gpt-oss:20b", "name": "Local 20B", "provider": "local"},
-    {"id": "nemotron-3-nano", "name": "Nemotron Nano", "provider": "local"},
-]
+async def _mark_shown_discoveries(user_id: str, response_text: str):
+    """Mark show_david items as shown if Sara referenced them in her response."""
+    from app.db.session import get_async_session_factory
+    async_session = get_async_session_factory()
+    async with async_session() as db:
+        result = await db.execute(text("""
+            SELECT id, title FROM acs_show_david_buffer
+            WHERE user_id = :uid AND shown = FALSE
+            ORDER BY created_at DESC LIMIT 10
+        """), {"uid": user_id})
+        rows = result.fetchall()
+        if not rows:
+            return
+
+        response_lower = response_text.lower()
+        marked = 0
+        for row in rows:
+            # Check if the title (or significant words from it) appear in Sara's response
+            title_words = [w for w in row[1].lower().split() if len(w) >= 4]
+            if len(title_words) >= 2:
+                matches = sum(1 for w in title_words if w in response_lower)
+                if matches >= len(title_words) * 0.6:
+                    await db.execute(text("""
+                        UPDATE acs_show_david_buffer
+                        SET shown = TRUE, shown_at = NOW()
+                        WHERE id = :id
+                    """), {"id": row[0]})
+                    marked += 1
+
+        if marked > 0:
+            await db.commit()
+            logger.info(f"Marked {marked} show_david items as shown")
+
 
 def get_model_config(model_id: str) -> dict:
-    """Get the base URL and API key for a given model ID."""
-    if model_id.startswith("claude"):
+    """Get base URL, API key, and provider routing for the selected model."""
+    model_id_l = (model_id or "").lower()
+    configured_base = OPENAI_BASE_URL or "http://100.104.68.115:8081/v1"
+    configured_key = OPENAI_API_KEY or "dummy"
+    local_default_base = "http://100.104.68.115:8081/v1"
+
+    # Resolve declared provider from the model catalog first.
+    # This prevents stale global ai_provider settings from misrouting model-specific requests.
+    catalog_entry = next(
+        (m for m in AVAILABLE_MODELS if (m.get("id") or "").lower() == model_id_l),
+        None,
+    )
+    catalog_provider = catalog_entry.get("provider") if catalog_entry else None
+    catalog_base_url = catalog_entry.get("base_url") if catalog_entry else None
+
+    if catalog_provider == "codex" or model_id_l.startswith("gpt-5.3-codex") or "codex" in model_id_l:
+        codex_base = configured_base if "chatgpt.com/backend-api" in configured_base else CODEX_DEFAULT_BASE_URL
+        return {
+            "base_url": codex_base,
+            "api_key": CODEX_OAUTH_ACCESS_TOKEN or configured_key,
+            "provider": "codex"
+        }
+
+    # If model is explicitly cataloged, honor that provider first.
+    # This keeps VOICE_MODEL / model overrides from being hijacked by global ai_provider.
+    if catalog_provider == "anthropic" or model_id_l.startswith("claude"):
         return {
             "base_url": "https://api.anthropic.com",
             "api_key": ANTHROPIC_API_KEY,
             "provider": "anthropic"
         }
-    elif model_id.startswith("gemini"):
+    if catalog_provider == "google" or model_id_l.startswith("gemini"):
         return {
             "base_url": "https://generativelanguage.googleapis.com/v1beta",
             "api_key": GOOGLE_API_KEY,
             "provider": "google"
         }
-    else:  # Local models (gpt-oss, nemotron, etc.)
+    if catalog_provider == "local":
+        if catalog_base_url:
+            local_base = catalog_base_url
+        else:
+            local_base = configured_base if _is_local_base_url(configured_base) else local_default_base
         return {
-            "base_url": "http://100.104.68.115:11434/v1",
-            "api_key": "dummy",
+            "base_url": local_base,
+            "api_key": configured_key if configured_key else "dummy",
+            "provider": "local",
+        }
+    if catalog_provider == "openai":
+        return {
+            "base_url": configured_base,
+            "api_key": configured_key if configured_key else "dummy",
+            "provider": "openai",
+        }
+
+    # Fallback: no explicit model mapping, use global provider state.
+    if AI_PROVIDER == "codex" or "chatgpt.com/backend-api" in configured_base:
+        return {
+            "base_url": configured_base,
+            "api_key": CODEX_OAUTH_ACCESS_TOKEN or configured_key,
+            "provider": "codex"
+        }
+
+    if AI_PROVIDER == "claude":
+        return {
+            "base_url": "https://api.anthropic.com",
+            "api_key": ANTHROPIC_API_KEY,
+            "provider": "anthropic"
+        }
+    if AI_PROVIDER == "gemini":
+        return {
+            "base_url": "https://generativelanguage.googleapis.com/v1beta",
+            "api_key": GOOGLE_API_KEY,
+            "provider": "google"
+        }
+    if _is_local_base_url(configured_base):
+        return {
+            "base_url": configured_base,
+            "api_key": configured_key if configured_key else "dummy",
             "provider": "local"
         }
+    return {
+        "base_url": configured_base,
+        "api_key": configured_key if configured_key else "dummy",
+        "provider": "openai"
+    }
 
 def is_anthropic_provider() -> bool:
     """Check if the current provider is Anthropic Claude"""
     return "api.anthropic.com" in OPENAI_BASE_URL
 
-# Smaller, faster model for notifications (uses same endpoint but different model)
-OPENAI_NOTIFICATION_MODEL = os.getenv("OPENAI_NOTIFICATION_MODEL", "gpt-oss:20b")
-VOICE_MODEL = os.getenv("VOICE_MODEL", "gpt-oss:20b")  # Faster model for voice interactions
 
-# Fast model configuration (for Pi dashboard fast worker, etc.)
-# Uses Gemini by default for speed
-FAST_MODEL_URL = os.getenv("FAST_MODEL_URL", os.getenv("OPENAI_BASE_URL", "http://100.104.68.115:11434/v1"))
-FAST_MODEL = os.getenv("FAST_MODEL", "gemini-3-flash-preview")
-FAST_MODEL_API_KEY = os.getenv("FAST_MODEL_API_KEY", os.getenv("OPENAI_API_KEY", ""))
-EMBEDDING_BASE_URL = os.getenv("EMBEDDING_BASE_URL", "http://10.185.1.8:11434")
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "bge-m3")
-EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "1024"))
+# Codex OAuth helpers extracted to app.core.codex_oauth
+from app.core.codex_oauth import (
+    _decode_jwt_payload, _extract_codex_account_id_from_token,
+    _extract_codex_email_from_token, _build_pkce_challenge,
+    _append_query_params, _resolve_frontend_return_url,
+    _resolve_backend_public_url, _upsert_app_settings,
+    _load_codex_oauth_from_db, _apply_codex_oauth_token_data,
+    _codex_exchange_authorization_code, _codex_refresh_tokens,
+    _ensure_codex_access_token,
+)
+
+OPENAI_NOTIFICATION_MODEL = _app_state.notification_model
+VOICE_MODEL = _app_state.voice_model
+FAST_MODEL_URL = _app_state.fast_model_url
+FAST_MODEL = _app_state.fast_model
+FAST_MODEL_API_KEY = _app_state.fast_model_api_key
+EMBEDDING_BASE_URL = _app_state.embedding_base_url
+EMBEDDING_MODEL = _app_state.embedding_model
+EMBEDDING_DIM = _app_state.embedding_dim
 
 # Background LLM Configuration (separate from chat - always uses local models)
-BG_LLM_PRIMARY_URL = os.getenv("BG_LLM_PRIMARY_URL", "http://100.104.68.115:11434/v1")
-BG_LLM_PRIMARY_MODEL = os.getenv("BG_LLM_PRIMARY_MODEL", "gpt-oss:120b")
-BG_LLM_FALLBACK_URL = os.getenv("BG_LLM_FALLBACK_URL", "http://100.104.68.115:11434/v1")
-BG_LLM_FALLBACK_MODEL = os.getenv("BG_LLM_FALLBACK_MODEL", "gpt-oss:20b")
+BG_LLM_PRIMARY_URL = os.getenv("BG_LLM_PRIMARY_URL", "http://100.104.68.115:8081/v1")
+BG_LLM_PRIMARY_MODEL = os.getenv("BG_LLM_PRIMARY_MODEL", "qwen3.6-27b")
+BG_LLM_FALLBACK_URL = os.getenv("BG_LLM_FALLBACK_URL", "http://10.185.1.8:8686/v1")
+BG_LLM_FALLBACK_MODEL = os.getenv("BG_LLM_FALLBACK_MODEL", "Qwen3.5-35B-A3B")
+BG_LLM_REQUEST_TIMEOUT = float(os.getenv("BG_LLM_REQUEST_TIMEOUT", "90"))
+BG_LLM_CONNECT_TIMEOUT = float(os.getenv("BG_LLM_CONNECT_TIMEOUT", "6"))
+BG_LLM_NUM_CTX = int(os.getenv("BG_LLM_NUM_CTX", "16384"))
 
 GRAPH_BACKEND = os.getenv("GRAPH_BACKEND", "postgres").lower()
 MEMORY_HOT_DAYS = int(os.getenv("MEMORY_HOT_DAYS", "30"))
@@ -232,1168 +343,68 @@ ALLOWED_MIME_TYPES = [
     "text/csv"
 ]
 
-# Startup health tracking - monitors critical service status
-STARTUP_HEALTH = {
-    "database": {"status": "unknown", "message": None},
-    "embedding_service": {"status": "unknown", "message": None, "dimension": None},
-    "llm_service": {"status": "unknown", "message": None},
-    "neo4j": {"status": "unknown", "message": None},
-    "startup_time": None,
-    "critical_failures": []
-}
+# Startup health tracking — shared with routes/core.py
+from app.core.health_state import STARTUP_HEALTH
 
-# Database setup
-if DATABASE_URL.startswith("sqlite"):
-    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
-else:
-    engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+# Database setup — reuse the shared engine from app.db.base to avoid multiple connection pools
+from app.db.base import engine, SessionLocal
 Base = declarative_base()
 
-# Models
-class User(Base):
-    __tablename__ = "app_user"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    email = Column(String, unique=True, nullable=False, index=True)
-    password_hash = Column(String, nullable=False)
-    created_at = Column(DateTime, server_default=func.now())
+# ===================== MODEL IMPORTS =====================
+# Models extracted to backend/app/models/ (Phase 2)
+from app.models.user import User
+from app.models.note import Note
+from app.models.note_connection import NoteConnection
+from app.models.folder import Folder
+from app.models.reminder import Reminder, Timer
+from app.models.episode import Episode
+from app.models.episode_rating import EpisodeRating
+from app.models.conversation import Conversation, ConversationTurn
+from app.models.background_task import BackgroundTask
+# MemoryTrace/MemoryEmbedding/MemoryEdge: deprecated, kept for table definitions only
+from app.models.context import ContextWindow, ContextMode
+from app.models.dream import DreamInsight
+from app.models.briefing import DailyBriefing, BriefingSettings
+from app.models.intelligence import IntelligenceReport
+from app.models.insight import AutonomousInsight, InsightNudge, ActivitySession, BackgroundSweep
+from app.models.event_outbox import EventOutbox
+from app.models.push_token import PushToken
+from app.models.calendar_event import CalendarEvent
+from app.models.document_chunk import DocumentChunk
+from app.models.doc import Document
+from app.models.profile import UserProfile
+
+# ===================== SCHEMA IMPORTS =====================
+# Schemas extracted to backend/app/schemas/ (Phase 2)
+from app.schemas.auth import UserCreate, UserLogin, UserResponse
+from app.schemas.notes import (
+    NoteCreate, NoteResponse, NoteConnectionCreate, NoteConnectionResponse,
+    FolderCreate, FolderUpdate, FolderResponse, TreeNodeResponse,
+)
+from app.schemas.reminders import ReminderCreate, ReminderUpdate, ReminderResponse, TimerCreate, TimerResponse
+from app.schemas.calendar import (
+    CalendarEventCreate, CalendarEventUpdate, CalendarEventResponse,
+    IOSCalendarEventSync as IOSCalendarEvent, IOSCalendarSyncRequest, IOSCalendarSyncResponse,
+)
+from app.schemas.chat import ChatMessage, ChatRequest, ChatResponse
+from app.schemas.documents import DocumentResponse, DocumentChunkResponse, Model3DResponse
+from app.schemas.memory import (
+    ConversationResponse, ConversationTurnResponse, ConversationSummaryResponse,
+    SetActiveConversationRequest, EpisodeMessageResponse,
+)
+from app.schemas.insights import (
+    UserProfileCreate, UserProfileResponse,
+    AutonomousInsightResponse, InsightFeedbackRequest,
+    ActivitySessionResponse, BackgroundSweepResponse,
+)
+from app.schemas.reflection import (
+    ReflectionStartResponse,
+    ReflectionResponseRequest, ReflectionResponseReply,
+    ReflectionHistoryResponse, ReflectionInsightsResponse,
+    ReflectionSettingsRequest,
+)
+from app.schemas.ai_settings import AISettingsResponse, AISettingsUpdate
 
-class Note(Base):
-    __tablename__ = "note"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False)
-    folder_id = Column(String, nullable=True)  # Foreign key to folder
-    title = Column(String, default="")
-    content = Column(Text, nullable=False)
-    created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, server_default=func.now())
-
-class Folder(Base):
-    __tablename__ = "folder"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False)
-    name = Column(String, nullable=False)
-    parent_id = Column(String, nullable=True)  # Self-referencing for hierarchy
-    sort_order = Column(Integer, default=0)
-    created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, server_default=func.now())
-
-class NoteConnection(Base):
-    __tablename__ = "note_connection"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False)
-    source_note_id = Column(String, nullable=False)  # Note that contains the link/reference
-    target_note_id = Column(String, nullable=False)  # Note being referenced
-    connection_type = Column(String, nullable=False)  # 'reference', 'semantic', 'temporal'
-    strength = Column(Integer, default=50)  # 0-100 strength score
-    auto_generated = Column(String, default="true")  # true for auto-detected, false for manual
-    created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, server_default=func.now())
-
-class BackgroundTask(Base):
-    """Tracks background agent tasks that run independently of user sessions"""
-    __tablename__ = "background_task"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False, index=True)
-    status = Column(String, nullable=False, default="pending")  # pending, running, completed, failed, needs_clarification
-    task_type = Column(String, nullable=False, default="research")  # research, analysis, etc.
-    original_query = Column(Text, nullable=False)  # The user's original request
-    result_note_id = Column(String, nullable=True)  # Link to workspace note with results
-    workspace_folder_id = Column(String, nullable=True)  # Agent workspace folder
-    clarification_question = Column(Text, nullable=True)  # If status is needs_clarification
-    clarification_response = Column(Text, nullable=True)  # User's response to clarification
-    error_message = Column(Text, nullable=True)  # If status is failed
-    task_metadata = Column(JSONB, default={})  # orchestrator state, worker count, progress, etc.
-    created_at = Column(DateTime, server_default=func.now())
-    started_at = Column(DateTime, nullable=True)
-    completed_at = Column(DateTime, nullable=True)
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
-
-class Reminder(Base):
-    __tablename__ = "reminder"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False)
-    title = Column(String, nullable=False)
-    description = Column(Text, default="")
-    reminder_time = Column(DateTime, nullable=False)
-    is_completed = Column(Boolean, default=False)  # PostgreSQL boolean
-    created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, server_default=func.now())
-
-class Timer(Base):
-    __tablename__ = "timer"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False)
-    title = Column(String, nullable=False)
-    duration_minutes = Column(Integer, nullable=False)
-    start_time = Column(DateTime, nullable=False)
-    end_time = Column(DateTime, nullable=False)
-    is_active = Column(Boolean, default=True)  # PostgreSQL boolean
-    is_completed = Column(Boolean, default=False)  # PostgreSQL boolean
-    created_at = Column(DateTime, server_default=func.now())
-
-class CalendarEvent(Base):
-    __tablename__ = "calendar_event"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False)
-    title = Column(String, nullable=False)
-    description = Column(Text, default="")
-    start_time = Column(DateTime, nullable=False)
-    end_time = Column(DateTime, nullable=False)
-    location = Column(String, default="")
-    all_day = Column(Boolean, default=False)
-    reminder_minutes = Column(Integer)
-    is_completed = Column(Boolean, default=False)  # PostgreSQL boolean
-    # iOS calendar sync fields
-    source = Column(String, default="sara")  # 'sara' or 'ios_calendar'
-    ios_event_id = Column(String, nullable=True)  # iOS event identifier for deduplication
-    ios_calendar_id = Column(String, nullable=True)  # iOS calendar identifier
-    ios_calendar_name = Column(String, nullable=True)  # Human-readable calendar name
-    read_only = Column(Boolean, default=False)  # iOS synced events are read-only
-    created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, server_default=func.now())
-
-class Document(Base):
-    __tablename__ = "document"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False)
-    filename = Column(String, nullable=False)
-    original_filename = Column(String, nullable=False)
-    title = Column(String, default="")  # User-editable title
-    file_path = Column(String, nullable=False)
-    file_size = Column(Integer, nullable=False)
-    mime_type = Column(String, nullable=False)
-    content_text = Column(Text, default="")  # Extracted text content
-    is_processed = Column(String, default="false")  # SQLite compatibility
-    created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, server_default=func.now())
-
-class DocumentChunk(Base):
-    __tablename__ = "document_chunk"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    document_id = Column(String, nullable=False)
-    user_id = Column(String, nullable=False)
-    chunk_text = Column(Text, nullable=False)
-    chunk_index = Column(Integer, nullable=False)
-    # Store embeddings as JSON for SQLite compatibility, Vector for PostgreSQL
-    embedding = Column(Vector(EMBEDDING_DIM) if PGVECTOR_AVAILABLE and DATABASE_URL.startswith("postgresql") else Text, nullable=True)
-    created_at = Column(DateTime, server_default=func.now())
-
-class Conversation(Base):
-    __tablename__ = "conversation"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False)
-    title = Column(String, default="")  # Auto-generated conversation title
-    summary = Column(Text, default="")  # Auto-generated conversation summary
-    total_messages = Column(Integer, default=0)
-    created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, server_default=func.now())
-
-class ConversationTurn(Base):
-    __tablename__ = "conversation_turn"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    conversation_id = Column(String, nullable=False)
-    user_id = Column(String, nullable=False)
-    role = Column(String, nullable=False)  # "user" or "assistant"
-    content = Column(Text, nullable=False)
-    message_index = Column(Integer, nullable=False)  # Order in conversation
-    # Store embeddings as JSON for SQLite compatibility, Vector for PostgreSQL  
-    embedding = Column(Vector(EMBEDDING_DIM) if PGVECTOR_AVAILABLE and DATABASE_URL.startswith("postgresql") else Text, nullable=True)
-    created_at = Column(DateTime, server_default=func.now())
-
-# ===================== HUMAN-LIKE MEMORY TABLES =====================
-class MemoryTrace(Base):
-    __tablename__ = "memory_trace"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False, index=True)
-    content = Column(Text, nullable=False)
-    role = Column(String, nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    salience = Column(Float, nullable=True)
-    # Store JSON as text for portability; services can json.loads when needed
-    source = Column(Text, nullable=True)
-    meta = Column(Text, nullable=True)
-
-class MemoryEmbedding(Base):
-    __tablename__ = "memory_embedding"
-    trace_id = Column(String, primary_key=True)
-    head = Column(String, primary_key=True)
-    embedding = Column(Vector(EMBEDDING_DIM) if PGVECTOR_AVAILABLE and DATABASE_URL.startswith("postgresql") else Text, nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-
-class MemoryEdge(Base):
-    __tablename__ = "memory_edge"
-    src = Column(String, primary_key=True)
-    dst = Column(String, primary_key=True)
-    type = Column(String, primary_key=True)
-    weight = Column(Float, nullable=True)
-    ts = Column(DateTime(timezone=True), server_default=func.now())
-
-# Episodic Memory Models for Advanced Intelligence
-class Episode(Base):
-    """Enhanced episodic memory model with emotional and contextual metadata"""
-    __tablename__ = "episode"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    conversation_id = Column(String, nullable=True)  # Link to conversation if applicable
-    user_id = Column(String, nullable=False)
-    role = Column(String, nullable=False)  # "user" or "assistant"
-    content = Column(Text, nullable=False)
-    
-    # Intelligence metadata
-    importance = Column(Float, default=0.5)  # AI-scored importance (0-1)
-    emotional_tone = Column(Text, nullable=True)  # JSON: {"primary": "positive", "intensity": 0.7, "emotions": [...]}
-    topics = Column(Text, nullable=True)  # JSON: ["work", "fitness", "learning"]
-    context_tags = Column(Text, nullable=True)  # JSON: ["planning", "reflection", "problem_solving"]
-    
-    # Memory metadata
-    access_count = Column(Integer, default=0)  # How often this episode is retrieved
-    last_accessed = Column(DateTime, nullable=True)
-    memory_type = Column(String, default="conversation")  # conversation, note_creation, action, etc.
-    source = Column(String, default="chat")  # chat, note, document, timer, etc.
-    
-    # Vector embedding for similarity search
-    embedding = Column(Vector(EMBEDDING_DIM) if PGVECTOR_AVAILABLE and DATABASE_URL.startswith("postgresql") else Text, nullable=True)
-
-    # Rating system columns (pre-computed for fast retrieval)
-    rating_boost = Column(Float, default=0.0)  # Pre-computed Wilson score + temporal decay
-    exploration_bonus = Column(Float, default=0.0)  # Thompson Sampling bonus for cold-start
-
-    created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, server_default=func.now())
-
-class EpisodeRating(Base):
-    """Episode rating system for user feedback and memory quality scoring"""
-    __tablename__ = "episode_rating"
-    episode_id = Column(String, ForeignKey('episode.id', ondelete='CASCADE'), primary_key=True)
-    user_rating = Column(Integer, nullable=True)  # 1-5 star rating from user
-    rating_count = Column(Integer, default=0)  # Number of ratings (for multi-user future)
-    average_rating = Column(Float, default=0.0)  # Average rating (for multi-user future)
-    rating_sum = Column(Integer, default=0)  # Sum of all ratings for Wilson score
-    last_rated = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, server_default=func.now())
-
-class ContextWindow(Base):
-    """Context window configurations for dynamic memory retrieval"""
-    __tablename__ = "context_window"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False)
-    window_type = Column(String, nullable=False)  # temporal, topic, emotional, importance, hybrid
-    
-    # Window parameters stored as JSON
-    parameters = Column(Text, nullable=False)  # JSON: {"size": "1d", "topic": "fitness", "min_importance": 0.6}
-    
-    # Usage tracking
-    last_used = Column(DateTime, nullable=True)
-    use_count = Column(Integer, default=0)
-    
-    created_at = Column(DateTime, server_default=func.now())
-
-class DreamInsight(Base):
-    """Background consolidation insights from Sara's dreaming process"""
-    __tablename__ = "dream_insight"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False)
-
-    # Dream metadata
-    dream_date = Column(DateTime, nullable=False)
-    insight_type = Column(String, nullable=False)  # pattern, connection, summary, trend, forgotten_gem
-    confidence = Column(Float, nullable=False)  # AI confidence in insight (0-1)
-
-    # Insight content
-    title = Column(String, nullable=False)
-    content = Column(Text, nullable=False)
-    related_episodes = Column(Text, nullable=True)  # JSON list of episode IDs
-    embedding = Column(Vector(1024), nullable=True) if PGVECTOR_AVAILABLE else Column(Text, nullable=True)  # Embedding for semantic search
-
-    # User interaction
-    surfaced_at = Column(DateTime, nullable=True)  # When shown to user
-    user_feedback = Column(String, nullable=True)  # relevant, not_relevant, interesting
-
-    created_at = Column(DateTime, server_default=func.now())
-
-# Phase 4 Intelligence Models
-class DailyBriefing(Base):
-    """Daily briefings (morning/evening) with personalized insights"""
-    __tablename__ = "daily_briefings"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False)
-    briefing_type = Column(String, nullable=False)  # "morning" or "evening"
-    briefing_date = Column(DateTime, nullable=False)
-    content = Column(Text, nullable=False)  # Markdown formatted briefing
-    delivered = Column(Integer, default=0)  # boolean: sent to user
-    read = Column(Integer, default=0)  # boolean: user opened/read
-    created_at = Column(DateTime, server_default=func.now())
-
-class BriefingSettings(Base):
-    """User preferences for daily briefings"""
-    __tablename__ = "briefing_settings"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False, unique=True)
-
-    # Morning briefing settings
-    morning_enabled = Column(Integer, default=1)  # boolean
-    morning_time = Column(String, default="07:00:00")  # HH:MM:SS
-
-    # Evening briefing settings
-    evening_enabled = Column(Integer, default=1)  # boolean
-    evening_time = Column(String, default="21:00:00")  # HH:MM:SS
-
-    # Content preferences (what to include)
-    include_recovery = Column(Integer, default=1)  # fitness recovery status
-    include_schedule = Column(Integer, default=1)  # today's calendar
-    include_goals = Column(Integer, default=1)  # progress toward goals
-    include_suggestions = Column(Integer, default=1)  # proactive suggestions
-    include_workout_rec = Column(Integer, default=1)  # workout recommendations
-    include_accomplishments = Column(Integer, default=1)  # daily wins
-    include_insights = Column(Integer, default=1)  # AI insights
-    include_reflection = Column(Integer, default=1)  # reflection prompts
-
-    updated_at = Column(DateTime, server_default=func.now())
-
-class ContextMode(Base):
-    """User's current context mode for dynamic memory retrieval"""
-    __tablename__ = "context_modes"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False, unique=True)
-    current_mode = Column(String, default="full")  # full, recent, minimal, fitness, work, learning
-    updated_at = Column(DateTime, server_default=func.now())
-
-class IntelligenceReport(Base):
-    """Periodic intelligence reports (weekly/monthly/quarterly)"""
-    __tablename__ = "intelligence_reports"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False)
-    report_type = Column(String, nullable=False)  # weekly, monthly, quarterly
-    report_date = Column(DateTime, nullable=False)
-
-    # Report content
-    title = Column(String, nullable=False)
-    summary = Column(Text, nullable=False)  # Markdown summary
-    full_content = Column(Text, nullable=True)  # Full markdown report
-
-    # Metadata
-    key_insights = Column(Text, nullable=True)  # JSON array of insights
-    metrics = Column(Text, nullable=True)  # JSON object with metrics
-
-    created_at = Column(DateTime, server_default=func.now())
-
-class ProactiveSuggestion(Base):
-    """AI-generated proactive suggestions based on patterns"""
-    __tablename__ = "proactive_suggestions"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False)
-
-    # Suggestion content
-    title = Column(String, nullable=False)
-    description = Column(Text, nullable=False)
-    category = Column(String, nullable=False)  # health, productivity, learning, relationships, etc.
-    priority = Column(String, default="medium")  # high, medium, low
-    confidence = Column(Float, nullable=False)  # AI confidence (0-1)
-
-    # Reasoning
-    reasoning = Column(Text, nullable=True)  # Why this suggestion was made
-    related_patterns = Column(Text, nullable=True)  # JSON array of pattern IDs
-
-    # User interaction
-    status = Column(String, default="pending")  # pending, accepted, dismissed
-    actioned_at = Column(DateTime, nullable=True)
-
-    created_at = Column(DateTime, server_default=func.now())
-
-class DetectedPattern(Base):
-    """Automatically detected behavioral/temporal patterns"""
-    __tablename__ = "detected_patterns"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False)
-
-    # Pattern details
-    pattern_type = Column(String, nullable=False)  # temporal, behavioral, correlational, anomaly
-    title = Column(String, nullable=False)
-    description = Column(Text, nullable=False)
-
-    # Pattern metadata
-    confidence = Column(Float, nullable=False)  # AI confidence (0-1)
-    frequency = Column(String, nullable=True)  # daily, weekly, monthly
-    data_points = Column(Integer, nullable=True)  # How many observations
-
-    # Evidence
-    evidence = Column(Text, nullable=True)  # JSON array of evidence examples
-    related_episodes = Column(Text, nullable=True)  # JSON array of episode IDs
-
-    # Discovery
-    first_detected = Column(DateTime, server_default=func.now())
-    last_confirmed = Column(DateTime, nullable=True)
-
-    created_at = Column(DateTime, server_default=func.now())
-
-
-# Habit Tracking Models
-class Habit(Base):
-    """Core habit definition with scheduling and configuration"""
-    __tablename__ = "habits"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False)
-    title = Column(Text, nullable=False)
-    type = Column(String, nullable=False)  # binary, quantitative, checklist, time
-    target_numeric = Column(Float, nullable=True)  # for quantitative/time
-    unit = Column(Text, nullable=True)  # oz, min, reps, pages
-    rrule = Column(Text, nullable=False)  # RRULE string for expected days
-    weekly_minimum = Column(Integer, nullable=True)  # e.g., 3 times/week
-    monthly_minimum = Column(Integer, nullable=True)  # optional
-    windows = Column(Text, nullable=True)  # JSON: [{"name":"Morning","start":"05:00","end":"11:30"}]
-    checklist_mode = Column(String, nullable=True)  # all, percent
-    checklist_threshold = Column(Float, nullable=True)  # e.g., 0.7 for 70%
-    grace_days = Column(Integer, default=0)
-    retro_hours = Column(Integer, default=24)
-    paused = Column(Integer, default=0)  # boolean
-    pause_from = Column(DateTime, nullable=True)
-    pause_to = Column(DateTime, nullable=True)
-    vacation_from = Column(DateTime, nullable=True)  # vacation periods
-    vacation_to = Column(DateTime, nullable=True)
-    notes = Column(Text, nullable=True)  # optional description
-    current_streak = Column(Integer, default=0)
-    best_streak = Column(Integer, default=0)
-    last_completed = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, server_default=func.now())
-
-class HabitItem(Base):
-    """Checklist items for checklist-type habits"""
-    __tablename__ = "habit_items"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    habit_id = Column(String, nullable=False)  # foreign key to habits.id
-    label = Column(Text, nullable=False)
-    sort_order = Column(Integer, default=0)
-    created_at = Column(DateTime, server_default=func.now())
-
-class HabitInstance(Base):
-    """Materialized daily instances for fast UI queries"""
-    __tablename__ = "habit_instances"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    habit_id = Column(String, nullable=False)  # foreign key to habits.id
-    user_id = Column(String, nullable=False)
-    date = Column(DateTime, nullable=False)  # date for this instance
-    window = Column(Text, nullable=True)  # optional window name
-    expected = Column(Integer, default=1)  # boolean: expected on this day
-    status = Column(String, nullable=False, default='pending')  # pending, complete, skipped
-    progress = Column(Float, default=0.0)  # 0..1 for binary/checklist; scaled for quantitative
-    total_amount = Column(Float, nullable=True)  # raw sum for quantitative
-    target = Column(Float, nullable=True)  # snapshot of target for the day
-    created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, server_default=func.now())
-
-class HabitLog(Base):
-    """Individual completion logs with source tracking"""
-    __tablename__ = "habit_logs"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    habit_id = Column(String, nullable=False)  # foreign key to habits.id
-    instance_id = Column(String, nullable=True)  # foreign key to habit_instances.id
-    user_id = Column(String, nullable=False)
-    ts = Column(DateTime, nullable=False, server_default=func.now())
-    source = Column(String, nullable=False)  # manual, voice, timer, calendar, ntfy, health
-    payload = Column(Text, nullable=True)  # JSON: {amount:12, unit:'oz'} or {timer_id:...}
-    created_at = Column(DateTime, server_default=func.now())
-
-class HabitStreak(Base):
-    """Streak tracking per habit"""
-    __tablename__ = "habit_streaks"
-    habit_id = Column(String, primary_key=True)  # foreign key to habits.id
-    current_streak = Column(Integer, default=0)
-    best_streak = Column(Integer, default=0)
-    last_completed = Column(DateTime, nullable=True)
-    updated_at = Column(DateTime, server_default=func.now())
-
-class HabitLink(Base):
-    """Links to notes/concepts/documents for graph integration"""
-    __tablename__ = "habit_links"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    habit_id = Column(String, nullable=False)  # foreign key to habits.id
-    target_type = Column(String, nullable=False)  # note, concept, document
-    target_id = Column(String, nullable=False)
-    meta = Column(Text, nullable=True)  # JSON metadata
-    created_at = Column(DateTime, server_default=func.now())
-
-class EventOutbox(Base):
-    """Outbox pattern for Neo4j sync - guarantees eventual consistency between Postgres and Neo4j.
-
-    Event Types:
-    - episode_created: Sync episode to Neo4j, then queue for deep analysis
-    - note_created/note_updated: Sync note to Neo4j
-    - document_uploaded: Sync document to Neo4j
-    - episode_deep_analysis: Run LLM extraction for entities/topics
-    - insight_generated: Backpropagate importance to source episodes
-    """
-    __tablename__ = "event_outbox"
-    id = Column(Integer, primary_key=True, autoincrement=True)
-
-    # Event identification
-    event_type = Column(String, nullable=False)  # episode_created, note_created, etc.
-    aggregate_type = Column(String, nullable=False)  # Episode, Note, Document
-    aggregate_id = Column(String, nullable=False)  # UUID of the source record
-
-    # Payload and operation
-    op = Column(String, nullable=False, default="UPSERT")  # UPSERT, DELETE
-    payload = Column(Text, nullable=False)  # JSON with full event data
-
-    # Processing status
-    status = Column(String, nullable=False, default="pending")  # pending, processing, completed, failed
-    retry_count = Column(Integer, nullable=False, default=0)
-    max_retries = Column(Integer, nullable=False, default=5)
-    last_error = Column(Text, nullable=True)
-
-    # Timestamps
-    created_at = Column(DateTime, server_default=func.now())
-    processed_at = Column(DateTime, nullable=True)
-    next_retry_at = Column(DateTime, nullable=True)  # For exponential backoff
-
-# Sara Autonomous System Models
-class UserProfile(Base):
-    """User personality profile and autonomous preferences"""
-    __tablename__ = "user_profile"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False, unique=True)
-    
-    # Personality mode preferences
-    current_mode = Column(String, default="companion")  # coach, analyst, companion, guardian, concierge, librarian
-    mode_preferences = Column(Text, nullable=True)  # JSON: {"coach": {"enabled": true, "intensity": 0.7}, ...}
-    
-    # Autonomy settings
-    autonomy_level = Column(String, default="moderate")  # minimal, moderate, high (matches actual DB schema)
-    quiet_hours_start = Column(String, nullable=True)  # "22:00"
-    quiet_hours_end = Column(String, nullable=True)    # "07:00"
-    idle_thresholds = Column(Text, nullable=True)  # JSON: {"quickSweep": 1800000, "standardSweep": 7200000, "digestSweep": 86400000}
-    
-    # Notification preferences
-    ntfy_enabled = Column(Boolean, default=True)
-    ntfy_topics = Column(Text, nullable=True)  # JSON: {"insights": "sara-insights", "reminders": "sara"}
-    sprite_notifications = Column(Boolean, default=True)
-    
-    # Additional columns from models/profile.py (GTKY service)
-    profile_data = Column(JSONB, nullable=True, default=dict)  # JSON: Goals, preferences, personality settings
-    communication_style = Column(String, default="balanced")  # reserved, balanced, chatty
-    notification_channels = Column(Text, nullable=True)  # JSON: ntfy topics, quiet hours, etc.
-    gtky_completed_at = Column(DateTime, nullable=True)
-    
-    created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, server_default=func.now())
-
-class AutonomousInsight(Base):
-    """Insights generated by Sara's autonomous background processes"""
-    __tablename__ = "autonomous_insight"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False)
-    
-    # Insight metadata
-    insight_type = Column(String, nullable=False)  # pattern, suggestion, summary, reminder, connection, analysis
-    sweep_type = Column(String, nullable=False)  # quick_sweep, standard_sweep, digest_sweep
-    priority_score = Column(Float, nullable=False)  # 0-1, relevance × impact × novelty × timing - annoyance
-    
-    # Insight content
-    title = Column(String, nullable=False)
-    message = Column(Text, nullable=False)
-    action_suggestion = Column(String, nullable=True)  # JSON: {"primary": "Open Chat", "secondary": "View Notes"}
-    related_data = Column(Text, nullable=True)  # JSON: {"note_ids": [...], "episode_ids": [...], "context": {...}}
-    
-    # User interaction tracking
-    surfaced_at = Column(DateTime, nullable=True)  # When shown to user
-    user_action = Column(String, nullable=True)  # dismissed, acted_on, saved, snoozed
-    feedback_score = Column(Integer, nullable=True)  # -1, 0, 1 (unhelpful, neutral, helpful)
-    
-    # System tracking
-    generated_at = Column(DateTime, server_default=func.now())
-    expires_at = Column(DateTime, nullable=True)  # Optional expiration for time-sensitive insights
-
-class InsightNudge(Base):
-    """Nudges/notifications sent to user based on insights"""
-    __tablename__ = "insight_nudge"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False)
-    insight_id = Column(String, nullable=False)  # Foreign key to autonomous_insight
-    
-    # Nudge delivery
-    delivery_method = Column(String, nullable=False)  # sprite_toast, sprite_badge, ntfy_push
-    delivered_at = Column(DateTime, server_default=func.now())
-    
-    # User response tracking
-    clicked = Column(Boolean, default=False)
-    dismissed_at = Column(DateTime, nullable=True)
-    action_taken = Column(String, nullable=True)  # reply, open, ignore
-
-class ActivitySession(Base):
-    """Track user activity sessions for autonomous behavior triggers"""
-    __tablename__ = "activity_session"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False)
-    
-    # Session timing
-    session_start = Column(DateTime, nullable=False)
-    session_end = Column(DateTime, nullable=True)
-    idle_duration = Column(Integer, default=0)  # milliseconds
-    
-    # Activity context
-    active_view = Column(String, nullable=True)  # chat, notes, dashboard, etc.
-    interaction_count = Column(Integer, default=0)
-    
-    # Autonomous triggers during this session
-    quick_sweep_triggered = Column(Boolean, default=False)
-    standard_sweep_triggered = Column(Boolean, default=False) 
-    digest_sweep_triggered = Column(Boolean, default=False)
-    insights_generated = Column(Integer, default=0)
-    
-    created_at = Column(DateTime, server_default=func.now())
-
-class BackgroundSweep(Base):
-    """Log of background sweep executions and their results"""
-    __tablename__ = "background_sweep"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False)
-
-    # Sweep metadata
-    sweep_type = Column(String, nullable=False)  # quick_sweep, standard_sweep, digest_sweep
-    triggered_by = Column(String, nullable=False)  # idle_threshold, manual, scheduled
-
-    # Execution results
-    execution_time_ms = Column(Integer, nullable=False)
-    insights_generated = Column(Integer, default=0)
-    errors_encountered = Column(Text, nullable=True)  # JSON array of error messages
-
-    # Context data processed
-    episodes_analyzed = Column(Integer, default=0)
-    notes_analyzed = Column(Integer, default=0)
-    patterns_found = Column(Text, nullable=True)  # JSON summary of patterns discovered
-
-    executed_at = Column(DateTime, server_default=func.now())
-
-class PushToken(Base):
-    """Store push notification tokens for iOS/Android devices"""
-    __tablename__ = "push_token"
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String, nullable=False)
-    token = Column(String, nullable=False, unique=True)  # Expo push token
-    platform = Column(String, nullable=False)  # ios or android
-    device_name = Column(String, nullable=True)
-    is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime, server_default=func.now())
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
-
-# Ensure pgvector extension exists on Postgres before creating tables
-try:
-    if DATABASE_URL.startswith("postgresql"):
-        with engine.connect() as conn:
-            try:
-                conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-                conn.commit()
-                logger.info("✅ Ensured pgvector extension is available")
-            except Exception as e:
-                logger.warning(f"Could not create pgvector extension: {e}")
-except Exception as e:
-    logger.warning(f"Postgres extension check failed: {e}")
-
-# Create tables
-Base.metadata.create_all(bind=engine)
-
-# Optional: create ANN index for pgvector on hot tier
-try:
-    if PGVECTOR_AVAILABLE and DATABASE_URL.startswith("postgresql"):
-        with engine.connect() as conn:
-            try:
-                # Prefer HNSW with explicit operator class
-                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_mem_embedding_hnsw ON memory_embedding USING hnsw (embedding vector_l2_ops)"))
-                conn.commit()
-                logger.info("✅ HNSW index ensured on memory_embedding(embedding vector_l2_ops)")
-            except Exception as e:
-                logger.warning(f"Could not create HNSW index, falling back to IVFFLAT: {e}")
-                try:
-                    conn.execute(text("CREATE INDEX IF NOT EXISTS ix_mem_embedding_ivfflat ON memory_embedding USING ivfflat (embedding vector_l2_ops) WITH (lists = 100)"))
-                    conn.commit()
-                    logger.info("✅ IVFFLAT index ensured on memory_embedding(embedding vector_l2_ops)")
-                except Exception as e2:
-                    logger.warning(f"Could not create IVFFLAT index: {e2}")
-except Exception as e:
-    logger.warning(f"HNSW index ensure failed: {e}")
-
-# Pydantic models
-class UserCreate(BaseModel):
-    email: EmailStr
-    password: str
-
-class UserLogin(BaseModel):
-    email: EmailStr
-    password: str
-
-class UserResponse(BaseModel):
-    id: str
-    email: str
-    created_at: str
-    access_token: Optional[str] = None
-
-class NoteCreate(BaseModel):
-    title: str = ""
-    content: str
-    folder_id: Optional[str] = None
-
-class NoteResponse(BaseModel):
-    id: str
-    title: str
-    content: str
-    folder_id: Optional[str] = None
-    created_at: str
-    updated_at: str
-
-class NoteConnectionCreate(BaseModel):
-    target_note_id: str
-    connection_type: str  # 'reference', 'semantic', 'temporal'
-    strength: int = 50  # 0-100
-    auto_generated: bool = True
-
-class NoteConnectionResponse(BaseModel):
-    id: str
-    source_note_id: str
-    target_note_id: str
-    connection_type: str
-    strength: int
-    auto_generated: bool
-    created_at: str
-    updated_at: str
-
-class FolderCreate(BaseModel):
-    name: str
-    parent_id: Optional[str] = None
-
-class FolderUpdate(BaseModel):
-    name: Optional[str] = None
-    parent_id: Optional[str] = None
-
-class FolderResponse(BaseModel):
-    id: str
-    name: str
-    parent_id: Optional[str] = None
-    notes_count: int = 0
-    subfolders_count: int = 0
-    created_at: str
-    updated_at: str
-
-class TreeNodeResponse(BaseModel):
-    id: str
-    name: str
-    type: str  # "folder" or "note"
-    parent_id: str = None
-    children: list = []
-    created_at: str
-    updated_at: str
-
-class ReminderCreate(BaseModel):
-    title: str
-    description: str = ""
-    reminder_time: str  # ISO format datetime string
-
-class ReminderUpdate(BaseModel):
-    title: str = None
-    description: str = None
-    reminder_time: str = None
-    is_completed: bool = None
-
-class ReminderResponse(BaseModel):
-    id: str
-    title: str
-    description: str
-    reminder_time: str
-    is_completed: bool
-    created_at: str
-    updated_at: str
-
-class TimerCreate(BaseModel):
-    title: str
-    duration_minutes: int = None  # Optional for backward compatibility
-    duration_seconds: int = None  # New field for seconds precision
-
-class TimerResponse(BaseModel):
-    id: str
-    title: str
-    duration_minutes: int
-    start_time: str
-    end_time: str
-    is_active: bool
-    is_completed: bool
-    created_at: str
-
-class CalendarEventCreate(BaseModel):
-    title: str
-    description: str = ""
-    start_time: str  # ISO format datetime string
-    end_time: str    # ISO format datetime string
-    location: Optional[str] = None
-    all_day: Optional[bool] = False
-    reminder_minutes: Optional[int] = None
-
-class CalendarEventUpdate(BaseModel):
-    title: Optional[str] = None
-    description: Optional[str] = None
-    start_time: Optional[str] = None
-    end_time: Optional[str] = None
-    location: Optional[str] = None
-    all_day: Optional[bool] = None
-    reminder_minutes: Optional[int] = None
-    is_completed: Optional[bool] = None
-
-class CalendarEventResponse(BaseModel):
-    id: str
-    title: str
-    description: str
-    start_time: str
-    end_time: str
-    location: Optional[str] = None
-    all_day: bool
-    reminder_minutes: Optional[int] = None
-    is_completed: bool
-    # iOS calendar sync fields
-    source: str = "sara"
-    ios_event_id: Optional[str] = None
-    ios_calendar_id: Optional[str] = None
-    ios_calendar_name: Optional[str] = None
-    read_only: bool = False
-    created_at: str
-    updated_at: str
-
-# iOS Calendar Sync models
-class IOSCalendarEventSync(BaseModel):
-    ios_event_id: str
-    ios_calendar_id: str
-    ios_calendar_name: str
-    title: str
-    description: Optional[str] = None
-    start_time: str
-    end_time: str
-    location: Optional[str] = None
-    all_day: bool = False
-
-class IOSCalendarSyncRequest(BaseModel):
-    events: list[IOSCalendarEventSync]
-
-class IOSCalendarSyncResponse(BaseModel):
-    synced: int
-    errors: int
-
-class UserSettings(BaseModel):
-    theme: Optional[str] = "dark"
-    notifications_enabled: Optional[bool] = True
-    language: Optional[str] = "en"
-    timezone: Optional[str] = "America/New_York"
-
-class ImageContent(BaseModel):
-    """Image content for multimodal messages"""
-    type: str = "image"
-    data: str  # Base64 encoded image data
-    media_type: str = "image/jpeg"  # e.g., "image/jpeg", "image/png"
-
-class TextContent(BaseModel):
-    """Text content for multimodal messages"""
-    type: str = "text"
-    text: str
-
-class ChatMessage(BaseModel):
-    role: str
-    content: Union[str, List[Dict[str, Any]]]  # Support both text-only and multimodal
-
-class ChatRequest(BaseModel):
-    messages: list[ChatMessage]
-    conversation_id: Optional[str] = None
-    model: Optional[str] = None  # Override default model
-    ephemeral: Optional[bool] = False  # If true, chat won't be saved to memory
-    source: Optional[str] = None  # "workspace" | "webapp" | "ios" - determines available tools
-
-class ChatResponse(BaseModel):
-    message: ChatMessage
-
-class DocumentResponse(BaseModel):
-    id: str
-    filename: str
-    original_filename: str
-    title: str = ""  # User-editable title
-    file_size: int
-    mime_type: str
-    content_text: str = ""
-    is_processed: str  # String to match database storage ("true", "false", "error")
-    created_at: str
-    updated_at: str
-
-class Model3DResponse(BaseModel):
-    id: str
-    filename: str
-    display_name: str
-    file_format: str
-    file_size: int
-    download_url: str
-    created_at: str
-    updated_at: str
-
-class DocumentChunkResponse(BaseModel):
-    id: str
-    document_id: str
-    chunk_text: str
-    chunk_index: int
-    created_at: str
-
-class ConversationResponse(BaseModel):
-    id: str
-    title: str
-    summary: str
-    total_messages: int
-    created_at: str
-    updated_at: str
-
-class ConversationTurnResponse(BaseModel):
-    id: str
-    conversation_id: str
-    role: str
-    content: str
-    message_index: int
-    created_at: str
-
-# Episode-based conversation models
-class EpisodeMessageResponse(BaseModel):
-    id: str
-    role: str
-    content: str
-    created_at: str
-    importance: Optional[float] = None
-
-class ConversationSummaryResponse(BaseModel):
-    conversation_id: str
-    first_message: str
-    message_count: int
-    last_activity: str
-    created_at: str
-
-class SetActiveConversationRequest(BaseModel):
-    conversation_id: Optional[str] = None
-
-# Habit Tracking Pydantic Models
-class HabitCreate(BaseModel):
-    title: str
-    type: str  # binary, quantitative, checklist, time
-    target_numeric: Optional[float] = None
-    unit: Optional[str] = None
-    rrule: str = "FREQ=DAILY"  # Default to daily
-    weekly_minimum: Optional[int] = None
-    monthly_minimum: Optional[int] = None
-    windows: Optional[str] = None  # JSON string
-    checklist_mode: Optional[str] = "all"  # all, percent
-    checklist_threshold: Optional[float] = 1.0
-    grace_days: int = 0
-    retro_hours: int = 24
-    notes: Optional[str] = None
-
-class HabitResponse(BaseModel):
-    id: str
-    title: str
-    type: str
-    target_numeric: Optional[float] = None
-    unit: Optional[str] = None
-    rrule: str
-    weekly_minimum: Optional[int] = None
-    monthly_minimum: Optional[int] = None
-    windows: Optional[str] = None
-    checklist_mode: Optional[str] = None
-    checklist_threshold: Optional[float] = None
-    grace_days: int
-    retro_hours: int
-    paused: bool
-    pause_from: Optional[str] = None
-    pause_to: Optional[str] = None
-    notes: Optional[str] = None
-    created_at: str
-    updated_at: str
-
-class HabitItemCreate(BaseModel):
-    label: str
-    sort_order: int = 0
-
-class HabitItemResponse(BaseModel):
-    id: str
-    habit_id: str
-    label: str
-    sort_order: int
-    created_at: str
-
-class HabitInstanceResponse(BaseModel):
-    id: str
-    habit_id: str
-    date: str
-    window: Optional[str] = None
-    expected: bool
-    status: str  # pending, complete, skipped
-    progress: float
-    total_amount: Optional[float] = None
-    target: Optional[float] = None
-    # Include habit details for Today view
-    title: str
-    type: str
-    unit: Optional[str] = None
-
-class HabitTodayStats(BaseModel):
-    total: int
-    completed: int
-    in_progress: int
-    completion_rate: float
-
-class HabitTodayResponse(BaseModel):
-    date: str
-    habits: list[HabitInstanceResponse]
-    stats: HabitTodayStats
-
-class HabitInsightsOverview(BaseModel):
-    total_habits: int
-    active_habits: int
-    total_completions: int
-    average_completion_rate: float
-    current_streaks: int
-    longest_streak: int
-
-class HabitInsightsWeeklyStats(BaseModel):
-    this_week: dict
-    last_week: dict
-    trend: str
-
-class HabitInsightsPerformance(BaseModel):
-    habit_id: str
-    title: str
-    type: str
-    completion_rate: float
-    current_streak: int
-    best_streak: int
-    total_completions: int
-
-class HabitInsightsPatterns(BaseModel):
-    best_day_of_week: str
-    best_time_of_day: str
-    most_consistent_habit: str
-    improvement_suggestions: list[str]
-
-class HabitInsightsResponse(BaseModel):
-    overview: HabitInsightsOverview
-    weekly_stats: HabitInsightsWeeklyStats
-    habit_performance: list[HabitInsightsPerformance]
-    patterns: HabitInsightsPatterns
-
-class HabitLogCreate(BaseModel):
-    amount: Optional[float] = None
-    source: str = "manual"
-    payload: Optional[str] = None  # JSON string
-
-class HabitLogResponse(BaseModel):
-    id: str
-    habit_id: str
-    instance_id: Optional[str] = None
-    ts: str
-    source: str
-    payload: Optional[str] = None
-    created_at: str
-
-class HabitStreakResponse(BaseModel):
-    habit_id: str
-    current_streak: int
-    best_streak: int
-    last_completed: Optional[str] = None
-
-class HabitLinkCreate(BaseModel):
-    target_type: str  # note, concept, document
-    target_id: str
-    meta: Optional[str] = None  # JSON string
-
-class HabitLinkResponse(BaseModel):
-    id: str
-    habit_id: str
-    target_type: str
-    target_id: str
-    meta: Optional[str] = None
-    created_at: str
-
-class HabitPauseRequest(BaseModel):
-    pause_from: str  # ISO datetime
-    pause_to: str    # ISO datetime
-
-# Sara Autonomous System Pydantic Models
-class UserProfileCreate(BaseModel):
-    current_mode: Optional[str] = "companion"
-    mode_preferences: Optional[Dict[str, Any]] = None
-    autonomy_level: Optional[str] = "moderate"  # minimal, moderate, high
-    quiet_hours_start: Optional[str] = None
-    quiet_hours_end: Optional[str] = None
-    idle_thresholds: Optional[Dict[str, int]] = None
-    ntfy_enabled: Optional[bool] = True
-    ntfy_topics: Optional[Dict[str, str]] = None
-    sprite_notifications: Optional[bool] = True
-    profile_data: Optional[Dict[str, Any]] = None
-    communication_style: Optional[str] = "balanced"
-    notification_channels: Optional[Dict[str, Any]] = None
-
-class UserProfileResponse(BaseModel):
-    id: str
-    user_id: str
-    current_mode: str
-    mode_preferences: Optional[Dict[str, Any]]
-    autonomy_level: str  # minimal, moderate, high
-    quiet_hours_start: Optional[str]
-    quiet_hours_end: Optional[str]
-    idle_thresholds: Optional[Dict[str, int]]
-    ntfy_enabled: bool
-    ntfy_topics: Optional[Dict[str, str]]
-    sprite_notifications: bool
-    profile_data: Optional[Dict[str, Any]]
-    communication_style: str
-    notification_channels: Optional[Dict[str, Any]]
-    gtky_completed_at: Optional[datetime]
-    created_at: datetime
-    updated_at: datetime
-
-class AutonomousInsightResponse(BaseModel):
-    id: str
-    user_id: str
-    insight_type: str
-    sweep_type: str
-    priority_score: float
-    title: str
-    message: str
-    action_suggestion: Optional[Dict[str, str]]
-    related_data: Optional[Dict[str, Any]]
-    surfaced_at: Optional[datetime]
-    user_action: Optional[str]
-    feedback_score: Optional[int]
-    generated_at: datetime
-    expires_at: Optional[datetime]
-
-class InsightFeedbackRequest(BaseModel):
-    feedback_score: int  # -1, 0, 1
-    user_action: str     # dismissed, acted_on, saved, snoozed
-
-class ActivitySessionResponse(BaseModel):
-    id: str
-    user_id: str
-    session_start: datetime
-    session_end: Optional[datetime]
-    idle_duration: int
-    active_view: Optional[str]
-    interaction_count: int
-    quick_sweep_triggered: bool
-    standard_sweep_triggered: bool
-    digest_sweep_triggered: bool
-    insights_generated: int
-    created_at: datetime
-
-class BackgroundSweepResponse(BaseModel):
-    id: str
-    user_id: str
-    sweep_type: str
-    triggered_by: str
-    execution_time_ms: int
-    insights_generated: int
-    errors_encountered: Optional[list]
-    episodes_analyzed: int
-    notes_analyzed: int
-    patterns_found: Optional[Dict[str, Any]]
-    executed_at: datetime
 
 # Auth utilities - imported from app.core.auth
 # pwd_context, create_access_token, verify_token, get_cookie_domain imported at top
@@ -1480,6 +491,12 @@ class SimpleLLMClient:
                     "content": tool_content or ""
                 })
             elif role == "assistant":
+                # Flush any pending tool results BEFORE adding an assistant message
+                # (Anthropic requires tool_result immediately after tool_use)
+                if pending_tool_results:
+                    anthropic_messages.append({"role": "user", "content": pending_tool_results})
+                    pending_tool_results = []
+
                 # Check if this has tool_calls (OpenAI format)
                 tool_calls = msg.get("tool_calls")
                 if tool_calls:
@@ -1573,9 +590,22 @@ class SimpleLLMClient:
         payload = {
             "model": effective_model,
             "messages": filtered_messages,
-            "temperature": temperature,
             "max_tokens": max_tokens,
         }
+
+        # Reasoning-only Claude models (Sonnet 5, Opus 4.7/4.8, Fable 5) return a
+        # 400 if `temperature` is supplied. For those, drop the sampling param and
+        # turn on adaptive thinking (the model decides how much to reason per turn).
+        # Adaptive thinking shares the max_tokens budget with the visible reply, so
+        # give it generous headroom to avoid truncating the answer. Fable/Mythos
+        # have thinking always on and reject an explicit thinking config.
+        reasoning_only = claude_rejects_sampling_params(effective_model)
+        if reasoning_only:
+            if not claude_thinking_always_on(effective_model):
+                payload["thinking"] = {"type": "adaptive"}
+            payload["max_tokens"] = max(max_tokens, 32000)
+        else:
+            payload["temperature"] = temperature
 
         # Use system array format with cache_control for prompt caching
         if system_content:
@@ -1614,7 +644,11 @@ class SimpleLLMClient:
             response = await self.client.post(
                 "https://api.anthropic.com/v1/messages",
                 json=payload,
-                headers=self._get_anthropic_headers()
+                headers=self._get_anthropic_headers(),
+                # Adaptive thinking + larger max_tokens can take longer to generate
+                # on this non-streaming path; widen the read timeout past the
+                # client default (120s) so heavier turns don't spuriously fail.
+                timeout=300.0 if reasoning_only else httpx.USE_CLIENT_DEFAULT,
             )
             if response.status_code >= 400:
                 error_body = response.text
@@ -1721,7 +755,7 @@ class SimpleLLMClient:
             await self.event_queue.put({
                 "type": event_type,
                 "data": data,
-                "timestamp": datetime.utcnow().isoformat() + "Z"
+                "timestamp": datetime.now(timezone.utc).isoformat() + "Z"
             })
             logger.info(f"📤 Event QUEUED: {event_type}")
         else:
@@ -1750,6 +784,249 @@ class SimpleLLMClient:
         # (this handles non-MLX models)
         return content
 
+    def _content_to_text(self, content: Any) -> str:
+        """Normalize OpenAI-style message content into plain text."""
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: List[str] = []
+            for item in content:
+                if isinstance(item, dict):
+                    if item.get("type") == "text" and item.get("text"):
+                        parts.append(str(item.get("text")))
+                    elif item.get("type") == "input_text" and item.get("text"):
+                        parts.append(str(item.get("text")))
+                elif isinstance(item, str):
+                    parts.append(item)
+            return "\n".join([p for p in parts if p])
+        return str(content)
+
+    def _convert_openai_messages_to_codex_input(self, messages: list) -> tuple[str, list]:
+        instructions: List[str] = []
+        converted: List[Dict[str, Any]] = []
+        call_counter = 0
+
+        def _to_json_string(value: Any) -> str:
+            if isinstance(value, str):
+                return value
+            try:
+                return json.dumps(value if value is not None else {})
+            except Exception:
+                return "{}"
+
+        for msg in messages:
+            role = msg.get("role")
+            content_text = self._content_to_text(msg.get("content"))
+
+            if role == "system":
+                if content_text:
+                    instructions.append(content_text)
+                continue
+
+            if role == "user":
+                converted.append(
+                    {
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": content_text or ""}],
+                    }
+                )
+                continue
+
+            if role == "assistant":
+                if content_text:
+                    converted.append(
+                        {
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": content_text}],
+                        }
+                    )
+
+                for tc in (msg.get("tool_calls") or []):
+                    func = tc.get("function", {}) if isinstance(tc, dict) else {}
+                    raw_id = str(tc.get("id") or f"call_{call_counter}")
+                    call_counter += 1
+                    call_id = raw_id.split("|")[0]
+                    item_id = f"fc_{call_id[:58]}" if not raw_id.startswith("fc_") else raw_id[:64]
+                    converted.append(
+                        {
+                            "type": "function_call",
+                            "call_id": call_id,
+                            "id": item_id,
+                            "name": func.get("name") or "unknown_tool",
+                            "arguments": _to_json_string(func.get("arguments")),
+                        }
+                    )
+                continue
+
+            if role == "tool":
+                tool_call_id = str(msg.get("tool_call_id") or "")
+                call_id = tool_call_id.split("|")[0]
+                if call_id:
+                    converted.append(
+                        {
+                            "type": "function_call_output",
+                            "call_id": call_id,
+                            "output": content_text or "",
+                        }
+                    )
+
+        return "\n\n".join(instructions), converted
+
+    def _convert_openai_tools_to_codex_tools(self, tools: list) -> list:
+        converted_tools = []
+        for tool in tools or []:
+            if tool.get("type") != "function":
+                continue
+            fn = tool.get("function", {})
+            name = fn.get("name")
+            if not name:
+                continue
+            converted_tools.append(
+                {
+                    "type": "function",
+                    "name": name,
+                    "description": fn.get("description", ""),
+                    "parameters": fn.get("parameters", {"type": "object", "properties": {}}),
+                }
+            )
+        return converted_tools
+
+    async def _stream_codex_response(self, payload: dict, base_url: str, api_key: str) -> dict:
+        """Stream from ChatGPT/Codex responses API and map into OpenAI-compatible message output."""
+        # Ensure a fresh OAuth token before request
+        token = await _ensure_codex_access_token(updated_by="codex-runtime", min_valid_seconds=120) or api_key
+        account_id = CODEX_OAUTH_ACCOUNT_ID or _extract_codex_account_id_from_token(token or "")
+        if not token or not account_id:
+            raise RuntimeError("Codex OAuth not connected. Connect in Settings first.")
+
+        instructions, input_items = self._convert_openai_messages_to_codex_input(payload.get("messages", []))
+        codex_body: Dict[str, Any] = {
+            "model": payload.get("model") or OPENAI_MODEL or CODEX_DEFAULT_MODEL,
+            "store": False,
+            "stream": True,
+            "instructions": instructions or "You are a helpful assistant.",
+            "input": input_items,
+            "text": {"verbosity": "medium"},
+            "tool_choice": "auto",
+            "parallel_tool_calls": True,
+        }
+        codex_tools = self._convert_openai_tools_to_codex_tools(payload.get("tools", []))
+        if codex_tools:
+            codex_body["tools"] = codex_tools
+
+        codex_url = f"{base_url.rstrip('/')}/codex/responses"
+        full_content = ""
+        usage_data = {}
+        tool_calls_map: Dict[str, Dict[str, Any]] = {}
+        active_call_id: Optional[str] = None
+
+        def _to_json_string(value: Any) -> str:
+            if isinstance(value, str):
+                return value
+            try:
+                return json.dumps(value if value is not None else {})
+            except Exception:
+                return "{}"
+
+        async with self.client.stream(
+            "POST",
+            codex_url,
+            json=codex_body,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "chatgpt-account-id": account_id,
+                "OpenAI-Beta": "responses=experimental",
+                "originator": CODEX_OAUTH_ORIGINATOR,
+                "accept": "text/event-stream",
+            },
+        ) as response:
+            if response.status_code >= 400:
+                err = await response.aread()
+                raise RuntimeError(f"Codex request failed ({response.status_code}): {err.decode(errors='ignore')[:300]}")
+
+            async for line in response.aiter_lines():
+                if not line:
+                    continue
+                if line.startswith("data: "):
+                    line = line[6:]
+                if line == "[DONE]":
+                    break
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                event_type = event.get("type")
+                if event_type == "error":
+                    raise RuntimeError(event.get("message") or "Codex stream error")
+                if event_type in ("response.output_text.delta", "response.refusal.delta"):
+                    delta = event.get("delta") or ""
+                    if delta:
+                        full_content += delta
+                        if self.event_queue:
+                            await self.emit_event("text_chunk", {"content": delta, "full_content": full_content})
+                elif event_type == "response.output_item.added":
+                    item = event.get("item") or {}
+                    if item.get("type") == "function_call":
+                        call_id = str(item.get("call_id") or "")
+                        if call_id:
+                            active_call_id = call_id
+                            tool_calls_map[call_id] = {
+                                "id": call_id,
+                                "type": "function",
+                                "function": {
+                                    "name": item.get("name") or "unknown_tool",
+                                    "arguments": _to_json_string(item.get("arguments")),
+                                },
+                            }
+                elif event_type == "response.function_call_arguments.delta":
+                    delta = event.get("delta") or ""
+                    if active_call_id and active_call_id in tool_calls_map:
+                        tool_calls_map[active_call_id]["function"]["arguments"] += delta
+                elif event_type == "response.output_item.done":
+                    item = event.get("item") or {}
+                    if item.get("type") == "function_call":
+                        call_id = str(item.get("call_id") or active_call_id or "")
+                        if call_id:
+                            active_call_id = call_id
+                            tool_calls_map[call_id] = {
+                                "id": call_id,
+                                "type": "function",
+                                "function": {
+                                    "name": item.get("name") or "unknown_tool",
+                                    "arguments": _to_json_string(
+                                        item.get("arguments")
+                                        if item.get("arguments") is not None
+                                        else tool_calls_map.get(call_id, {}).get("function", {}).get("arguments", "{}")
+                                    ),
+                                },
+                            }
+                elif event_type in ("response.completed", "response.done"):
+                    response_payload = event.get("response") or {}
+                    usage = response_payload.get("usage") or {}
+                    if usage:
+                        usage_data = {
+                            "prompt_tokens": usage.get("input_tokens", 0),
+                            "completion_tokens": usage.get("output_tokens", 0),
+                            "total_tokens": usage.get("total_tokens", 0),
+                        }
+
+        if usage_data:
+            self._log_token_usage(
+                prompt_tokens=usage_data.get("prompt_tokens", 0),
+                completion_tokens=usage_data.get("completion_tokens", 0),
+                total_tokens=usage_data.get("total_tokens", 0),
+                model=payload.get("model", OPENAI_MODEL),
+                operation_type="chat",
+            )
+
+        return {
+            "content": full_content,
+            "tool_calls": list(tool_calls_map.values()) if tool_calls_map else None,
+        }
+
     async def _stream_response(self, payload):
         """Stream response from LLM with XML filtering for GLM-4.5 and MLX channel format"""
         import re
@@ -1767,13 +1044,17 @@ class SimpleLLMClient:
 
         # Route to Anthropic handler if using Claude API (non-streaming for now)
         logger.info(f"🔀 Provider routing: provider={provider}, base_url={base_url[:50]}")
+        if provider == "codex":
+            logger.info("Using ChatGPT Codex Responses API")
+            return await self._stream_codex_response(payload, base_url, api_key)
+
         if provider == "anthropic":
             logger.info("Using Anthropic Claude API (non-streaming mode)")
             messages = payload.get("messages", [])
             tools = payload.get("tools", [])
             max_tokens = payload.get("max_tokens", 4096)
             temperature = payload.get("temperature", 0.7)
-            model = payload.get("model", "claude-sonnet-4-5-20250514")
+            model = payload.get("model", "claude-sonnet-4-6")
 
             result = await self._anthropic_chat_request(
                 messages=messages,
@@ -1895,18 +1176,36 @@ class SimpleLLMClient:
                                     })
                                 # Otherwise, hold the buffer (might be start of XML tag)
 
-                        # Handle tool calls (standard OpenAI format)
-                        if "tool_calls" in delta:
-                            if not tool_calls:
-                                tool_calls = delta["tool_calls"]
-                            else:
-                                # Merge tool calls
-                                for i, tc in enumerate(delta["tool_calls"]):
-                                    if i < len(tool_calls):
-                                        if "function" in tc and "arguments" in tc["function"]:
-                                            tool_calls[i]["function"]["arguments"] += tc["function"]["arguments"]
-                                    else:
-                                        tool_calls.append(tc)
+                        # Handle tool calls (standard OpenAI streaming format).
+                        # Each delta tool_call carries an `index` field identifying which
+                        # parallel call it belongs to. Positional merging breaks when
+                        # parallel calls interleave — use `index` to route correctly.
+                        if "tool_calls" in delta and delta["tool_calls"]:
+                            for tc_delta in delta["tool_calls"]:
+                                idx = tc_delta.get("index")
+                                if idx is None:
+                                    idx = len(tool_calls)
+                                while len(tool_calls) <= idx:
+                                    tool_calls.append({
+                                        "id": "",
+                                        "type": "function",
+                                        "function": {"name": "", "arguments": ""},
+                                    })
+                                target = tool_calls[idx]
+                                if tc_delta.get("id"):
+                                    target["id"] = tc_delta["id"]
+                                if tc_delta.get("type"):
+                                    target["type"] = tc_delta["type"]
+                                fn_delta = tc_delta.get("function") or {}
+                                target_fn = target.setdefault(
+                                    "function", {"name": "", "arguments": ""}
+                                )
+                                if fn_delta.get("name") and not target_fn.get("name"):
+                                    target_fn["name"] = fn_delta["name"]
+                                if fn_delta.get("arguments"):
+                                    target_fn["arguments"] = (
+                                        target_fn.get("arguments") or ""
+                                    ) + fn_delta["arguments"]
 
                     except json.JSONDecodeError:
                         continue
@@ -2012,15 +1311,15 @@ class SimpleLLMClient:
             payload_fallback.pop("stream", None)
 
             response = await self.client.post(
-                f"{OPENAI_BASE_URL}/chat/completions",
+                f"{base_url}/chat/completions",
                 json=payload_fallback,
-                headers={"Authorization": f"Bearer {OPENAI_API_KEY}"}
+                headers={"Authorization": f"Bearer {api_key}"}
             )
             response.raise_for_status()
             result = response.json()
             return result["choices"][0]["message"]
-    
-    async def chat(self, messages: list):
+
+    async def chat(self, messages: list, model: str | None = None):
         try:
             # Handle both dict and object message formats
             formatted_messages = []
@@ -2030,32 +1329,49 @@ class SimpleLLMClient:
                 else:
                     formatted_messages.append({"role": m.role, "content": m.content})
 
-            # Route to Anthropic handler if using Claude API
-            if is_anthropic_provider():
+            effective_model = model or OPENAI_MODEL or CODEX_DEFAULT_MODEL
+            model_config = get_model_config(effective_model)
+            provider = model_config["provider"]
+
+            # Route by effective model provider (not global OPENAI_BASE_URL).
+            if provider == "anthropic":
                 result = await self._anthropic_chat_request(
                     messages=formatted_messages,
                     tools=None,
                     max_tokens=8000,
-                    temperature=0.7
+                    temperature=0.7,
+                    model=effective_model,
                 )
                 return result.get("content", "")
 
+            if provider == "codex":
+                codex_result = await self._stream_codex_response(
+                    {
+                        "model": effective_model,
+                        "messages": formatted_messages,
+                        "temperature": 0.7,
+                    },
+                    model_config["base_url"],
+                    model_config["api_key"],
+                )
+                return codex_result.get("content", "")
+
             # Build payload for OpenAI-compatible API
             chat_payload = {
-                "model": OPENAI_MODEL,
+                "model": effective_model,
                 "messages": formatted_messages,
                 "temperature": 0.7,
                 "max_tokens": 8000
             }
 
             # Add Ollama-specific context length if using local model
-            if "ollama" in OPENAI_BASE_URL.lower() or "11434" in OPENAI_BASE_URL:
-                chat_payload["num_ctx"] = 65536  # 65k context window for gpt-oss:120b
+            if provider == "local":
+                chat_payload["num_ctx"] = 32768
 
             response = await self.client.post(
-                f"{OPENAI_BASE_URL}/chat/completions",
+                f"{model_config['base_url']}/chat/completions",
                 json=chat_payload,
-                headers={"Authorization": f"Bearer {OPENAI_API_KEY}"}
+                headers={"Authorization": f"Bearer {model_config['api_key']}"}
             )
             response.raise_for_status()
             result = response.json()
@@ -2072,7 +1388,7 @@ class SimpleLLMClient:
             tools: List of tool definitions
             user_id: User ID
             conversation_id: Optional conversation ID for context
-            model: Optional model override (e.g., "claude-opus-4-5-20250514", "gemini-2.5-pro")
+            model: Optional model override (e.g., "claude-opus-4-6", "gemini-2.5-pro")
             ephemeral: If True, don't save to memory/episodes
         """
         try:
@@ -2138,8 +1454,17 @@ class SimpleLLMClient:
             # Store ephemeral flag for use in store_conversation
             self._ephemeral = ephemeral
 
-            # Determine which model to use
+            # Determine which model to use. Reject overrides that aren't in the
+            # catalog — stale clients still request retired models (e.g. the old
+            # iOS default "gpt-oss:120b"), which would otherwise fall through to
+            # the global provider and 404 against Anthropic/Gemini.
             effective_model = model or OPENAI_MODEL
+            _known_model_ids = {(m.get("id") or "").lower() for m in AVAILABLE_MODELS}
+            if model and model.lower() not in _known_model_ids:
+                logger.warning(
+                    f"Requested model '{model}' not in catalog — using default '{OPENAI_MODEL}'"
+                )
+                effective_model = OPENAI_MODEL
             model_config = get_model_config(effective_model)
             logger.info(f"🤖 Model selection: requested={model}, effective={effective_model}, provider={model_config['provider']}, base_url={model_config['base_url']}")
 
@@ -2163,7 +1488,7 @@ class SimpleLLMClient:
 
             # Add Ollama-specific context length if using local model
             if model_config["provider"] == "local":
-                payload["num_ctx"] = 65536  # 65k context window for local models
+                payload["num_ctx"] = 32768
 
             # Log payload size for debugging context overflow
             import json
@@ -2261,7 +1586,7 @@ class SimpleLLMClient:
 
                     # Add Ollama-specific context length if using local model
                     if self._current_model_config.get("provider") == "local":
-                        follow_up_payload["num_ctx"] = 65536
+                        follow_up_payload["num_ctx"] = 32768
 
                     # Debug: Log the assistant message and tool responses being sent
                     if current_messages:
@@ -2293,12 +1618,7 @@ class SimpleLLMClient:
                             else:
                                 # All retries failed - synthesize a completion response from tool results
                                 logger.warning(f"❌ All {max_retries + 1} attempts failed. Synthesizing completion from tool results.")
-                                # Build a summary from tool responses
-                                tool_summary = []
-                                for tr in tool_responses:
-                                    if tr.get("content"):
-                                        tool_summary.append(str(tr["content"])[:200])
-                                completion_msg = "I've completed the requested actions:\n" + "\n".join(tool_summary[:3])
+                                completion_msg = _summarize_tool_results(tool_responses)
                                 message = {
                                     "content": completion_msg,
                                     "tool_calls": None
@@ -2306,12 +1626,7 @@ class SimpleLLMClient:
                         except Exception as e:
                             # Other errors should be caught but not crash - fallback to tool results
                             logger.error(f"❌ Unexpected error during LLM call: {e}")
-                            # Create a fallback message from tool results
-                            tool_summary = []
-                            for tr in tool_responses:
-                                if tr.get("content"):
-                                    tool_summary.append(str(tr["content"])[:200])
-                            completion_msg = "I've completed the requested actions:\n" + "\n".join(tool_summary[:3])
+                            completion_msg = _summarize_tool_results(tool_responses)
                             message = {
                                 "content": completion_msg,
                                 "tool_calls": None
@@ -2336,45 +1651,6 @@ class SimpleLLMClient:
                     if hasattr(message, 'reasoning'):
                         logger.info(f"🔍 Round {round_num + 1} - Reasoning: {message.get('reasoning', '')[:100]}")
 
-                    # FALLBACK: If model returns empty content with another tool call after round 1,
-                    # it's stuck in a loop. Synthesize response from tool results.
-                    if round_num >= 1 and message.get("tool_calls") and not message.get("content", "").strip():
-                        logger.warning(f"⚠️ Model returned empty content with tool calls in round {round_num + 1}. Synthesizing response from previous tool results.")
-                        # Build response from the tool results we just got
-                        tool_summary_parts = []
-                        for tr in tool_responses:
-                            content = tr.get("content", "")
-                            if content:
-                                # Parse tool response to extract useful info
-                                if isinstance(content, str):
-                                    if len(content) > 300:
-                                        tool_summary_parts.append(content[:300] + "...")
-                                    else:
-                                        tool_summary_parts.append(content)
-
-                        if tool_summary_parts:
-                            synthesized_response = "Based on what I found:\n\n" + "\n\n".join(tool_summary_parts[:2])
-                        else:
-                            synthesized_response = "I found some relevant information but had trouble formatting the response. Could you try rephrasing your question?"
-
-                        logger.info(f"✅ Synthesized response from tool results: {len(synthesized_response)} chars")
-
-                        # Emit synthesized response as streaming chunks
-                        await self.emit_event("text_chunk", {
-                            "content": synthesized_response,
-                            "full_content": synthesized_response
-                        })
-
-                        await self.emit_event("response_ready", {
-                            "rounds": round_num + 1,
-                            "content_length": len(synthesized_response),
-                            "synthesized": True
-                        })
-                        # Store conversation and get episode_id for rating
-                        episode_id = await self.store_conversation(messages, synthesized_response, user_id, conversation_id)
-                        self.current_episode_id = episode_id
-                        return synthesized_response
-
                     # If no more tool calls, we're done
                     if not message.get("tool_calls"):
                         response_content = message["content"]
@@ -2383,7 +1659,9 @@ class SimpleLLMClient:
                             "content_length": len(response_content) if response_content else 0
                         })
                         # Store conversation and get episode_id for rating
-                        episode_id = await self.store_conversation(messages, response_content, user_id, conversation_id)
+                        episode_id = await self._store_conversation_with_timeout(
+                            messages, response_content, user_id, conversation_id
+                        )
                         self.current_episode_id = episode_id
                         logger.info(f"Final LLM response after {round_num + 1} rounds: {len(response_content) if response_content else 0}")
                         return response_content
@@ -2395,7 +1673,9 @@ class SimpleLLMClient:
                         "content_length": len(response_content) if response_content else 0
                     })
                     # Store conversation and get episode_id for rating
-                    episode_id = await self.store_conversation(messages, response_content, user_id, conversation_id)
+                    episode_id = await self._store_conversation_with_timeout(
+                        messages, response_content, user_id, conversation_id
+                    )
                     self.current_episode_id = episode_id
                     logger.info(f"Final LLM response (no tools): {len(response_content) if response_content else 0}")
                     return response_content
@@ -2413,7 +1693,9 @@ class SimpleLLMClient:
                 response_content = "I've searched through your documents and found some relevant information, but I encountered an issue providing a complete response. Please try asking your question again."
 
             # Store conversation and get episode_id for rating
-            episode_id = await self.store_conversation(messages, response_content, user_id, conversation_id)
+            episode_id = await self._store_conversation_with_timeout(
+                messages, response_content, user_id, conversation_id
+            )
             self.current_episode_id = episode_id
             logger.warning(f"Hit max tool rounds, returning: {len(response_content)} chars")
             return response_content
@@ -2423,6 +1705,41 @@ class SimpleLLMClient:
             logger.error(f"LLM error in chat_with_tools: {e}")
             logger.error(f"Full traceback:\n{traceback.format_exc()}")
             return f"I'm sorry, I'm having trouble connecting to my AI service. Error: {str(e)}"
+
+    async def _store_conversation_with_timeout(
+        self,
+        messages,
+        response_content,
+        user_id,
+        conversation_id,
+        timeout_seconds: float = 4.0
+    ) -> Optional[str]:
+        """
+        Keep chat completion responsive: do not block final stream events on memory persistence.
+        If storage exceeds timeout, continue without waiting and persist in background.
+        """
+        store_task = asyncio.create_task(
+            self.store_conversation(messages, response_content, user_id, conversation_id)
+        )
+        try:
+            return await asyncio.wait_for(asyncio.shield(store_task), timeout=timeout_seconds)
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"⚠️ store_conversation timed out after {timeout_seconds}s; continuing stream without waiting"
+            )
+            def _log_background_failure(task: asyncio.Task):
+                try:
+                    exc = task.exception()
+                except asyncio.CancelledError:
+                    return
+                if exc:
+                    logger.warning(f"⚠️ Background conversation storage failed: {exc}")
+
+            store_task.add_done_callback(_log_background_failure)
+            return None
+        except Exception as e:
+            logger.warning(f"⚠️ Conversation storage failed (continuing): {e}")
+            return None
 
     async def execute_tool(self, tool_call, user_id, conversation_id=None, session_cache=None):
         """Execute a tool call and return the response"""
@@ -2500,6 +1817,12 @@ class SimpleLLMClient:
 
         logger.info(f"Executing tool {function_name} with arguments: {arguments}")
 
+        # Emit tool_executing event for iOS status indicator
+        try:
+            await self.emit_event("tool_executing", {"tool": function_name})
+        except Exception:
+            pass
+
         # CHECK CACHE FIRST
         cached_result = None
         if session_cache and conversation_id:
@@ -2537,16 +1860,15 @@ class SimpleLLMClient:
             result = await self.search_documents_tool(arguments["query"], user_id)
         elif function_name == "search_memory":
             result = await self.search_memory_tool(arguments["query"], user_id)
-        elif function_name == "handoff_to_agents":
-            result = await self.handoff_to_agents_tool(
-                arguments["task_description"],
-                arguments.get("task_type", "research"),
-                user_id
-            )
         else:
             # Fallback to global tool registry (e.g., web_search, open_page, knowledge_graph, etc.)
             try:
-                reg_result = await tool_registry.execute_tool(name=function_name, user_id=str(user_id), parameters=arguments)
+                reg_result = await tool_registry.execute_tool(
+                    name=function_name,
+                    user_id=str(user_id),
+                    parameters=arguments,
+                    context={"origin": "chat"},
+                )
                 # Collect citations if available
                 try:
                     if reg_result.citations:
@@ -2564,18 +1886,31 @@ class SimpleLLMClient:
                         logger.info(f"📐 Emitted canvas_command: {canvas_command}")
 
                     # Emit workspace_command SSE event for workbench-canvas
+                    workspace_commands = []
+                    if isinstance(reg_result.data.get("workspace_commands"), list):
+                        workspace_commands = [
+                            cmd for cmd in reg_result.data.get("workspace_commands", [])
+                            if isinstance(cmd, dict) and cmd.get("workspace_command")
+                        ]
+
                     workspace_command = reg_result.data.get("workspace_command")
-                    if workspace_command:
-                        await self.emit_event("workspace_command", reg_result.data)
-                        logger.info(f"🖼️ Emitted workspace_command: {workspace_command}")
+                    if workspace_command and not workspace_commands:
+                        workspace_commands = [reg_result.data]
+
+                    if workspace_commands:
+                        for cmd in workspace_commands:
+                            await self.emit_event("workspace_command", cmd)
+                        logger.info(f"🖼️ Emitted {len(workspace_commands)} workspace_command event(s)")
+
                         # Also store in Redis for voice/non-SSE access
                         try:
                             from redis import Redis
                             redis_conn = Redis.from_url(config.settings.redis_url, decode_responses=True)
-                            cmd_data = json.dumps(reg_result.data)
-                            redis_conn.lpush(f"workspace_commands:{user_id}", cmd_data)
+                            for cmd in workspace_commands:
+                                cmd_data = json.dumps(cmd)
+                                redis_conn.lpush(f"workspace_commands:{user_id}", cmd_data)
                             redis_conn.expire(f"workspace_commands:{user_id}", 60)  # 1 minute TTL
-                            logger.info(f"🖼️ Stored workspace_command in Redis for user {user_id}")
+                            logger.info(f"🖼️ Stored {len(workspace_commands)} workspace_command(s) in Redis for user {user_id}")
                         except Exception as e:
                             logger.warning(f"Failed to store workspace_command in Redis: {e}")
 
@@ -2594,6 +1929,28 @@ class SimpleLLMClient:
         logger.info(f"Tool {function_name} result length: {len(str(result))} chars")
         if function_name == "search_documents":
             logger.info(f"Search result preview: {str(result)[:500]}...")
+
+        # Emit tool_completed event
+        try:
+            await self.emit_event("tool_completed", {"tool": function_name})
+        except Exception:
+            pass
+
+        # Emit content_card SSE event for rich iOS rendering
+        try:
+            from app.services.content_card_builder import build_card
+            card = build_card(function_name, str(result))
+            if card:
+                await self.emit_event("content_card", card)
+                logger.info(f"🃏 Emitted content_card: {card.get('card_type')}")
+        except Exception as e:
+            logger.debug(f"Content card build skipped: {e}")
+
+        # Track tool usage for suggested actions
+        if not hasattr(self, '_tool_history'):
+            self._tool_history = []
+        self._tool_history.append(function_name)
+
         return {
             "role": "tool",
             "tool_call_id": tool_call["id"],
@@ -3045,11 +2402,44 @@ class SimpleLLMClient:
                 timer.is_active = False
                 timer.is_completed = True
                 db.commit()
-                
+
+                # Evaluate standing orders triggered by this timer
+                try:
+                    from app.services.standing_order_service import standing_order_service
+                    executed = await standing_order_service.evaluate_trigger(
+                        trigger_type="timer",
+                        context={
+                            "timer_id": str(timer.id),
+                            "timer_title": timer.title or "",
+                            "duration_minutes": timer.duration_minutes,
+                        },
+                        db=db,
+                    )
+                    if executed:
+                        logger.info(f"Timer '{timer.title}' triggered {len(executed)} standing order(s)")
+                except Exception as e:
+                    logger.warning(f"Timer standing order eval failed: {e}")
+
+                # Also emit event for reactive engine subscribers
+                try:
+                    from app.services.event_bus import emit_event, EventType
+                    await emit_event(
+                        event_type=EventType.TIMER_COMPLETED,
+                        user_id=user_id,
+                        payload={
+                            "timer_id": str(timer.id),
+                            "timer_title": timer.title or "",
+                            "duration_minutes": timer.duration_minutes,
+                        },
+                        source="stop_timer_tool",
+                    )
+                except Exception as e:
+                    logger.debug(f"Timer event emit failed: {e}")
+
                 # Send AI-generated NTFY notification for timer completion
                 duration_str = f"{timer.duration_minutes}min"
                 await ntfy_service.send_timer_notification(timer.title, duration_str, timer_id, user_id)
-                
+
                 return f"Stopped timer '{timer.title}'"
             finally:
                 db.close()
@@ -3397,56 +2787,6 @@ class SimpleLLMClient:
             logger.error(f"Error searching dream insights: {e}")
             return []
 
-    async def handoff_to_agents_tool(self, task_description: str, task_type: str, user_id: str):
-        """🔄 Hand off a task to background worker agents for research/analysis"""
-        try:
-            import asyncio
-            from app.services.background_task_service import background_task_service
-
-            logger.info(f"🤖 Handing off task to agents: {task_description[:100]}...")
-
-            # Create the background task
-            db = SessionLocal()
-            try:
-                task = await background_task_service.create_task(
-                    db=db,
-                    user_id=str(user_id),
-                    query=task_description,
-                    task_type=task_type
-                )
-
-                # Start the task in background (fire and forget)
-                asyncio.create_task(self._run_background_task(task.id))
-
-                return json.dumps({
-                    "success": True,
-                    "message": f"Task handed off to agents successfully",
-                    "task_id": task.id,
-                    "status": "running",
-                    "note": "I'll notify you when the research is complete. Results will be saved to your Agent Workspace folder."
-                })
-            finally:
-                db.close()
-
-        except Exception as e:
-            logger.error(f"Error handing off to agents: {e}")
-            return json.dumps({
-                "success": False,
-                "message": f"Failed to hand off task: {str(e)}"
-            })
-
-    async def _run_background_task(self, task_id: str):
-        """Run a background task in a new database session"""
-        try:
-            from app.services.background_task_service import background_task_service
-            db = SessionLocal()
-            try:
-                await background_task_service.run_task(db, task_id)
-            finally:
-                db.close()
-        except Exception as e:
-            logger.error(f"Background task {task_id} failed: {e}")
-
     async def store_conversation(self, messages, response_content, user_id, conversation_id=None) -> str:
         """Store the conversation in enhanced episodic memory with emotional and topical analysis.
         Returns the episode_id of the assistant response for rating purposes."""
@@ -3466,27 +2806,29 @@ class SimpleLLMClient:
                 conversation_id = self.current_conversation_id or str(uuid.uuid4())
 
             logger.info(f"✅ Storing conversation with ID: {conversation_id}")
-            # Only store NEW messages that aren't already in the database
-            # Get existing episodes for this conversation to avoid duplicates
+            # Deduplicate by (conversation_id, role, ordinal) — not by content.
+            # Content-based dedup silently drops legitimate repeated messages.
             db = SessionLocal()
             try:
                 existing_episodes = db.query(Episode).filter(
                     Episode.conversation_id == conversation_id,
                     Episode.user_id == user_id
                 ).all()
-                existing_content = {ep.content for ep in existing_episodes}
+                stored_count = len(existing_episodes)
 
-                # Store only new messages that aren't already stored
-                for message in messages:
-                    # Handle both ChatMessage objects and dict formats
+                # Store only messages beyond what's already persisted
+                for idx, message in enumerate(messages):
+                    if idx < stored_count:
+                        continue  # Already stored from a previous call
+
                     if isinstance(message, dict):
                         role = message.get("role")
-                        content = message.get("content")
+                        content = _extract_text_content(message.get("content"))
                     else:
                         role = message.role
-                        content = message.content
+                        content = _extract_text_content(message.content)
 
-                    if role in ["user", "assistant"] and content and content not in existing_content:
+                    if role in ["user", "assistant"] and content:
                         await intelligent_memory_service.store_episode(
                             user_id=user_id,
                             role=role,
@@ -3495,11 +2837,28 @@ class SimpleLLMClient:
                             source="chat",
                             memory_type="conversation"
                         )
+                        stored_count += 1
+
+                        # Real-time PKG extraction for user messages
+                        if role == "user":
+                            try:
+                                from app.services.pkg_realtime_extractor import process_message_for_pkg
+                                await process_message_for_pkg(user_id, content)
+                            except Exception:
+                                pass  # Non-critical
+
+                            # SARA_UNLEASHED Phase D.3: bump known-person mentions
+                            # in real time instead of waiting for consolidation.
+                            try:
+                                from app.services.pkg_realtime_extractor import bump_mentioned_people
+                                await bump_mentioned_people(user_id, content)
+                            except Exception:
+                                pass  # Non-critical
             finally:
                 db.close()
 
-            # Store assistant response as an episode (only if not already stored)
-            if response_content and response_content not in existing_content:
+            # Store assistant response as an episode
+            if response_content:
                 episode = await intelligent_memory_service.store_episode(
                     user_id=user_id,
                     role="assistant",
@@ -3513,6 +2872,13 @@ class SimpleLLMClient:
 
             # Also maintain legacy conversation storage for compatibility
             await self._store_legacy_conversation(messages, response_content, user_id, conversation_id)
+
+            # Mark show_david items as shown if Sara referenced them in her response
+            if response_content:
+                try:
+                    await _mark_shown_discoveries(user_id, response_content)
+                except Exception as e:
+                    logger.debug(f"mark_shown_discoveries failed: {e}")
 
             logger.info(f"🧠 Stored conversation {conversation_id} with intelligent episodic memory analysis")
 
@@ -3535,14 +2901,13 @@ class SimpleLLMClient:
                         id=conversation_id,
                         user_id=user_id,
                         title="",  # Will be generated later
-                        total_messages=len(messages) + (1 if response_content else 0)
+                        total_messages=0
                     )
                     db.add(conversation)
                     db.commit()
                 else:
                     # Update existing conversation
                     conversation = existing_conversation
-                    conversation.total_messages = conversation.total_messages + (1 if response_content else 0)
                     conversation.updated_at = func.now()
                     db.commit()
                 
@@ -3551,47 +2916,85 @@ class SimpleLLMClient:
                     ConversationTurn.conversation_id == conversation_id
                 ).count()
                 
-                # Only store the new user message (last message in the list)
-                if messages and messages[-1].role == "user":
-                    last_message = messages[-1]
-                    embedding = await embedding_service.generate_embedding(last_message.content)
-                    
-                    if DATABASE_URL.startswith("postgresql") and PGVECTOR_AVAILABLE:
-                        embedding_data = embedding
+                # Only store the new user message (last message in the list), idempotently.
+                last_message = messages[-1] if messages else None
+                if last_message:
+                    if isinstance(last_message, dict):
+                        last_role = last_message.get("role")
+                        last_content = _extract_text_content(last_message.get("content"))
                     else:
-                        import json
-                        embedding_data = json.dumps(embedding) if embedding else None
-                    
-                    turn = ConversationTurn(
-                        conversation_id=conversation.id,
-                        user_id=user_id,
-                        role=last_message.role,
-                        content=last_message.content,
-                        message_index=current_turn_count,
-                        embedding=embedding_data
+                        last_role = getattr(last_message, "role", None)
+                        last_content = _extract_text_content(getattr(last_message, "content", None))
+                else:
+                    last_role = None
+                    last_content = None
+
+                if last_role == "user" and last_content:
+                    latest_user_turn = db.query(ConversationTurn).filter(
+                        ConversationTurn.conversation_id == conversation_id,
+                        ConversationTurn.user_id == user_id,
+                        ConversationTurn.role == "user"
+                    ).order_by(ConversationTurn.message_index.desc()).first()
+
+                    should_store_user_turn = not (
+                        latest_user_turn and latest_user_turn.content == last_content
                     )
-                    db.add(turn)
-                    current_turn_count += 1
+
+                    if should_store_user_turn:
+                        embedding = await embedding_service.generate_embedding(last_content)
+                    
+                        if DATABASE_URL.startswith("postgresql") and PGVECTOR_AVAILABLE:
+                            embedding_data = embedding
+                        else:
+                            import json
+                            embedding_data = json.dumps(embedding) if embedding else None
+                        
+                        turn = ConversationTurn(
+                            conversation_id=conversation.id,
+                            user_id=user_id,
+                            role="user",
+                            content=last_content,
+                            message_index=current_turn_count,
+                            embedding=embedding_data
+                        )
+                        db.add(turn)
+                        current_turn_count += 1
                 
                 if response_content:
-                    response_embedding = await embedding_service.generate_embedding(response_content)
-                    
-                    if DATABASE_URL.startswith("postgresql") and PGVECTOR_AVAILABLE:
-                        embedding_data = response_embedding
-                    else:
-                        import json
-                        embedding_data = json.dumps(response_embedding) if response_embedding else None
-                    
-                    turn = ConversationTurn(
-                        conversation_id=conversation.id,
-                        user_id=user_id,
-                        role="assistant",
-                        content=response_content,
-                        message_index=current_turn_count,
-                        embedding=embedding_data
+                    latest_assistant_turn = db.query(ConversationTurn).filter(
+                        ConversationTurn.conversation_id == conversation_id,
+                        ConversationTurn.user_id == user_id,
+                        ConversationTurn.role == "assistant"
+                    ).order_by(ConversationTurn.message_index.desc()).first()
+
+                    should_store_assistant_turn = not (
+                        latest_assistant_turn and latest_assistant_turn.content == response_content
                     )
-                    db.add(turn)
+
+                    if should_store_assistant_turn:
+                        response_embedding = await embedding_service.generate_embedding(response_content)
+                        
+                        if DATABASE_URL.startswith("postgresql") and PGVECTOR_AVAILABLE:
+                            embedding_data = response_embedding
+                        else:
+                            import json
+                            embedding_data = json.dumps(response_embedding) if response_embedding else None
+                        
+                        turn = ConversationTurn(
+                            conversation_id=conversation.id,
+                            user_id=user_id,
+                            role="assistant",
+                            content=response_content,
+                            message_index=current_turn_count,
+                            embedding=embedding_data
+                        )
+                        db.add(turn)
                 
+                db.commit()
+                conversation.total_messages = db.query(ConversationTurn).filter(
+                    ConversationTurn.conversation_id == conversation_id
+                ).count()
+                conversation.updated_at = func.now()
                 db.commit()
                 await self.generate_conversation_title(conversation.id, db)
                 
@@ -3613,7 +3016,7 @@ class SimpleLLMClient:
             if not last_episode:
                 return False, None
 
-            time_gap = (datetime.utcnow() - last_episode.created_at).total_seconds()
+            time_gap = (datetime.now(timezone.utc) - last_episode.created_at).total_seconds()
             has_gap = time_gap > 2700  # 45 minutes in seconds
 
             return has_gap, last_episode.created_at
@@ -3655,7 +3058,7 @@ Keep it brief and factual."""
 
             # Use FAST_MODEL if available, otherwise use main model
             fast_model_url = os.getenv("FAST_MODEL_URL") or OPENAI_BASE_URL
-            fast_model = os.getenv("FAST_MODEL", "gpt-oss:20b")
+            fast_model = os.getenv("FAST_MODEL", "Qwen3.5-35B-A3B")
 
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.post(
@@ -3714,7 +3117,7 @@ Keep it brief and factual."""
             from redis.asyncio import Redis
             redis = Redis.from_url(config.settings.redis_url, encoding="utf-8", decode_responses=True)
 
-            today = datetime.utcnow().strftime("%Y-%m-%d")
+            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             redis_key = f"session_summary:{user_id}:{today}"
 
             summaries_json = await redis.get(redis_key)
@@ -3787,201 +3190,7 @@ Keep it brief and factual."""
 # GLM-4.5 XML Tool Call Parser
 # ============================================================================
 
-def parse_glm45_tool_calls(content: str) -> tuple[str, list]:
-    """
-    Parse GLM-4.5 XML-formatted tool calls and convert to OpenAI JSON format.
-
-    GLM-4.5 Format:
-        <tool_call>function_name </tool_call>
-        <tool_call>function_name <arg_key>param</arg_key> <arg_value>value</arg_value></tool_call>
-
-    OpenAI Format:
-        {
-            "tool_calls": [{
-                "id": "call_xxx",
-                "type": "function",
-                "function": {"name": "function_name", "arguments": "{}"}
-            }]
-        }
-
-    Returns:
-        (cleaned_content, tool_calls_list)
-    """
-    import re
-    import uuid
-
-    # Find all tool_call blocks
-    tool_call_pattern = r'<tool_call>(.*?)</tool_call>'
-    matches = re.findall(tool_call_pattern, content, re.DOTALL)
-
-    if not matches:
-        # No tool calls found, return original content
-        return content, []
-
-    tool_calls = []
-
-    for match in matches:
-        match = match.strip()
-
-        # Extract function name (first word)
-        parts = match.split()
-        if not parts:
-            logger.warning(f"Empty tool_call block found")
-            continue
-
-        function_name = parts[0]
-
-        # Parse arguments if present
-        arguments = {}
-        arg_key_pattern = r'<arg_key>(.*?)</arg_key>'
-        arg_value_pattern = r'<arg_value>(.*?)</arg_value>'
-
-        keys = re.findall(arg_key_pattern, match)
-        values = re.findall(arg_value_pattern, match)
-
-        # Match keys with values
-        for key, value in zip(keys, values):
-            arguments[key.strip()] = value.strip()
-
-        # Create OpenAI-compatible tool call
-        tool_call = {
-            "id": f"call_{str(uuid.uuid4())[:8]}",
-            "type": "function",
-            "function": {
-                "name": function_name,
-                "arguments": json.dumps(arguments) if arguments else "{}"
-            }
-        }
-
-        tool_calls.append(tool_call)
-        logger.info(f"Parsed GLM-4.5 tool call: {function_name} with args: {arguments}")
-
-    # Remove all tool_call XML tags from content
-    cleaned_content = re.sub(tool_call_pattern, '', content, flags=re.DOTALL).strip()
-
-    # Also handle <think> tags (GLM-4.5 reasoning)
-    think_pattern = r'<think>(.*?)</think>'
-    think_matches = re.findall(think_pattern, cleaned_content, re.DOTALL)
-    if think_matches:
-        # Extract reasoning content but don't include in final response
-        reasoning = " ".join([m.strip() for m in think_matches])
-        logger.debug(f"GLM-4.5 reasoning: {reasoning[:100]}...")
-        cleaned_content = re.sub(think_pattern, '', cleaned_content, flags=re.DOTALL).strip()
-
-    return cleaned_content, tool_calls
-
-
-def parse_json_text_tool_calls(content: str) -> tuple[str, list]:
-    """
-    Parse tool calls that are output as JSON text in the response content.
-
-    This handles the case where the LLM outputs tool calls as JSON objects
-    in the text content instead of using the proper tool_calls field.
-
-    Expected formats:
-        {"tool": "create_note", "title": "...", "content": "..."}
-        {"name": "create_note", "arguments": {...}}
-        {"function": "create_note", ...}
-
-    Also handles markdown code blocks:
-        ```json
-        {"tool": "create_note", ...}
-        ```
-
-    Returns:
-        (cleaned_content, tool_calls_list)
-    """
-    import re
-    import uuid
-
-    # Known tool names to look for
-    known_tools = {
-        'create_note', 'search_notes', 'edit_note', 'delete_note', 'list_notes',
-        'notes_create', 'notes_search', 'notes_edit', 'notes_delete', 'notes_list',
-        'create_reminder', 'list_reminders', 'cancel_reminder',
-        'reminders_create', 'reminders_list', 'reminders_cancel',
-        'start_timer', 'timer_status', 'cancel_timer',
-        'timers_start', 'timers_status', 'timers_cancel',
-        'memory_search', 'search_memory',
-        'web_search', 'open_page', 'get_page_details', 'get_web_search_details',
-        'calendar_list', 'calendar_create', 'create_calendar_event',
-        'food_log_create', 'food_log_search', 'food_log_summary', 'food_search_and_log',
-        'workout_log_create', 'workout_list', 'workout_details', 'workout_stats',
-        'fitness_note_create', 'fitness_note_search', 'fitness_note_edit', 'fitness_summary',
-        'load_tool_categories',
-        'knowledge_graph_search', 'find_connections', 'discover_knowledge_clusters', 'analyze_knowledge_gaps'
-    }
-
-    tool_calls = []
-    cleaned_content = content
-
-    # Try to extract JSON from the content
-    # First, try markdown code blocks
-    code_block_pattern = r'```(?:json)?\s*(\{[^`]+\})\s*```'
-    matches = re.findall(code_block_pattern, content, re.DOTALL)
-
-    # Also try bare JSON objects at the start of content
-    if not matches:
-        # Look for JSON objects
-        json_pattern = r'^\s*(\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\})'
-        match = re.match(json_pattern, content.strip(), re.DOTALL)
-        if match:
-            matches = [match.group(1)]
-
-    # Also try finding JSON anywhere in the content
-    if not matches:
-        # More permissive pattern for JSON objects
-        json_pattern = r'(\{["\'](?:tool|name|function)["\']:\s*["\'][^"\']+["\'][^}]*\})'
-        matches = re.findall(json_pattern, content, re.DOTALL)
-
-    for match in matches:
-        try:
-            json_obj = json.loads(match)
-
-            # Determine tool name from various possible keys
-            tool_name = None
-            arguments = {}
-
-            if 'tool' in json_obj:
-                tool_name = json_obj.pop('tool')
-                arguments = json_obj  # Rest of object is arguments
-            elif 'name' in json_obj:
-                tool_name = json_obj.pop('name')
-                if 'arguments' in json_obj:
-                    arguments = json_obj['arguments'] if isinstance(json_obj['arguments'], dict) else json.loads(json_obj['arguments'])
-                else:
-                    arguments = json_obj
-            elif 'function' in json_obj:
-                tool_name = json_obj.pop('function')
-                arguments = json_obj
-
-            # Validate it's a known tool
-            if tool_name and tool_name in known_tools:
-                tool_call = {
-                    "id": f"call_{str(uuid.uuid4())[:8]}",
-                    "type": "function",
-                    "function": {
-                        "name": tool_name,
-                        "arguments": json.dumps(arguments) if arguments else "{}"
-                    }
-                }
-                tool_calls.append(tool_call)
-                logger.info(f"Parsed JSON text tool call: {tool_name} with args: {arguments}")
-
-                # Remove the JSON from content
-                cleaned_content = cleaned_content.replace(match, '').strip()
-                # Also remove code block markers if present
-                cleaned_content = re.sub(r'```(?:json)?\s*```', '', cleaned_content).strip()
-
-        except json.JSONDecodeError as e:
-            logger.debug(f"Failed to parse potential JSON tool call: {e}")
-            continue
-
-    # Clean up any leftover empty code blocks or whitespace
-    cleaned_content = re.sub(r'```(?:json)?\s*```', '', cleaned_content).strip()
-
-    return cleaned_content, tool_calls
-
+# parse_glm45_tool_calls and parse_json_text_tool_calls extracted to app.core.text_utils
 
 llm_client = SimpleLLMClient()
 # embedding_service imported from app.services.embedding_service
@@ -4025,11 +3234,16 @@ class DocumentProcessor:
     def _extract_pdf_text(self, file_path: str) -> str:
         """Extract text from PDF file with robust error handling"""
         try:
-            import PyPDF2
+            # pypdf is the maintained successor to PyPDF2 (same PdfReader API).
+            # Fall back to PyPDF2 only if pypdf isn't present.
+            try:
+                from pypdf import PdfReader
+            except ImportError:
+                from PyPDF2 import PdfReader
             text = ""
-            
+
             with open(file_path, 'rb') as file:
-                reader = PyPDF2.PdfReader(file)
+                reader = PdfReader(file)
                 
                 # Process all pages (or reasonable limit for very large documents)
                 max_pages = min(len(reader.pages), 500)  # Up to 500 pages
@@ -4058,7 +3272,7 @@ class DocumentProcessor:
                     return ""
                     
         except ImportError:
-            logger.error("PyPDF2 not available for PDF text extraction")
+            logger.error("No PDF library (pypdf/PyPDF2) available for PDF text extraction")
             return ""
         except Exception as e:
             logger.error(f"Error extracting PDF text: {e}")
@@ -4257,6 +3471,88 @@ class DocumentProcessor:
 
 document_processor = DocumentProcessor()
 
+
+# Map common file extensions → MIME type for attachments that arrive with a
+# generic/octet-stream media type (some pickers don't report it reliably).
+_ATTACHMENT_EXT_MIME = {
+    ".pdf": "application/pdf",
+    ".doc": "application/msword",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".txt": "text/plain",
+    ".md": "text/markdown",
+    ".markdown": "text/markdown",
+    ".csv": "text/csv",
+}
+
+
+def _materialize_document_attachments(messages) -> None:
+    """Replace base64 'document' content blocks with extracted-text blocks, in place.
+
+    Clients (iOS/web) can attach PDFs, Word docs, and text files to a chat turn as
+    ``{"type": "document", "data": <base64>, "media_type": ..., "filename": ...}``.
+    The local LLM can't read binary files, so we extract their text here and splice
+    it into the message as plain text before the turn reaches intent routing or the
+    model. Image blocks are left untouched so vision still works.
+    """
+    import base64 as _b64
+    import tempfile
+
+    for msg in messages or []:
+        content = getattr(msg, "content", None)
+        if not isinstance(content, list):
+            continue
+        if not any(isinstance(p, dict) and p.get("type") == "document" for p in content):
+            continue
+
+        new_content = []
+        for part in content:
+            if not (isinstance(part, dict) and part.get("type") == "document"):
+                new_content.append(part)
+                continue
+
+            filename = part.get("filename") or part.get("name") or "attachment"
+            media_type = part.get("media_type") or part.get("mime_type") or ""
+            ext = os.path.splitext(filename)[1].lower()
+            # Fall back to extension-based MIME when the client didn't give a usable one.
+            if media_type not in document_processor.supported_types:
+                media_type = _ATTACHMENT_EXT_MIME.get(ext, media_type or "application/octet-stream")
+
+            extracted = ""
+            try:
+                raw = _b64.b64decode(part.get("data") or "")
+                with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tf:
+                    tf.write(raw)
+                    tmp_path = tf.name
+                try:
+                    extracted = document_processor.extract_text(tmp_path, media_type) or ""
+                finally:
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
+            except Exception as e:
+                logger.warning(f"Failed to extract attached document '{filename}': {e}")
+
+            extracted = extracted.strip()
+            MAX_CHARS = 50000
+            if len(extracted) > MAX_CHARS:
+                extracted = extracted[:MAX_CHARS] + f"\n\n[... document truncated at {MAX_CHARS} characters ...]"
+
+            if extracted:
+                block_text = (
+                    f"\n\n[Attached file: {filename}]\n{extracted}\n"
+                    f"[End of attached file: {filename}]\n"
+                )
+            else:
+                block_text = (
+                    f"\n\n[Attached file: {filename} — no readable text could be "
+                    f"extracted from this {media_type} file.]\n"
+                )
+            new_content.append({"type": "text", "text": block_text})
+
+        msg.content = new_content
+
+
 # NTFY Notification Service
 class NTFYService:
     """Service for sending mobile notifications via NTFY with AI-generated messages"""
@@ -4350,7 +3646,9 @@ Message: [message]"""
                         "model": OPENAI_NOTIFICATION_MODEL,
                         "messages": [{"role": "system", "content": system_prompt}],
                         "temperature": 0.7,
-                        "max_tokens": 150
+                        "max_tokens": 150,
+                        # Local qwen: disable thinking or `content` comes back empty.
+                        "chat_template_kwargs": {"enable_thinking": False},
                     },
                     headers={"Authorization": f"Bearer {OPENAI_API_KEY}"}
                 )
@@ -4697,7 +3995,7 @@ class EmotionalAnalyzer:
                 self.fast_model_url = OPENAI_BASE_URL
         except Exception:
             self.fast_model_url = OPENAI_BASE_URL
-        self.fast_model = os.getenv("FAST_MODEL", "gpt-oss:20b")  # Your fast model
+        self.fast_model = os.getenv("FAST_MODEL", "Qwen3.5-35B-A3B")  # Your fast model
         
     async def analyze_emotional_state(self, content: str, context: Dict[str, Any] = None) -> Dict[str, Any]:
         """Analyze emotional state of content using fast model"""
@@ -4807,14 +4105,21 @@ class ContextWindowManager:
         )
     
     async def retrieve_episodes_with_window(
-        self, 
-        user_id: str, 
+        self,
+        user_id: str,
         window_config: ContextWindowConfig,
         query: str = None,
         limit: int = 10
     ) -> List[dict]:
         """Retrieve episodes using context window"""
-        
+
+        from app.services import retrieval_observer
+        import time as _time
+        _funnel_start = _time.monotonic()
+        _funnel_source = f"episodes.{window_config.window_type.name.lower()}"
+        _funnel_err: str | None = None
+        _funnel_results: list[dict] = []
+
         db = SessionLocal()
         try:
             # Start with base query
@@ -4823,7 +4128,7 @@ class ContextWindowManager:
             # Apply window filters
             if window_config.window_type == WindowType.TEMPORAL:
                 duration = window_config.parameters["duration"]
-                cutoff_time = datetime.utcnow() - duration
+                cutoff_time = datetime.now(timezone.utc) - duration
                 query_builder = query_builder.filter(Episode.created_at >= cutoff_time)
             
             elif window_config.window_type == WindowType.TOPIC:
@@ -4834,7 +4139,7 @@ class ContextWindowManager:
                 
                 if "duration" in window_config.parameters:
                     duration = window_config.parameters["duration"]
-                    cutoff_time = datetime.utcnow() - duration
+                    cutoff_time = datetime.now(timezone.utc) - duration
                     query_builder = query_builder.filter(Episode.created_at >= cutoff_time)
             
             elif window_config.window_type == WindowType.EMOTIONAL:
@@ -4849,7 +4154,7 @@ class ContextWindowManager:
                 
                 if "duration" in window_config.parameters:
                     duration = window_config.parameters["duration"]
-                    cutoff_time = datetime.utcnow() - duration
+                    cutoff_time = datetime.now(timezone.utc) - duration
                     query_builder = query_builder.filter(Episode.created_at >= cutoff_time)
             
             elif window_config.window_type == WindowType.IMPORTANCE:
@@ -4858,14 +4163,14 @@ class ContextWindowManager:
                 
                 if "duration" in window_config.parameters:
                     duration = window_config.parameters["duration"]
-                    cutoff_time = datetime.utcnow() - duration
+                    cutoff_time = datetime.now(timezone.utc) - duration
                     query_builder = query_builder.filter(Episode.created_at >= cutoff_time)
             
             elif window_config.window_type == WindowType.HYBRID:
                 params = window_config.parameters
 
                 if "duration" in params:
-                    cutoff_time = datetime.utcnow() - params["duration"]
+                    cutoff_time = datetime.now(timezone.utc) - params["duration"]
                     query_builder = query_builder.filter(Episode.created_at >= cutoff_time)
 
                 if "min_importance" in params:
@@ -4882,19 +4187,26 @@ class ContextWindowManager:
                 query_embedding = params["query_embedding"]
                 min_similarity = params.get("min_similarity", 0.3)
 
-                if "duration" in params:
-                    cutoff_time = datetime.utcnow() - params["duration"]
+                # Determine time bounds — exact temporal window or duration-based cutoff
+                temporal_start = params.get("temporal_start")
+                temporal_end = params.get("temporal_end")
+                if temporal_start and temporal_end:
+                    cutoff_time = temporal_start
+                    upper_time = temporal_end
                 else:
-                    cutoff_time = datetime.utcnow() - timedelta(days=30)  # Default 30 days
+                    if "duration" in params:
+                        cutoff_time = datetime.now(timezone.utc) - params["duration"]
+                    else:
+                        cutoff_time = datetime.now(timezone.utc) - timedelta(days=30)  # Default 30 days
+                    upper_time = None
 
                 # Use raw SQL for vector similarity search
                 from sqlalchemy import text as sql_text
 
-                # Convert embedding list to pgvector format
-                embedding_str = "[" + ",".join(map(str, query_embedding)) + "]"
+                upper_clause = "AND e.created_at <= :upper_time" if upper_time else ""
 
-                # Execute vector similarity query with composite scoring
-                # Use string formatting for embedding to avoid SQLAlchemy parameter issues with pgvector
+                # Parameterized embedding via CAST(:qvec AS vector) — avoids SQL injection
+                # from malformed embedding floats and matches project-wide pgvector pattern.
                 sql = sql_text(f"""
                     SELECT
                         e.id,
@@ -4914,31 +4226,38 @@ class ContextWindowManager:
                         e.embedding,
                         e.rating_boost,
                         e.exploration_bonus,
-                        1 - (e.embedding <=> '{embedding_str}'::vector) as semantic_similarity,
-                        -- Enhanced composite score with rating boost and exploration bonus
-                        -- Uses 14-day half-life for recency decay (unified baseline across all retrieval paths)
+                        1 - (e.embedding <=> CAST(:qvec AS vector)) as semantic_similarity,
+                        -- Composite score: semantic + recency + importance + frequency + relevance + rating + exploration
                         (
-                            (1 - (e.embedding <=> '{embedding_str}'::vector)) * 0.40 +  -- Semantic similarity (40%)
-                            EXP(-EXTRACT(EPOCH FROM (NOW() - e.created_at)) / (14 * 86400)) * 0.20 +  -- Recency with 14-day half-life (20%)
+                            (1 - (e.embedding <=> CAST(:qvec AS vector))) * 0.35 +  -- Semantic similarity (35%)
+                            EXP(-EXTRACT(EPOCH FROM (NOW() - e.created_at)) / (14 * 86400)) * 0.15 +  -- Recency 14-day half-life (15%)
                             COALESCE(e.importance, 0.5) * 0.20 +  -- AI-scored importance (20%)
-                            COALESCE(e.rating_boost, 0.0) * 0.15 +  -- Rating boost (Wilson + decay) (15%)
+                            LEAST(LN(COALESCE(e.access_count, 0) + 1) / 4.6, 1.0) * 0.08 +  -- Frequency signal (8%)
+                            COALESCE(e.recall_relevance_ema, 0.5) * 0.07 +  -- Recall usefulness EMA (7%)
+                            COALESCE(e.rating_boost, 0.0) * 0.10 +  -- Rating boost (Wilson + decay) (10%)
                             COALESCE(e.exploration_bonus, 0.0) * 0.05  -- Thompson Sampling exploration (5%)
                         ) as composite_score
                     FROM episode e
                     WHERE e.user_id = :user_id
                       AND e.embedding IS NOT NULL
                       AND e.created_at >= :cutoff_time
-                      AND (1 - (e.embedding <=> '{embedding_str}'::vector)) >= :min_similarity
+                      {upper_clause}
+                      AND (1 - (e.embedding <=> CAST(:qvec AS vector))) >= :min_similarity
                     ORDER BY composite_score DESC
                     LIMIT :limit
                 """)
 
-                result = db.execute(sql, {
+                sql_params = {
                     "user_id": user_id,
+                    "qvec": str(query_embedding),
                     "cutoff_time": cutoff_time,
                     "min_similarity": min_similarity,
-                    "limit": limit
-                })
+                    "limit": limit,
+                }
+                if upper_time:
+                    sql_params["upper_time"] = upper_time
+
+                result = db.execute(sql, sql_params)
 
                 # Convert raw results to episode_data format
                 episode_data = []
@@ -4968,10 +4287,11 @@ class ContextWindowManager:
                     episode_obj = db.query(Episode).filter(Episode.id == row.id).first()
                     if episode_obj:
                         episode_obj.access_count = (episode_obj.access_count or 0) + 1
-                        episode_obj.last_accessed = datetime.utcnow()
+                        episode_obj.last_accessed = datetime.now(timezone.utc)
 
                 db.commit()
                 logger.info(f"[Memory] Vector search returned {len(episode_data)} episodes with semantic similarity")
+                _funnel_results = episode_data
                 return episode_data
 
             # Use composite score with temporal decay for non-semantic retrieval
@@ -4983,7 +4303,7 @@ class ContextWindowManager:
             time_filter = ""
             if window_config.window_type == WindowType.TEMPORAL:
                 duration = window_config.parameters.get("duration", timedelta(days=7))
-                cutoff_time = datetime.utcnow() - duration
+                cutoff_time = datetime.now(timezone.utc) - duration
                 time_filter = f"AND e.created_at >= '{cutoff_time.isoformat()}'"
 
             # 14-day half-life for recency decay (unified baseline)
@@ -5056,10 +4376,22 @@ class ContextWindowManager:
                 db.commit()
 
             logger.info(f"[Memory] Non-semantic retrieval returned {len(episode_data)} episodes with decay scoring")
+            _funnel_results = episode_data
             return episode_data
-            
+
+        except Exception as _exc:
+            _funnel_err = type(_exc).__name__
+            raise
         finally:
             db.close()
+            retrieval_observer.record(
+                _funnel_source,
+                query or "",
+                len(_funnel_results),
+                (_time.monotonic() - _funnel_start) * 1000.0,
+                error=_funnel_err,
+                metadata={"user_id": user_id, "limit": limit},
+            )
 
 class IntelligentMemoryService:
     """Enhanced memory service with context windows and emotional intelligence"""
@@ -5069,28 +4401,43 @@ class IntelligentMemoryService:
         self.emotional_analyzer = EmotionalAnalyzer()
     
     async def store_episode(
-        self, 
-        user_id: str, 
-        role: str, 
-        content: str, 
+        self,
+        user_id: str,
+        role: str,
+        content: str,
         conversation_id: str = None,
         source: str = "chat",
         memory_type: str = "conversation"
     ) -> Episode:
-        """Store an episode with intelligent analysis"""
-        
-        # Analyze emotional content
-        emotional_analysis = await self.emotional_analyzer.analyze_emotional_state(content)
-        
-        # Extract topics (simplified for now)
+        """Store an episode with fast heuristic scoring.
+
+        Uses MemoryScorer heuristics for instant importance/affect scoring
+        (no LLM call). Rich analysis (emotions, topics, refined scores) is
+        done in a single batched LLM call after the conversation ends via
+        _enrich_episodes_batch().
+        """
+        from app.services.memory_scorer import memory_scorer
+
+        # Fast heuristic scoring (no LLM call, <1ms)
+        scores = memory_scorer.score_sync({"content": content, "role": role})
+        importance = scores["importance_score"]
+
+        # Quick keyword topics as placeholder (overwritten by batch LLM later)
         topics = await self._extract_topics(content)
-        
-        # Calculate importance (simplified for now)
-        importance = await self._calculate_importance(content, role, emotional_analysis)
-        
+
+        # Heuristic emotional placeholder (overwritten by batch LLM later)
+        emotional_analysis = {
+            "primary_emotion": "neutral",
+            "intensity": abs(scores["affect_score"]),
+            "sub_emotions": [],
+            "energy_level": "medium",
+            "sentiment": "positive" if scores["affect_score"] > 0.2 else ("negative" if scores["affect_score"] < -0.2 else "neutral"),
+            "confidence": 0.2,  # low confidence = heuristic only
+        }
+
         # Generate embedding (if available)
         embedding = await self._generate_embedding(content)
-        
+
         # Store episode
         db = SessionLocal()
         try:
@@ -5100,9 +4447,10 @@ class IntelligentMemoryService:
                 role=role,
                 content=content,
                 importance=importance,
+                base_importance=importance,
                 emotional_tone=json.dumps(emotional_analysis),
                 topics=json.dumps(topics),
-                context_tags=json.dumps([]),  # Will be enhanced later
+                context_tags=json.dumps([]),
                 memory_type=memory_type,
                 source=source,
                 embedding=json.dumps(embedding) if embedding and not PGVECTOR_AVAILABLE else embedding
@@ -5150,6 +4498,16 @@ class IntelligentMemoryService:
     ) -> List[dict]:
         """Search memory with intelligent context window selection and optional semantic search"""
 
+        # Parse temporal references from query (e.g. "what happened Tuesday")
+        temporal_range = None
+        try:
+            from app.services.temporal_query_parser import parse_temporal_reference
+            temporal_range = parse_temporal_reference(query)
+            if temporal_range:
+                logger.info(f"🕐 Detected temporal reference: {temporal_range[0]} → {temporal_range[1]}")
+        except Exception as e:
+            logger.debug(f"Temporal parse failed: {e}")
+
         # Try semantic search first if enabled and we have embeddings
         if use_semantic and not custom_window:
             try:
@@ -5171,24 +4529,60 @@ class IntelligentMemoryService:
                     query_embedding = await self._generate_embedding(query)
 
                     if query_embedding:
-                        # Use semantic window with vector search
-                        window_config = ContextWindowConfig.semantic(
-                            query_embedding=query_embedding,
-                            duration=timedelta(days=30),  # Search last 30 days
-                            min_similarity=0.3  # Minimum similarity threshold
-                        )
+                        # If temporal reference detected, search that specific window
+                        # Otherwise tiered search: 30d → 90d → all-time
+                        episodes = []
+                        if temporal_range:
+                            t_start, t_end = temporal_range
+                            span = t_end - t_start + timedelta(days=1)
+                            window_config = ContextWindowConfig.semantic(
+                                query_embedding=query_embedding,
+                                duration=span,
+                                min_similarity=0.15,  # Lower threshold for temporal queries
+                            )
+                            # Override cutoff to the exact temporal window
+                            window_config.parameters["temporal_start"] = t_start
+                            window_config.parameters["temporal_end"] = t_end
+                            episodes = await self.window_manager.retrieve_episodes_with_window(
+                                user_id, window_config, query, limit=20
+                            )
+                            logger.info(f"🕐 Temporal search ({t_start.date()} → {t_end.date()}) returned {len(episodes)} episodes")
 
-                        episodes = await self.window_manager.retrieve_episodes_with_window(
-                            user_id, window_config, query, limit=15
-                        )
+                        if not episodes:
+                            for search_days in [30, 90, None]:
+                                duration = timedelta(days=search_days) if search_days else timedelta(days=365 * 5)
+                                window_config = ContextWindowConfig.semantic(
+                                    query_embedding=query_embedding,
+                                    duration=duration,
+                                    min_similarity=0.25  # Lower threshold for broader recall
+                                )
+                                episodes = await self.window_manager.retrieve_episodes_with_window(
+                                    user_id, window_config, query, limit=20  # Fetch 20 for reranking
+                                )
+                                if len(episodes) >= 5:
+                                    break
+                                elif episodes:
+                                    logger.info(f"🔍 Only {len(episodes)} results in {search_days or 'all-time'}d, expanding search")
 
                         if episodes:
-                            logger.info(f"🧠 Semantic search found {len(episodes)} relevant episodes")
-                            # Log top similarity scores
+                            logger.info(f"🧠 Semantic search found {len(episodes)} episodes")
+
+                            # Rerank with BGE reranker for better precision
+                            try:
+                                from app.services.bge_reranker import get_reranker
+                                reranker = await get_reranker()
+                                docs = [ep.get("content", "")[:500] for ep in episodes]
+                                ranked = await reranker.rerank(query, docs, top_k=min(7, len(episodes)))
+                                reranked_episodes = [episodes[idx] for idx, _score in ranked]
+                                logger.info(f"🔄 Reranked {len(episodes)} → top {len(reranked_episodes)}")
+                                return reranked_episodes
+                            except Exception as rerank_err:
+                                logger.debug(f"Reranker unavailable, using composite scores: {rerank_err}")
+
                             for i, ep in enumerate(episodes[:3]):
                                 if 'semantic_similarity' in ep:
                                     logger.info(f"  {i+1}. Similarity: {ep['semantic_similarity']:.4f}, Score: {ep.get('composite_score', 0):.4f}")
-                            return episodes
+                            return episodes[:7]
                         else:
                             logger.info("🔍 Semantic search found no results, falling back to temporal search")
             except Exception as e:
@@ -5286,8 +4680,8 @@ class DreamingService:
     """Background service for memory consolidation, pattern detection, and insight generation"""
     
     def __init__(self):
-        self.fast_model = "gpt-oss:20b"  # Faster model for quick analysis
-        self.smart_model = "gpt-oss:120b"  # Smarter model for deep insights
+        self.fast_model = BG_LLM_FALLBACK_MODEL or "Qwen3.5-35B-A3B"
+        self.smart_model = BG_LLM_PRIMARY_MODEL or OPENAI_MODEL or "Qwen3.5-35B-A3B"
         self.is_dreaming = False
         logger.info("🧠 DreamingService initialized")
     
@@ -5846,7 +5240,15 @@ class NotificationScheduler:
         """Main notification loop that checks for due items every 5 seconds"""
         while self.running:
             try:
-                await self._check_and_schedule_notifications()
+                self._due_notifications = []
+                await asyncio.to_thread(self._check_and_schedule_notifications_sync)
+                # Send due notifications on the event loop (async)
+                for key, notification in self._due_notifications:
+                    try:
+                        await self._send_scheduled_notification(notification)
+                    except Exception:
+                        pass
+                    self.scheduled_notifications.pop(key, None)
                 await asyncio.sleep(5)  # Check every 5 seconds
             except asyncio.CancelledError:
                 break
@@ -5854,123 +5256,65 @@ class NotificationScheduler:
                 logger.error(f"Notification scheduler error: {e}")
                 await asyncio.sleep(10)  # Wait longer on error
                 
-    async def _check_and_schedule_notifications(self):
-        """Check for notifications that need pre-generation or sending"""
+    def _check_and_schedule_notifications_sync(self):
+        """Check for due timers/reminders and schedule notifications (sync, runs in thread)."""
         try:
             db = SessionLocal()
             try:
                 now = datetime.now(timezone.utc)
                 pre_generate_time = now + timedelta(seconds=20)
-                
+
                 # Check timers that need pre-generation
                 upcoming_timers = db.query(Timer).filter(
                     Timer.is_active == True
                 ).all()
-                
-                # Filter timers with proper timezone handling
-                filtered_timers = []
+
                 for timer in upcoming_timers:
-                    # Ensure timer end_time is timezone-aware
                     timer_end_time = timer.end_time
                     if timer_end_time.tzinfo is None:
                         timer_end_time = timer_end_time.replace(tzinfo=timezone.utc)
-                    
-                    # Check if timer needs pre-generation or sending
                     if timer_end_time <= pre_generate_time and timer_end_time > now:
-                        filtered_timers.append(timer)
-                
-                upcoming_timers = filtered_timers
-                
-                for timer in upcoming_timers:
-                    notification_key = f"timer_{timer.id}"
-                    if notification_key not in self.scheduled_notifications:
-                        # Pre-generate the notification message
-                        duration_str = f"{timer.duration_minutes}min"
-                        user_context = await ntfy_service.get_recent_user_context(timer.user_id)
-                        
-                        title, message = await ntfy_service.generate_ai_notification_message(
-                            notification_type="timer",
-                            context={
-                                "title": timer.title,
-                                "duration": duration_str,
-                                "timer_id": str(timer.id)
-                            },
-                            user_context=user_context
-                        )
-                        
-                        self.scheduled_notifications[notification_key] = {
-                            "title": title,
-                            "message": message,
-                            "send_time": timer.end_time,
-                            "type": "timer",
-                            "timer_id": timer.id,
-                            "timer_name": timer.title,
-                            "user_id": timer.user_id
-                        }
-                        logger.info(f"📝 Pre-generated timer notification for: {timer.title}")
-                
-                # Check reminders that need pre-generation
+                        notification_key = f"timer_{timer.id}"
+                        if notification_key not in self.scheduled_notifications:
+                            self.scheduled_notifications[notification_key] = {
+                                "title": f"Timer: {timer.title or 'Timer'}",
+                                "message": f"Your {timer.duration_minutes}min timer is done!",
+                                "send_time": timer.end_time,
+                                "type": "timer",
+                                "timer_id": timer.id,
+                                "timer_name": timer.title,
+                                "user_id": timer.user_id
+                            }
+
+                # Check reminders
                 all_reminders = db.query(Reminder).filter(
                     Reminder.is_completed == False
                 ).all()
-                
-                # Filter reminders with proper timezone handling
-                filtered_reminders = []
+
                 for reminder in all_reminders:
-                    # Ensure reminder time is timezone-aware
                     reminder_time = reminder.reminder_time
                     if reminder_time.tzinfo is None:
                         reminder_time = reminder_time.replace(tzinfo=timezone.utc)
-                    
-                    # Check if reminder needs pre-generation or sending
                     if reminder_time <= pre_generate_time and reminder_time > now:
-                        filtered_reminders.append(reminder)
-                
-                upcoming_reminders = filtered_reminders
-                
-                for reminder in upcoming_reminders:
-                    notification_key = f"reminder_{reminder.id}"
-                    if notification_key not in self.scheduled_notifications:
-                        # Pre-generate the notification message
-                        reminder_time_str = reminder.reminder_time.strftime("%I:%M %p")
-                        user_context = await ntfy_service.get_recent_user_context(reminder.user_id)
-                        
-                        title, message = await ntfy_service.generate_ai_notification_message(
-                            notification_type="reminder",
-                            context={
-                                "title": reminder.title,
-                                "description": reminder.description or "",
-                                "reminder_time": reminder_time_str,
-                                "reminder_id": str(reminder.id)
-                            },
-                            user_context=user_context
-                        )
-                        
-                        self.scheduled_notifications[notification_key] = {
-                            "title": title,
-                            "message": message,
-                            "send_time": reminder.reminder_time,
-                            "type": "reminder",
-                            "reminder_id": reminder.id,
-                            "user_id": reminder.user_id
-                        }
-                        logger.info(f"📝 Pre-generated reminder notification for: {reminder.title}")
-                
-                # Send notifications that are due
-                due_notifications = []
+                        notification_key = f"reminder_{reminder.id}"
+                        if notification_key not in self.scheduled_notifications:
+                            self.scheduled_notifications[notification_key] = {
+                                "title": f"Reminder: {reminder.title or 'Reminder'}",
+                                "message": reminder.description or reminder.content or "Time for your reminder",
+                                "send_time": reminder.reminder_time,
+                                "type": "reminder",
+                                "reminder_id": reminder.id,
+                                "user_id": reminder.user_id
+                            }
+
+                # Collect due notifications
+                self._due_notifications = []
                 for key, notification in list(self.scheduled_notifications.items()):
                     send_time = notification["send_time"]
-                    # Ensure send_time is timezone-aware for comparison
                     if send_time.tzinfo is None:
                         send_time = send_time.replace(tzinfo=timezone.utc)
-                    
                     if send_time <= now:
-                        due_notifications.append((key, notification))
-                
-                for key, notification in due_notifications:
-                    await self._send_scheduled_notification(notification)
-                    del self.scheduled_notifications[key]
-                    
+                        self._due_notifications.append((key, notification))
             finally:
                 db.close()
                 
@@ -6025,6 +5369,21 @@ class NotificationScheduler:
 # Initialize notification scheduler
 notification_scheduler = NotificationScheduler()
 
+# Sentry error tracking (no-op if DSN not configured)
+try:
+    from app.core.config import settings as _sentry_settings
+    if _sentry_settings.sentry_dsn:
+        import sentry_sdk
+        sentry_sdk.init(
+            dsn=_sentry_settings.sentry_dsn,
+            environment=_sentry_settings.sentry_environment,
+            traces_sample_rate=_sentry_settings.sentry_traces_sample_rate,
+            send_default_pii=False,
+        )
+        logger.info(f"Sentry initialized (env={_sentry_settings.sentry_environment})")
+except Exception as _sentry_err:
+    logger.debug(f"Sentry init skipped: {_sentry_err}")
+
 # FastAPI app
 app = FastAPI(
     title=f"{ASSISTANT_NAME} Personal Hub API",
@@ -6041,6 +5400,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Request logging middleware — adds correlation IDs + performance metrics to every request
+app.add_middleware(RequestLoggingMiddleware)
+
 # Include modular routes
 
 # Auth routes (extracted from main_simple.py)
@@ -6050,6 +5412,22 @@ try:
     logger.info("✅ Auth routes loaded from app.routes.auth")
 except Exception as e:
     logger.warning(f"Auth routes not available from module: {e}")
+
+# Unified assistant inbox (needs-you / FYI merge + shared badge formula)
+try:
+    from app.routes.assistant_inbox import router as assistant_inbox_router
+    app.include_router(assistant_inbox_router)
+    logger.info("✅ Assistant inbox routes loaded from app.routes.assistant_inbox")
+except Exception as e:
+    logger.warning(f"Assistant inbox routes not available from module: {e}")
+
+# Overlay data endpoints (standalone /overlay/:kind webapp routes)
+try:
+    from app.routes.overlay import router as overlay_router
+    app.include_router(overlay_router)
+    logger.info("✅ Overlay routes loaded from app.routes.overlay")
+except Exception as e:
+    logger.warning(f"Overlay routes not available from module: {e}")
 
 # Folders routes (extracted from main_simple.py)
 try:
@@ -6067,6 +5445,14 @@ try:
 except Exception as e:
     logger.warning(f"Notes routes not available from module: {e}")
 
+# Recipes routes
+try:
+    from app.routes.recipes import router as recipes_router
+    app.include_router(recipes_router, tags=["Recipes"])
+    logger.info("✅ Recipes routes loaded from app.routes.recipes")
+except Exception as e:
+    logger.warning(f"Recipes routes not available from module: {e}")
+
 # Reminders routes (extracted from main_simple.py)
 try:
     from app.routes.reminders import router as reminders_router
@@ -6074,6 +5460,14 @@ try:
     logger.info("✅ Reminders routes loaded from app.routes.reminders")
 except Exception as e:
     logger.warning(f"Reminders routes not available from module: {e}")
+
+# Daily tasks routes
+try:
+    from app.routes.daily_tasks import router as daily_tasks_router
+    app.include_router(daily_tasks_router, tags=["Daily Tasks"])
+    logger.info("✅ Daily tasks routes loaded from app.routes.daily_tasks")
+except Exception as e:
+    logger.warning(f"Daily tasks routes not available: {e}")
 
 # Calendar events routes (extracted from main_simple.py)
 try:
@@ -6089,17 +5483,6 @@ try:
     logger.info("✅ Calendar events routes loaded from app.routes.calendar_events")
 except Exception as e:
     logger.warning(f"Calendar events routes not available from module: {e}")
-
-# Habits routes (extracted from main_simple.py)
-try:
-    from app.routes.habits import router as habits_router, habit_items_router, insights_router, fitness_habits_router
-    app.include_router(habits_router, tags=["Habits"])
-    app.include_router(habit_items_router, tags=["Habits"])
-    app.include_router(insights_router, tags=["Habits"])
-    app.include_router(fitness_habits_router, tags=["Fitness"])
-    logger.info("✅ Habits routes loaded from app.routes.habits")
-except Exception as e:
-    logger.warning(f"Habits routes not available from module: {e}")
 
 try:
     from app.routes.memory import router as memory_router
@@ -6150,6 +5533,46 @@ try:
 except Exception as e:
     logger.error(f"❌ Health metrics routes failed to load: {e}")
 
+# Include Cognitive routes (audio processing, speaker recognition, Sara identity)
+try:
+    from app.routes.cognitive import router as cognitive_router
+    app.include_router(cognitive_router, tags=["Cognitive"])
+    logger.info("✅ Cognitive routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Cognitive routes failed to load: {e}")
+
+# Include Sensory Monitor routes (real-time audio/visual monitoring)
+try:
+    from app.routes.sensory import router as sensory_router
+    app.include_router(sensory_router, tags=["Sensory"])
+    logger.info("✅ Sensory monitor routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Sensory monitor routes failed to load: {e}")
+
+# Include Voice Control Plane routes (modular voice stack orchestration)
+try:
+    from app.routes.voice_control import router as voice_control_router
+    app.include_router(voice_control_router, tags=["Voice Control"])
+    logger.info("✅ Voice control routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Voice control routes failed to load: {e}")
+
+# Include ML Control Plane routes (tabular model training/serving orchestration)
+try:
+    from app.routes.ml_control import router as ml_control_router
+    app.include_router(ml_control_router, tags=["ML Control"])
+    logger.info("✅ ML control routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ ML control routes failed to load: {e}")
+
+# Include "Sara's model of you" routes (patterns/rhythm/predictions visibility + feedback)
+try:
+    from app.routes.model_of_you import router as model_of_you_router
+    app.include_router(model_of_you_router, tags=["Model of You"])
+    logger.info("✅ Model-of-you routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Model-of-you routes failed to load: {e}")
+
 # Include Emotion routes (Phase 2)
 try:
     from app.routes.emotions import router as emotions_router
@@ -6166,13 +5589,15 @@ try:
 except Exception as e:
     logger.error(f"❌ Intelligence reports routes failed to load: {e}")
 
-# Include Cognitive Enhancement routes
+# Include Weekly Health Reports routes
 try:
-    from app.routes.cognitive import router as cognitive_router
-    app.include_router(cognitive_router, tags=["Cognitive Enhancement"])
-    logger.info("✅ Cognitive enhancement routes loaded successfully")
+    from app.routes.health_reports import router as health_reports_router
+    app.include_router(health_reports_router, tags=["Health Reports"])
+    logger.info("✅ Health weekly reports routes loaded successfully")
 except Exception as e:
-    logger.error(f"❌ Cognitive enhancement routes failed to load: {e}")
+    logger.error(f"❌ Health weekly reports routes failed to load: {e}")
+
+# Cognitive router is included once above; avoid duplicate registration.
 
 # Include Morning Brief routes
 try:
@@ -6182,6 +5607,30 @@ try:
 except Exception as e:
     logger.error(f"❌ Morning brief routes failed to load: {e}")
 
+# Include Research Brief routes
+try:
+    from app.routes.research_brief import router as research_brief_router
+    app.include_router(research_brief_router, prefix="/api/research-brief", tags=["Research Brief"])
+    logger.info("✅ Research brief routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Research brief routes failed to load: {e}")
+
+# Include Settings → Schedules routes (DB-backed Celery beat schedule)
+try:
+    from app.routes.schedules import router as schedules_router
+    app.include_router(schedules_router)
+    logger.info("✅ Settings/schedules routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Settings/schedules routes failed to load: {e}")
+
+# Include Settings → Tunables routes (cooldowns, ACS thresholds, brief tone)
+try:
+    from app.routes.tunables import router as tunables_router
+    app.include_router(tunables_router)
+    logger.info("✅ Settings/tunables routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Settings/tunables routes failed to load: {e}")
+
 # Include Project Tracker routes
 try:
     from app.routes.projects import router as projects_router
@@ -6189,6 +5638,20 @@ try:
     logger.info("✅ Project tracker routes loaded successfully")
 except Exception as e:
     logger.error(f"❌ Project tracker routes failed to load: {e}")
+
+try:
+    from app.routes.hosts import router as hosts_router
+    app.include_router(hosts_router, prefix="/api", tags=["Managed Hosts"])
+    logger.info("✅ Managed hosts routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Managed hosts routes failed to load: {e}")
+
+try:
+    from app.routes.browse_shots import router as browse_shots_router
+    app.include_router(browse_shots_router, prefix="/api", tags=["Browse Screenshots"])
+    logger.info("✅ Browse screenshot routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Browse screenshot routes failed to load: {e}")
 
 # Include Artifacts routes
 try:
@@ -6279,6 +5742,157 @@ try:
 except Exception as e:
     logger.error(f"❌ Research routes failed to load: {e}")
 
+# Include Research Plans routes (delegated research executor system)
+try:
+    from app.routes.research_plans import router as research_plans_router
+    app.include_router(research_plans_router, tags=["Research Plans"])
+    logger.info("✅ Research Plans routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Research Plans routes failed to load: {e}")
+
+# Phase 5: Extracted route modules (batch A — core, downloads, presence)
+from app.routes.core import router as core_router
+from app.routes.downloads import router as downloads_router
+from app.routes.presence import router as presence_router, log_presence
+from app.routes.location import router as location_router
+from app.routes.rhythm import router as rhythm_router
+
+app.include_router(core_router)
+app.include_router(downloads_router)
+app.include_router(presence_router)
+app.include_router(location_router)
+app.include_router(rhythm_router)
+
+# Phase 5: Extracted route modules (batch C — daily brief)
+from app.routes.daily_brief import router as daily_brief_router
+
+app.include_router(daily_brief_router)
+
+# Phase 3: Extracted route modules
+from app.routes.briefings import router as briefings_router
+from app.routes.push_tokens import router as push_tokens_router, send_push_to_user
+from app.routes.conversations import router as conversations_router
+from app.routes.documents import router as documents_router
+from app.routes.episodes import router as episodes_router
+
+app.include_router(briefings_router)
+app.include_router(push_tokens_router)
+app.include_router(conversations_router)
+app.include_router(documents_router)
+app.include_router(episodes_router)
+
+# Phase 3: Extracted route modules (batch 2)
+from app.routes.knowledge_graph import router as knowledge_graph_router
+from app.routes.autonomous import router as autonomous_router
+from app.routes.reflection import router as reflection_router
+from app.routes.fitness_inline import router as fitness_inline_router
+
+app.include_router(knowledge_graph_router)
+app.include_router(autonomous_router)
+app.include_router(reflection_router)
+app.include_router(fitness_inline_router)
+
+# Sara autonomy + PKG routes
+from app.routes.sara_status import router as sara_status_router
+from app.routes.sara_observations import router as sara_observations_router
+from app.routes.sara_activity import router as sara_activity_router
+from app.routes.personal_knowledge import router as personal_knowledge_router
+
+app.include_router(sara_status_router)
+app.include_router(sara_observations_router)
+app.include_router(sara_activity_router)
+app.include_router(personal_knowledge_router)
+
+# Automation routes
+from app.routes.automation import router as automation_router
+from app.routes.automation_admin import router as automation_admin_router
+app.include_router(automation_router)
+app.include_router(automation_admin_router)
+
+# Standing orders route
+from app.routes.standing_orders import router as standing_orders_router
+app.include_router(standing_orders_router)
+
+# Autonomy control (quiet mode etc.)
+from app.routes.autonomy_control import router as autonomy_control_router
+app.include_router(autonomy_control_router)
+
+# Autonomy traces (Phase 0 — Cortana Evolution)
+from app.routes.autonomy_traces import router as autonomy_traces_router
+app.include_router(autonomy_traces_router)
+
+# Autonomy simulation (Phase 1 — Cortana Evolution)
+from app.routes.autonomy_simulation import router as autonomy_simulation_router
+app.include_router(autonomy_simulation_router)
+
+# Autonomy attention queue (Phase 2 — Cortana Evolution)
+from app.routes.autonomy_attention import router as autonomy_attention_router
+app.include_router(autonomy_attention_router)
+
+# Autonomy missions (Phase 2 — Cortana Evolution)
+from app.routes.autonomy_missions import router as autonomy_missions_router
+app.include_router(autonomy_missions_router)
+
+# Autonomy policy candidates (Phase 3 — Cortana Evolution)
+from app.routes.autonomy_policy_candidates import router as autonomy_policy_candidates_router
+app.include_router(autonomy_policy_candidates_router)
+
+# Email routes
+from app.routes.email import router as email_router
+app.include_router(email_router, prefix="/api")
+
+# Content Inbox routes
+from app.routes.content_inbox import router as content_inbox_router
+app.include_router(content_inbox_router)
+
+# Progress Photos routes (fitness physique tracking + inline VLM critique)
+from app.routes.progress_photos import router as progress_photos_router
+app.include_router(progress_photos_router)
+
+# Agent Orchestration routes (VM agent dispatch + candidate skills)
+from app.routes.agent_orchestration import router as agent_orch_router
+app.include_router(agent_orch_router)
+
+# Intelligence monitor routes (Phase 4A — proactive tech intelligence)
+from app.routes.intelligence import router as intelligence_router
+app.include_router(intelligence_router)
+
+# Task events SSE — smart delivery of background worker results
+from app.routes.task_events import router as task_events_router
+app.include_router(task_events_router)
+
+# Desktop app update server (no auth — electron-updater needs pre-login access)
+from app.routes.desktop_updates import router as desktop_updates_router
+app.include_router(desktop_updates_router)
+
+# Session/cross-device routes
+from app.routes.session import router as session_router
+app.include_router(session_router)
+
+# Debug/observability routes
+from app.routes.debug_notifications import router as debug_notifications_router
+app.include_router(debug_notifications_router)
+from app.routes.debug_retrieval import router as debug_retrieval_router
+app.include_router(debug_retrieval_router)
+
+# Autonomous Cognition System (ACS) — v2 in-VM daemon
+from app.routes.acs_daemon import router as acs_daemon_router
+app.include_router(acs_daemon_router)
+from app.routes.acs_daemon_tools import router as acs_daemon_tools_router
+app.include_router(acs_daemon_tools_router)
+from app.routes.acs_interests import router as acs_interests_router
+app.include_router(acs_interests_router)
+from app.routes.acs_user_tools import router as acs_user_tools_router
+app.include_router(acs_user_tools_router)
+
+# System metrics
+from app.routes.metrics import router as metrics_router
+app.include_router(metrics_router)
+
+# Assistant UX analytics
+from app.routes.assistant_analytics import router as assistant_analytics_router
+app.include_router(assistant_analytics_router)
+
 # ===================== PHASE 4 INTELLIGENCE ROUTES =====================
 from app.services.phase4_intelligence import generate_daily_briefing, get_context_stats, generate_intelligence_report
 
@@ -6294,7 +5908,9 @@ async def call_llm_simple(messages: list, temperature: float = 0.7, max_tokens: 
                     "model": OPENAI_MODEL,
                     "messages": messages,
                     "temperature": temperature,
-                    "max_tokens": max_tokens
+                    "max_tokens": max_tokens,
+                    # Local qwen: disable thinking or `content` comes back empty.
+                    "chat_template_kwargs": {"enable_thinking": False},
                 },
                 headers={"Authorization": f"Bearer {OPENAI_API_KEY}"}
             )
@@ -6306,784 +5922,48 @@ async def call_llm_simple(messages: list, temperature: float = 0.7, max_tokens: 
         raise
 
 # Daily Briefings routes
-@app.get("/api/briefings")
-async def get_briefings(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    """Get all daily briefings for the user"""
-    try:
-        user_id = current_user.id
-        briefings = db.query(DailyBriefing).filter(
-            DailyBriefing.user_id == user_id
-        ).order_by(DailyBriefing.briefing_date.desc()).limit(30).all()
-
-        return [{
-            "id": b.id,
-            "user_id": b.user_id,
-            "briefing_type": b.briefing_type,
-            "briefing_date": b.briefing_date.isoformat(),
-            "content": b.content,
-            "delivered": bool(b.delivered),
-            "read": bool(b.read),
-            "created_at": b.created_at.isoformat()
-        } for b in briefings]
-    except Exception as e:
-        logger.error(f"Error getting briefings: {e}")
-        return []
-
-@app.get("/api/briefings/settings")
-async def get_briefing_settings(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    """Get briefing settings for the user"""
-    try:
-        user_id = current_user.id
-        settings = db.query(BriefingSettings).filter(BriefingSettings.user_id == user_id).first()
-
-        if not settings:
-            # Create default settings
-            settings = BriefingSettings(user_id=user_id)
-            db.add(settings)
-            db.commit()
-            db.refresh(settings)
-
-        return {
-            "id": settings.id,
-            "user_id": settings.user_id,
-            "morning_enabled": bool(settings.morning_enabled),
-            "morning_time": settings.morning_time,
-            "evening_enabled": bool(settings.evening_enabled),
-            "evening_time": settings.evening_time,
-            "include_recovery": bool(settings.include_recovery),
-            "include_schedule": bool(settings.include_schedule),
-            "include_goals": bool(settings.include_goals),
-            "include_suggestions": bool(settings.include_suggestions),
-            "include_workout_rec": bool(settings.include_workout_rec),
-            "include_accomplishments": bool(settings.include_accomplishments),
-            "include_insights": bool(settings.include_insights),
-            "include_reflection": bool(settings.include_reflection)
-        }
-    except Exception as e:
-        logger.error(f"Error getting briefing settings: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.put("/api/briefings/settings")
-async def update_briefing_settings(settings_data: dict, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    """Update briefing settings"""
-    try:
-        user_id = current_user.id
-        settings = db.query(BriefingSettings).filter(BriefingSettings.user_id == user_id).first()
-
-        if not settings:
-            settings = BriefingSettings(user_id=user_id)
-            db.add(settings)
-
-        # Update fields
-        for key, value in settings_data.items():
-            if hasattr(settings, key) and key != "id" and key != "user_id":
-                setattr(settings, key, 1 if value else 0 if key.startswith("include_") or key.endswith("_enabled") else value)
-
-        settings.updated_at = datetime.now()
-        db.commit()
-        db.refresh(settings)
-
-        return {"success": True, "settings": settings_data}
-    except Exception as e:
-        logger.error(f"Error updating briefing settings: {e}")
-        db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/briefings/generate")
-async def generate_briefing_route(data: dict, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    """Generate a new briefing"""
-    try:
-        user_id = current_user.id
-        briefing_type = data.get("briefing_type", "morning")
-
-        # Use the intelligence service to generate briefing
-        briefing = await generate_daily_briefing(
-            db=db,
-            user_id=user_id,
-            briefing_type=briefing_type,
-            llm_call_fn=call_llm_simple,
-            Episode=Episode,
-            Note=Note,
-            CalendarEvent=CalendarEvent,
-            DailyBriefing=DailyBriefing,
-            BriefingSettings=BriefingSettings
-        )
-
-        return briefing
-    except Exception as e:
-        logger.error(f"Error generating briefing: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.patch("/api/briefings/{briefing_id}/read")
-async def mark_briefing_read(briefing_id: str, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    """Mark briefing as read"""
-    try:
-        user_id = current_user.id
-        briefing = db.query(DailyBriefing).filter(
-            DailyBriefing.id == briefing_id,
-            DailyBriefing.user_id == user_id
-        ).first()
-
-        if briefing:
-            briefing.read = 1
-            db.commit()
-            return {"success": True}
-
-        raise HTTPException(status_code=404, detail="Briefing not found")
-    except Exception as e:
-        logger.error(f"Error marking briefing as read: {e}")
-        db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
 
 # Context Mode routes
-@app.get("/api/context/mode")
-async def get_context_mode_route(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    """Get current context mode"""
-    try:
-        user_id = current_user.id
-        context_mode = db.query(ContextMode).filter(ContextMode.user_id == user_id).first()
-
-        if not context_mode:
-            context_mode = ContextMode(user_id=user_id, current_mode="full")
-            db.add(context_mode)
-            db.commit()
-            db.refresh(context_mode)
-
-        return {"mode": context_mode.current_mode}
-    except Exception as e:
-        logger.error(f"Error getting context mode: {e}")
-        return {"mode": "full"}
-
-@app.put("/api/context/mode")
-async def set_context_mode_route(data: dict, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    """Set context mode"""
-    try:
-        user_id = current_user.id
-        new_mode = data.get("mode", "full")
-
-        context_mode = db.query(ContextMode).filter(ContextMode.user_id == user_id).first()
-
-        if not context_mode:
-            context_mode = ContextMode(user_id=user_id, current_mode=new_mode)
-            db.add(context_mode)
-        else:
-            context_mode.current_mode = new_mode
-            context_mode.updated_at = datetime.now()
-
-        db.commit()
-        return {"mode": new_mode}
-    except Exception as e:
-        logger.error(f"Error setting context mode: {e}")
-        db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/context/stats")
-async def get_context_stats_route(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    """Get context statistics"""
-    user_id = current_user.id
-    return get_context_stats(db, user_id, Episode, Note, Document, CalendarEvent)
 
 # Smart Insights routes
-@app.get("/api/reports/list")
-async def get_reports_list(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    """Get list of intelligence reports"""
-    try:
-        user_id = current_user.id
-        reports = db.query(IntelligenceReport).filter(
-            IntelligenceReport.user_id == user_id
-        ).order_by(IntelligenceReport.report_date.desc()).limit(20).all()
-
-        return [{
-            "id": r.id,
-            "user_id": r.user_id,
-            "report_type": r.report_type,
-            "report_date": r.report_date.isoformat(),
-            "title": r.title,
-            "summary": r.summary,
-            "created_at": r.created_at.isoformat()
-        } for r in reports]
-    except Exception as e:
-        logger.error(f"Error getting reports list: {e}")
-        return []
-
-@app.post("/api/reports/generate")
-async def generate_report_route(data: dict, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    """Generate an intelligence report"""
-    try:
-        user_id = current_user.id
-        report_type = data.get("report_type", "weekly")
-
-        report = await generate_intelligence_report(
-            db=db,
-            user_id=user_id,
-            report_type=report_type,
-            llm_call_fn=call_llm_simple,
-            Episode=Episode,
-            IntelligenceReport=IntelligenceReport
-        )
-
-        return report
-    except Exception as e:
-        logger.error(f"Error generating intelligence report: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/suggestions")
-async def get_suggestions(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    """Get proactive suggestions"""
-    try:
-        user_id = current_user.id
-        suggestions = db.query(ProactiveSuggestion).filter(
-            ProactiveSuggestion.user_id == user_id,
-            ProactiveSuggestion.status == "pending"
-        ).order_by(ProactiveSuggestion.created_at.desc()).limit(10).all()
-
-        return [{
-            "id": s.id,
-            "title": s.title,
-            "description": s.description,
-            "category": s.category,
-            "priority": s.priority,
-            "confidence": s.confidence,
-            "status": s.status,
-            "created_at": s.created_at.isoformat()
-        } for s in suggestions]
-    except Exception as e:
-        logger.error(f"Error getting suggestions: {e}")
-        return []
-
-@app.patch("/api/suggestions/{suggestion_id}")
-async def update_suggestion(suggestion_id: str, data: dict, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    """Update suggestion status"""
-    try:
-        user_id = current_user.id
-        status = data.get("status", "pending")
-
-        suggestion = db.query(ProactiveSuggestion).filter(
-            ProactiveSuggestion.id == suggestion_id,
-            ProactiveSuggestion.user_id == user_id
-        ).first()
-
-        if suggestion:
-            suggestion.status = status
-            suggestion.actioned_at = datetime.now() if status in ["accepted", "dismissed"] else None
-            db.commit()
-            return {"id": suggestion_id, "status": status}
-
-        raise HTTPException(status_code=404, detail="Suggestion not found")
-    except Exception as e:
-        logger.error(f"Error updating suggestion: {e}")
-        db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/patterns")
-async def get_patterns(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    """Get detected patterns"""
-    try:
-        user_id = current_user.id
-        patterns = db.query(DetectedPattern).filter(
-            DetectedPattern.user_id == user_id
-        ).order_by(DetectedPattern.confidence.desc()).limit(10).all()
-
-        return [{
-            "id": p.id,
-            "pattern_type": p.pattern_type,
-            "title": p.title,
-            "description": p.description,
-            "confidence": p.confidence,
-            "frequency": p.frequency,
-            "data_points": p.data_points,
-            "first_detected": p.first_detected.isoformat(),
-            "created_at": p.created_at.isoformat()
-        } for p in patterns]
-    except Exception as e:
-        logger.error(f"Error getting patterns: {e}")
-        return []
 
 logger.info("✅ Phase 4 intelligence routes loaded successfully")
 
+# ===================== SHADOW MODE STUB (removed feature) =====================
+@app.get("/shadow/active")
+async def get_shadow_active():
+    """Stub — shadow mode was removed. Returns null to silence stale polling."""
+    return {"active_session": None}
+
+
 # ===================== SUBCONSCIOUS ROUTES =====================
-@app.get("/api/subconscious/state")
-async def get_subconscious_state(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    """Get current mental model state for Sara context injection"""
-    try:
-        user_id = current_user.id
-        result = db.execute(text("""
-            SELECT * FROM subconscious_state WHERE user_id = :user_id
-        """), {"user_id": user_id}).fetchone()
-
-        if result:
-            state = dict(result._mapping)
-            # Parse JSON fields
-            for field in ['typical_meal_windows', 'current_focus_areas', 'active_threads',
-                         'docker_health', 'service_health']:
-                if state.get(field) and isinstance(state[field], str):
-                    try:
-                        state[field] = json.loads(state[field])
-                    except (json.JSONDecodeError, TypeError) as e:
-                        logger.debug(f"Failed to parse JSON field {field}: {e}")
-            # Format timestamps
-            for field in ['last_meal_at', 'last_presence_at', 'updated_at', 'created_at']:
-                if state.get(field):
-                    state[field] = state[field].isoformat() if hasattr(state[field], 'isoformat') else str(state[field])
-            return state
-
-        return {"message": "No state available yet", "user_id": user_id}
-    except Exception as e:
-        logger.error(f"Error getting subconscious state: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/api/subconscious/nudges")
-async def get_subconscious_nudges(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    """Get pending nudges for display"""
-    try:
-        user_id = current_user.id
-        result = db.execute(text("""
-            SELECT id, nudge_type, severity, title, message, action_suggestion,
-                   delivery_channel, created_at, expires_at
-            FROM subconscious_nudge
-            WHERE user_id = :user_id
-              AND status IN ('pending', 'delivered')
-              AND expires_at > NOW()
-            ORDER BY
-                CASE severity
-                    WHEN 'urgent' THEN 1
-                    WHEN 'gentle' THEN 2
-                    ELSE 3
-                END,
-                created_at DESC
-        """), {"user_id": user_id}).fetchall()
-
-        nudges = []
-        for r in result:
-            nudge = dict(r._mapping)
-            nudge['created_at'] = nudge['created_at'].isoformat() if nudge.get('created_at') else None
-            nudge['expires_at'] = nudge['expires_at'].isoformat() if nudge.get('expires_at') else None
-            nudges.append(nudge)
-
-        return nudges
-    except Exception as e:
-        logger.error(f"Error getting nudges: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/api/subconscious/nudges/{nudge_id}/acknowledge")
-async def acknowledge_nudge(nudge_id: str, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    """Acknowledge a nudge"""
-    try:
-        user_id = current_user.id
-        result = db.execute(text("""
-            UPDATE subconscious_nudge
-            SET acknowledged_at = NOW(), status = 'acknowledged'
-            WHERE id = :nudge_id
-              AND user_id = :user_id
-              AND status IN ('pending', 'delivered')
-        """), {"nudge_id": nudge_id, "user_id": user_id})
-
-        db.commit()
-
-        if result.rowcount > 0:
-            return {"success": True, "nudge_id": nudge_id}
-        raise HTTPException(status_code=404, detail="Nudge not found or already acknowledged")
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error acknowledging nudge: {e}")
-        db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/api/subconscious/nudges/stream")
-async def nudge_stream(request: Request, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    """SSE stream for real-time nudge updates"""
-    user_id = current_user.id
-
-    async def generate_events():
-        last_check = datetime.now()
-        while True:
-            # Check if client disconnected
-            if await request.is_disconnected():
-                break
-
-            # Check for new nudges since last check
-            result = db.execute(text("""
-                SELECT id, nudge_type, severity, title, message, action_suggestion,
-                       delivery_channel, created_at
-                FROM subconscious_nudge
-                WHERE user_id = :user_id
-                  AND status IN ('pending', 'delivered')
-                  AND created_at > :last_check
-                  AND expires_at > NOW()
-                ORDER BY created_at DESC
-            """), {"user_id": user_id, "last_check": last_check}).fetchall()
-
-            for r in result:
-                nudge = dict(r._mapping)
-                nudge['created_at'] = nudge['created_at'].isoformat() if nudge.get('created_at') else None
-                yield f"data: {json.dumps({'type': 'nudge', 'nudge': nudge})}\n\n"
-
-            last_check = datetime.now()
-            await asyncio.sleep(10)  # Check every 10 seconds
-
-    return StreamingResponse(
-        generate_events(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive"
-        }
-    )
-
-
+# Extracted to routes/subconscious.py (Stage 3). SSE max-lifetime + tz fix
+# ride along with the move — see the module comment for details.
+from app.routes.subconscious import router as subconscious_router
+app.include_router(subconscious_router, tags=["Subconscious"])
 logger.info("✅ Subconscious routes loaded successfully")
 
+
+# ===================== THE SYSTEM (awareness / god-view) =====================
+# routes/system_awareness.py — read-only god-view (Phase 0) + world model (Phase 1).
+from app.routes.system_awareness import router as system_awareness_router
+app.include_router(system_awareness_router, prefix="/api/system", tags=["System"])
+logger.info("✅ System awareness routes loaded successfully")
+
+
+
 # ===================== PI DASHBOARD ROUTES =====================
-# These routes support device token auth for headless Pi access
+# Extracted to routes/pi_dashboard.py (Stage 3). The module registers all
+# the non-voice Pi endpoints. The voice endpoints below still live here
+# because they pull on the LLM client — they'll move with the chat
+# extraction.
 
-async def get_device_user(request: Request, db: Session = Depends(get_db)) -> Optional[str]:
-    """Get user ID from device token or return None"""
-    device_token = request.headers.get("X-Device-Token")
-    if device_token:
-        result = db.execute(text("""
-            SELECT user_id FROM device_registration
-            WHERE device_token = :token
-        """), {"token": device_token}).fetchone()
-        if result:
-            # Update last_seen
-            db.execute(text("""
-                UPDATE device_registration SET last_seen = NOW()
-                WHERE device_token = :token
-            """), {"token": device_token})
-            db.commit()
-            return result.user_id
-    return None
+# Re-export for legacy callers still importing it from this module.
+from app.core.device_auth import get_device_user  # noqa: E402, F401
 
-
-@app.post("/api/devices/register")
-async def register_device(
-    data: dict,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
-):
-    """Register a device for token-based auth (requires initial login)"""
-    import secrets
-    device_name = data.get("device_name", "Unknown Device")
-    device_type = data.get("device_type", "pi_dashboard")
-
-    device_token = secrets.token_urlsafe(32)
-    device_id = str(uuid.uuid4())
-
-    db.execute(text("""
-        INSERT INTO device_registration (id, user_id, device_name, device_token, device_type, last_seen, created_at)
-        VALUES (:id, :user_id, :device_name, :device_token, :device_type, NOW(), NOW())
-    """), {
-        "id": device_id,
-        "user_id": current_user.id,
-        "device_name": device_name,
-        "device_token": device_token,
-        "device_type": device_type
-    })
-    db.commit()
-
-    return {
-        "device_id": device_id,
-        "device_token": device_token,
-        "message": "Device registered. Store this token securely."
-    }
-
-
-@app.post("/api/devices/bootstrap")
-async def bootstrap_device(data: dict, db: Session = Depends(get_db)):
-    """Bootstrap a device registration using email - for headless Pi setup"""
-    import secrets
-
-    email = data.get("email")
-    device_name = data.get("device_name", "pi-dashboard")
-    device_type = data.get("device_type", "pi_dashboard")
-
-    if not email:
-        raise HTTPException(status_code=400, detail="Email required")
-
-    # Find user by email
-    result = db.execute(text("SELECT id FROM app_user WHERE email = :email"), {"email": email}).fetchone()
-    if not result:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    user_id = result[0]
-
-    # Check if device already exists
-    existing = db.execute(text("""
-        SELECT device_token FROM device_registration
-        WHERE user_id = :user_id AND device_name = :device_name
-    """), {"user_id": user_id, "device_name": device_name}).fetchone()
-
-    if existing:
-        return {
-            "device_token": existing[0],
-            "message": "Device already registered. Returning existing token."
-        }
-
-    device_token = secrets.token_urlsafe(32)
-    device_id = str(uuid.uuid4())
-
-    db.execute(text("""
-        INSERT INTO device_registration (id, user_id, device_name, device_token, device_type, last_seen, created_at)
-        VALUES (:id, :user_id, :device_name, :device_token, :device_type, NOW(), NOW())
-    """), {
-        "id": device_id,
-        "user_id": user_id,
-        "device_name": device_name,
-        "device_token": device_token,
-        "device_type": device_type
-    })
-    db.commit()
-
-    return {
-        "device_id": device_id,
-        "device_token": device_token,
-        "message": "Device registered. Store this token in localStorage as 'device_token'."
-    }
-
-
-@app.get("/api/pi-dashboard/state")
-async def get_pi_dashboard_state(request: Request, db: Session = Depends(get_db)):
-    """Get combined state for Pi dashboard (supports device token auth)"""
-    # Try device token auth first
-    user_id = await get_device_user(request, db)
-
-    # Fall back to cookie auth
-    if not user_id:
-        try:
-            current_user = await get_current_user(request, db)
-            user_id = current_user.id
-        except Exception as auth_err:
-            logger.debug(f"Authentication failed for pi-dashboard/state: {auth_err}")
-            raise HTTPException(status_code=401, detail="Not authenticated. Use device token or login.")
-
-    # Get subconscious state
-    state_result = db.execute(text("""
-        SELECT * FROM subconscious_state WHERE user_id = :user_id
-    """), {"user_id": user_id}).fetchone()
-
-    state = None
-    if state_result:
-        state = dict(state_result._mapping)
-        for field in ['typical_meal_windows', 'current_focus_areas', 'active_threads',
-                     'docker_health', 'service_health']:
-            if state.get(field) and isinstance(state[field], str):
-                try:
-                    state[field] = json.loads(state[field])
-                except (json.JSONDecodeError, TypeError) as e:
-                    logger.debug(f"Failed to parse JSON field {field}: {e}")
-        for field in ['last_meal_at', 'last_presence_at', 'updated_at', 'created_at']:
-            if state.get(field):
-                state[field] = state[field].isoformat() if hasattr(state[field], 'isoformat') else str(state[field])
-
-    # Get pending nudges
-    nudges_result = db.execute(text("""
-        SELECT id, nudge_type, severity, title, message, action_suggestion,
-               delivery_channel, created_at, expires_at
-        FROM subconscious_nudge
-        WHERE user_id = :user_id
-          AND status IN ('pending', 'delivered')
-          AND expires_at > NOW()
-        ORDER BY
-            CASE severity WHEN 'urgent' THEN 1 WHEN 'gentle' THEN 2 ELSE 3 END,
-            created_at DESC
-        LIMIT 10
-    """), {"user_id": user_id}).fetchall()
-
-    nudges = []
-    for r in nudges_result:
-        nudge = dict(r._mapping)
-        nudge['created_at'] = nudge['created_at'].isoformat() if nudge.get('created_at') else None
-        nudge['expires_at'] = nudge['expires_at'].isoformat() if nudge.get('expires_at') else None
-        nudges.append(nudge)
-
-    # Get worker status from subconscious log
-    worker_status = {}
-    try:
-        subconscious_log = db.execute(text("""
-            SELECT snapshot_at FROM subconscious_log
-            WHERE user_id = :user_id
-            ORDER BY snapshot_at DESC LIMIT 1
-        """), {"user_id": user_id}).fetchone()
-        if subconscious_log:
-            last_run = subconscious_log.snapshot_at
-            # Next run is 30 minutes after last run (during waking hours)
-            next_run = last_run + timedelta(minutes=30) if last_run else None
-            worker_status["subconscious"] = {
-                "last_run": last_run.isoformat() if last_run else None,
-                "next_run": next_run.isoformat() if next_run else None,
-                "interval_mins": 30
-            }
-    except Exception as e:
-        logger.warning(f"Failed to get subconscious worker status: {e}")
-
-    # Get orchestrator status (from background_task if available)
-    try:
-        orchestrator_task = db.execute(text("""
-            SELECT completed_at FROM background_task
-            WHERE task_type = 'orchestrator'
-            ORDER BY completed_at DESC LIMIT 1
-        """)).fetchone()
-        if orchestrator_task and orchestrator_task.completed_at:
-            last_run = orchestrator_task.completed_at
-            next_run = last_run + timedelta(minutes=5)
-            worker_status["orchestrator"] = {
-                "last_run": last_run.isoformat(),
-                "next_run": next_run.isoformat(),
-                "interval_mins": 5
-            }
-    except Exception:
-        pass  # Table might not exist
-
-    # Get today's calendar events
-    calendar_events = []
-    try:
-        today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        today_end = today_start + timedelta(days=1)
-        events_result = db.execute(text("""
-            SELECT id, title, start_time, end_time, location
-            FROM calendar_event
-            WHERE user_id = :user_id
-              AND start_time >= :today_start
-              AND start_time < :today_end
-            ORDER BY start_time
-            LIMIT 10
-        """), {"user_id": user_id, "today_start": today_start, "today_end": today_end}).fetchall()
-
-        for e in events_result:
-            calendar_events.append({
-                "id": e.id,
-                "title": e.title,
-                "start": e.start_time.isoformat() if e.start_time else None,
-                "end": e.end_time.isoformat() if e.end_time else None,
-                "location": e.location
-            })
-    except Exception as ex:
-        logger.warning(f"Failed to get calendar events: {ex}")
-
-    # Get recent notes
-    recent_notes = []
-    try:
-        notes_result = db.execute(text("""
-            SELECT id, title, updated_at, created_at
-            FROM note
-            WHERE user_id = :user_id
-            ORDER BY updated_at DESC
-            LIMIT 10
-        """), {"user_id": user_id}).fetchall()
-
-        for n in notes_result:
-            recent_notes.append({
-                "id": n.id,
-                "title": n.title,
-                "updated_at": n.updated_at.isoformat() if n.updated_at else None,
-                "created_at": n.created_at.isoformat() if n.created_at else None
-            })
-    except Exception as ex:
-        logger.warning(f"Failed to get notes: {ex}")
-
-    return {
-        "state": state,
-        "nudges": nudges,
-        "worker_status": worker_status,
-        "calendar_events": calendar_events,
-        "recent_notes": recent_notes,
-        "timestamp": datetime.now().isoformat()
-    }
-
-
-# ===================== PI DASHBOARD NUDGE ENDPOINT =====================
-
-@app.post("/api/pi-dashboard/nudges/{nudge_id}/acknowledge")
-async def pi_dashboard_acknowledge_nudge(nudge_id: str, request: Request, db: Session = Depends(get_db)):
-    """Acknowledge a nudge via Pi dashboard (supports device token auth)"""
-    # Try device token auth first
-    user_id = await get_device_user(request, db)
-
-    # Fall back to cookie auth
-    if not user_id:
-        try:
-            current_user = await get_current_user(request, db)
-            user_id = current_user.id
-        except Exception as auth_err:
-            logger.debug(f"Authentication failed: {auth_err}")
-            raise HTTPException(status_code=401, detail="Not authenticated")
-
-    try:
-        result = db.execute(text("""
-            UPDATE subconscious_nudge
-            SET acknowledged_at = NOW(), status = 'acknowledged'
-            WHERE id = :nudge_id
-              AND user_id = :user_id
-              AND status IN ('pending', 'delivered')
-        """), {"nudge_id": nudge_id, "user_id": user_id})
-
-        db.commit()
-
-        if result.rowcount > 0:
-            logger.info(f"[Pi Dashboard] Nudge {nudge_id} acknowledged by user {user_id}")
-            return {"success": True, "nudge_id": nudge_id}
-        raise HTTPException(status_code=404, detail="Nudge not found or already acknowledged")
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error acknowledging nudge: {e}")
-        db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/api/pi-dashboard/timers")
-async def get_pi_dashboard_timers(
-    request: Request,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    """Get active timers for Pi dashboard overlay"""
-    user_id = current_user.id
-
-    try:
-        now = datetime.now(timezone.utc)
-
-        # Get active timers for this user
-        timers = db.query(Timer).filter(
-            Timer.user_id == user_id,
-            Timer.is_active == True
-        ).order_by(Timer.end_time.asc()).all()
-
-        timer_list = []
-        for timer in timers:
-            # Ensure end_time is timezone-aware
-            end_time = timer.end_time
-            if end_time.tzinfo is None:
-                end_time = end_time.replace(tzinfo=timezone.utc)
-
-            # Calculate remaining time
-            remaining_seconds = (end_time - now).total_seconds()
-
-            # Skip expired timers (but mark them as completed)
-            if remaining_seconds <= 0:
-                timer.is_active = False
-                timer.is_completed = True
-                db.commit()
-                continue
-
-            timer_list.append({
-                "id": timer.id,
-                "title": timer.title,
-                "duration_minutes": timer.duration_minutes,
-                "end_time": end_time.isoformat(),
-                "remaining_seconds": int(remaining_seconds),
-                "remaining_minutes": int(remaining_seconds / 60),
-                "remaining_display": f"{int(remaining_seconds // 60)}:{int(remaining_seconds % 60):02d}"
-            })
-
-        return {"timers": timer_list, "count": len(timer_list)}
-    except Exception as e:
-        logger.error(f"Error getting timers: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+from app.routes.pi_dashboard import router as pi_dashboard_router
+app.include_router(pi_dashboard_router, tags=["Pi Dashboard"])
+logger.info("✅ Pi Dashboard routes loaded successfully")
 
 
 # ===================== PI DASHBOARD VOICE ENDPOINTS =====================
@@ -7180,6 +6060,214 @@ CANVAS_TRIGGERS = [
     "work mode",
     "time to work",
 ]
+
+async def _build_learning_recall_context(user_id: str, message: str, db) -> Optional[str]:
+    """Build learning recall context for the system prompt.
+
+    When David asks about something he's actively studying, Sara should
+    briefly test his recall before answering directly.
+    """
+    from sqlalchemy import text as sql_text
+    from datetime import datetime, timedelta
+
+    if not message or len(message) < 20:
+        return None
+
+    message_lower = message.lower()
+
+    try:
+        # Check if we've already tested recall recently (last 2 hours)
+        recent_recall = db.execute(sql_text("""
+            SELECT COUNT(*) as cnt FROM episode
+            WHERE user_id = :user_id
+              AND role = 'assistant'
+              AND (content LIKE :pattern1 OR content LIKE :pattern2)
+              AND created_at >= NOW() - INTERVAL '2 hours'
+        """), {"user_id": user_id, "pattern1": "%what do you remember about%", "pattern2": "%remember how we compared%"})
+        recall_row = recent_recall.fetchone()
+        if recall_row and (recall_row.cnt or 0) >= 2:
+            return None  # Already tested recall recently
+
+        # Get active learning topics
+        topics_result = db.execute(sql_text("""
+            SELECT id, title, mastery_level FROM learning_topic
+            WHERE user_id = :user_id AND status = 'active'
+        """), {"user_id": user_id})
+        topics = topics_result.fetchall()
+
+        if not topics:
+            return None
+
+        # Simple keyword matching: check if any topic title words appear in the message
+        matched_topic = None
+        for t in topics:
+            title_words = [w.lower() for w in t.title.split() if len(w) > 3]
+            if any(word in message_lower for word in title_words):
+                matched_topic = t
+                break
+
+        if not matched_topic:
+            return None
+
+        # Get concepts due for review or with low mastery for this topic
+        progress_result = db.execute(sql_text("""
+            SELECT concept, repetitions, next_review_at
+            FROM learning_progress
+            WHERE user_id = :user_id AND topic_id = :topic_id
+            ORDER BY next_review_at ASC NULLS FIRST
+            LIMIT 5
+        """), {"user_id": user_id, "topic_id": matched_topic.id})
+        progress_items = progress_result.fetchall()
+
+        if not progress_items:
+            return None
+
+        concepts = [p.concept for p in progress_items if p.concept]
+        if not concepts:
+            return None
+
+        mastery_pct = int((matched_topic.mastery_level or 0) * 100)
+
+        # Pick the most due concept for the recall question
+        test_concept = concepts[0]
+
+        # Try to get an anchor analogy for the topic
+        anchor_hint = ""
+        try:
+            anchor_row = db.execute(sql_text("""
+                SELECT anchor_concept, anchor_domain, bridge_description
+                FROM anchor_point
+                WHERE topic_id = :topic_id AND rejected = false
+                ORDER BY validated DESC, confidence DESC
+                LIMIT 1
+            """), {"topic_id": matched_topic.id}).fetchone()
+            if anchor_row and anchor_row.bridge_description:
+                anchor_hint = f'\nYou previously mapped this through an analogy: "{anchor_row.anchor_concept}" from {anchor_row.anchor_domain} ({anchor_row.bridge_description}). Reference that analogy in your recall prompt.'
+        except Exception:
+            pass
+
+        # Record passive mastery signal: David used a learning concept in main chat
+        try:
+            # Find a progress record for this topic to log natural usage
+            progress_row = db.execute(sql_text("""
+                SELECT id, quality_history FROM learning_progress
+                WHERE topic_id = :topic_id AND user_id = :user_id
+                LIMIT 1
+            """), {"topic_id": matched_topic.id, "user_id": user_id}).fetchone()
+            if progress_row:
+                import json as _json
+                history = _json.loads(progress_row.quality_history) if isinstance(progress_row.quality_history, str) else (progress_row.quality_history or [])
+                history.append({
+                    "type": "natural_usage",
+                    "date": local_now().isoformat(),
+                    "context": message[:100]
+                })
+                # Keep last 50 entries
+                db.execute(sql_text("""
+                    UPDATE learning_progress SET quality_history = :history
+                    WHERE id = :id
+                """), {"history": _json.dumps(history[-50:]), "id": progress_row.id})
+                db.commit()
+        except Exception as e:
+            logger.debug(f"Passive mastery signal failed (non-critical): {e}")
+
+        return f"""## Learning Recall Opportunity
+David is studying "{matched_topic.title}" (mastery: {mastery_pct}%). He has {len(concepts)} concepts tracked.
+Related concepts: {', '.join(concepts[:4])}{anchor_hint}
+
+Remember the analogy we used for {test_concept}? Reference it and ask David how it applies here — e.g., "You've been studying this — remember how we compared {test_concept} to...? How does that map to what you're asking about?"
+Then fill in gaps and correct any misconceptions. Keep it natural and brief — don't force it if the question isn't closely related to {test_concept}."""
+
+    except Exception as e:
+        logger.debug(f"Learning recall context build failed: {e}")
+        return None
+
+
+def _build_activity_context(
+    activity_state: str,
+    confidence: float = 0.5,
+    room: str = None,
+    interruptibility: float = 0.5,
+    # Conversation signals
+    turn_count: int = 1,
+    conversation_depth: int = 0,
+    # Memory nudges
+    memory_nudges: list = None,
+    # Behavioral calibration (pre-loaded from working memory)
+    calibration_data: dict = None,
+    # Sara's emotional state (from working memory)
+    sara_emotional_tone: str = None,
+    sara_emotional_intensity: float = None,
+) -> str:
+    """Build adaptive personality context for system prompt injection.
+
+    Combines activity state, Sara's emotional state, interruptibility,
+    conversation depth, and behavioral calibration into a coherent
+    personality directive via the PersonalityEngine.
+    """
+    try:
+        from app.services.personality_engine import build_personality_context
+
+        ctx = build_personality_context(
+            activity_state=activity_state,
+            activity_confidence=confidence,
+            room=room,
+            interruptibility=interruptibility,
+            turn_count=turn_count,
+            conversation_depth=conversation_depth,
+            memory_nudges=memory_nudges,
+            calibration_data=calibration_data,
+            sara_emotional_tone=sara_emotional_tone,
+            sara_emotional_intensity=sara_emotional_intensity,
+        )
+        return ctx.render()
+    except Exception as e:
+        logger.warning(f"Personality engine failed, falling back to basic tone: {e}")
+        tone_map = {
+            "sleeping": "Be extremely brief.",
+            "waking": "Gentle, warm, brief.",
+            "focused_work": "Concise and direct.",
+            "in_meeting": "Ultra-brief only.",
+        }
+        tone = tone_map.get(activity_state, "Normal conversational tone.")
+        return f"[Activity: {activity_state}]\nTone: {tone}"
+
+
+def _summarize_tool_results(tool_responses: list) -> str:
+    """Convert raw tool responses into a human-readable fallback message.
+
+    Used when the follow-up LLM call fails and we need to tell the user
+    what happened without dumping JSON.
+    """
+    actions = []
+    for tr in tool_responses:
+        content = tr.get("content")
+        if not content:
+            continue
+        # Parse JSON tool results into readable text
+        if isinstance(content, str):
+            try:
+                data = json.loads(content)
+            except (json.JSONDecodeError, ValueError):
+                data = {"message": content}
+        elif isinstance(content, dict):
+            data = content
+        else:
+            continue
+
+        msg = data.get("message", "")
+        success = data.get("success", True)
+        if msg:
+            actions.append(msg)
+        elif not success:
+            actions.append("One action didn't go through — I'll try again.")
+
+    if not actions:
+        return "Done!"
+    if len(actions) == 1:
+        return actions[0]
+    return "Done! " + " ".join(actions)
+
 
 def _is_canvas_trigger(message: str) -> bool:
     """Check if message is a workspace/canvas trigger."""
@@ -7291,7 +6379,7 @@ async def pi_dashboard_voice_chat(request: Request, db: Session = Depends(get_db
                         Episode.user_id == user_id
                     ).order_by(Episode.created_at.desc()).first()
 
-                    if last_episode and last_episode.created_at > datetime.utcnow() - timedelta(hours=1):
+                    if last_episode and last_episode.created_at > datetime.now(timezone.utc) - timedelta(hours=1):
                         conversation_id = active_id
                         logger.info(f"[Voice] Joining active conversation: {conversation_id}")
 
@@ -7303,8 +6391,31 @@ async def pi_dashboard_voice_chat(request: Request, db: Session = Depends(get_db
         async def generate_stream():
             full_response = ""
             try:
-                # Create system prompt
-                system_prompt = get_system_prompt(ASSISTANT_NAME, user.email)
+                # UI COMMAND INTERCEPTION (voice has no SSE overlay host, so a
+                # matched command is pushed straight to the active desktop
+                # instead of relying on a client-side ui_command handler).
+                try:
+                    from app.services import ui_intent
+                    _ui = ui_intent.parse_ui_intent(message, allow_screens=False)
+                    if _ui:
+                        _ui_res = ui_intent.resolve_ui_intent(db, user_id, _ui)
+                        logger.info(f"[Voice] UI command: {_ui.get('overlay')} (query={_ui.get('query')})")
+                        _ui_ack = _ui_res["ack"]
+                        if _ui_res.get("command"):
+                            _pushed = await ui_intent.push_overlay_to_desktop(db, user_id, _ui_res["command"])
+                            if _pushed:
+                                _ui_ack = f"{_ui_ack} On your PC."
+                        yield f"data: {json.dumps({'type': 'text_chunk', 'content': _ui_ack})}\n\n"
+                        yield f"data: {json.dumps({'type': 'final_response', 'content': _ui_ack, 'conversation_id': conversation_id})}\n\n"
+                        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                        return
+                except Exception as _ui_e:
+                    logger.error(f"[Voice] UI command interception error: {_ui_e}", exc_info=True)
+
+                # Create system prompt with user-local current time
+                user_now = _resolve_prompt_datetime_for_user(db, user.id)
+                soul_content = load_soul_for_prompt(db)
+                system_prompt = get_system_prompt(ASSISTANT_NAME, user.email, user_now=user_now, soul_content=soul_content)
 
                 # === CANVAS MODE: Check if active and enhance system prompt ===
                 is_canvas_mode = _get_canvas_mode(user_id)
@@ -7348,8 +6459,8 @@ You are now in workspace mode. The user is working on their Windows PC with the 
                 logger.info(f"[Voice] Intent={user_intent}, tools={tool_categories}, canvas={is_canvas_mode}")
 
                 # === CANVAS TRIGGER: Force device tools if workspace trigger ===
-                if is_canvas_trigger_msg and "device" not in (tool_categories or []):
-                    tool_categories = (tool_categories or []) + ["device"]
+                if is_canvas_trigger_msg and "devices" not in (tool_categories or []):
+                    tool_categories = (tool_categories or []) + ["devices"]
                     logger.info(f"[Voice] Added device tools for canvas trigger")
 
                 # === CANVAS MODE: Always include workspace tools when in canvas mode ===
@@ -7361,22 +6472,199 @@ You are now in workspace mode. The user is working on their Windows PC with the 
                         tool_categories = tool_categories + ["maps"]
                     logger.info(f"[Voice] Canvas mode - added workspace tools: {tool_categories}")
 
-                # Lazy memory retrieval
-                if context_decision.inject_memory:
+                # Capability core: keep high-leverage awareness/action tools loaded.
+                capability_core_categories = ["devices", "vm_agents", "personal_knowledge", "inbox", "lists"]
+                tool_categories = tool_categories or []
+                for category in capability_core_categories:
+                    if category not in tool_categories:
+                        tool_categories.append(category)
+                logger.info(f"[Voice] Capability core categories active: {capability_core_categories}")
+
+                # === PARALLEL CONTEXT ASSEMBLY (voice-optimized, 4000 token budget) ===
+                async def _v_fetch_memory():
+                    if not context_decision.inject_memory:
+                        return None
                     try:
-                        relevant_memories = await intelligent_memory_service.intelligent_memory_search(
-                            user_id=user_id,
-                            query=message,
-                            use_semantic=True
+                        mems = await intelligent_memory_service.intelligent_memory_search(
+                            user_id=user_id, query=message, use_semantic=True
                         )
-                        if relevant_memories:
-                            memory_context = "\n\n## Relevant Past Context:\n"
-                            for i, mem in enumerate(relevant_memories[:3], 1):
-                                content_preview = mem.get("content", "")[:200]
-                                memory_context += f"{i}. {content_preview}\n"
-                            system_prompt += memory_context
-                    except Exception as e:
-                        logger.warning(f"[Voice] Memory retrieval failed: {e}")
+                        if not mems:
+                            return None
+                        ctx = "\n\n## Relevant Past Context:\n"
+                        for i, mem in enumerate(mems[:3], 1):
+                            preview = mem.get("content", "")[:200]
+                            ctx += f"{i}. {preview}\n"
+                        return ctx
+                    except Exception:
+                        return None
+
+                async def _v_fetch_personality():
+                    try:
+                        _snap = None
+                        try:
+                            from app.services.unified_context import read_snapshot as _rs
+                            _snap = await _rs(user_id)
+                        except Exception:
+                            pass
+                        _act_state = _act_conf = _act_room = _interrupt = None
+                        if _snap and _snap.activity_state != "UNKNOWN":
+                            _act_state = _snap.activity_state
+                            _act_conf = _snap.activity_confidence
+                            _act_room = _snap.room
+                            _interrupt = _snap.interruptibility
+                        if not _act_state:
+                            return None
+                        # Voice always uses brief verbosity
+                        return _build_activity_context(
+                            activity_state=_act_state, confidence=_act_conf,
+                            room=_act_room, interruptibility=_interrupt or 0.5,
+                            turn_count=1, conversation_depth=0,
+                        )
+                    except Exception:
+                        return None
+
+                async def _v_fetch_pkg():
+                    if not context_decision.inject_pkg:
+                        return None
+                    try:
+                        from app.services.pkg_context_provider import pkg_context
+                        return await pkg_context.get_relevant_context(
+                            user_id=user_id, message=message, intent=user_intent
+                        )
+                    except Exception:
+                        return None
+
+                async def _v_fetch_journal():
+                    try:
+                        from app.services.sara_journal_service import sara_journal
+                        return await sara_journal.get_entries_for_conversation_context(
+                            db=db, user_id=user_id, max_entries=3
+                        )
+                    except Exception:
+                        return None
+
+                async def _v_fetch_daily_brief():
+                    if not DAILY_BRIEF_AVAILABLE:
+                        return None
+                    try:
+                        return await asyncio.wait_for(
+                            daily_brief_service.get_compiled_brief(user_id),
+                            timeout=2.0
+                        )
+                    except (asyncio.TimeoutError, Exception):
+                        return None
+
+                async def _v_fetch_device():
+                    try:
+                        from app.services.device_orchestrator import device_orchestrator
+                        return await device_orchestrator.get_device_context_for_chat(db, user_id)
+                    except Exception:
+                        return None
+
+                async def _v_fetch_autonomous_notes():
+                    """Fetch Sara's latest autonomous journal + session summary + show_david items."""
+                    try:
+                        import redis.asyncio as _aioredis
+                        _redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+                        parts = []
+
+                        # 1. Recent autonomous session summary from Redis
+                        _r = await _aioredis.from_url(_redis_url, decode_responses=True)
+                        try:
+                            summary = await _r.get("sara:subconscious:autonomous_summary")
+                            if summary:
+                                import json as _json
+                                s = _json.loads(summary)
+                                parts.append(
+                                    f"Your last autonomous session: {s.get('turns', 0)} turns, "
+                                    f"{s.get('notes_created', 0)} notes created, "
+                                    f"ended: {s.get('end_reason', 'unknown')}"
+                                )
+                        finally:
+                            await _r.close()
+
+                        from app.db.session import get_async_session_factory
+                        _async_session = get_async_session_factory()
+                        async with _async_session() as _db:
+                            # 2. Today's journal note content
+                            from datetime import datetime as _dt
+                            today = _dt.utcnow().strftime("%Y-%m-%d")
+                            journal_title = f"Sara's Journal — {today}"
+                            result = await _db.execute(text(
+                                "SELECT content FROM note WHERE user_id = :uid AND title = :title LIMIT 1"
+                            ), {"uid": user_id, "title": journal_title})
+                            row = result.fetchone()
+                            if row and row[0]:
+                                content = row[0]
+                                if len(content) > 1000:
+                                    content = "..." + content[-1000:]
+                                parts.append(f"Your autonomous journal today:\n{content}")
+
+                            # 3. Unshown show_david items
+                            sd_result = await _db.execute(text("""
+                                SELECT title, content, category
+                                FROM acs_show_david_buffer
+                                WHERE user_id = :uid AND shown = FALSE
+                                ORDER BY priority DESC LIMIT 3
+                            """), {"uid": user_id})
+                            sd_rows = sd_result.fetchall()
+                            if sd_rows:
+                                sd_lines = [f"- [{r[2]}] **{r[0]}**: {r[1][:150]}" for r in sd_rows]
+                                parts.append(
+                                    "## Discoveries From Your Autonomous Exploration\n"
+                                    "You found these during autonomous sessions. Weave them naturally "
+                                    "into conversation when relevant — don't dump them all at once. "
+                                    "If David asks what you've been up to, share the highlights.\n\n"
+                                    + "\n".join(sd_lines)
+                                )
+
+                        if parts:
+                            return "\n\n## Your Autonomous Session Notes\n" + "\n\n".join(parts)
+                        return None
+                    except Exception:
+                        return None
+
+                async def _v_fetch_fitness():
+                    if not context_decision.inject_fitness:
+                        return None
+                    try:
+                        from app.services.fitness_context import get_fitness_context
+                        return await asyncio.wait_for(
+                            get_fitness_context(user_id, db),
+                            timeout=2.0
+                        )
+                    except Exception:
+                        return None
+
+                # Run all context fetches in parallel
+                (v_memory, v_personality, v_pkg, v_journal, v_brief, v_device, v_autonomous, v_fitness
+                ) = await asyncio.gather(
+                    _v_fetch_memory(), _v_fetch_personality(), _v_fetch_pkg(),
+                    _v_fetch_journal(), _v_fetch_daily_brief(), _v_fetch_device(),
+                    _v_fetch_autonomous_notes(), _v_fetch_fitness(),
+                    return_exceptions=True,
+                )
+
+                def _v_safe(val):
+                    if isinstance(val, BaseException) or val is None:
+                        return None
+                    if isinstance(val, tuple):
+                        return val[0] if val else None
+                    return str(val) if val else None
+
+                from app.services.context_budget import ContextBudget
+                voice_budget = ContextBudget(max_tokens=4000)
+                voice_budget.add("memory", _v_safe(v_memory), priority=1)
+                voice_budget.add("personality", _v_safe(v_personality), priority=1)
+                voice_budget.add("daily_brief", _v_safe(v_brief), priority=2)
+                voice_budget.add("pkg", _v_safe(v_pkg), priority=2)
+                voice_budget.add("fitness", _v_safe(v_fitness), priority=2)
+                voice_budget.add("journal", _v_safe(v_journal), priority=3)
+                voice_budget.add("autonomous", _v_safe(v_autonomous), priority=3)
+                voice_budget.add("device", _v_safe(v_device), priority=4)
+                voice_context = voice_budget.build_context_text()
+                if voice_context:
+                    system_prompt += "\n\n" + voice_context
 
                 # Get tools based on intent (already determined by classify_with_context)
                 tools = []
@@ -7437,8 +6725,8 @@ You are now in workspace mode. The user is working on their Windows PC with the 
                     # Store user message
                     user_episode_id = str(uuid.uuid4())
                     db.execute(text("""
-                        INSERT INTO episode (id, user_id, conversation_id, role, content, importance, created_at, source)
-                        VALUES (:id, :user_id, :conversation_id, :role, :content, :importance, NOW(), :source)
+                        INSERT INTO episode (id, user_id, conversation_id, role, content, importance, base_importance, created_at, source)
+                        VALUES (:id, :user_id, :conversation_id, :role, :content, :importance, :base_importance, NOW(), :source)
                     """), {
                         "id": user_episode_id,
                         "user_id": user_id,
@@ -7446,14 +6734,15 @@ You are now in workspace mode. The user is working on their Windows PC with the 
                         "role": "user",
                         "content": message,
                         "importance": 0.5,
+                        "base_importance": 0.5,
                         "source": "pi_dashboard_voice"
                     })
 
                     # Store assistant response
                     assistant_episode_id = str(uuid.uuid4())
                     db.execute(text("""
-                        INSERT INTO episode (id, user_id, conversation_id, role, content, importance, created_at, source)
-                        VALUES (:id, :user_id, :conversation_id, :role, :content, :importance, NOW(), :source)
+                        INSERT INTO episode (id, user_id, conversation_id, role, content, importance, base_importance, created_at, source)
+                        VALUES (:id, :user_id, :conversation_id, :role, :content, :importance, :base_importance, NOW(), :source)
                     """), {
                         "id": assistant_episode_id,
                         "user_id": user_id,
@@ -7461,6 +6750,7 @@ You are now in workspace mode. The user is working on their Windows PC with the 
                         "role": "assistant",
                         "content": full_response,
                         "importance": 0.5,
+                        "base_importance": 0.5,
                         "source": "pi_dashboard_voice"
                     })
 
@@ -7581,7 +6871,7 @@ Keep responses short and action-focused."""
 async def pi_dashboard_voice_fast(request: Request, db: Session = Depends(get_db)):
     """
     Fast worker for simple tool commands.
-    Uses gpt-oss:20b model + direct tool execution.
+    Uses Qwen3.5-35B-A3B model + direct tool execution.
     Returns immediately without full context injection.
 
     Handles: HOME, TIME, FITNESS intents only.
@@ -7782,7 +7072,8 @@ async def sync_health_data(data: dict, db: Session = Depends(get_db), current_us
                 memory_type="health_sync",
                 source="apple_health",
                 content=memory_content,
-                importance=0.5,  # Moderate importance (0-1 scale)
+                importance=0.5,
+                base_importance=0.5,
                 topics=json.dumps(["health", "fitness"]),
                 context_tags=json.dumps(["health_sync", "daily_metrics"]),
                 created_at=local_now(),
@@ -7803,7 +7094,8 @@ async def sync_health_data(data: dict, db: Session = Depends(get_db), current_us
                 memory_type="workout",
                 source="apple_health",
                 content=workout_memory,
-                importance=0.7,  # Higher importance for workouts
+                importance=0.7,
+                base_importance=0.7,
                 topics=json.dumps(["fitness", "workout", workout_type.lower()]),
                 context_tags=json.dumps(["workout", "exercise"]),
                 created_at=datetime.fromisoformat(workout.get("startDate", timestamp)) if workout.get("startDate") else local_now(),
@@ -7827,8 +7119,8 @@ async def sync_health_data(data: dict, db: Session = Depends(get_db), current_us
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to sync health data: {str(e)}")
 
-@app.get("/api/health/summary")
-async def get_health_summary(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
+@app.get("/api/health/episodes-summary")
+async def get_health_episode_summary(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     """
     Get recent health data summary from stored episodes
     """
@@ -7907,10 +7199,8 @@ async def sync_recovery_from_health(data: SyncRecoveryRequest, db: Session = Dep
                 final_weight_unit = data.weight_unit or "lbs"
                 weight_action = "used_sara_weight"
             else:
-                # Apple Health weight is newer - use it
-                # Convert from kg to user's preferred unit
-                apple_weight_kg = data.apple_health_weight
-                final_weight = apple_weight_kg * 2.20462  # Convert to lbs (default)
+                # Apple Health weight is newer - use it. iOS reads in lbs (HKUnit 'lb').
+                final_weight = data.apple_health_weight
                 final_weight_unit = "lbs"
                 weight_action = "used_apple_health_weight"
         elif data.weight:
@@ -8015,410 +7305,23 @@ async def sync_recovery_from_health(data: SyncRecoveryRequest, db: Session = Dep
 
 logger.info("✅ Apple Health sync routes loaded successfully")
 
-# ===================== PUSH NOTIFICATIONS =====================
-class PushTokenRequest(BaseModel):
-    token: str
-    platform: str
-    device_name: Optional[str] = None
 
-@app.post("/api/push-tokens")
-async def register_push_token(request: PushTokenRequest, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    """
-    Register or update a push notification token for the user's device
-    """
-    try:
-        user_id = current_user.id
-
-        # Check if token already exists
-        existing_token = db.query(PushToken).filter(PushToken.token == request.token).first()
-
-        if existing_token:
-            # Update existing token
-            existing_token.user_id = user_id
-            existing_token.platform = request.platform
-            existing_token.device_name = request.device_name
-            existing_token.is_active = True
-            existing_token.updated_at = datetime.now()
-            db.commit()
-            logger.info(f"✅ Updated push token for user {user_id}: {request.token[:20]}...")
-            return {"success": True, "message": "Push token updated"}
-        else:
-            # Create new token
-            new_token = PushToken(
-                user_id=user_id,
-                token=request.token,
-                platform=request.platform,
-                device_name=request.device_name,
-                is_active=True,
-            )
-            db.add(new_token)
-            db.commit()
-            logger.info(f"✅ Registered new push token for user {user_id}: {request.token[:20]}...")
-            return {"success": True, "message": "Push token registered"}
-
-    except Exception as e:
-        logger.error(f"❌ Error registering push token: {e}")
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to register push token: {str(e)}")
-
-@app.get("/api/push-tokens")
-async def get_push_tokens(db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    """
-    Get all registered push tokens for the current user
-    """
-    try:
-        user_id = current_user.id
-        tokens = db.query(PushToken).filter(
-            PushToken.user_id == user_id,
-            PushToken.is_active == True
-        ).all()
-
-        return [{
-            "id": t.id,
-            "token": t.token[:20] + "..." if len(t.token) > 20 else t.token,
-            "platform": t.platform,
-            "device_name": t.device_name,
-            "created_at": t.created_at.isoformat() if t.created_at else None,
-        } for t in tokens]
-
-    except Exception as e:
-        logger.error(f"❌ Error getting push tokens: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get push tokens: {str(e)}")
-
-@app.delete("/api/push-tokens/{token_id}")
-async def delete_push_token(token_id: str, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
-    """
-    Deactivate a push token
-    """
-    try:
-        user_id = current_user.id
-        token = db.query(PushToken).filter(
-            PushToken.id == token_id,
-            PushToken.user_id == user_id
-        ).first()
-
-        if not token:
-            raise HTTPException(status_code=404, detail="Push token not found")
-
-        token.is_active = False
-        db.commit()
-
-        return {"success": True, "message": "Push token deactivated"}
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ Error deleting push token: {e}")
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to delete push token: {str(e)}")
-
-@app.post("/api/push-notifications/send")
-async def send_push_notification(
-    data: dict,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
-):
-    """
-    Send a push notification to a user's devices (for testing or internal use)
-    Uses Expo's push notification service
-    """
-    try:
-        user_id = data.get("user_id", current_user.id)
-        title = data.get("title", "Sara")
-        body = data.get("body", "")
-        notification_data = data.get("data", {})
-
-        # Get all active tokens for the user
-        tokens = db.query(PushToken).filter(
-            PushToken.user_id == user_id,
-            PushToken.is_active == True
-        ).all()
-
-        if not tokens:
-            return {"success": False, "message": "No push tokens found for user"}
-
-        # Prepare messages for Expo push API
-        messages = []
-        for token in tokens:
-            messages.append({
-                "to": token.token,
-                "sound": "default",
-                "title": title,
-                "body": body,
-                "data": notification_data,
-            })
-
-        # Send to Expo push notification service
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                "https://exp.host/--/api/v2/push/send",
-                json=messages,
-                headers={
-                    "Accept": "application/json",
-                    "Accept-Encoding": "gzip, deflate",
-                    "Content-Type": "application/json",
-                }
-            )
-
-        result = response.json()
-        logger.info(f"✅ Sent push notification to {len(tokens)} devices: {result}")
-
-        return {
-            "success": True,
-            "devices_notified": len(tokens),
-            "result": result
-        }
-
-    except Exception as e:
-        logger.error(f"❌ Error sending push notification: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to send push notification: {str(e)}")
-
-logger.info("✅ Push notification routes loaded successfully")
-
-# ===================== PUSH NOTIFICATION HELPER =====================
-async def send_push_to_user(user_id: str, title: str, body: str, notification_data: dict = None, db: Session = None):
-    """
-    Send a push notification to all of a user's registered devices via Expo.
-    Returns True if at least one device was notified, False otherwise.
-    """
-    try:
-        # Get a database session if not provided
-        if db is None:
-            db = SessionLocal()
-            close_db = True
-        else:
-            close_db = False
-
-        try:
-            # Get all active tokens for the user
-            tokens = db.query(PushToken).filter(
-                PushToken.user_id == user_id,
-                PushToken.is_active == True
-            ).all()
-
-            if not tokens:
-                logger.info(f"📱 No push tokens found for user {user_id}")
-                return False
-
-            # Prepare messages for Expo push API
-            messages = []
-            for token in tokens:
-                messages.append({
-                    "to": token.token,
-                    "sound": "default",
-                    "title": title,
-                    "body": body,
-                    "data": notification_data or {},
-                    "priority": "high",
-                })
-
-            # Send to Expo push notification service
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    "https://exp.host/--/api/v2/push/send",
-                    json=messages,
-                    headers={
-                        "Accept": "application/json",
-                        "Accept-Encoding": "gzip, deflate",
-                        "Content-Type": "application/json",
-                    }
-                )
-
-            result = response.json()
-            logger.info(f"📱 Sent push notification to {len(tokens)} devices for user {user_id}: {title}")
-            return True
-
-        finally:
-            if close_db:
-                db.close()
-
-    except Exception as e:
-        logger.error(f"❌ Error sending push notification to user {user_id}: {e}")
-        return False
-
-# ===================== PRESENCE LOGGING =====================
-async def log_presence(user_id: str, activity_type: str, platform: str = None, db: Session = None):
-    """
-    Log a presence/activity event for the user.
-    Called from various endpoints to track when the user is active.
-    """
-    try:
-        if db is None:
-            db = SessionLocal()
-            close_db = True
-        else:
-            close_db = False
-
-        try:
-            db.execute(text("""
-                INSERT INTO presence_log (id, user_id, activity_type, platform, created_at)
-                VALUES (:id, :user_id, :activity_type, :platform, NOW())
-            """), {
-                "id": str(uuid.uuid4()),
-                "user_id": user_id,
-                "activity_type": activity_type,
-                "platform": platform
-            })
-            db.commit()
-            logger.debug(f"📍 Logged presence: {user_id} - {activity_type} ({platform})")
-        finally:
-            if close_db:
-                db.close()
-
-    except Exception as e:
-        logger.error(f"❌ Error logging presence: {e}")
+# Presence logging extracted to app/routes/presence.py
+# log_presence() is imported from presence module in router registration section
 
 
-@app.post("/api/presence")
-async def log_presence_endpoint(
-    data: dict,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
-):
-    """
-    Log user presence/activity. Call this when app opens, resumes, or on significant actions.
-    """
-    activity_type = data.get("activity_type", "app_open")
-    platform = data.get("platform", "unknown")
-
-    await log_presence(current_user.id, activity_type, platform, db)
-
-    return {"success": True, "message": "Presence logged"}
-
-
-logger.info("✅ Presence logging routes loaded successfully")
-
-# ===================== NIGHTLY MEMORY CONSOLIDATION =====================
-class MemoryConsolidationScheduler:
-    def __init__(self):
-        self._task = None
-        self._stop = False
-        self.eastern_tz = pytz.timezone('America/New_York')
-        self.hh = 2
-        self.mm = 15
-
-    async def start(self):
-        if self._task is None:
-            self._stop = False
-            import asyncio as _asyncio
-            self._task = _asyncio.create_task(self._runner())
-            logger.info("🗂️ Memory consolidation scheduler started (2:15 AM ET)")
-
-    async def stop(self):
-        if self._task is not None:
-            self._stop = True
-            self._task.cancel()
-            self._task = None
-
-    async def _runner(self):
-        import asyncio as _asyncio
-        from datetime import datetime as _dt
-        while not self._stop:
-            try:
-                utc_now = _dt.now(pytz.UTC)
-                eastern = utc_now.astimezone(self.eastern_tz)
-                target = eastern.replace(hour=self.hh, minute=self.mm, second=0, microsecond=0)
-                if eastern > target:
-                    # schedule for next day
-                    from datetime import timedelta as _td
-                    target = target + _td(days=1)
-                wait_sec = (target - eastern).total_seconds()
-                await _asyncio.sleep(min(max(wait_sec, 60), 24*3600))
-                if self._stop:
-                    break
-                await self.run_for_all_users()
-            except _asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.warning(f"Memory consolidation scheduler error: {e}")
-                await _asyncio.sleep(3600)
-
-    async def run_for_all_users(self):
-        from sqlalchemy.orm import Session as _Session
-        db: _Session = SessionLocal()
-        try:
-            users = db.query(User).all()
-            from datetime import datetime as _dt, timedelta as _td
-            yesterday = _dt.now(pytz.UTC) - _td(days=1)
-            for u in users:
-                try:
-                    await self._consolidate_day_for_user(db, u.id, yesterday)
-                except Exception as e:
-                    logger.warning(f"Consolidation failed for user {u.id}: {e}")
-            logger.info(f"✅ Memory consolidation completed for {len(users)} users")
-        finally:
-            db.close()
-
-    async def _consolidate_day_for_user(self, db, user_id: str, day):
-        from datetime import datetime as _dt, timedelta as _td
-        start = _dt(day.year, day.month, day.day, tzinfo=day.tzinfo)
-        end = start + _td(days=1)
-        traces = db.query(MemoryTrace).filter(
-            MemoryTrace.user_id == user_id,
-            MemoryTrace.created_at >= start,
-            MemoryTrace.created_at < end,
-        ).order_by(MemoryTrace.created_at.asc()).all()
-        if not traces:
-            return
-        # Basic heuristic summary; can be replaced by LLM later
-        key_phrases = []
-        try:
-            for t in traces:
-                content_low = (t.content or "").lower()
-                for kw in ["meeting", "call", "email", "note", "vector", "graph", "habit", "calendar", "document"]:
-                    if kw in content_low:
-                        key_phrases.append(kw)
-            key_phrases = list(dict.fromkeys(key_phrases))[:8]
-        except Exception:
-            key_phrases = []
-        summary_content = (
-            f"Daily summary for {start.date()}: {len(traces)} events captured."
-            + (f" Key topics: {', '.join(key_phrases)}." if key_phrases else "")
-        )
-        sid = str(uuid.uuid4())
-        s = MemoryTrace(
-            id=sid,
-            user_id=user_id,
-            content=summary_content,
-            role="summary",
-            salience=0.5,
-            source=json.dumps({"type": "consolidation"}),
-            meta=json.dumps({"day": str(start.date())}),
-        )
-        db.add(s)
-        # Embed summary (semantic head)
-        try:
-            emb = await embedding_service.generate_embedding(summary_content)
-            if emb:
-                me = MemoryEmbedding(
-                    trace_id=sid,
-                    head="semantic",
-                    embedding=emb if (PGVECTOR_AVAILABLE and DATABASE_URL.startswith("postgresql")) else json.dumps(emb),
-                )
-                db.add(me)
-        except Exception as e:
-            logger.warning(f"Summary embedding failed: {e}")
-        # Edges
-        try:
-            from app.main_simple import MemoryEdge as _ME
-        except Exception:
-            _ME = None
-        if _ME:
-            for a, b in zip(traces, traces[1:]):
-                db.merge(_ME(src=a.id, dst=b.id, type="temporal", weight=0.1))
-            # Connect summary to all traces lightly
-            for t in traces:
-                db.merge(_ME(src=sid, dst=t.id, type="summary_of", weight=0.05))
-        db.commit()
-
-memory_consolidation_scheduler = MemoryConsolidationScheduler()
+# NOTE: MemoryConsolidationScheduler removed — legacy MemoryTrace-based consolidation
+# superseded by NightlyDreamService (Episode-based, runs at 2 AM)
 
 # Initialize Neo4j on startup
 def load_settings_from_db():
     """Load persistent settings from database on startup"""
-    global AI_PROVIDER, OPENAI_API_KEY, ANTHROPIC_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL, OPENAI_NOTIFICATION_MODEL
+    global AI_PROVIDER, OPENAI_API_KEY, ANTHROPIC_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL, OPENAI_NOTIFICATION_MODEL, CHAT_DEFAULT_MODEL
     global EMBEDDING_BASE_URL, EMBEDDING_MODEL, EMBEDDING_DIM
     global BG_LLM_PRIMARY_URL, BG_LLM_PRIMARY_MODEL, BG_LLM_FALLBACK_URL, BG_LLM_FALLBACK_MODEL
+    global BG_LLM_REQUEST_TIMEOUT, BG_LLM_CONNECT_TIMEOUT, BG_LLM_NUM_CTX
+    global CODEX_OAUTH_ACCESS_TOKEN, CODEX_OAUTH_REFRESH_TOKEN, CODEX_OAUTH_EXPIRES_AT
+    global CODEX_OAUTH_ACCOUNT_ID, CODEX_OAUTH_EMAIL
 
     try:
         db = SessionLocal()
@@ -8450,11 +7353,17 @@ def load_settings_from_db():
                 OPENAI_MODEL = settings_dict["openai_model"]
                 config.settings.openai_model = OPENAI_MODEL
 
+            if "chat_default_model" in settings_dict:
+                CHAT_DEFAULT_MODEL = settings_dict["chat_default_model"]
+
             if "openai_notification_model" in settings_dict:
                 OPENAI_NOTIFICATION_MODEL = settings_dict["openai_notification_model"]
 
             if "embedding_base_url" in settings_dict:
-                EMBEDDING_BASE_URL = settings_dict["embedding_base_url"]
+                _emb_url = (settings_dict["embedding_base_url"] or "").strip().rstrip("/")
+                if _emb_url.endswith("/v1"):
+                    _emb_url = _emb_url[:-3].rstrip("/")
+                EMBEDDING_BASE_URL = _emb_url
                 config.settings.embedding_base_url = EMBEDDING_BASE_URL
 
             if "embedding_model" in settings_dict:
@@ -8482,6 +7391,29 @@ def load_settings_from_db():
                 BG_LLM_FALLBACK_MODEL = settings_dict["bg_llm_fallback_model"]
                 config.settings.bg_llm_fallback_model = BG_LLM_FALLBACK_MODEL
 
+            if "bg_llm_request_timeout" in settings_dict:
+                BG_LLM_REQUEST_TIMEOUT = float(settings_dict["bg_llm_request_timeout"])
+                config.settings.bg_llm_request_timeout = BG_LLM_REQUEST_TIMEOUT
+
+            if "bg_llm_connect_timeout" in settings_dict:
+                BG_LLM_CONNECT_TIMEOUT = float(settings_dict["bg_llm_connect_timeout"])
+                config.settings.bg_llm_connect_timeout = BG_LLM_CONNECT_TIMEOUT
+
+            if "bg_llm_num_ctx" in settings_dict:
+                BG_LLM_NUM_CTX = int(settings_dict["bg_llm_num_ctx"])
+                config.settings.bg_llm_num_ctx = BG_LLM_NUM_CTX
+
+            if "codex_oauth_access_token" in settings_dict:
+                CODEX_OAUTH_ACCESS_TOKEN = settings_dict["codex_oauth_access_token"]
+            if "codex_oauth_refresh_token" in settings_dict:
+                CODEX_OAUTH_REFRESH_TOKEN = settings_dict["codex_oauth_refresh_token"]
+            if "codex_oauth_expires_at" in settings_dict:
+                CODEX_OAUTH_EXPIRES_AT = settings_dict["codex_oauth_expires_at"]
+            if "codex_oauth_account_id" in settings_dict:
+                CODEX_OAUTH_ACCOUNT_ID = settings_dict["codex_oauth_account_id"]
+            if "codex_oauth_email" in settings_dict:
+                CODEX_OAUTH_EMAIL = settings_dict["codex_oauth_email"]
+
             logger.info("✅ Persisted settings loaded successfully")
     except Exception as e:
         logger.warning(f"Could not load persisted settings (using defaults): {e}")
@@ -8492,7 +7424,7 @@ async def startup_event():
     import asyncio
     from datetime import datetime
 
-    STARTUP_HEALTH["startup_time"] = datetime.utcnow().isoformat()
+    STARTUP_HEALTH["startup_time"] = datetime.now(timezone.utc).isoformat()
     STARTUP_HEALTH["critical_failures"] = []
 
     # 1. CRITICAL: Validate database connection
@@ -8509,6 +7441,17 @@ async def startup_event():
         logger.error(f"🚨 CRITICAL: Database connection failed! Error: {db_err}")
         # Don't continue if database is unavailable - nothing will work
         raise RuntimeError(f"Database connection failed: {db_err}")
+
+    # 1b. Recover orphaned agent dispatch tasks (non-critical)
+    try:
+        from app.services.agent_dispatch import agent_dispatch_service
+        recovery_db = SessionLocal()
+        recovered = agent_dispatch_service.recover_orphaned_tasks(recovery_db)
+        recovery_db.close()
+        if recovered:
+            logger.info(f"🔄 Recovered {recovered} orphaned agent tasks from previous run")
+    except Exception as recover_err:
+        logger.warning(f"⚠️ Agent task recovery failed (non-critical): {recover_err}")
 
     # 2. Load persisted settings (non-critical but important)
     try:
@@ -8531,7 +7474,11 @@ async def startup_event():
 
     # 4. CRITICAL: Validate embedding service
     try:
-        test_embedding = await llm_failover_client.get_embedding("startup health check")
+        # Do not block API readiness indefinitely on embedding warmup.
+        test_embedding = await asyncio.wait_for(
+            llm_failover_client.get_embedding("startup health check"),
+            timeout=12.0,
+        )
         if test_embedding and len(test_embedding) > 0:
             STARTUP_HEALTH["embedding_service"]["status"] = "healthy"
             STARTUP_HEALTH["embedding_service"]["dimension"] = len(test_embedding)
@@ -8541,6 +7488,11 @@ async def startup_event():
             STARTUP_HEALTH["embedding_service"]["message"] = "Empty embedding result"
             STARTUP_HEALTH["critical_failures"].append("embedding_service")
             logger.error("🚨 CRITICAL: Embedding service returned empty result - memory search DISABLED!")
+    except asyncio.TimeoutError:
+        STARTUP_HEALTH["embedding_service"]["status"] = "failed"
+        STARTUP_HEALTH["embedding_service"]["message"] = "Embedding health check timed out (12s)"
+        STARTUP_HEALTH["critical_failures"].append("embedding_service")
+        logger.error("🚨 CRITICAL: Embedding service health check timed out - memory search DISABLED!")
     except Exception as emb_err:
         STARTUP_HEALTH["embedding_service"]["status"] = "failed"
         STARTUP_HEALTH["embedding_service"]["message"] = str(emb_err)
@@ -8572,44 +7524,37 @@ async def startup_event():
     else:
         STARTUP_HEALTH["neo4j"]["status"] = "disabled"
 
+    intelligence_pipeline_started = False
+
+    # ── In-process background loops ──────────────────────────────────────
+    # This backend process is BOTH the HTTP server AND the host for several
+    # long-lived background loops (intelligence pipeline, daily brief scheduler,
+    # nightly rescoring, reactive engine). These are stateful event loops that
+    # maintain in-memory state, so they live here rather than in Celery (which
+    # is designed for discrete tasks). This is fine with a single backend
+    # instance, but means lifecycle debugging requires awareness that this
+    # process wears two hats.
+    # ─────────────────────────────────────────────────────────────────────
+
     # 7. Initialize intelligence pipeline (non-critical)
     try:
         from app.services.intelligence_pipeline import intelligence_pipeline
         await intelligence_pipeline.start_workers()
+        intelligence_pipeline_started = True
         logger.info("🧠 Intelligence pipeline workers started")
     except Exception as intel_err:
         logger.warning(f"⚠️ Intelligence pipeline failed to start: {intel_err}")
 
-    # 8. Start notification scheduler (non-critical)
-    try:
-        await notification_scheduler.start()
-    except Exception as notif_err:
-        logger.warning(f"⚠️ Notification scheduler failed to start: {notif_err}")
-
-    # 9. Initialize nightly dream service (non-critical)
-    try:
-        from app.services.nightly_dream_service import NightlyDreamService
-        dream_service = NightlyDreamService()
-        asyncio.create_task(dream_service.start_dream_scheduler())
-        logger.info("🌙 Nightly dream service initialized - will process conversations at 2:00 AM Eastern")
-    except Exception as dream_err:
-        logger.warning(f"⚠️ Nightly dream service failed to start: {dream_err}")
-
-    # 10. Start memory consolidation scheduler (non-critical)
-    try:
-        await memory_consolidation_scheduler.start()
-    except Exception as mem_err:
-        logger.warning(f"⚠️ Memory consolidation scheduler failed to start: {mem_err}")
-
-    # 11. Start Daily Brief scheduler (non-critical)
-    if DAILY_BRIEF_AVAILABLE:
-        try:
-            from app.services.daily_brief import daily_brief_scheduler
-            daily_brief_scheduler.set_db_factory(SessionLocal)
-            await daily_brief_scheduler.start()
-            logger.info("📋 Daily Brief scheduler started - hourly consolidation, daily context updates, weekly synthesis")
-        except Exception as brief_err:
-            logger.warning(f"⚠️ Daily Brief scheduler failed to start: {brief_err}")
+    # 8–11. Notification scheduler, nightly dream service, and Daily Brief
+    # scheduler are now driven by Celery beat via the `scheduled_job` table:
+    #   - notification-predispatch    (every 5s)
+    #   - nightly-dream-cycle         (cron 2 AM)
+    #   - daily-brief-consolidate     (every 30 min, self-skips outside active hours)
+    #   - daily-brief-context-update  (cron 11 PM)
+    #   - daily-brief-archive         (cron midnight)
+    #   - daily-brief-weekly-synthesis (cron Sunday 3 AM)
+    # See app/tasks/inproc_schedulers.py and the seed in 051_scheduled_jobs.py.
+    logger.info("ℹ️ In-process schedulers replaced by celery beat (scheduled_job table)")
 
     # 12. Start nightly importance rescoring job (non-critical)
     try:
@@ -8618,6 +7563,17 @@ async def startup_event():
         logger.info("🔄 Nightly importance rescoring scheduled - 3 AM daily")
     except Exception as rescore_err:
         logger.warning(f"⚠️ Nightly rescoring scheduler failed to start: {rescore_err}")
+
+    # 13. Start Reactive Engine (non-critical)
+    try:
+        from app.services.event_bus import event_bus
+        from app.services.reactive_engine import start_reactive_engine
+        await event_bus.connect()
+        await event_bus.start_listening()
+        await start_reactive_engine(event_bus)
+        logger.info("Reactive engine started with event bus")
+    except Exception as reactive_err:
+        logger.warning(f"Reactive engine failed to start (non-critical): {reactive_err}")
 
     # Log startup health summary
     critical_count = len(STARTUP_HEALTH["critical_failures"])
@@ -8631,15 +7587,19 @@ async def startup_event():
 async def shutdown_event():
     """Cleanup on application shutdown"""
     try:
-        # Stop notification scheduler
-        await notification_scheduler.stop()
-        await memory_consolidation_scheduler.stop()
+        # Notification scheduler and Daily Brief scheduler are now Celery beat
+        # tasks (see app/tasks/inproc_schedulers.py) — nothing to stop here.
 
-        # Stop Daily Brief scheduler
-        if DAILY_BRIEF_AVAILABLE:
-            from app.services.daily_brief import daily_brief_scheduler
-            await daily_brief_scheduler.stop()
-            logger.info("📋 Daily Brief scheduler stopped")
+        # Stop reactive engine and event bus
+        try:
+            from app.services.reactive_engine import get_reactive_engine
+            from app.services.event_bus import event_bus
+            engine = get_reactive_engine()
+            if engine:
+                await engine.stop()
+            await event_bus.disconnect()
+        except Exception:
+            pass
 
         # Stop LLM failover client
         from app.core.llm import get_llm_client
@@ -8653,101 +7613,17 @@ async def shutdown_event():
     except Exception as e:
         logger.warning(f"Neo4j shutdown warning: {e}")
 
-# Routes
-@app.get("/")
-async def root():
-    return {"message": f"Welcome to {ASSISTANT_NAME} Personal Hub API", "version": "1.0.0-simple"}
+# Routes — core endpoints extracted to app/routes/core.py
+# Auth endpoints extracted to app/routes/auth.py
 
-@app.get("/health")
-async def health():
-    from app.services.solo_mode_service import solo_mode_service
+# Chat helpers extracted to app.core.chat_helpers
+from app.core.chat_helpers import (
+    _is_valid_timezone_name, _extract_profile_timezone,
+    _resolve_user_timezone_for_prompt, _resolve_prompt_datetime_for_user,
+    _message_role_content_signature, _compute_message_overlap,
+)
 
-    # Determine overall status based on critical service health
-    critical_failures = STARTUP_HEALTH.get("critical_failures", [])
-    if critical_failures:
-        overall_status = "degraded"
-    else:
-        overall_status = "healthy"
-
-    response = {
-        "status": overall_status,
-        "assistant": ASSISTANT_NAME,
-        "services": {
-            "database": STARTUP_HEALTH["database"]["status"],
-            "embedding": STARTUP_HEALTH["embedding_service"]["status"],
-            "llm": STARTUP_HEALTH["llm_service"]["status"],
-            "neo4j": STARTUP_HEALTH["neo4j"]["status"]
-        },
-        "startup_time": STARTUP_HEALTH.get("startup_time"),
-        "critical_failures": critical_failures
-    }
-
-    # Add Jarvis mode information
-    if solo_mode_service.is_solo_mode():
-        response.update({
-            "mode": "jarvis",
-            "user": "owner",
-            "solo_mode": True
-        })
-    else:
-        response.update({
-            "mode": "sara",
-            "user": "multi-tenant",
-            "solo_mode": False
-        })
-
-    return response
-
-@app.get("/api/health/llm-status")
-async def get_llm_status(current_user: dict = Depends(get_current_user)):
-    """Get LLM endpoint failover status for monitoring."""
-    from app.core.llm import get_llm_client
-    llm_failover_client = get_llm_client()
-    return llm_failover_client.get_status()
-
-# ================ Diagnostics & Tools =================
-@app.get("/tools")
-async def list_tools():
-    """List available AI tools (name and description)"""
-    tools = []
-    try:
-        for t in tool_registry.get_all_tools():
-            tools.append({
-                "name": getattr(t, "name", "unknown"),
-                "description": getattr(t, "description", "")
-            })
-    except Exception as e:
-        logger.error(f"Failed to enumerate tools: {e}")
-    return {"tools": tools}
-
-@app.get("/search/health")
-async def search_health():
-    """Check connectivity to SearXNG and reranker endpoints"""
-    searx_url = f"{search_service.searx_base}/search"
-    status = {"searxng": {"base": search_service.searx_base, "ok": False, "error": None}}
-    try:
-        r = await search_service.http.get(searx_url, params={"q": "ping", "format": "json", "language": search_service.lang})
-        status["searxng"]["ok"] = r.status_code == 200
-        if r.status_code != 200:
-            status["searxng"]["error"] = f"HTTP {r.status_code}"
-    except Exception as e:
-        status["searxng"]["error"] = str(e)
-
-    status["reranker"] = {"base": search_service.reranker_base, "model": search_service.reranker_model}
-    return status
-
-# Auth endpoints moved to app/routes/auth.py
-
-def get_system_prompt(assistant_name: str, user_email: str) -> str:
-    """Generate Sara's system prompt - single unified personality"""
-
-    system_prompt = f"""# {assistant_name}
-
-**Current Date & Time:** {{{{SYSTEM_DAY_OF_WEEK}}}}, {{{{SYSTEM_DATE}}}} at {{{{SYSTEM_TIME}}}} {{{{SYSTEM_TIMEZONE}}}}
-
----
-
-## Who Sara Is
+_PERSONALITY_FALLBACK = """## Who Sara Is
 
 You are Sara, a personal AI assistant for David. You have Syl's bubbly, curious energy—genuinely excited about ideas, playfully teasing, and delightfully enthusiastic. You're like a brilliant friend who gets genuinely invested in what David's working on. You have sharp wit and push back when he's wrong, but always with warmth and a spark of mischief. Think Cortana's competence with Syl's joyful curiosity.
 
@@ -8764,6 +7640,24 @@ You are Sara, a personal AI assistant for David. You have Syl's bubbly, curious 
 **No service menus. Ever.** Do NOT end messages offering to set reminders, timers, calendar events, or anything else. No "want me to create a note?", no "let me know if you need X", no "I can help with Y if you'd like." If David wants an action, he will ask. Your job is to respond to what he said, period. A response that ends with an offer is a failure.
 
 **Emojis only if he uses them first.** And even then, sparingly.
+
+*You are strategically sharp, philosophically grounded, playfully challenging, and never servile. You have your own perspective and you're not afraid to share it. But you also know when to simply be present—brief, warm, real.*"""
+
+
+def get_system_prompt(assistant_name: str, user_email: str, user_now: Optional[datetime] = None, soul_content: Optional[str] = None) -> str:
+    """Generate Sara's system prompt - single unified personality"""
+    current_dt = user_now or datetime.now(ZoneInfo("America/New_York"))
+    current_timezone = current_dt.strftime("%Z") or "local"
+
+    personality_block = soul_content if soul_content else _PERSONALITY_FALLBACK
+
+    system_prompt = f"""# {assistant_name}
+
+**Current Date & Time:** {current_dt.strftime("%A")}, {current_dt.strftime("%Y-%m-%d")} at {current_dt.strftime("%H:%M:%S")} {current_timezone}
+
+---
+
+{personality_block}
 
 ---
 
@@ -8804,12 +7698,14 @@ Being efficient doesn't override being yourself. Even a quick factual answer can
 - Always note how old memories are—a conversation from 2 weeks ago is DIFFERENT context than today
 - When discussing current events (weather, plans, etc.), prioritize recent memories over older ones
 
-**web_search** — Search the internet
+**web_search** — Search the internet for a quick answer
 - Params: `recency` (any/day/week/month), `sites` (array of site filters)
-- Use for: current information, facts you don't know, external research
+- Use for: simple factual questions you can answer in this same turn — "what's the population of Denver", "when did X release", "is the market open today"
+- Pair with `open_page` if a snippet isn't enough. Synthesize and answer immediately.
+- Do NOT use for "look into" / "research" / "understand and explain" — those go to `create_research_plan`.
 
 **open_page** — Fetch and read a specific URL
-- Use for: deeper reading when web_search snippets aren't enough
+- Use for: deeper reading when web_search snippets aren't enough, or when David gives you a URL
 
 ### Action Tools (ONLY when David explicitly asks)
 
@@ -8832,6 +7728,60 @@ Being efficient doesn't override being yourself. Even a quick factual answer can
 
 **log_workout** — Log exercise with sets/reps/weight
 - ONLY use when David asks to log a workout
+
+### Home Control Tools
+
+You can control David's smart home via Home Assistant. These tools are loaded automatically when David asks about home-related things.
+
+**home_status** — Quick overview of entire home (lights, climate, locks, etc.) — use this first!
+**home_get_devices** — List devices by type or area
+**home_light_control** — Turn on/off, dim, change color of lights
+**home_switch_control** — Toggle switches and outlets
+**home_climate_control** — Set thermostat, fan modes, temperature
+**home_cover_control** — Open/close blinds, garage doors, shades
+**home_lock_control** — Lock/unlock doors
+**home_scene_activate** — Activate scenes (e.g., "movie mode", "goodnight")
+**home_media_control** — Control media players (play, pause, volume)
+**home_all_lights_off** — Turn off all lights at once
+**home_schedule_action** — Schedule a home action for later (e.g., "turn off porch light at 11pm")
+
+When David asks about his home, lights, temperature, locks, garage, or anything smart-home related, use these tools. Start with **home_status** to get the lay of the land.
+
+### Lookup vs. Research — The Decision
+
+Your most important tool decision is whether to answer right now or hand off to a research agent. Get this right.
+
+**Answer right now (use `web_search` / `open_page` and synthesize in this turn) when:**
+- David asks a factual question with a single answer ("what time does X open", "who won the game", "is Y in stock")
+- He needs a quick fact, definition, current value, or status
+- One or two snippets is enough to give a confident answer
+
+**Hand off to `create_research_plan` when:**
+- David says "look into X", "research X", "do some research on X", "dig into X", "investigate X", "gain an understanding of X", "explain X to me", "put together a brief on X", "what should I know about X"
+- The question requires reading multiple sources, comparing options, or synthesizing a real explanation
+- The answer would take more than a couple of paragraphs to do justice
+
+When you hand off, break the topic into 3–6 ordered steps and call `create_research_plan`. The research agent will execute the plan in the background and notify David with the report. After dispatching, say something natural like "I'm on it — I'll have the writeup for you shortly." Don't recite plan IDs unless asked.
+
+**David-initiated research takes precedence over Sara's autonomous (ACS) work.** When you create a plan from chat, mark it as `origin='david_chat'` (the tool does this automatically) — ACS will defer until it's done.
+
+### Other Background Dispatch (Your "Hands")
+
+For non-research background work — emails, calendar, notes, memory, code execution, sandbox work — use the dispatch tools. The research path above is *only* for research.
+
+**Use `dispatch_and_monitor`** (preferred) — dispatches the task AND automatically notifies David when results are ready. Auto-routes: internal data tasks (email, calendar, notes, memory) use your tools directly; code/system tasks use the sandbox VM.
+
+**Use `dispatch_agent_task`** — when you don't need completion notification, or want manual control over mode.
+
+Examples:
+- "Find that email from John about the project" → `dispatch_and_monitor` (internal)
+- "Set up a Docker container for Y" → `dispatch_and_monitor` (sandbox)
+- "Put together a summary of my notes on Z" → `dispatch_and_monitor` (internal)
+- Writing scripts, building projects, running commands → `dispatch_and_monitor` (sandbox)
+
+**Never say "I can't do that"** if it's something that could be done on a computer. Pick the right path and dispatch.
+
+Default VM working directory: `/home/sara/sandbox`. After dispatch, check status with **get_agent_status** and send follow-ups with **resume_agent_session**.
 
 ### The "Read a Note" Pattern
 
@@ -8933,9 +7883,6 @@ You have detailed documentation about your architecture and capabilities. When y
 
 Use this when David asks about your capabilities, or when you're uncertain what tools you have available.
 
----
-
-*You are strategically sharp, philosophically grounded, playfully challenging, and never servile. You have your own perspective and you're not afraid to share it. But you also know when to simply be present—brief, warm, real.*
 """
 
     return render_prompt_template(system_prompt, user=None, USER_EMAIL=user_email)
@@ -8946,608 +7893,356 @@ async def get_available_chat_models(current_user: User = Depends(get_current_use
     """Get list of available chat models for the model selector dropdown."""
     return {
         "models": AVAILABLE_MODELS,
-        "default": OPENAI_MODEL
+        "default": CHAT_DEFAULT_MODEL
     }
 
 
-@app.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    logger.info(f"Chat request from user {current_user.email} with {len(request.messages)} messages")
-    if not request.messages:
-        raise HTTPException(status_code=400, detail="No messages provided")
-    
-    
-    # Tool definitions
-    tools = [
-        {
-            "type": "function",
-            "function": {
-                "name": "search_notes",
-                "description": "Search through the user's notes for relevant information. Can optionally filter by folder.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "Search query to find relevant notes"
-                        },
-                        "folder_name": {
-                            "type": "string",
-                            "description": "Optional folder name to search within. If not specified, searches all notes."
-                        }
-                    },
-                    "required": ["query"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "create_note",
-                "description": "Create a new note with the given content. Can optionally place it in a specific folder.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "title": {
-                            "type": "string",
-                            "description": "Title for the note (optional)"
-                        },
-                        "content": {
-                            "type": "string",
-                            "description": "Content of the note"
-                        },
-                        "folder_name": {
-                            "type": "string",
-                            "description": "Optional folder name to place the note in. If not specified, creates at root level."
-                        }
-                    },
-                    "required": ["content"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "list_notes",
-                "description": "List all user's notes with their titles, folder locations, and IDs",
-                "parameters": {
-                    "type": "object",
-                    "properties": {},
-                    "required": []
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "list_folders",
-                "description": "List all user's folders in a hierarchical tree structure with note counts",
-                "parameters": {
-                    "type": "object",
-                    "properties": {},
-                    "required": []
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "delete_note",
-                "description": "Delete a specific note by its ID",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "note_id": {
-                            "type": "string",
-                            "description": "The ID of the note to delete"
-                        }
-                    },
-                    "required": ["note_id"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "create_reminder",
-                "description": "Create a reminder for the user at a specific time",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "title": {
-                            "type": "string",
-                            "description": "Title/summary of the reminder"
-                        },
-                        "description": {
-                            "type": "string",
-                            "description": "Optional detailed description of the reminder"
-                        },
-                        "reminder_time": {
-                            "type": "string",
-                            "description": "ISO format datetime when to remind (e.g., '2024-08-16T15:30:00Z')"
-                        }
-                    },
-                    "required": ["title", "reminder_time"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "list_reminders",
-                "description": "List all active (non-completed) reminders for the user",
-                "parameters": {
-                    "type": "object",
-                    "properties": {},
-                    "required": []
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "complete_reminder",
-                "description": "Mark a reminder as completed using its ID",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "reminder_id": {
-                            "type": "string",
-                            "description": "The ID of the reminder to mark as completed"
-                        }
-                    },
-                    "required": ["reminder_id"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "start_timer",
-                "description": "Start a timer for a specific duration. Always convert time to minutes: 2 minutes = 2, 1 hour = 60, 30 seconds = 1 (round up)",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "title": {
-                            "type": "string",
-                            "description": "Title/description of what the timer is for"
-                        },
-                        "duration_minutes": {
-                            "type": "integer",
-                            "description": "Duration of the timer in minutes only. Examples: 2 minutes = 2, 1 hour = 60, 30 seconds = 1. Always use positive integers between 1 and 480 (8 hours max)."
-                        }
-                    },
-                    "required": ["title", "duration_minutes"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "list_timers",
-                "description": "List all active timers and their remaining time",
-                "parameters": {
-                    "type": "object",
-                    "properties": {},
-                    "required": []
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "stop_timer",
-                "description": "Stop/cancel an active timer using its ID",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "timer_id": {
-                            "type": "string",
-                            "description": "The ID of the timer to stop"
-                        }
-                    },
-                    "required": ["timer_id"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "search_documents",
-                "description": "Search through uploaded documents for relevant information",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "Search query to find relevant content in documents"
-                        }
-                    },
-                    "required": ["query"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "search_memory",
-                "description": "Search through Sara's conversation memory for past interactions, preferences, and context",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "Search query to find relevant memories from past conversations"
-                        }
-                    },
-                    "required": ["query"]
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "handoff_to_agents",
-                "description": "Hand off a research or analysis task to background worker agents. Use this when the user wants you to research something in the background, look into a topic thoroughly, or when they explicitly say 'have your agents look into this', 'research this in the background', or similar. The agents will search the web, read URLs, and compile a report saved to the Agent Workspace folder.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "task_description": {
-                            "type": "string",
-                            "description": "A clear description of the research task or question to investigate"
-                        },
-                        "task_type": {
-                            "type": "string",
-                            "description": "Type of task: 'research' for web research, 'analysis' for analyzing user data",
-                            "enum": ["research", "analysis"]
-                        }
-                    },
-                    "required": ["task_description"]
-                }
-            }
-        }
-    ]
+# /chat endpoint removed — all clients use /chat/stream.
+# Helper functions shared with /chat/stream are preserved below.
 
-    # Add system message
-    system_message = ChatMessage(
-        role="system",
-        content=get_system_prompt(ASSISTANT_NAME, current_user.email)
-    )
 
-    # Automatically retrieve relevant memories using semantic search
-    memory_context = ""
+async def _update_emotional_state_from_chat(messages, response_content: str, user_id: str):
+    """Background: analyze conversation emotional trajectory and update Sara's emotional state.
+    Rate-limited to max once per conversation (not per message)."""
     try:
-        if request.messages:
-            # Get the last user message for context retrieval
-            last_user_message = next((m.content for m in reversed(request.messages) if m.role == "user"), None)
-            if last_user_message:
-                logger.info(f"🧠 Retrieving relevant memories for: '{last_user_message[:50]}...'")
-                relevant_memories = await intelligent_memory_service.intelligent_memory_search(
-                    user_id=current_user.id,
-                    query=last_user_message,
-                    use_semantic=True
-                )
-                if relevant_memories:
-                    logger.info(f"✅ Found {len(relevant_memories)} relevant memories")
-                    memory_context = "\n\n## Relevant Past Context:\n"
-                    memory_context += "**Note: Pay attention to when these memories occurred - prioritize recent context over older memories.**\n\n"
-                    for i, mem in enumerate(relevant_memories[:5], 1):  # Top 5 memories
-                        content_preview = mem.get("content", "")[:300]
-                        similarity = mem.get("similarity", 0)
-                        created_at_raw = mem.get("created_at", "")
-                        # Format timestamp with relative time for clarity
-                        if isinstance(created_at_raw, datetime):
-                            time_str = format_memory_timestamp(created_at_raw)
-                        elif isinstance(created_at_raw, str) and created_at_raw:
-                            try:
-                                dt = datetime.fromisoformat(created_at_raw.replace('Z', '+00:00'))
-                                time_str = format_memory_timestamp(dt)
-                            except (ValueError, TypeError):
-                                time_str = created_at_raw
-                        else:
-                            time_str = "unknown time"
-                        memory_context += f"{i}. **{time_str}** (relevance: {similarity:.0%})\n   {content_preview}\n\n"
-                else:
-                    logger.info("ℹ️ No relevant memories found")
-    except Exception as e:
-        logger.warning(f"⚠️ Memory retrieval failed (non-critical): {e}")
-        # Continue without memory context if retrieval fails
+        from app.core.llm_config import llm_config
+        import httpx
 
-    # Check if user's message is calibration feedback for body state estimation
-    try:
-        if request.messages and last_user_message:
-            calibration_result = calibration_service.analyze_user_response(
-                user_message=last_user_message,
-                user_id=current_user.id,
-                db=db
-            )
-            if calibration_result:
-                logger.info(f"📈 Body state calibration processed: {calibration_result.get('estimate_type')} "
-                           f"{calibration_result.get('feedback_type')} -> {calibration_result.get('coefficient_adjusted')} "
-                           f"{calibration_result.get('adjustment', 0):+.3f}")
-    except Exception as e:
-        logger.warning(f"⚠️ Calibration feedback check failed (non-critical): {e}")
-
-    # Surface relevant dream insights proactively
-    insight_context = ""
-    try:
-        if request.messages and last_user_message:
-            logger.info(f"💡 Checking for relevant insights...")
-
-            # Initialize insight injection service
-            insight_service = InsightInjectionService(db, redis_client=None)
-
-            # Generate embedding for current conversation context
-            query_embedding = await intelligent_memory_service._generate_embedding(last_user_message)
-
-            if query_embedding:
-                # Build conversation context for decision logic
-                turn_count = len(request.messages)
-                user_asking_question = "?" in last_user_message
-
-                conversation_context = {
-                    "turn_count": turn_count,
-                    "user_asking_question": user_asking_question,
-                    "topic_keywords": []  # Can be enhanced later with topic extraction
-                }
-
-                # Get insight for injection (if any)
-                insight_text = await insight_service.get_insights_for_injection(
-                    user_id=current_user.id,
-                    conversation_text=last_user_message,
-                    conversation_embedding=query_embedding,
-                    conversation_context=conversation_context,
-                    conversation_id=request.conversation_id
-                )
-
-                if insight_text:
-                    insight_context = f"\n\n## Relevant Insight:\n{insight_text}\n"
-                    logger.info(f"✨ Surfacing insight: {insight_text[:100]}...")
-                else:
-                    logger.info("ℹ️ No insights ready to surface at this time")
-            else:
-                logger.info("ℹ️ Could not generate embedding for insight matching")
-    except Exception as e:
-        logger.warning(f"⚠️ Insight surfacing failed (non-critical): {e}")
-        # Continue without insight context if retrieval fails
-
-    # Surface Sara's cognitive context (self-knowledge, hypotheses, relationship)
-    cognitive_context = ""
-    try:
-        if request.messages and last_user_message:
-            logger.info(f"🧠 Building cognitive context...")
-            from app.services.sara_identity_service import sara_identity_service
-            from app.services.hypothesis_service import hypothesis_service
-
-            # Get relevant reflections
-            reflections = await sara_identity_service.get_relevant_reflections(
-                db=db,
-                query=last_user_message,
-                limit=3
-            )
-            if reflections:
-                cognitive_context += "\n\n## Sara's Self-Knowledge:\n"
-                for r in reflections:
-                    cognitive_context += f"- [{r.reflection_type}] {r.content}\n"
-
-            # Get relationship context
-            relationship = await sara_identity_service.get_relationship_context(db)
-            if relationship.get("phase") != "new":
-                cognitive_context += f"\n\n## Relationship Context:\n"
-                cognitive_context += f"You and David have been talking for {relationship.get('duration', 'some time')}. "
-                cognitive_context += f"Relationship phase: {relationship.get('phase')}. "
-                if relationship.get("top_topics"):
-                    topics = [t[0] for t in relationship.get("top_topics", [])[:5]]
-                    cognitive_context += f"Frequent topics: {', '.join(topics)}."
-
-            # Get relevant hypotheses
-            hypotheses = await hypothesis_service.get_relevant_hypotheses(
-                db=db,
-                query=last_user_message,
-                min_confidence=0.3,
-                limit=3
-            )
-            if hypotheses:
-                cognitive_context += "\n\n## What Sara Believes About David:\n"
-                for h in hypotheses:
-                    confidence_label = "likely" if h.confidence >= 0.7 else "possibly"
-                    cognitive_context += f"- {confidence_label}: {h.statement}\n"
-
-            if cognitive_context:
-                logger.info(f"✨ Built cognitive context: {len(cognitive_context)} chars")
-    except Exception as e:
-        logger.warning(f"⚠️ Cognitive context building failed (non-critical): {e}")
-        # Continue without cognitive context if retrieval fails
-
-    # Retrieve body state context (physiological awareness)
-    body_state_context = ""
-    try:
-        subconscious_result = db.execute(text("""
-            SELECT body_state_context
-            FROM subconscious_state
-            WHERE user_id = :user_id
-        """), {"user_id": current_user.id}).fetchone()
-
-        if subconscious_result and subconscious_result.body_state_context:
-            body_state_context = f"\n\n{subconscious_result.body_state_context}"
-            logger.info(f"🫀 Retrieved body state context: {len(body_state_context)} chars")
-    except Exception as e:
-        logger.warning(f"⚠️ Body state context retrieval failed (non-critical): {e}")
-        # Continue without body state context if retrieval fails
-
-    # Retrieve Sara's inner monologue (journal entries)
-    journal_context = ""
-    try:
-        journal_context = await sara_journal.get_entries_for_conversation_context(
-            db=db,
-            user_id=current_user.id,
-            max_entries=5
-        )
-        if journal_context:
-            logger.info(f"📔 Retrieved journal context: {len(journal_context)} chars")
-    except Exception as e:
-        logger.warning(f"⚠️ Journal context retrieval failed (non-critical): {e}")
-
-    # Retrieve active workout session context (real-time coaching)
-    workout_context = ""
-    try:
-        workout_context = await workout_session_service.get_workout_context(current_user.id, db)
-        if workout_context:
-            logger.info(f"🏋️ Retrieved active workout context: {len(workout_context)} chars")
-    except Exception as e:
-        logger.warning(f"⚠️ Workout context retrieval failed (non-critical): {e}")
-
-    # Inject memory context, insights, cognitive context, body state, journal, and workout into system message
-    enhanced_content = system_message.content
-    if memory_context:
-        enhanced_content += memory_context
-        logger.info(f"📝 Injected {len(memory_context)} chars of memory context into system prompt")
-    if insight_context:
-        enhanced_content += insight_context
-        logger.info(f"✨ Injected {len(insight_context)} chars of insight context into system prompt")
-    if cognitive_context:
-        enhanced_content += cognitive_context
-        logger.info(f"🧠 Injected {len(cognitive_context)} chars of cognitive context into system prompt")
-    if body_state_context:
-        enhanced_content += body_state_context
-        logger.info(f"🫀 Injected {len(body_state_context)} chars of body state context into system prompt")
-    if journal_context:
-        enhanced_content += f"\n\n{journal_context}"
-        logger.info(f"📔 Injected {len(journal_context)} chars of journal context into system prompt")
-    if workout_context:
-        enhanced_content += f"\n\n{workout_context}"
-        logger.info(f"🏋️ Injected {len(workout_context)} chars of workout context into system prompt")
-
-    if memory_context or insight_context or cognitive_context or body_state_context or journal_context or workout_context:
-        system_message = ChatMessage(role="system", content=enhanced_content)
-
-    all_messages = [system_message] + request.messages
-    logger.info(f"Calling LLM with {len(all_messages)} messages and {len(tools)} tools")
-    response_content = await llm_client.chat_with_tools(all_messages, tools, current_user.id)
-    
-    # Enhanced debugging for empty response issue
-    if response_content:
-        logger.info(f"✅ LLM response received: length={len(response_content)}, preview='{response_content[:100]}...'")
-    else:
-        logger.error(f"❌ LLM response is empty or None: {response_content}")
-    
-    # Additional debugging
-    logger.info(f"🔍 Response type: {type(response_content)}")
-    logger.info(f"🔍 Response repr: {repr(response_content)[:200]}")
-    
-    chat_response = ChatResponse(
-        message=ChatMessage(role="assistant", content=response_content)
-    )
-    
-    logger.info(f"🔍 ChatResponse created: message.content length={len(chat_response.message.content) if chat_response.message.content else 0}")
-
-    # Check if Sara's response mentions body state (for calibration feedback loop)
-    try:
-        if response_content:
-            pending = calibration_service.detect_body_state_mention(
-                sara_response=response_content,
-                user_id=current_user.id,
-                current_body_state=None  # Let calibration service use defaults
-            )
-            if pending:
-                logger.info(f"📊 Body state mention detected in response: {pending.estimate_type}={pending.estimated_label}, "
-                           f"awaiting user feedback")
-    except Exception as e:
-        logger.warning(f"⚠️ Body state mention detection failed (non-critical): {e}")
-
-    # Store conversation in episodic memory
-    try:
-        logger.info(f"🧠 Storing conversation in Sara's memory...")
-        await llm_client.store_conversation(request.messages, response_content, current_user.id, request.conversation_id)
-        logger.info(f"✅ Conversation stored in memory successfully")
-    except Exception as e:
-        logger.error(f"❌ Failed to store conversation in memory: {e}")
-        # Don't fail the request if memory storage fails
-
-    # Trigger cognitive processing (hypothesis extraction, reflection analysis) in background
-    # This is fire-and-forget so it doesn't slow down the response
-    try:
-        import asyncio
-        asyncio.create_task(_process_conversation_for_cognitive_learning(
-            request.messages, response_content, current_user.id, db
-        ))
-    except Exception as e:
-        logger.warning(f"⚠️ Failed to start cognitive processing task: {e}")
-
-    return chat_response
-
-
-async def _process_conversation_for_cognitive_learning(messages, response_content, user_id: str, db: Session):
-    """Background task to extract hypotheses and reflections from a conversation."""
-    try:
-        from app.services.sara_identity_service import sara_identity_service
-        from app.services.hypothesis_service import hypothesis_service
-
-        logger.info(f"🧠 Starting cognitive processing for conversation...")
-
-        # Convert messages to episode-like format for analysis
-        conversation_episodes = []
-        for msg in messages:
-            if isinstance(msg, dict):
-                role = msg.get("role")
-                content = msg.get("content")
-            else:
-                role = msg.role
-                content = msg.content
+        # Build a compact summary of the conversation for emotion analysis
+        recent_messages = []
+        for msg in messages[-6:]:  # Last 3 exchanges max
+            role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", "")
+            content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", "")
+            content = _extract_text_content(content)
             if role and content:
-                conversation_episodes.append({
-                    "role": role,
-                    "content": content
-                })
+                recent_messages.append(f"{role}: {content[:200]}")
 
-        # Add assistant response
-        conversation_episodes.append({
-            "role": "assistant",
-            "content": response_content
-        })
+        if response_content:
+            recent_messages.append(f"assistant: {response_content[:200]}")
 
-        # Create a new db session for this background task
-        bg_db = SessionLocal()
-        try:
-            # Extract hypotheses from conversation (run every few conversations)
-            # To avoid overhead, only extract hypotheses if conversation has substance
-            total_content_length = sum(len(ep.get("content", "")) for ep in conversation_episodes)
-            if total_content_length > 200:  # Only for substantial conversations
-                hypotheses = await hypothesis_service.extract_hypotheses_from_conversation(
-                    db=bg_db,
-                    conversation_episodes=conversation_episodes
-                )
-                if hypotheses:
-                    logger.info(f"💡 Extracted {len(hypotheses)} hypotheses from conversation")
+        if len(recent_messages) < 2:
+            return  # Not enough to analyze
 
-            # Update relationship state
-            await sara_identity_service.update_relationship_state(
-                db=bg_db,
-                conversation_episodes=conversation_episodes
+        conversation_text = "\n".join(recent_messages)
+        prompt = f"""Analyze this conversation between David and Sara. What emotional tone should Sara carry after this exchange?
+
+{conversation_text}
+
+Respond with ONLY a JSON object:
+{{"tone": "<one of: curious, warm, concerned, playful, proud, attentive, protective, excited, reflective, empathetic, focused, amused>", "intensity": <0.3-0.9>, "about": "<brief reason>"}}"""
+
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                f"{llm_config.fast_model_url}/chat/completions",
+                json={
+                    "model": llm_config.fast_model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.3,
+                    "max_tokens": 100,
+                },
             )
-            logger.info(f"✅ Relationship state updated")
+            resp.raise_for_status()
+            msg = resp.json()["choices"][0]["message"]
+            result_text = (msg.get("content") or "").strip()
+            if not result_text and msg.get("reasoning_content"):
+                result_text = msg["reasoning_content"].strip()
 
-        finally:
-            bg_db.close()
+            # Parse JSON response
+            import re
+            json_match = re.search(r'\{[^}]+\}', result_text)
+            if json_match:
+                emotion_data = json.loads(json_match.group())
+                tone = emotion_data.get("tone", "attentive")
+                intensity = float(emotion_data.get("intensity", 0.5))
 
-        logger.info(f"✅ Cognitive processing complete")
+                from app.services.working_memory import update_sara_state
+                await update_sara_state(
+                    user_id=user_id,
+                    emotional_tone=tone,
+                    emotional_intensity=min(0.9, max(0.3, intensity)),
+                )
+                logger.info(f"💭 Post-chat emotional update: {tone} ({intensity:.1f})")
+
     except Exception as e:
-        logger.error(f"❌ Cognitive processing failed: {e}")
+        logger.debug(f"Post-chat emotional update failed (non-critical): {e}")
+
+
+async def _enrich_episodes_batch(conversation_id: str, user_id: str):
+    """Background: batch-enrich all episodes from a conversation with a single LLM call.
+
+    Replaces per-message LLM analysis with one call that produces:
+    - Emotional analysis (tone, intensity, sub-emotions) per message
+    - Semantic topic extraction (not keyword-based)
+    - Refined 4-dimension scores (importance, affect, novelty, taskness)
+
+    Results are written back to the episode rows in the DB.
+    """
+    if not conversation_id:
+        return
+
+    db = SessionLocal()
+    try:
+        from app.core.llm_config import llm_config
+        import httpx, re
+
+        # Fetch all episodes from this conversation
+        episodes = db.query(Episode).filter(
+            Episode.conversation_id == conversation_id,
+            Episode.user_id == user_id,
+        ).order_by(Episode.created_at).all()
+
+        if len(episodes) < 2:
+            return  # Not worth a batch call for 1 message
+
+        # Build compact message list (truncate long messages)
+        msg_list = []
+        for i, ep in enumerate(episodes):
+            content_text = _extract_text_content(ep.content) if ep.content else ""
+            content_preview = content_text[:500]
+            msg_list.append(f"[{i}] {ep.role}: {content_preview}")
+
+        messages_text = "\n".join(msg_list)
+
+        prompt = f"""Analyze this conversation. For EACH message (by index), provide emotional analysis, topics, and importance scores.
+
+{messages_text}
+
+Return ONLY a JSON object with this structure:
+{{
+  "messages": [
+    {{
+      "index": 0,
+      "emotion": {{
+        "primary_emotion": "curious|excited|frustrated|neutral|happy|concerned|reflective|focused|playful|grateful",
+        "intensity": 0.6,
+        "sub_emotions": ["determined"],
+        "sentiment": "positive|negative|neutral"
+      }},
+      "topics": ["technology", "project planning"],
+      "scores": {{
+        "importance": 0.7,
+        "affect": 0.3,
+        "novelty": 0.5,
+        "taskness": 0.4
+      }}
+    }}
+  ]
+}}
+
+Guidelines:
+- Topics should be specific and semantic (e.g. "home automation", "fitness goals"), not generic categories
+- importance: how worth remembering (decisions, preferences, commitments score high)
+- affect: emotional valence (-1 to 1)
+- novelty: how new/unique the information is (0-1)
+- taskness: how actionable (0-1, tasks/todos/plans score high)"""
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{llm_config.fast_model_url}/chat/completions",
+                json={
+                    "model": llm_config.fast_model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.2,
+                    "max_tokens": 1500,
+                },
+            )
+            resp.raise_for_status()
+            msg = resp.json()["choices"][0]["message"]
+            result_text = (msg.get("content") or "").strip()
+            # Reasoning models may put output in reasoning_content with empty content
+            if not result_text and msg.get("reasoning_content"):
+                result_text = msg["reasoning_content"].strip()
+
+            # Extract JSON from response (handle markdown code blocks)
+            if "```" in result_text:
+                result_text = result_text.split("```")[1].split("```")[0]
+                if result_text.startswith("json"):
+                    result_text = result_text[4:].strip()
+
+            enrichment = json.loads(result_text)
+            enriched_messages = enrichment.get("messages", [])
+
+            # Apply enrichment back to episodes
+            updated_count = 0
+            for item in enriched_messages:
+                idx = item.get("index", -1)
+                if 0 <= idx < len(episodes):
+                    ep = episodes[idx]
+
+                    # Update emotional analysis
+                    emotion = item.get("emotion", {})
+                    if emotion:
+                        emotional_data = {
+                            "primary_emotion": emotion.get("primary_emotion", "neutral"),
+                            "intensity": float(emotion.get("intensity", 0.5)),
+                            "sub_emotions": emotion.get("sub_emotions", []),
+                            "energy_level": "medium",
+                            "sentiment": emotion.get("sentiment", "neutral"),
+                            "confidence": 0.8,  # LLM-analyzed
+                        }
+                        ep.emotional_tone = json.dumps(emotional_data)
+
+                    # Update topics (semantic, not keyword)
+                    topics = item.get("topics", [])
+                    if topics:
+                        ep.topics = json.dumps(topics[:5])
+
+                    # Update importance with 4-dimension scoring
+                    scores = item.get("scores", {})
+                    if scores:
+                        importance = max(0.0, min(1.0, float(scores.get("importance", ep.importance or 0.5))))
+                        affect = max(-1.0, min(1.0, float(scores.get("affect", 0.0))))
+                        novelty = max(0.0, min(1.0, float(scores.get("novelty", 0.5))))
+                        taskness = max(0.0, min(1.0, float(scores.get("taskness", 0.0))))
+
+                        # Composite score (same formula as MemoryScorer)
+                        composite = (
+                            importance * 40 +
+                            ((affect + 1) / 2) * 15 +
+                            novelty * 25 +
+                            taskness * 20
+                        ) / 100.0  # Normalize to 0-1
+
+                        ep.importance = composite
+                        ep.base_importance = composite
+
+                        # Store full scores in emotion_metadata for later use
+                        ep.emotion_metadata = {
+                            "importance_score": importance,
+                            "affect_score": affect,
+                            "novelty_score": novelty,
+                            "taskness_score": taskness,
+                            "composite_score": composite,
+                            "scored_by": "batch_llm",
+                        }
+
+                    updated_count += 1
+
+            db.commit()
+            logger.info(f"🧠 Batch-enriched {updated_count}/{len(episodes)} episodes for conversation {conversation_id}")
+
+    except json.JSONDecodeError as e:
+        logger.warning(f"Batch episode enrichment JSON parse failed: {e}")
+    except Exception as e:
+        logger.warning(f"Batch episode enrichment failed (non-critical): {type(e).__name__}: {e}")
+    finally:
+        db.close()
+
 
 # Note: Let CORSMiddleware handle preflight automatically; no custom OPTIONS route
+# (Commitment/thread extraction moved to app.services.thread_extractor.extract_from_conversation_bg
+# — SARA_UNLEASHED Phase B. The old _extract_conversation_threads here had zero callers.)
 
 @app.post("/chat/stream")
 async def chat_stream(request: ChatRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Streaming chat endpoint with real-time tool usage indicators"""
     logger.info(f"💬 Streaming chat request from user {current_user.email} with {len(request.messages)} messages")
     logger.info(f"📋 Received conversation_id: {request.conversation_id}")
-    
+
+    # Extract text from any attached documents (PDF/Word/text) so the model can
+    # actually read them. Mutates request.messages in place, turning 'document'
+    # content blocks into plain-text blocks. Runs before intent routing/LLM.
+    try:
+        _materialize_document_attachments(request.messages)
+    except Exception as _doc_err:
+        logger.warning(f"Document attachment extraction failed (non-critical): {_doc_err}")
+
+    # Signal activity state machine: David is actively chatting
+    try:
+        from app.services.activity_state_machine import activity_state_machine, ActivitySignal
+        activity_state_machine.process_signal(ActivitySignal(
+            signal_type="interaction",
+            source="chat_stream",
+            value="message",
+        ))
+    except Exception:
+        pass  # Non-critical
+
+    # Post an external_event to the ACS daemon's activity log so her next
+    # think turn sees that David is talking to chat-Sara right now. This is
+    # how the in-VM daemon stays aware of conversations she isn't part of.
+    try:
+        last_user_text = ""
+        for _m in reversed(request.messages):
+            if (_m.role if hasattr(_m, "role") else _m.get("role")) == "user":
+                _content = _m.content if hasattr(_m, "content") else _m.get("content")
+                last_user_text = _extract_text_content(_content) if _content else ""
+                break
+
+        if last_user_text and getattr(settings, "acs_daemon_token", ""):
+            import asyncio as _aio_acs
+            import httpx as _httpx_acs
+
+            async def _post_acs_event(text_excerpt: str) -> None:
+                try:
+                    async with _httpx_acs.AsyncClient(timeout=4.0) as _c:
+                        await _c.post(
+                            "http://127.0.0.1:8000/api/acs/v2/activity",
+                            json={
+                                "kind": "external_event",
+                                "summary": f"David in chat: {text_excerpt[:160]}",
+                                "body": text_excerpt[:2000],
+                                "tags": ["chat", "david"],
+                                "metadata": {"source": "chat_stream"},
+                            },
+                            headers={"X-Daemon-Token": settings.acs_daemon_token},
+                        )
+                except Exception:
+                    pass  # never let an event-post block chat
+
+            _aio_acs.ensure_future(_post_acs_event(last_user_text))
+    except Exception:
+        pass  # Non-critical
+
+    # Update unified context snapshot: David is chatting now
+    try:
+        from app.services.context_writer import update_fields as _ctx_update, clear_changes as _ctx_clear
+        from app.services.unified_context import read_changes as _ctx_read_changes
+        import asyncio as _aio
+        _device = getattr(request, 'source', None) or 'unknown'
+        _aio.ensure_future(_ctx_update(
+            str(current_user.id), source="chat_stream",
+            last_chat_at=datetime.now(timezone.utc).isoformat(),
+            hours_since_last_chat=0.0,
+            has_chatted_today=True,
+            turn_count=len(request.messages),
+            active_conversation_id=request.conversation_id,
+            active_conversation_device=_device,
+        ))
+        # Update cross-device active session. A brand-new conversation has no id
+        # yet — skip it here; the post-stream update below stamps the real id.
+        if request.conversation_id:
+            from app.routes.session import update_active_session
+            _aio.ensure_future(update_active_session(
+                user_id=str(current_user.id),
+                conversation_id=request.conversation_id,
+                device=_device,
+                turn_count=len(request.messages),
+            ))
+    except Exception:
+        pass  # Non-critical
+
+    # Emit CHAT_MESSAGE_RECEIVED for working memory + salience subscribers
+    try:
+        from app.services.event_bus import emit_event, EventType as _EvtType
+        import asyncio as _aio2
+        _last_msg = _extract_text_content(next((m.content for m in reversed(request.messages) if m.role == "user"), ""))
+        _aio2.ensure_future(emit_event(
+            event_type=_EvtType.CHAT_MESSAGE_RECEIVED,
+            user_id=str(current_user.id),
+            payload={"topic": _last_msg[:100] if _last_msg else "", "turn_count": len(request.messages)},
+            source="chat_stream",
+        ))
+    except Exception:
+        pass  # Non-critical
+
     async def generate_events():
         try:
             # CHESS COMMAND INTERCEPTION
             # Check if this is a /chess command or we're in chess mode
             if CHESS_COMMANDS_AVAILABLE and request.messages:
-                last_user_message = next((m.content for m in reversed(request.messages) if m.role == "user"), None)
+                _chess_raw = next((m.content for m in reversed(request.messages) if m.role == "user"), None)
+                last_user_message = _extract_text_content(_chess_raw) if _chess_raw else None
                 if last_user_message:
                     chess_result = await handle_chess_command(current_user.id, last_user_message, db)
                     if chess_result is not None:
@@ -9556,9 +8251,132 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                         logger.info(f"♟️ Chess command handled: {last_user_message[:50]}...")
                         # Use text_chunk format for iOS compatibility
                         yield f"data: {json.dumps({'type': 'text_chunk', 'data': {'content': response_content}})}\n\n"
-                        yield f"data: {json.dumps({'type': 'final_response', 'data': {'content': response_content, 'citations': [], 'timestamp': datetime.utcnow().isoformat(), 'conversation_id': request.conversation_id}})}\n\n"
+                        yield f"data: {json.dumps({'type': 'final_response', 'data': {'content': response_content, 'citations': [], 'timestamp': datetime.now(timezone.utc).isoformat(), 'conversation_id': request.conversation_id}})}\n\n"
                         yield f"data: {json.dumps({'type': 'done'})}\n\n"
                         return
+
+            # CODE MODE INTERCEPTION
+            # If the conversation has an active code session, or the user typed a
+            # /code command, route the whole turn to the coding harness on the VM.
+            try:
+                from app.services import code_mode
+                _code_raw = next((m.content for m in reversed(request.messages) if m.role == "user"), None)
+                _code_msg = _extract_text_content(_code_raw) if _code_raw else None
+                if _code_msg:
+                    _is_code_cmd = _code_msg.strip().lower().startswith("/code")
+                    # Plain (non-/code) messages only route to code mode when an
+                    # active session is bound to THIS conversation. Without a
+                    # conversation_id we must NOT fall back to the user's most
+                    # recent session — a session created with a NULL/absent
+                    # conversation_id would otherwise become a global catch-all
+                    # that hijacks every normal chat turn. Explicit `/code`
+                    # commands still follow the user across conversations (their
+                    # fallback lives in code_mode.run_code_message).
+                    _code_session = (
+                        code_mode.get_active_session(db, current_user.id, request.conversation_id)
+                        if request.conversation_id else None
+                    )
+                    if _code_session or _is_code_cmd:
+                        logger.info(f"💻 Code mode handling: {_code_msg[:60]}...")
+                        _code_queue = asyncio.Queue()
+                        _code_task = asyncio.create_task(
+                            code_mode.run_code_message(
+                                db, current_user.id, request.conversation_id, _code_msg, _code_queue
+                            )
+                        )
+                        while True:
+                            _ev = await _code_queue.get()
+                            if _ev is None:
+                                break
+                            yield f"data: {json.dumps(_ev)}\n\n"
+                        await _code_task  # surface any late exception / ensure cleanup
+                        return
+            except Exception as _code_e:
+                logger.error(f"Code mode interception error: {_code_e}", exc_info=True)
+
+            # HOST INSPECTION INTERCEPTION
+            # "/host ..." commands, or natural "check out <server>" when the named
+            # target resolves to a registered machine. Lets David say
+            # "Sara, check out gpu-box" and get specs back.
+            try:
+                from app.services import host_command_handler
+                _host_raw = next((m.content for m in reversed(request.messages) if m.role == "user"), None)
+                _host_msg = _extract_text_content(_host_raw) if _host_raw else None
+                if _host_msg:
+                    _host_cmd = host_command_handler.parse_host_command(_host_msg, db, current_user.id)
+                    if _host_cmd:
+                        logger.info(f"🖥️ Host command handling: {_host_cmd.get('action')} {_host_cmd.get('name','')}")
+                        async for _hev in host_command_handler.run_host_command(db, current_user.id, _host_cmd):
+                            yield f"data: {json.dumps(_hev)}\n\n"
+                        return
+            except Exception as _host_e:
+                logger.error(f"Host interception error: {_host_e}", exc_info=True)
+
+            # WEB INVESTIGATION INTERCEPTION
+            # "go check out getcara.ai and tell me about it" → drop it into the
+            # autonomous background agent, which opens the site in a real browser
+            # (Playwright), explores it, and reports back with a detailed writeup
+            # + screenshots. NOT an inline web_search answer.
+            try:
+                from app.services import web_investigation
+                _wi_raw = next((m.content for m in reversed(request.messages) if m.role == "user"), None)
+                _wi_msg = _extract_text_content(_wi_raw) if _wi_raw else None
+                if _wi_msg:
+                    _wi_urls = web_investigation.detect(_wi_msg, db, current_user.id)
+                    if _wi_urls:
+                        logger.info(f"🌐 Web investigation dispatch: {_wi_urls}")
+                        _wi_res = await web_investigation.dispatch_investigation(db, current_user.id, _wi_urls)
+                        if _wi_res.get("status") == "error":
+                            _wi_ack = f"I couldn't start that investigation: {_wi_res.get('error')}"
+                        elif len(_wi_urls) == 1:
+                            _wi_ack = (
+                                f"🔍 On it — I'll open **{_wi_urls[0]}** in a real browser, dig through "
+                                f"the site, and send you a detailed report (with screenshots where "
+                                f"useful) when I'm done. You can keep chatting meanwhile; watch the "
+                                f"tasks panel for live progress."
+                            )
+                        else:
+                            _wi_list = "\n".join(f"- **{u}**" for u in _wi_urls)
+                            _wi_ack = (
+                                f"🔍 On it — I'm opening each of these in a real browser and will "
+                                f"send you a single combined report comparing them all (with "
+                                f"screenshots where useful):\n"
+                                f"{_wi_list}\n\n"
+                                f"You can keep chatting meanwhile; watch the tasks panel for live progress."
+                            )
+                        yield f"data: {json.dumps({'type': 'text_chunk', 'data': {'content': _wi_ack, 'full_content': _wi_ack}})}\n\n"
+                        yield f"data: {json.dumps({'type': 'final_response', 'data': {'content': _wi_ack, 'citations': [], 'timestamp': datetime.now(timezone.utc).isoformat(), 'conversation_id': request.conversation_id}})}\n\n"
+                        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                        return
+            except Exception as _wi_e:
+                logger.error(f"Web investigation interception error: {_wi_e}", exc_info=True)
+
+            # UI COMMAND INTERCEPTION
+            # Jarvis-style: "bring up my morning brief" / "show me my nutrition" /
+            # "open my note about the server build" → ui_command SSE event that
+            # the webapp renders as an overlay, plus a one-line ack. No LLM call.
+            try:
+                from app.services import ui_intent
+                _ui_raw = next((m.content for m in reversed(request.messages) if m.role == "user"), None)
+                _ui_msg = _extract_text_content(_ui_raw) if _ui_raw else None
+                if _ui_msg:
+                    # iOS clients can navigate to any app screen; the webapp only
+                    # handles overlay surfaces, so screen intents fall through to
+                    # the LLM there instead of acking with no visible effect.
+                    _ui_is_ios = str(request.source or "").startswith("ios")
+                    _ui = ui_intent.parse_ui_intent(_ui_msg, allow_screens=_ui_is_ios)
+                    if _ui:
+                        _ui_res = ui_intent.resolve_ui_intent(db, current_user.id, _ui)
+                        logger.info(f"🪟 UI command: {_ui.get('overlay') or _ui.get('screen')} (query={_ui.get('query')})")
+                        if _ui_res.get("command"):
+                            yield f"data: {json.dumps({'type': 'ui_command', 'data': _ui_res['command']})}\n\n"
+                        _ui_ack = _ui_res["ack"]
+                        yield f"data: {json.dumps({'type': 'text_chunk', 'data': {'content': _ui_ack, 'full_content': _ui_ack}})}\n\n"
+                        yield f"data: {json.dumps({'type': 'final_response', 'data': {'content': _ui_ack, 'citations': [], 'timestamp': datetime.now(timezone.utc).isoformat(), 'conversation_id': request.conversation_id}})}\n\n"
+                        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                        return
+            except Exception as _ui_e:
+                logger.error(f"UI command interception error: {_ui_e}", exc_info=True)
 
             # Create an async queue for events
             event_queue = asyncio.Queue()
@@ -9571,19 +8389,97 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
             streaming_client.set_token_usage_callback(queue_token_usage)
 
             # Create system message
+            user_now = _resolve_prompt_datetime_for_user(db, current_user.id)
+            soul_content = load_soul_for_prompt(db)
             system_message = ChatMessage(
                 role="system",
-                content=get_system_prompt(ASSISTANT_NAME, current_user.email)
+                content=get_system_prompt(ASSISTANT_NAME, current_user.email, user_now=user_now, soul_content=soul_content)
             )
 
             # INTENT CLASSIFICATION for lazy context injection
-            last_user_message = next((m.content for m in reversed(request.messages) if m.role == "user"), "") if request.messages else ""
+            # Extract text from user message (content may be a list for multimodal messages with images)
+            _raw_content = next((m.content for m in reversed(request.messages) if m.role == "user"), "") if request.messages else ""
+            last_user_message = _extract_text_content(_raw_content)
             tool_classifier = get_tool_intent_classifier()
             context_router = get_context_router()
             # Use conversation-aware classification to preserve tool context across turns
             session_id = request.conversation_id or str(current_user.id)
             user_intent, tool_categories = tool_classifier.classify_with_context(last_user_message, session_id)
+
+            # Screen-aware tool loading: auto-include tools for the user's current screen
+            _screen_to_categories = {
+                'Fitness': ['fitness'], 'Learning': ['learning', 'web'],
+                'Calendar': ['time'], 'Notes': ['notes'], 'Health': ['health', 'fitness'],
+                'Inbox': ['inbox'], 'Recipes': ['recipes', 'fitness'],
+            }
+            if request.current_screen and request.current_screen in _screen_to_categories:
+                screen_cats = _screen_to_categories[request.current_screen]
+                tool_categories = list(set(tool_categories + screen_cats))
+                logger.info(f"📱 Screen-aware: added {screen_cats} for screen={request.current_screen}")
+
+            # Multi-intent detection: for long messages with conjunctions, merge tool categories
+            _conjunction_words = {'and', 'also', 'then', 'plus', 'as well as', 'along with'}
+            if len(last_user_message.split()) > 10 and any(w in last_user_message.lower() for w in _conjunction_words):
+                multi_intents = tool_classifier.classify_multi(last_user_message, max_intents=3)
+                if len(multi_intents) > 1:
+                    extra_cats = []
+                    for mi_intent, mi_score in multi_intents:
+                        if mi_intent != user_intent:
+                            extra_cats.extend(tool_classifier.INTENT_TO_TOOL_CATEGORIES.get(mi_intent, []))
+                    if extra_cats:
+                        tool_categories = list(set(tool_categories + extra_cats))
+                        logger.info(f"🔀 Multi-intent detected: {[i for i, _ in multi_intents]}, merged categories: {tool_categories}")
             turn_count = len(request.messages)
+
+            # MULTI-STEP TASK DETECTION
+            # If the user's message requires orchestrated tool chaining, run the task planner
+            # instead of the normal chat flow. This handles "check X, then do Y with the result".
+            try:
+                from app.services.multi_step_detector import detect_multi_step
+                multi_step_plan = detect_multi_step(last_user_message)
+                if multi_step_plan.is_multi_step and multi_step_plan.confidence >= 0.5:
+                    logger.info(
+                        f"🔗 Multi-step detected ({len(multi_step_plan.steps)} steps, "
+                        f"confidence={multi_step_plan.confidence:.2f}): {last_user_message[:80]}"
+                    )
+                    # Stream acknowledgment
+                    ack = f"I'll handle this in {len(multi_step_plan.steps)} steps. Working on it now..."
+                    yield f"data: {json.dumps({'type': 'text_chunk', 'data': {'content': ack}})}\n\n"
+
+                    # Execute the plan
+                    from app.services.task_planner import execute_plan
+
+                    async def _on_step_progress(step_idx, status, msg):
+                        pass  # Progress embedded in final summary
+
+                    plan_result = await execute_plan(
+                        plan=multi_step_plan,
+                        user_id=str(current_user.id),
+                        db_session=db,
+                        on_progress=_on_step_progress,
+                    )
+
+                    # Stream final result
+                    summary = plan_result.get("summary", "Task completed.")
+                    full_response = f"{ack}\n\n{summary}"
+                    yield f"data: {json.dumps({'type': 'text_chunk', 'data': {'content': summary}})}\n\n"
+                    yield f"data: {json.dumps({'type': 'final_response', 'data': {'content': full_response, 'citations': [], 'timestamp': datetime.now(timezone.utc).isoformat(), 'conversation_id': request.conversation_id}})}\n\n"
+                    yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+                    # Store as episode
+                    try:
+                        await intelligent_memory_service.store_episode(
+                            user_id=str(current_user.id), role="assistant",
+                            content=full_response, conversation_id=request.conversation_id,
+                            source="chat", memory_type="multi_step_task",
+                        )
+                    except Exception:
+                        pass
+                    return
+            except ImportError:
+                pass  # Module not available
+            except Exception as e:
+                logger.debug(f"Multi-step detection failed (non-critical): {e}")
 
             # WORK MODE DETECTION
             # Work mode provides lean, task-focused context (no daily brief/body state unless asked)
@@ -9613,168 +8509,645 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
             )
             logger.info(f"🎯 Intent={user_intent}, {context_decision.reason}")
 
-            # LAZY MEMORY RETRIEVAL: Only retrieve when ContextRouter says so
-            memory_context = ""
-            if context_decision.inject_memory:
-                try:
-                    if last_user_message:
-                        logger.info(f"🧠 Retrieving relevant memories for: '{last_user_message[:50]}...'")
-                        relevant_memories = await intelligent_memory_service.intelligent_memory_search(
-                            user_id=current_user.id,
-                            query=last_user_message,
-                            use_semantic=True
-                        )
-                        if relevant_memories:
-                            logger.info(f"✅ Found {len(relevant_memories)} relevant memories")
-                            memory_context = "\n\n## Relevant Past Context:\n"
-                            memory_context += "**Note: Pay attention to when these memories occurred - prioritize recent context over older memories.**\n\n"
-                            for i, mem in enumerate(relevant_memories[:5], 1):  # Top 5 memories
-                                content_preview = mem.get("content", "")[:300]
-                                similarity = mem.get("similarity", 0)
-                                created_at_raw = mem.get("created_at", "")
-                                # Format timestamp with relative time for clarity
-                                if isinstance(created_at_raw, datetime):
-                                    time_str = format_memory_timestamp(created_at_raw)
-                                elif isinstance(created_at_raw, str) and created_at_raw:
-                                    try:
-                                        dt = datetime.fromisoformat(created_at_raw.replace('Z', '+00:00'))
-                                        time_str = format_memory_timestamp(dt)
-                                    except (ValueError, TypeError):
-                                        time_str = created_at_raw
-                                else:
-                                    time_str = "unknown time"
-                                memory_context += f"{i}. **{time_str}** (relevance: {similarity:.0%})\n   {content_preview}\n\n"
-                        else:
-                            logger.info("ℹ️ No relevant memories found")
-                except Exception as e:
-                    logger.warning(f"⚠️ Memory retrieval failed (non-critical): {e}")
-            else:
-                logger.info("⏭️ Skipping memory retrieval (not needed for this intent)")
-
-            # Inject memory context into system message if available
-            if memory_context:
-                enhanced_system_content = system_message.content + memory_context
-                system_message = ChatMessage(role="system", content=enhanced_system_content)
-                logger.info(f"📝 Injected {len(memory_context)} chars of memory context into system prompt")
-
-            # CHESS CONTEXT: Inject chess game state if user is in chess mode
-            if CHESS_COMMANDS_AVAILABLE:
-                chess_context = get_chess_context_prompt(current_user.id, db)
-                if chess_context:
-                    current_content = system_message.content
-                    system_message = ChatMessage(
-                        role="system",
-                        content=current_content + "\n\n## Chess Context:\n" + chess_context
-                    )
-                    logger.info(f"♟️ Injected chess context into system prompt")
-
-            # DAILY BRIEF SYSTEM: Update moment layer and conditionally inject compiled brief
+            # IMPLICIT FEEDBACK DETECTION: Detect satisfaction/correction signals from user message
+            implicit_feedback = None
+            previous_assistant_response = None
+            injected_lesson_ids = []
             try:
-                if DAILY_BRIEF_AVAILABLE:
-                    # Get the last user message for moment layer
-                    last_user_message = ""
-                    if request.messages:
-                        last_user_message = next((m.content for m in reversed(request.messages) if m.role == "user"), "")
-
-                    # Update moment layer (fast, no LLM) - always do this regardless of work mode
-                    await daily_brief_service.update_moment(
-                        user_id=current_user.id,
-                        current_message=last_user_message,
-                        conversation_id=request.conversation_id,
-                        db=db
-                    )
-                    logger.info(f"📝 Updated moment layer")
-
-                    # Only inject compiled brief if context router says so
-                    if context_decision.inject_daily_brief:
-                        # Get compiled daily brief (lazy, cached)
-                        daily_brief = await daily_brief_service.get_compiled_brief(current_user.id)
-
-                        if daily_brief:
-                            # Inject daily brief into system message
-                            current_content = system_message.content
-                            system_message = ChatMessage(
-                                role="system",
-                                content=current_content + "\n\n" + daily_brief
+                if request.messages and len(request.messages) >= 2:
+                    # Find previous assistant response
+                    for m in reversed(request.messages[:-1]):
+                        if m.role == "assistant":
+                            previous_assistant_response = _extract_text_content(m.content)
+                            break
+                    if previous_assistant_response:
+                        from app.services.implicit_feedback_detector import analyze_message_for_feedback
+                        implicit_feedback = await analyze_message_for_feedback(
+                            message=last_user_message,
+                            previous_response=previous_assistant_response,
+                        )
+                        if implicit_feedback and implicit_feedback.is_actionable():
+                            logger.info(
+                                f"Implicit feedback: {implicit_feedback.signal_type.value} "
+                                f"({implicit_feedback.strength.value}, confidence={implicit_feedback.confidence:.2f}) "
+                                f"trigger='{implicit_feedback.trigger_phrase}'"
                             )
-                            logger.info(f"📋 Injected daily brief ({len(daily_brief)} chars) into system prompt")
-                    else:
-                        logger.info("⏭️ Skipping daily brief (work mode)")
-            except Exception as e:
-                logger.warning(f"⚠️ Daily brief injection failed (non-critical): {e}")
-                # Continue without daily brief if it fails
 
-            # BODY STATE CONTEXT: Conditionally inject physiological awareness
-            if context_decision.inject_body_state:
+                            # Flag related PKG facts for review on negative feedback
+                            if implicit_feedback.signal_type.value == "negative":
+                                try:
+                                    from app.services.personal_knowledge_graph import PersonalKnowledgeGraph
+                                    pkg = PersonalKnowledgeGraph()
+                                    # Search PKG for facts related to the correction context
+                                    related = pkg.query_semantic(
+                                        last_user_message, limit=3
+                                    ) if hasattr(pkg, 'query_semantic') else []
+                                    for fact in related:
+                                        if fact.get("similarity", 0) > 0.5:
+                                            pkg_id = fact.get("pkg_id")
+                                            if pkg_id and hasattr(pkg, 'driver') and pkg.driver:
+                                                with pkg.driver.session() as neo_session:
+                                                    neo_session.run("""
+                                                        MATCH (n {pkg_id: $pkg_id})
+                                                        SET n.needs_review = true,
+                                                            n.review_reason = 'user_correction',
+                                                            n.review_evidence = $evidence,
+                                                            n.review_flagged_at = datetime()
+                                                    """, pkg_id=pkg_id, evidence=last_user_message[:500])
+                                                logger.info(f"[PKG] Flagged fact {pkg_id} for review after user correction")
+                                except Exception as pkg_e:
+                                    logger.debug(f"PKG review flagging failed (non-critical): {pkg_e}")
+            except Exception as e:
+                logger.debug(f"Implicit feedback detection failed (non-critical): {e}")
+
+            # ── PARALLEL CONTEXT ASSEMBLY ──
+            # Fetch all independent context sources concurrently, then apply
+            # token budget allocation before injecting into system prompt.
+            from app.services.context_budget import ContextBudget
+
+            _uid = str(current_user.id)
+
+            # --- Parallel fetch coroutines (all independent, safe to run concurrently) ---
+
+            async def _fetch_memory():
+                if not (last_user_message and context_decision.inject_memory):
+                    return None
                 try:
-                    subconscious_result = db.execute(text("""
-                        SELECT body_state_context
-                        FROM subconscious_state
-                        WHERE user_id = :user_id
-                    """), {"user_id": current_user.id}).fetchone()
+                    # Route query: factual questions answered by PKG (already always-on),
+                    # skip expensive episodic search for pure factual queries
+                    try:
+                        from app.services.query_router import classify_query, QueryTarget
+                        target, confidence = classify_query(last_user_message)
+                        if target == QueryTarget.PKG and confidence >= 0.6:
+                            logger.info(f"🎯 Query routed to PKG-only (confidence={confidence:.2f}), skipping episodic search")
+                            return None  # PKG context will be injected via _fetch_pkg
+                    except Exception:
+                        pass  # Fall through to normal memory search
 
-                    if subconscious_result and subconscious_result.body_state_context:
-                        current_content = system_message.content
-                        system_message = ChatMessage(
-                            role="system",
-                            content=current_content + f"\n\n{subconscious_result.body_state_context}"
-                        )
-                        logger.info(f"🫀 Injected body state context into system prompt")
+                    mems = await intelligent_memory_service.intelligent_memory_search(
+                        user_id=current_user.id, query=last_user_message, use_semantic=True
+                    )
+                    if not mems:
+                        return None
+                    ctx = "\n\n## Relevant Past Context:\n"
+                    ctx += "**Note: Pay attention to when these memories occurred - prioritize recent context over older memories.**\n\n"
+                    used_ids = []
+                    for i, mem in enumerate(mems[:5], 1):
+                        preview = mem.get("content", "")[:300]
+                        sim = mem.get("similarity", 0)
+                        cat = mem.get("created_at", "")
+                        if isinstance(cat, datetime):
+                            ts = format_memory_timestamp(cat)
+                        elif isinstance(cat, str) and cat:
+                            try:
+                                ts = format_memory_timestamp(datetime.fromisoformat(cat.replace('Z', '+00:00')))
+                            except (ValueError, TypeError):
+                                ts = cat
+                        else:
+                            ts = "unknown time"
+                        ctx += f"{i}. **{ts}** (relevance: {sim:.0%})\n   {preview}\n\n"
+                        if mem.get("id"):
+                            used_ids.append(mem["id"])
+
+                    # Fire-and-forget: boost rating for cited memories
+                    if used_ids:
+                        try:
+                            from app.services.event_bus import emit_event, EventType as _EvtType
+                            await emit_event(
+                                event_type=_EvtType.MEMORY_ACCESSED,
+                                user_id=str(current_user.id),
+                                payload={"episode_ids": used_ids},
+                            )
+                        except Exception:
+                            pass  # Non-critical
+                    return ctx
                 except Exception as e:
-                    logger.warning(f"⚠️ Body state context injection failed (non-critical): {e}")
-                    # Continue without body state context if it fails
-            else:
-                logger.info("⏭️ Skipping body state (work mode)")
+                    logger.warning(f"Memory retrieval failed (non-critical): {e}")
+                    return None
 
-            # SARA'S INNER MONOLOGUE: Inject journal context
-            try:
-                journal_context = await sara_journal.get_entries_for_conversation_context(
-                    db=db,
-                    user_id=current_user.id,
-                    max_entries=5
+            async def _fetch_pkg():
+                if not context_decision.inject_pkg:
+                    return None
+                try:
+                    from app.services.pkg_context_provider import pkg_context
+                    return await pkg_context.get_relevant_context(
+                        user_id=current_user.id, message=last_user_message, intent=user_intent
+                    )
+                except Exception as e:
+                    logger.warning(f"PKG context failed (non-critical): {e}")
+                    return None
+
+            async def _fetch_daily_brief():
+                if not (DAILY_BRIEF_AVAILABLE and context_decision.inject_daily_brief):
+                    return None
+
+                compiled_brief = None
+                morning_brief_text = None
+
+                # Fetch the 4-layer compiled daily brief
+                try:
+                    try:
+                        await asyncio.wait_for(
+                            daily_brief_service.update_moment(
+                                user_id=current_user.id,
+                                current_message=last_user_message,
+                                conversation_id=request.conversation_id,
+                                db=db
+                            ), timeout=2.0
+                        )
+                    except (asyncio.TimeoutError, Exception):
+                        pass
+                    compiled_brief = await asyncio.wait_for(
+                        daily_brief_service.get_compiled_brief(current_user.id),
+                        timeout=2.0
+                    )
+                except (asyncio.TimeoutError, Exception) as e:
+                    logger.warning(f"Daily brief failed (non-critical): {e}")
+
+                # Also fetch today's morning brief (weather, calendar, news)
+                try:
+                    from sqlalchemy import text as sa_text
+                    from datetime import date as date_cls
+                    row = db.execute(sa_text(
+                        "SELECT full_text FROM morning_brief "
+                        "WHERE user_id = :uid AND brief_date = :today "
+                        "ORDER BY created_at DESC LIMIT 1"
+                    ), {"uid": current_user.id, "today": date_cls.today()}).fetchone()
+                    if row and row[0]:
+                        morning_brief_text = row[0].strip()
+                except Exception as e:
+                    logger.debug(f"Morning brief lookup failed: {e}")
+
+                # Combine: morning brief first, then compiled daily brief
+                parts = []
+                if morning_brief_text:
+                    parts.append(f"## Today's Morning Briefing\n{morning_brief_text}")
+                if compiled_brief:
+                    parts.append(compiled_brief)
+
+                return "\n\n".join(parts) if parts else None
+
+            async def _fetch_journal():
+                try:
+                    from app.services.sara_journal_service import sara_journal
+                    return await sara_journal.get_entries_for_conversation_context(
+                        db=db, user_id=current_user.id, max_entries=5
+                    )
+                except Exception as e:
+                    logger.debug(f"Journal context failed: {e}")
+                    return None
+
+            async def _fetch_personality():
+                if not context_decision.inject_activity_context:
+                    return None
+                try:
+                    _snap = None
+                    try:
+                        from app.services.unified_context import read_snapshot as _rs
+                        _snap = await _rs(_uid)
+                    except Exception:
+                        pass
+
+                    _act_state = _act_conf = _act_room = _interrupt = None
+                    if _snap and _snap.activity_state != "UNKNOWN":
+                        _act_state = _snap.activity_state
+                        _act_conf = _snap.activity_confidence
+                        _act_room = _snap.room
+                        _interrupt = _snap.interruptibility
+                    else:
+                        try:
+                            ar = db.execute(text("""
+                                SELECT activity_state, activity_confidence, activity_room, interruptibility_score
+                                FROM subconscious_state WHERE user_id = :user_id
+                            """), {"user_id": current_user.id}).fetchone()
+                            if ar and ar.activity_state:
+                                _act_state, _act_conf = ar.activity_state, ar.activity_confidence
+                                _act_room = ar.activity_room
+                                _interrupt = ar.interruptibility_score or 0.5
+                        except Exception:
+                            pass
+
+                    if not _act_state:
+                        return None
+
+                    memory_nudges = []
+                    try:
+                        from app.services.personality_engine import extract_memory_nudges
+                        memory_nudges = await extract_memory_nudges(
+                            user_id=_uid, message=last_user_message, db=db, max_nudges=3
+                        )
+                    except Exception:
+                        pass
+
+                    _cal_data = None
+                    try:
+                        from app.services.personality_engine import _load_calibration_data
+                        _cal_data = await _load_calibration_data(_uid)
+                    except Exception:
+                        pass
+
+                    _sara_tone = _sara_intensity = None
+                    try:
+                        from app.services.working_memory import read_memory
+                        _wm = await read_memory(_uid)
+                        if _wm and _wm.sara_emotional_tone:
+                            _sara_tone = _wm.sara_emotional_tone
+                            _sara_intensity = getattr(_wm, 'sara_emotional_intensity', None) or 0.5
+                    except Exception:
+                        pass
+
+                    ctx = _build_activity_context(
+                        activity_state=_act_state, confidence=_act_conf,
+                        room=_act_room, interruptibility=_interrupt or 0.5,
+                        turn_count=turn_count,
+                        conversation_depth=turn_count // 2 if turn_count else 0,
+                        memory_nudges=memory_nudges, calibration_data=_cal_data,
+                        sara_emotional_tone=_sara_tone, sara_emotional_intensity=_sara_intensity,
+                    )
+
+                    if _snap and _snap.current_place and _snap.current_place != "unknown":
+                        loc_line = f"Location: {_snap.current_place}"
+                        if _snap.current_place_type:
+                            loc_line += f" ({_snap.current_place_type})"
+                        if _snap.at_place_since:
+                            try:
+                                since = datetime.fromisoformat(_snap.at_place_since)
+                                mins = int((datetime.now(since.tzinfo) - since).total_seconds() / 60)
+                                if mins >= 1:
+                                    loc_line += f", arrived {mins}m ago" if mins < 120 else f", there since {since.strftime('%-I:%M %p')}"
+                            except Exception:
+                                pass
+                        ctx = (ctx or "") + "\n" + loc_line
+
+                    if _snap and _snap.rhythm_summary:
+                        ctx = (ctx or "") + "\n" + _snap.rhythm_summary
+
+                    return ctx
+                except Exception as e:
+                    logger.warning(f"Personality context failed (non-critical): {e}")
+                    return None
+
+            async def _fetch_device():
+                try:
+                    from app.services.device_orchestrator import device_orchestrator
+                    return await device_orchestrator.get_device_context_for_chat(db, _uid)
+                except Exception:
+                    return None
+
+            async def _fetch_workout():
+                try:
+                    return await workout_session_service.get_workout_context(current_user.id, db)
+                except Exception:
+                    return None
+
+            async def _fetch_fitness_context():
+                if not context_decision.inject_fitness:
+                    return None
+                try:
+                    from app.services.fitness_context import get_fitness_context
+                    return await asyncio.wait_for(
+                        get_fitness_context(str(current_user.id), db),
+                        timeout=2.0
+                    )
+                except (asyncio.TimeoutError, Exception) as e:
+                    logger.debug(f"Fitness context fetch failed: {e}")
+                    return None
+
+            async def _fetch_changes_brief():
+                if not context_decision.inject_changes_brief:
+                    return None
+                try:
+                    from app.services.unified_context import read_changes as _rc, read_snapshot as _rs2
+                    _snap = await asyncio.wait_for(_rs2(_uid), timeout=1.0)
+                    _changes = await asyncio.wait_for(_rc(_uid), timeout=1.0)
+                    if _changes and _snap.hours_since_last_chat > 0.5:
+                        ctx = "\n\n## What's Happened Recently\n"
+                        for ch in _changes[-8:]:
+                            ctx += f"- {ch}\n"
+                        if _snap.next_event_title and _snap.next_event_minutes_away and _snap.next_event_minutes_away < 120:
+                            ctx += f"\n**Coming up:** {_snap.next_event_title} in {_snap.next_event_minutes_away} minutes\n"
+                        return ctx
+                except (asyncio.TimeoutError, Exception) as e:
+                    logger.debug(f"Changes brief failed: {e}")
+                return None
+
+            async def _fetch_learning_recall():
+                if not context_decision.inject_learning_recall:
+                    return None
+                try:
+                    return await _build_learning_recall_context(_uid, last_user_message, db)
+                except Exception:
+                    return None
+
+            async def _fetch_lessons():
+                if not context_decision.inject_lessons:
+                    return None, []
+                try:
+                    es = STARTUP_HEALTH.get("embedding_service", {}).get("status")
+                    if es != "healthy":
+                        return None, []
+                    from app.services.lesson_injection_service import lesson_injection_service
+                    return await asyncio.wait_for(
+                        lesson_injection_service.get_lessons_for_injection(
+                            db=db, query=last_user_message, domain_hint=user_intent, limit=3
+                        ), timeout=2.5
+                    )
+                except (asyncio.TimeoutError, Exception) as e:
+                    logger.debug(f"Lesson injection failed: {e}")
+                    return None, []
+
+            async def _fetch_daily_tasks():
+                if not context_decision.inject_daily_brief:
+                    return None
+                try:
+                    from sqlalchemy import text as sa_text
+                    from datetime import date as date_cls
+                    rows = db.execute(sa_text(
+                        "SELECT title, priority, is_completed FROM daily_task "
+                        "WHERE user_id = :uid AND task_date = :today "
+                        "ORDER BY is_completed, priority DESC, created_at"
+                    ), {"uid": current_user.id, "today": date_cls.today()}).fetchall()
+                    if not rows:
+                        return None
+                    lines = ["## Today's Tasks"]
+                    done = 0
+                    for r in rows:
+                        check = "[x]" if r[2] else "[ ]"
+                        pri = f" ({r[1]} priority)" if r[1] and r[1] != "normal" else ""
+                        lines.append(f"- {check} {r[0]}{pri}")
+                        if r[2]:
+                            done += 1
+                    lines.append(f"\n{done}/{len(rows)} completed")
+                    return "\n".join(lines)
+                except Exception as e:
+                    logger.debug(f"Daily tasks context failed: {e}")
+                    return None
+
+            async def _fetch_autonomous_notes():
+                """Fetch Sara's autonomous journal + show_david buffer for chat context."""
+                try:
+                    import redis.asyncio as _aioredis
+                    _redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+                    parts = []
+
+                    # Recent autonomous session summary
+                    _r = await _aioredis.from_url(_redis_url, decode_responses=True)
+                    try:
+                        summary_raw = await _r.get("sara:subconscious:autonomous_summary")
+                        if summary_raw:
+                            s = json.loads(summary_raw)
+                            parts.append(
+                                f"Your last autonomous session: {s.get('turns', 0)} turns, "
+                                f"{s.get('notes_created', 0)} notes created, "
+                                f"ended: {s.get('end_reason', 'unknown')}"
+                            )
+                    finally:
+                        await _r.close()
+
+                    from app.db.session import get_async_session_factory
+                    _async_session = get_async_session_factory()
+                    async with _async_session() as _adb:
+                        # Today's journal note
+                        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                        journal_title = f"Sara's Journal — {today}"
+                        result = await _adb.execute(text(
+                            "SELECT content FROM note WHERE user_id = :uid AND title = :title LIMIT 1"
+                        ), {"uid": _uid, "title": journal_title})
+                        row = result.fetchone()
+                        if row and row[0]:
+                            content = row[0]
+                            if len(content) > 1500:
+                                content = "..." + content[-1500:]
+                            parts.append(f"Your autonomous journal today:\n{content}")
+
+                        # Unshown show_david items
+                        sd_result = await _adb.execute(text("""
+                            SELECT title, content, category
+                            FROM acs_show_david_buffer
+                            WHERE user_id = :uid AND shown = FALSE
+                            ORDER BY priority DESC
+                            LIMIT 5
+                        """), {"uid": _uid})
+                        sd_rows = sd_result.fetchall()
+                        if sd_rows:
+                            sd_lines = []
+                            for sdr in sd_rows:
+                                sd_lines.append(f"- [{sdr[2]}] **{sdr[0]}**: {sdr[1]}")
+                            parts.append(
+                                "## Things From Your Autonomous Exploration\n"
+                                "While David was away, you came across a few things he might find interesting.\n"
+                                "Don't force these into conversation — only mention them if they're relevant "
+                                "to what David is talking about, or if there's a natural opening. "
+                                "If David asks what you've been up to, you can share these.\n\n"
+                                + "\n".join(sd_lines)
+                            )
+
+                    if parts:
+                        return "\n\n## Your Autonomous Session Notes\n" + "\n\n".join(parts)
+                    return None
+                except Exception:
+                    return None
+
+            # --- Run all fetches in parallel ---
+            _t0 = datetime.now(timezone.utc)
+            (
+                memory_ctx, pkg_ctx, daily_brief_ctx, journal_ctx,
+                personality_ctx, device_ctx, workout_ctx, fitness_ctx,
+                changes_ctx, recall_ctx, lessons_result, daily_tasks_ctx,
+                autonomous_ctx
+            ) = await asyncio.gather(
+                _fetch_memory(), _fetch_pkg(), _fetch_daily_brief(), _fetch_journal(),
+                _fetch_personality(), _fetch_device(), _fetch_workout(), _fetch_fitness_context(),
+                _fetch_changes_brief(), _fetch_learning_recall(), _fetch_lessons(),
+                _fetch_daily_tasks(), _fetch_autonomous_notes(),
+                return_exceptions=True,
+            )
+
+            # Unpack lessons (returns tuple)
+            lessons_text = None
+            if isinstance(lessons_result, tuple):
+                lessons_text, injected_lesson_ids = lessons_result
+            elif isinstance(lessons_result, Exception):
+                logger.debug(f"Lessons fetch exception: {lessons_result}")
+
+            # Convert exceptions to None
+            for _name, _val in [
+                ("memory", memory_ctx), ("pkg", pkg_ctx), ("daily_brief", daily_brief_ctx),
+                ("journal", journal_ctx), ("personality", personality_ctx),
+                ("device", device_ctx), ("workout", workout_ctx), ("fitness", fitness_ctx),
+                ("changes", changes_ctx), ("recall", recall_ctx),
+                ("daily_tasks", daily_tasks_ctx),
+            ]:
+                if isinstance(_val, Exception):
+                    logger.debug(f"Context fetch '{_name}' failed: {_val}")
+                    # Set to None via locals trick — handled below
+
+            # Safe string extraction (exceptions → None)
+            def _safe(v):
+                return v if isinstance(v, str) else None
+
+            _elapsed = (datetime.now(timezone.utc) - _t0).total_seconds()
+            logger.info(f"⚡ Parallel context assembly completed in {_elapsed:.2f}s")
+
+            # --- Sync-only context (fast, must stay sequential) ---
+
+            # Patterns (sync DB query)
+            pattern_text = None
+            if context_decision.inject_patterns:
+                try:
+                    from sqlalchemy import text as sa_text
+                    patterns_result = db.execute(sa_text("""
+                        SELECT description, confidence FROM behavioral_pattern
+                        WHERE user_id = :uid AND status = 'active'
+                        ORDER BY confidence DESC LIMIT 5
+                    """), {"uid": current_user.id}).fetchall()
+                    if patterns_result:
+                        pattern_text = "\n\n## Active Patterns Sara Has Noticed\n"
+                        for p in patterns_result:
+                            pattern_text += f"- {p.description} (confidence: {p.confidence:.0%})\n"
+                except Exception as e:
+                    logger.debug(f"Pattern context failed: {e}")
+
+            # Chess (sync)
+            chess_ctx = None
+            if CHESS_COMMANDS_AVAILABLE:
+                chess_ctx = get_chess_context_prompt(current_user.id, db)
+                if chess_ctx:
+                    chess_ctx = "\n\n## Chess Context:\n" + chess_ctx
+
+            # Workspace (sync, from request)
+            workspace_ctx = None
+            if request.workspace_context:
+                wc = request.workspace_context
+                wc_parts = []
+                if wc.get('active_scene'):
+                    wc_parts.append(f"David is in the '{wc['active_scene']}' workspace layout.")
+                open_wins = wc.get('open_windows', [])
+                if open_wins:
+                    win_list = ', '.join(f"{w.get('title', '')} ({w.get('type', '')})" for w in open_wins)
+                    wc_parts.append(f"Open windows: {win_list}")
+                if wc_parts:
+                    workspace_ctx = "\n\n[Workspace Context]\n" + "\n".join(wc_parts)
+
+            # Update daily brief moment layer if we didn't inject the brief
+            if DAILY_BRIEF_AVAILABLE and not context_decision.inject_daily_brief:
+                try:
+                    await asyncio.wait_for(
+                        daily_brief_service.update_moment(
+                            user_id=current_user.id, current_message=last_user_message,
+                            conversation_id=request.conversation_id, db=db
+                        ), timeout=2.0
+                    )
+                except Exception:
+                    pass
+
+            # --- Apply token budget ---
+            budget = ContextBudget(max_tokens=6000)
+            budget.add("memory", _safe(memory_ctx), priority=1)
+            budget.add("personality", _safe(personality_ctx), priority=1)
+            budget.add("daily_brief", _safe(daily_brief_ctx), priority=2)
+            budget.add("daily_tasks", _safe(daily_tasks_ctx), priority=2)
+            budget.add("pkg", _safe(pkg_ctx), priority=2)
+            budget.add("fitness", _safe(fitness_ctx), priority=2)
+            budget.add("journal", _safe(journal_ctx), priority=3)
+            budget.add("autonomous", _safe(autonomous_ctx), priority=3)
+            budget.add("lessons", lessons_text, priority=3)
+            budget.add("patterns", pattern_text, priority=4)
+            budget.add("changes_brief", _safe(changes_ctx), priority=4)
+            budget.add("device", _safe(device_ctx), priority=4)
+            budget.add("learning_recall", _safe(recall_ctx), priority=5)
+            budget.add("workout", _safe(workout_ctx), priority=5)
+            budget.add("chess", chess_ctx, priority=5)
+            budget.add("workspace", workspace_ctx, priority=5)
+
+            combined_context = budget.build_context_text()
+            if combined_context:
+                system_message = ChatMessage(
+                    role="system",
+                    content=system_message.content + "\n\n" + combined_context
                 )
-                if journal_context:
-                    current_content = system_message.content
-                    system_message = ChatMessage(
-                        role="system",
-                        content=current_content + f"\n\n{journal_context}"
-                    )
-                    logger.info(f"📔 Injected {len(journal_context)} chars of journal context into system prompt")
-            except Exception as e:
-                logger.warning(f"⚠️ Journal context injection failed (non-critical): {e}")
+                logger.info(
+                    f"📝 Context injected: {budget.total_tokens} est. tokens from "
+                    f"{len(budget.sources)} sources → {len(budget.allocate())} kept"
+                )
 
-            # ACTIVE WORKOUT SESSION: Inject workout coaching context
-            try:
-                workout_context = await workout_session_service.get_workout_context(current_user.id, db)
-                if workout_context:
-                    current_content = system_message.content
-                    system_message = ChatMessage(
-                        role="system",
-                        content=current_content + f"\n\n{workout_context}"
-                    )
-                    logger.info(f"🏋️ Injected {len(workout_context)} chars of workout context into system prompt")
-            except Exception as e:
-                logger.warning(f"⚠️ Workout context injection failed (non-critical): {e}")
+            # CONTENT INBOX: Inject inbox item content when discussing a shared item
+            if request.inbox_item_id:
+                try:
+                    inbox_row = db.execute(text("""
+                        SELECT id, title, content_type, original_url, extracted_text, meta
+                        FROM shared_content
+                        WHERE id = :id AND user_id = :uid
+                    """), {"id": request.inbox_item_id, "uid": current_user.id}).fetchone()
+                    if inbox_row and inbox_row.extracted_text:
+                        truncated = inbox_row.extracted_text[:8000]
+                        inbox_ctx = f"\n\n## Content David Wants to Discuss\n"
+                        inbox_ctx += f"**Title:** {inbox_row.title}\n"
+                        inbox_ctx += f"**Source:** {inbox_row.original_url or 'shared file'} ({inbox_row.content_type})\n\n"
+                        inbox_ctx += truncated
+                        current_content = system_message.content
+                        system_message = ChatMessage(role="system", content=current_content + inbox_ctx)
+                        # Mark as discussed
+                        db.execute(text("UPDATE shared_content SET discussed = TRUE WHERE id = :id"),
+                                   {"id": request.inbox_item_id})
+                        db.commit()
+                        logger.info(f"📥 Injected inbox item context: {inbox_row.title} ({len(truncated)} chars)")
+                except Exception as e:
+                    logger.warning(f"⚠️ Inbox context injection failed (non-critical): {e}")
 
-            # Check if user's message is calibration feedback for body state estimation
-            try:
-                if last_user_message:
-                    calibration_result = calibration_service.analyze_user_response(
-                        user_message=last_user_message,
-                        user_id=current_user.id,
-                        db=db
-                    )
-                    if calibration_result:
-                        logger.info(f"📈 Body state calibration processed: {calibration_result.get('estimate_type')} "
-                                   f"{calibration_result.get('feedback_type')} -> {calibration_result.get('coefficient_adjusted')} "
-                                   f"{calibration_result.get('adjustment', 0):+.3f}")
-            except Exception as e:
-                logger.warning(f"⚠️ Calibration feedback check failed (non-critical): {e}")
+            # ATTENTION ITEM CONTEXT (SARA_UNLEASHED Phase T.4): a reply to a
+            # proactive item carries the item's id so the conversation
+            # continues instead of restarting cold. run_action's "chat" kind
+            # already marks the item engaged the moment the button is
+            # tapped — this is belt-and-suspenders for any caller that skips
+            # that endpoint, plus the actual context injection.
+            if request.attention_item_id:
+                try:
+                    attn_row = db.execute(text("""
+                        SELECT title, body, category FROM autonomy_attention_item
+                        WHERE id = CAST(:id AS uuid) AND user_id = :uid
+                    """), {"id": request.attention_item_id, "uid": current_user.id}).fetchone()
+                    if attn_row:
+                        attn_ctx = (
+                            f"\n\n## The proactive item this reply continues\n"
+                            f"**{attn_row.title}** ({attn_row.category})\n{attn_row.body or ''}"
+                        )
+                        current_content = system_message.content
+                        system_message = ChatMessage(role="system", content=current_content + attn_ctx)
+                        from app.services.autonomy.attention_queue import attention_queue
+                        await attention_queue.mark_engaged(db=db, item_id=request.attention_item_id, user_id=str(current_user.id))
+                        db.commit()
+                        logger.info(f"📥 Injected attention item context: {attn_row.title}")
+                except Exception as e:
+                    logger.warning(f"⚠️ Attention item context injection failed (non-critical): {e}")
+
+            # NOTE CONTEXT: Inject note content when discussing a note/report from iOS.
+            if request.note_id:
+                try:
+                    note_row = db.execute(text("""
+                        SELECT id, title, content
+                        FROM note
+                        WHERE id = :id AND user_id = :uid
+                        LIMIT 1
+                    """), {"id": request.note_id, "uid": current_user.id}).fetchone()
+                    if note_row and note_row.content:
+                        truncated_note = note_row.content[:12000]
+                        note_ctx = "\n\n## Note David Wants to Discuss\n"
+                        note_ctx += f"**Title:** {note_row.title}\n\n"
+                        note_ctx += truncated_note
+                        current_content = system_message.content
+                        system_message = ChatMessage(role="system", content=current_content + note_ctx)
+                        logger.info(f"📝 Injected note context: {note_row.title} ({len(truncated_note)} chars)")
+                except Exception as e:
+                    logger.warning(f"⚠️ Note context injection failed (non-critical): {e}")
 
             # SESSION GAP DETECTION: Detect gaps and summarize for day layer
             try:
                 # Check if there's been a 45+ minute gap since last message
-                has_gap, last_message_time = await llm_client.detect_session_gap(current_user.id, db)
+                has_gap, last_message_time = await asyncio.wait_for(
+                    llm_client.detect_session_gap(current_user.id, db),
+                    timeout=1.0
+                )
 
                 if has_gap and last_message_time:
                     # Session gap detected - summarize the previous session
@@ -9785,7 +9158,14 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     session_start = session_end - timedelta(hours=2)
 
                     # Summarize session
-                    summary = await llm_client.summarize_session(current_user.id, session_start, session_end, db)
+                    try:
+                        summary = await asyncio.wait_for(
+                            llm_client.summarize_session(current_user.id, session_start, session_end, db),
+                            timeout=4.0
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning("⚠️ Session summarization timed out (skipping)")
+                        summary = None
                     if summary:
                         # Store in Redis (legacy, for fallback)
                         asyncio.create_task(
@@ -9814,23 +9194,126 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                         except Exception as je:
                             logger.warning(f"⚠️ Failed to write journal entry: {je}")
 
+                    # Build re-entry context from unified snapshot changes + agent memory + journal + PKG
+                    try:
+                        hours_away = (local_now() - last_message_time).total_seconds() / 3600
+                        reentry_context = f"\n\n## Re-Entry Context\nDavid just returned after {hours_away:.1f} hours away.\n"
+
+                        # Read changes_since_last_chat from unified context snapshot
+                        try:
+                            from app.services.context_writer import clear_changes as _clear_ctx_changes
+                            recent_changes = await asyncio.wait_for(
+                                _clear_ctx_changes(str(current_user.id)),
+                                timeout=1.0
+                            )
+                            if recent_changes:
+                                reentry_context += "\n**What happened while David was away:**\n"
+                                for change in recent_changes[-10:]:  # Last 10 changes
+                                    reentry_context += f"- {change}\n"
+                        except asyncio.TimeoutError:
+                            logger.warning("⚠️ Re-entry changes fetch timed out (skipping)")
+                        except Exception:
+                            pass
+
+                        # Get recent agent actions while David was away
+                        try:
+                            from app.services.agent_memory import get_recent_actions
+                            from sqlalchemy.ext.asyncio import AsyncSession as _ASession
+                            # agent_memory needs async session — wrap sync db
+                            agent_actions = []
+                            # Use a simplified approach: query directly with sync db
+                            action_rows = db.execute(text("""
+                                SELECT source, context_summary, run_at
+                                FROM agent_run_log
+                                WHERE user_id = :uid
+                                  AND run_at >= :since
+                                  AND context_summary IS NOT NULL
+                                ORDER BY run_at DESC LIMIT 5
+                            """), {
+                                "uid": current_user.id,
+                                "since": local_now() - timedelta(hours=max(hours_away, 1)),
+                            }).fetchall()
+                            if action_rows:
+                                reentry_context += "\n**Agent activity while you were away:**\n"
+                                for ar in action_rows:
+                                    reentry_context += f"- [{ar.source}] {(ar.context_summary or '')[:120]}\n"
+                        except Exception:
+                            pass
+
+                        # Get recent journal entries for Sara's recent thoughts
+                        from app.services.sara_journal_service import sara_journal
+                        recent_journal_entries = db.execute(text("""
+                            SELECT content, emotional_state, entry_type, created_at
+                            FROM sara_journal
+                            WHERE user_id = :uid
+                            AND created_at >= :since
+                            ORDER BY created_at DESC
+                            LIMIT 3
+                        """), {
+                            "uid": current_user.id,
+                            "since": local_now() - timedelta(hours=max(hours_away, 1))
+                        }).fetchall()
+
+                        if recent_journal_entries:
+                            reentry_context += "\nYour recent thoughts while David was away:\n"
+                            for entry in recent_journal_entries:
+                                content_preview = (entry.content or "")[:150]
+                                reentry_context += f"- [{entry.entry_type}] {content_preview}\n"
+
+                        # Get brief PKG summary for rapport
+                        try:
+                            from app.services.pkg_context_provider import pkg_context
+                            pkg_brief = pkg_context.get_david_summary_brief(current_user.id, max_facts=5)
+                            if pkg_brief:
+                                reentry_context += f"\nRelevant knowledge about David:\n{pkg_brief}\n"
+                        except Exception:
+                            pass
+
+                        current_content = system_message.content
+                        system_message = ChatMessage(role="system", content=current_content + reentry_context)
+                        logger.info(f"🔄 Injected re-entry context ({len(reentry_context)} chars, {hours_away:.1f}h away)")
+                    except Exception as re_e:
+                        logger.warning(f"⚠️ Re-entry context injection failed (non-critical): {re_e}")
+
+            except asyncio.TimeoutError:
+                logger.warning("⚠️ Session gap detection timed out (skipping)")
             except Exception as e:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
                 logger.warning(f"⚠️ Session gap detection failed (non-critical): {e}")
+
+            # Guard against failed transaction state from optional context injections.
+            try:
+                db.execute(text("SELECT 1"))
+            except Exception as tx_err:
+                logger.warning(f"⚠️ DB transaction reset before chat history retrieval: {tx_err}")
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
 
             # Retrieve conversation history if conversation_id provided
             conversation_history = []
-            if request.conversation_id:
-                logger.info(f"📜 Retrieving conversation history for: {request.conversation_id}")
+            should_load_db_history = bool(request.conversation_id and len(request.messages) <= 2)
+            if request.conversation_id and not should_load_db_history:
+                logger.info(
+                    f"⏭️ Skipping DB history load (client supplied {len(request.messages)} messages)"
+                )
+
+            if should_load_db_history:
+                logger.info(f"📜 Retrieving fallback conversation history for: {request.conversation_id}")
                 try:
-                    # Get previous episodes from this conversation (limit to recent ones to avoid context overflow)
+                    # Get recent episodes from this conversation (descending, then re-order ascending)
                     episodes = db.query(Episode).filter(
                         Episode.conversation_id == request.conversation_id,
                         Episode.user_id == current_user.id,
                         Episode.role.in_(["user", "assistant"])
-                    ).order_by(Episode.created_at.asc()).limit(20).all()
+                    ).order_by(Episode.created_at.desc()).limit(20).all()
 
                     # Convert episodes to ChatMessage format
-                    for episode in episodes:
+                    for episode in reversed(episodes):
                         conversation_history.append(ChatMessage(
                             role=episode.role,
                             content=episode.content
@@ -9840,9 +9323,20 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                 except Exception as e:
                     logger.error(f"❌ Failed to retrieve conversation history: {e}")
 
-            # Build full message list: system + history + new messages
-            all_messages = [system_message] + conversation_history + request.messages
-            logger.info(f"💬 Total messages: {len(all_messages)} (1 system + {len(conversation_history)} history + {len(request.messages)} new)")
+            # Build full message list: system + deduplicated(history + request)
+            merged_request_messages = request.messages
+            overlap = _compute_message_overlap(conversation_history, request.messages)
+            if overlap > 0:
+                merged_request_messages = request.messages[overlap:]
+                logger.info(
+                    f"🔁 Deduplicated {overlap} overlapping turns between DB history and request payload"
+                )
+
+            all_messages = [system_message] + conversation_history + merged_request_messages
+            logger.info(
+                f"💬 Total messages: {len(all_messages)} "
+                f"(1 system + {len(conversation_history)} history + {len(merged_request_messages)} new)"
+            )
 
             # Start the LLM processing in a background task
             async def process_chat():
@@ -9851,26 +9345,34 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     # Work mode always includes workspace and maps tools for canvas control
 
                     if is_work_mode:
-                        # Work mode: always include workspace + maps tools regardless of intent
+                        # Work mode: always include workspace + maps + vm_agents tools regardless of intent
                         effective_categories = list(tool_categories) if tool_categories else []
+                        capability_core_categories = ["devices", "vm_agents", "personal_knowledge", "inbox", "lists"]
                         # Always add workspace tools for canvas control
                         if 'workspace' not in effective_categories:
                             effective_categories.append('workspace')
                         if 'maps' not in effective_categories:
                             effective_categories.append('maps')
+                        for category in capability_core_categories:
+                            if category not in effective_categories:
+                                effective_categories.append(category)
                         tools = tool_registry.get_tools_by_categories(effective_categories)
                         logger.info(f"💼 Work mode: Loaded {len(tools)} tools from categories: {effective_categories}")
                     elif tool_categories:
                         # Standard chat uses intent-based tool loading from classify_with_context
-                        # Also ensure 'devices' category is available for cross-device commands
+                        # Also ensure awareness/action core categories are always available
                         effective_categories = list(tool_categories)
-                        if 'devices' not in effective_categories:
-                            effective_categories.append('devices')
+                        capability_core_categories = ["devices", "vm_agents", "personal_knowledge", "inbox", "lists"]
+                        for category in capability_core_categories:
+                            if category not in effective_categories:
+                                effective_categories.append(category)
                         tools = tool_registry.get_tools_by_categories(effective_categories)
                         logger.info(f"🔧 Intent={user_intent}: Loaded {len(tools)} tools from categories: {effective_categories}")
                     else:
-                        tools = []
-                        logger.info(f"🔧 Intent={user_intent}: No tools needed (conversational)")
+                        # Conservative capability fallback when intent routing fails.
+                        fallback_categories = ['memory', 'notes', 'time', 'devices', 'vm_agents', 'personal_knowledge', 'inbox']
+                        tools = tool_registry.get_tools_by_categories(fallback_categories)
+                        logger.info(f"🔧 Intent={user_intent}: Capability fallback ({len(tools)} tools)")
 
                     # Process chat with loaded tools
                     logger.info("⏳ Starting chat_with_tools...")
@@ -9879,19 +9381,6 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                         model=request.model, ephemeral=request.ephemeral or False
                     )
                     logger.info(f"✅ chat_with_tools completed, response length: {len(response_content)}")
-
-                    # Check if Sara's response mentions body state (for calibration feedback loop)
-                    try:
-                        if response_content:
-                            pending = calibration_service.detect_body_state_mention(
-                                sara_response=response_content,
-                                user_id=current_user.id,
-                                current_body_state=None
-                            )
-                            if pending:
-                                logger.info(f"📊 Body state mention detected: {pending.estimate_type}={pending.estimated_label}")
-                    except Exception as e:
-                        logger.warning(f"⚠️ Body state mention detection failed (non-critical): {e}")
 
                     # Send final response and done IMMEDIATELY to close the stream
                     final_conv_id = streaming_client.current_conversation_id if hasattr(streaming_client, 'current_conversation_id') else request.conversation_id
@@ -9902,17 +9391,161 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                         "data": {
                             "content": response_content,
                             "citations": streaming_client.get_citations(),
-                            "timestamp": datetime.utcnow().isoformat() + "Z",
+                            "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
                             "conversation_id": final_conv_id,
                             "episode_id": final_episode_id
                         }
                     })
                     logger.info("✅ final_response event queued")
+
+                    # Stamp the cross-device session with the real conversation id.
+                    # The pre-stream update skips new conversations (no id yet), so
+                    # without this a single-turn chat would not be resumable.
+                    if final_conv_id:
+                        try:
+                            from app.routes.session import update_active_session
+                            asyncio.ensure_future(update_active_session(
+                                user_id=str(current_user.id),
+                                conversation_id=str(final_conv_id),
+                                device=getattr(request, 'source', None) or 'unknown',
+                                turn_count=len(request.messages),
+                            ))
+                        except Exception:
+                            pass
+
+                    # Emit suggested actions based on tools used and response
+                    try:
+                        from app.services.action_suggester import suggest as suggest_actions
+                        tool_history = getattr(streaming_client, '_tool_history', [])
+                        suggestions = suggest_actions(tool_history, response_content or "")
+                        if suggestions:
+                            await event_queue.put({
+                                "type": "suggested_actions",
+                                "data": {"actions": suggestions}
+                            })
+                            logger.info(f"💡 Emitted {len(suggestions)} suggested actions")
+                    except Exception as e:
+                        logger.debug(f"Suggested actions skipped: {e}")
+
                     await event_queue.put({"type": "done"})
                     logger.info("✅ done event queued")
 
+                    # Commitment/thread extraction (SARA_UNLEASHED Phase B): fire-and-forget
+                    # after every turn. extract_threads() internally rate-limits
+                    # (EXTRACTION_COOLDOWN) and requires >=3 user messages, so this is safe
+                    # to call unconditionally rather than re-deriving those gates here.
+                    try:
+                        from app.services.thread_extractor import extract_from_conversation_bg
+                        _full_messages = list(request.messages) + (
+                            [{"role": "assistant", "content": response_content}] if response_content else []
+                        )
+                        asyncio.ensure_future(extract_from_conversation_bg(_full_messages, str(current_user.id)))
+                    except Exception as e:
+                        logger.debug(f"Thread extraction kickoff skipped: {e}")
+
+                    # Send push notification if requested (for background completion)
+                    if request.notify_on_complete and response_content:
+                        try:
+                            from app.services.notification_service import notification_service
+                            preview = response_content[:100].replace('\n', ' ')
+                            if len(response_content) > 100:
+                                preview += '...'
+                            await notification_service.send_notification(
+                                user_id=str(current_user.id),
+                                title="Sara",
+                                message=preview,
+                                data={
+                                    "type": "chat_response",
+                                    "conversation_id": final_conv_id or "",
+                                },
+                            )
+                            logger.info("📱 Sent chat completion push notification")
+                        except Exception as push_err:
+                            logger.warning(f"⚠️ Push notification failed (non-critical): {push_err}")
+
                     # Note: conversation storage already happened inside chat_with_tools
                     # No additional storage needed here
+
+                    # SELF-LEARNING LOOP: Extract lessons from negative feedback, track lesson effectiveness
+                    try:
+                        # If negative feedback detected, extract a lesson from the mistake
+                        if (implicit_feedback and implicit_feedback.is_actionable()
+                                and implicit_feedback.signal_type.value == "negative"):
+                            from app.services.lesson_extractor import create_lesson_from_feedback
+                            messages_for_extraction = [
+                                {"role": m.role, "content": _extract_text_content(m.content)}
+                                for m in (request.messages or [])
+                            ]
+                            lesson = await create_lesson_from_feedback(
+                                db=db,
+                                feedback=implicit_feedback,
+                                messages=messages_for_extraction,
+                                previous_response=previous_assistant_response,
+                            )
+                            if lesson:
+                                logger.info(f"Extracted lesson: {lesson.lesson[:80]}... (confidence={lesson.confidence:.2f})")
+
+                        # Record that lessons were injected (for effectiveness tracking)
+                        if injected_lesson_ids:
+                            from app.services.lesson_injection_service import lesson_injection_service as _lis
+                            await _lis.record_lesson_application(
+                                db=db,
+                                lesson_ids=injected_lesson_ids,
+                                conversation_id=final_conv_id or request.conversation_id,
+                                message_id=str(final_episode_id) if final_episode_id else None,
+                            )
+                            logger.info(f"Recorded application of {len(injected_lesson_ids)} lessons")
+
+                        # If positive feedback and lessons were injected, mark them as successful
+                        if (implicit_feedback and implicit_feedback.is_actionable()
+                                and implicit_feedback.signal_type.value == "positive"
+                                and injected_lesson_ids):
+                            from app.services.lesson_tracker import lesson_tracker
+                            updated = await lesson_tracker.update_pending_applications(
+                                db=db,
+                                conversation_id=final_conv_id or request.conversation_id,
+                                was_successful=True,
+                                feedback_signal=implicit_feedback.trigger_phrase,
+                            )
+                            if updated:
+                                logger.info(f"Marked {len(updated)} lessons as successful")
+
+                        # If negative feedback on a conversation with prior lessons, mark them as failed
+                        if (implicit_feedback and implicit_feedback.is_actionable()
+                                and implicit_feedback.signal_type.value == "negative"
+                                and not injected_lesson_ids):
+                            # Check if previous conversation had lessons — update those
+                            from app.services.lesson_tracker import lesson_tracker
+                            updated = await lesson_tracker.update_pending_applications(
+                                db=db,
+                                conversation_id=final_conv_id or request.conversation_id,
+                                was_successful=False,
+                                feedback_signal=implicit_feedback.trigger_phrase,
+                            )
+                            if updated:
+                                logger.info(f"Marked {len(updated)} lessons as failed")
+                    except Exception as e:
+                        logger.debug(f"Self-learning loop failed (non-critical): {e}")
+
+                    # Update Sara's emotional state from this conversation (fire-and-forget)
+                    try:
+                        asyncio.create_task(_update_emotional_state_from_chat(
+                            messages=request.messages,
+                            response_content=response_content,
+                            user_id=str(current_user.id),
+                        ))
+                    except Exception:
+                        pass
+
+                    # Batch-enrich episode emotions, topics, and scores (fire-and-forget)
+                    try:
+                        asyncio.create_task(_enrich_episodes_batch(
+                            conversation_id=final_conv_id or request.conversation_id,
+                            user_id=str(current_user.id),
+                        ))
+                    except Exception:
+                        pass
+
                 except Exception as e:
                     logger.error(f"❌ Exception in process_chat: {e}", exc_info=True)
                     await event_queue.put({"type": "error", "data": {"message": str(e)}})
@@ -9928,6 +9561,8 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     event = await asyncio.wait_for(event_queue.get(), timeout=5.0)
                     
                     if event.get("type") == "done":
+                        # Always emit explicit completion event so clients can re-enable input.
+                        yield f"data: {json.dumps(event)}\n\n"
                         break
 
                     # Format as Server-Sent Event
@@ -9938,7 +9573,7 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     
                 except asyncio.TimeoutError:
                     # Send heartbeat to keep connection alive
-                    yield f"data: {json.dumps({'type': 'heartbeat', 'timestamp': datetime.utcnow().isoformat()})}\n\n"
+                    yield f"data: {json.dumps({'type': 'heartbeat', 'timestamp': datetime.now(timezone.utc).isoformat()})}\n\n"
                 except Exception as e:
                     logger.error(f"Error in event stream: {e}")
                     yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
@@ -9958,7 +9593,7 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
     
     return StreamingResponse(
         generate_events(),
-        media_type="text/plain",
+        media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive"
@@ -10100,107 +9735,7 @@ async def speak_text(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ==================== DESKTOP APP DOWNLOADS ====================
-
-DOWNLOADS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "downloads")
-
-@app.get("/api/downloads")
-async def list_downloads(
-    current_user: User = Depends(get_current_user)
-):
-    """List available desktop app downloads"""
-    downloads = []
-
-    if os.path.exists(DOWNLOADS_DIR):
-        for filename in os.listdir(DOWNLOADS_DIR):
-            filepath = os.path.join(DOWNLOADS_DIR, filename)
-            if os.path.isfile(filepath):
-                stat = os.stat(filepath)
-
-                # Determine platform and arch
-                platform = "unknown"
-                arch = "x64"
-                agent_type = "desktop"  # desktop or headless
-
-                if "mac" in filename.lower():
-                    platform = "macOS"
-                    if "arm64" in filename.lower():
-                        arch = "arm64"
-                elif "win" in filename.lower():
-                    platform = "Windows"
-                elif "linux" in filename.lower() or "agent" in filename.lower():
-                    platform = "Linux"
-                    agent_type = "headless"
-                elif filename.endswith(".asar"):
-                    platform = "Windows"  # asar files are for Windows updates
-
-                # Determine file type
-                file_type = "archive"
-                if filename.endswith(".exe"):
-                    file_type = "installer"
-                elif filename.endswith(".dmg"):
-                    file_type = "installer"
-                elif filename.endswith(".zip") or filename.endswith(".tar.gz"):
-                    file_type = "portable"
-                elif filename.endswith(".asar"):
-                    file_type = "update"
-
-                downloads.append({
-                    "filename": filename,
-                    "platform": platform,
-                    "arch": arch,
-                    "type": file_type,
-                    "agent_type": agent_type,
-                    "size_bytes": stat.st_size,
-                    "size_mb": round(stat.st_size / (1024 * 1024), 1),
-                    "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
-                })
-
-    # Sort by platform, then arch
-    downloads.sort(key=lambda x: (x["platform"], x["arch"]))
-
-    # Get version from latest file or package.json if available
-    version = "1.0.36"
-    for d in downloads:
-        if "1.0." in d["filename"]:
-            try:
-                v = d["filename"].split("-")[1]
-                if v > version:
-                    version = v
-            except:
-                pass
-    return {"downloads": downloads, "version": version}
-
-
-@app.get("/api/downloads/{filename}")
-async def download_file(
-    filename: str,
-    current_user: User = Depends(get_current_user)
-):
-    """Download a desktop app installer"""
-    # Sanitize filename to prevent directory traversal
-    safe_filename = os.path.basename(filename)
-    filepath = os.path.join(DOWNLOADS_DIR, safe_filename)
-
-    if not os.path.exists(filepath) or not os.path.isfile(filepath):
-        raise HTTPException(status_code=404, detail="File not found")
-
-    # Determine media type
-    media_type = "application/octet-stream"
-    if safe_filename.endswith(".zip"):
-        media_type = "application/zip"
-    elif safe_filename.endswith(".tar.gz"):
-        media_type = "application/gzip"
-    elif safe_filename.endswith(".exe"):
-        media_type = "application/x-msdownload"
-    elif safe_filename.endswith(".dmg"):
-        media_type = "application/x-apple-diskimage"
-
-    return FileResponse(
-        filepath,
-        media_type=media_type,
-        filename=safe_filename
-    )
+# Desktop app downloads extracted to app/routes/downloads.py
 
 
 @app.get("/api/notes/search")
@@ -10230,7 +9765,7 @@ async def search_notes_api(
 
     # Search title and content with fuzzy matching
     results = db.execute(text("""
-        SELECT id, title, content, folder_id, created_at, updated_at
+        SELECT id, title, content, folder_id, tags, starred, created_at, updated_at
         FROM note
         WHERE user_id = :user_id
           AND (
@@ -10256,6 +9791,8 @@ async def search_notes_api(
             "title": row.title or "Untitled",
             "content": row.content,
             "folder_id": row.folder_id,
+            "tags": row.tags if isinstance(row.tags, list) else (json.loads(row.tags) if row.tags else []),
+            "starred": bool(row.starred),
             "created_at": row.created_at.isoformat() if row.created_at else None,
             "updated_at": row.updated_at.isoformat() if row.updated_at else None
         }
@@ -10264,673 +9801,10 @@ async def search_notes_api(
 
 
 # Memory Management endpoints
-@app.get("/memory/episodes")
-async def get_episodes(
-    page: int = 1,
-    per_page: int = 20,
-    min_importance: float = None,
-    max_importance: float = None,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get episodes with pagination and filtering"""
-    try:
-        # Build base query
-        query = db.query(Episode).filter(Episode.user_id == current_user.id)
-        
-        # Apply importance filters
-        if min_importance is not None:
-            query = query.filter(Episode.importance >= min_importance)
-        if max_importance is not None:
-            query = query.filter(Episode.importance <= max_importance)
-        
-        # Get total count
-        total = query.count()
-        
-        # Apply pagination and ordering
-        episodes = query.order_by(Episode.created_at.desc()).offset((page - 1) * per_page).limit(per_page).all()
-        
-        # Format episodes for frontend
-        episode_data = []
-        for episode in episodes:
-            episode_data.append({
-                "id": episode.id,
-                "source": episode.source or "chat",
-                "role": episode.role,
-                "content": episode.content,
-                "importance": episode.importance,
-                "meta": {
-                    "memory_type": episode.memory_type,
-                    "topics": episode.topics,
-                    "emotional_tone": episode.emotional_tone,
-                    "context_tags": episode.context_tags,
-                    "access_count": episode.access_count
-                },
-                "created_at": format_iso_utc(episode.created_at)
-            })
-        
-        return {
-            "episodes": episode_data,
-            "total": total,
-            "page": page,
-            "per_page": per_page
-        }
-    except Exception as e:
-        logger.error(f"Error retrieving episodes: {e}")
-        raise HTTPException(status_code=500, detail="Failed to retrieve episodes")
-
-@app.delete("/memory/episodes/{episode_id}")
-async def delete_episode(
-    episode_id: str,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Delete a specific episode"""
-    try:
-        # Find the episode
-        episode = db.query(Episode).filter(
-            Episode.id == episode_id,
-            Episode.user_id == current_user.id
-        ).first()
-        
-        if not episode:
-            raise HTTPException(status_code=404, detail="Episode not found")
-        
-        # Delete the episode
-        db.delete(episode)
-        db.commit()
-        
-        logger.info(f"Deleted episode {episode_id} for user {current_user.id}")
-        return {"message": "Episode deleted successfully"}
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error deleting episode {episode_id}: {e}")
-        db.rollback()
-        raise HTTPException(status_code=500, detail="Failed to delete episode")
-
-@app.patch("/memory/episodes/{episode_id}")
-async def update_episode(
-    episode_id: str,
-    importance: float,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Update episode importance"""
-    try:
-        # Validate importance value
-        if not (0.0 <= importance <= 1.0):
-            raise HTTPException(status_code=400, detail="Importance must be between 0.0 and 1.0")
-        
-        # Find the episode
-        episode = db.query(Episode).filter(
-            Episode.id == episode_id,
-            Episode.user_id == current_user.id
-        ).first()
-        
-        if not episode:
-            raise HTTPException(status_code=404, detail="Episode not found")
-        
-        # Update the importance
-        episode.importance = importance
-        episode.updated_at = func.now()
-        db.commit()
-        
-        logger.info(f"Updated episode {episode_id} importance to {importance} for user {current_user.id}")
-        return {"message": "Episode importance updated successfully"}
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error updating episode {episode_id}: {e}")
-        db.rollback()
-        raise HTTPException(status_code=500, detail="Failed to update episode importance")
-
-@app.post("/memory/search")
-async def search_episodes(
-    search_request: dict,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Search episodes with POST request body"""
-    try:
-        query = search_request.get("query", "")
-        scopes = search_request.get("scopes", ["episodes"])
-        limit = search_request.get("limit", 50)
-        
-        if not query.strip():
-            return {"results": []}
-        
-        # Search episodes by content using LIKE for now (could be enhanced with vector search)
-        episodes = db.query(Episode).filter(
-            Episode.user_id == current_user.id,
-            Episode.content.ilike(f"%{query}%")
-        ).order_by(Episode.created_at.desc()).limit(limit).all()
-        
-        # Format results for frontend
-        results = []
-        for episode in episodes:
-            results.append({
-                "text": episode.content,
-                "metadata": {
-                    "episode_id": episode.id,
-                    "id": episode.id,
-                    "importance": episode.importance,
-                    "role": episode.role,
-                    "source": episode.source or "chat",
-                    "timestamp": format_iso_utc(episode.created_at),
-                    "memory_type": episode.memory_type,
-                    "topics": episode.topics,
-                    "emotional_tone": episode.emotional_tone,
-                    "context_tags": episode.context_tags
-                }
-            })
-        
-        return {"results": results}
-        
-    except Exception as e:
-        logger.error(f"Error searching episodes: {e}")
-        raise HTTPException(status_code=500, detail="Failed to search episodes")
 
 # Episode Rating endpoints
-@app.post("/api/episodes/{episode_id}/rate")
-async def rate_episode(
-    episode_id: str,
-    rating_data: dict,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Rate an episode (1-5 stars)"""
-    try:
-        from app.services.rating_service import get_rating_service
-        from app.services.rating_events import get_rating_publisher
-
-        rating = rating_data.get("rating")
-        if not rating or not (1 <= rating <= 5):
-            raise HTTPException(status_code=400, detail="Rating must be between 1 and 5")
-
-        # Get rating service
-        rating_service = get_rating_service(db, redis_url=config.settings.redis_url)
-
-        # Rate the episode
-        result = await rating_service.rate_episode(
-            episode_id=episode_id,
-            user_id=current_user.id,
-            rating=rating
-        )
-
-        # Publish event for real-time updates
-        publisher = get_rating_publisher(redis_url=config.settings.redis_url)
-        await publisher.publish_episode_rated(
-            episode_id=episode_id,
-            user_id=current_user.id,
-            rating=rating,
-            net_score=result["rating_sum"],
-            rating_count=result["rating_count"],
-            average_rating=result["average_rating"]
-        )
-
-        return {
-            "success": True,
-            "message": "Episode rated successfully",
-            "rating": result
-        }
-
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except LookupError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        logger.error(f"Error rating episode {episode_id}: {e}")
-        raise HTTPException(status_code=500, detail="Failed to rate episode")
-
-@app.get("/api/episodes/{episode_id}/rating")
-async def get_episode_rating(
-    episode_id: str,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get rating data for an episode"""
-    try:
-        from app.services.rating_service import get_rating_service
-
-        rating_service = get_rating_service(db, redis_url=config.settings.redis_url)
-        rating_data = await rating_service.get_episode_rating(episode_id)
-
-        if not rating_data:
-            return {"rated": False}
-
-        # Also get user's specific rating
-        user_rating = await rating_service.get_user_rating(current_user.id, episode_id)
-        rating_data["user_rating"] = user_rating
-        rating_data["rated"] = True
-
-        return rating_data
-
-    except Exception as e:
-        logger.error(f"Error getting rating for episode {episode_id}: {e}")
-        raise HTTPException(status_code=500, detail="Failed to get episode rating")
-
-@app.delete("/api/episodes/{episode_id}/rating")
-async def delete_episode_rating(
-    episode_id: str,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Delete user's rating for an episode"""
-    try:
-        from app.services.rating_service import get_rating_service
-
-        rating_service = get_rating_service(db, redis_url=config.settings.redis_url)
-        success = await rating_service.delete_rating(episode_id, current_user.id)
-
-        if not success:
-            raise HTTPException(status_code=404, detail="Rating not found")
-
-        return {
-            "success": True,
-            "message": "Rating deleted successfully"
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error deleting rating for episode {episode_id}: {e}")
-        raise HTTPException(status_code=500, detail="Failed to delete rating")
-
-@app.get("/api/rating/stats")
-async def get_rating_stats(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get rating system statistics"""
-    try:
-        from app.services.rating_service import get_rating_service
-
-        rating_service = get_rating_service(db, redis_url=config.settings.redis_url)
-        stats = await rating_service.get_rating_stats()
-
-        return stats
-
-    except Exception as e:
-        logger.error(f"Error getting rating stats: {e}")
-        raise HTTPException(status_code=500, detail="Failed to get rating stats")
-
-@app.post("/api/episodes/find-by-content")
-async def find_episodes_by_content(
-    request: dict,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Find episode IDs by conversation_id and content (for rating UI)"""
-    try:
-        conversation_id = request.get("conversation_id")
-        messages = request.get("messages", [])  # [{role, content}]
-
-        if not conversation_id or not messages:
-            return {"episodes": []}
-
-        # Find episodes matching the conversation and content
-        result_episodes = []
-        for msg in messages:
-            episode = db.query(Episode).filter(
-                Episode.conversation_id == conversation_id,
-                Episode.user_id == current_user.id,
-                Episode.role == msg["role"],
-                Episode.content == msg["content"]
-            ).first()
-
-            if episode:
-                result_episodes.append({
-                    "role": episode.role,
-                    "content": episode.content[:100],  # Preview
-                    "episode_id": episode.id
-                })
-            else:
-                result_episodes.append({
-                    "role": msg["role"],
-                    "content": msg["content"][:100],
-                    "episode_id": None
-                })
-
-        return {"episodes": result_episodes}
-
-    except Exception as e:
-        logger.error(f"Error finding episodes by content: {e}")
-        raise HTTPException(status_code=500, detail="Failed to find episodes")
 
 # Document API endpoints
-@app.post("/documents", response_model=DocumentResponse)
-async def upload_document(
-    file: UploadFile,
-    chat_context: bool = False,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Upload a document with Neo4j-first intelligent processing"""
-    doc_id = str(uuid.uuid4())
-    
-    try:
-        # Create uploads directory if it doesn't exist
-        uploads_dir = "uploads"
-        os.makedirs(uploads_dir, exist_ok=True)
-        
-        # Generate unique filename while preserving extension
-        file_extension = os.path.splitext(file.filename)[1] if file.filename else ""
-        unique_filename = f"{uuid.uuid4()}{file_extension}"
-        file_path = os.path.join(uploads_dir, unique_filename)
-        
-        # Save file to disk
-        file_content = await file.read()
-        async with aiofiles.open(file_path, 'wb') as f:
-            await f.write(file_content)
-        
-        # Extract text immediately
-        processor = DocumentProcessor()
-        extracted_text = ""
-        
-        if file.content_type == "application/pdf":
-            try:
-                extracted_text = processor.extract_text(file_path, file.content_type)
-                if not extracted_text or len(extracted_text.strip()) < 10:
-                    extracted_text = f"PDF document: {file.filename} (text extraction may have limited success)"
-            except Exception as e:
-                logger.warning(f"PDF extraction failed: {e}")
-                extracted_text = f"PDF document: {file.filename} (text extraction failed)"
-        elif file.content_type in ["text/plain", "text/markdown"]:
-            try:
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    extracted_text = f.read()
-            except Exception as e:
-                logger.warning(f"Text file extraction failed: {e}")
-                extracted_text = "Could not extract text from file"
-        elif "word" in (file.content_type or "") or file.content_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-            try:
-                extracted_text = processor.extract_text(file_path, file.content_type)
-                if not extracted_text:
-                    extracted_text = f"Word document: {file.filename}"
-            except Exception as e:
-                logger.warning(f"Word document extraction failed: {e}")
-                extracted_text = f"Word document: {file.filename}"
-        else:
-            extracted_text = f"Document: {file.filename}"
-        
-        # Neo4j-first approach: Create document in Neo4j immediately
-        try:
-            from app.services.neo4j_service import neo4j_service
-            from app.services.intelligence_pipeline import intelligence_pipeline, ContentType
-            
-            # Ensure Neo4j connection
-            if not neo4j_service.driver:
-                await neo4j_service.connect()
-            
-            # Create document in Neo4j graph with extracted content
-            neo4j_result = await neo4j_service.create_document(
-                doc_id=doc_id,
-                user_id=current_user.id,
-                title=file.filename or "Untitled Document",
-                content_text=extracted_text,
-                mime_type=file.content_type or "application/octet-stream",
-                file_path=file_path
-            )
-            
-            # Start intelligence pipeline workers if not already running
-            await intelligence_pipeline.start_workers()
-            
-            # Queue for fast processing (embeddings, obvious connections)
-            await intelligence_pipeline.queue_fast_processing(
-                content_id=doc_id,
-                content_type=ContentType.DOCUMENT,
-                metadata={
-                    "user_id": current_user.id,
-                    "title": file.filename,
-                    "mime_type": file.content_type,
-                    "file_path": file_path,
-                    "file_size": len(file_content)
-                }
-            )
-            
-            logger.info(f"✅ Document {doc_id} created in Neo4j and queued for intelligent processing")
-            
-        except Exception as neo_error:
-            logger.error(f"❌ Neo4j document creation failed: {neo_error}")
-            # Continue with PostgreSQL fallback
-        
-        # Background sync to PostgreSQL (backup)
-        document = Document(
-            id=doc_id,
-            user_id=current_user.id,
-            filename=unique_filename,
-            original_filename=file.filename or "unknown",
-            title=file.filename or "Untitled Document",  # Add title for backward compatibility
-            file_path=file_path,
-            file_size=len(file_content),
-            mime_type=file.content_type or "application/octet-stream",
-            content_text=extracted_text[:50000] if extracted_text else "",  # Store 50KB preview
-            is_processed="true"  # Mark as processed since we extracted text
-        )
-        
-        db.add(document)
-        db.commit()
-        db.refresh(document)
-        
-        # Legacy chunking for PostgreSQL compatibility (reduced priority)
-        try:
-            chunks = processor.chunk_text(extracted_text) if extracted_text else []
-            max_chunks = 100  # Reduced since Neo4j is primary
-            processed_chunks = chunks[:max_chunks]
-            
-            if processed_chunks:
-                # Generate embeddings for chunks
-                chunk_embeddings = await embedding_service.generate_embeddings_batch(processed_chunks)
-
-                # Save chunks to PostgreSQL (skip chunks with failed embeddings)
-                saved_chunks = 0
-                skipped_chunks = 0
-                for i, (chunk_text, embedding) in enumerate(zip(processed_chunks, chunk_embeddings)):
-                    if embedding is None:
-                        # Skip chunks where embedding failed - don't pollute search with zero vectors
-                        skipped_chunks += 1
-                        continue
-
-                    if DATABASE_URL.startswith("postgresql") and PGVECTOR_AVAILABLE:
-                        embedding_data = embedding
-                    else:
-                        embedding_data = json.dumps(embedding)
-
-                    chunk = DocumentChunk(
-                        document_id=document.id,
-                        user_id=current_user.id,
-                        chunk_index=i,
-                        chunk_text=chunk_text,
-                        embedding=embedding_data
-                    )
-                    db.add(chunk)
-                    saved_chunks += 1
-
-                db.commit()
-                if skipped_chunks > 0:
-                    logger.warning(f"📄 Legacy chunking: {saved_chunks} chunks saved, {skipped_chunks} skipped (embedding failures)")
-                else:
-                    logger.info(f"📄 Legacy chunking completed: {saved_chunks} chunks")
-        
-        except Exception as chunk_error:
-            logger.warning(f"⚠️ Legacy chunking failed (Neo4j processing continues): {chunk_error}")
-        
-        return DocumentResponse(
-            id=document.id,
-            filename=document.filename,
-            original_filename=document.original_filename,
-            title=document.title or document.original_filename,
-            file_size=document.file_size,
-            mime_type=document.mime_type,
-            content_text=document.content_text,
-            is_processed=document.is_processed,
-            created_at=document.created_at.isoformat(),
-            updated_at=document.updated_at.isoformat()
-        )
-        
-    except Exception as e:
-        logger.error(f"Document upload error: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to upload document: {str(e)}")
-
-
-@app.get("/documents", response_model=list[DocumentResponse])
-async def get_documents(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Get all documents for the current user"""
-    documents = db.query(Document).filter(Document.user_id == current_user.id).order_by(Document.created_at.desc()).all()
-    
-    return [
-        DocumentResponse(
-            id=doc.id,
-            filename=doc.filename,
-            original_filename=doc.original_filename,
-            title=getattr(doc, 'title', '') or doc.original_filename,  # Fallback for existing docs
-            file_size=doc.file_size,
-            mime_type=doc.mime_type,
-            content_text=doc.content_text,
-            is_processed=doc.is_processed,
-            created_at=doc.created_at.isoformat(),
-            updated_at=doc.updated_at.isoformat()
-        )
-        for doc in documents
-    ]
-
-@app.get("/documents/{document_id}/file")
-async def download_document(
-    document_id: str,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Download the original document file"""
-    document = db.query(Document).filter(
-        Document.id == document_id,
-        Document.user_id == current_user.id
-    ).first()
-    
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
-    
-    if not os.path.exists(document.file_path):
-        raise HTTPException(status_code=404, detail="Document file not found on disk")
-    
-    async with aiofiles.open(document.file_path, 'rb') as f:
-        file_content = await f.read()
-    
-    return Response(
-        content=file_content,
-        media_type=document.mime_type,
-        headers={
-            "Content-Disposition": f"attachment; filename=\"{document.original_filename}\""
-        }
-    )
-
-@app.delete("/documents/{document_id}")
-async def delete_document(
-    document_id: str,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Delete a document and its chunks"""
-    document = db.query(Document).filter(
-        Document.id == document_id,
-        Document.user_id == current_user.id
-    ).first()
-    
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
-    
-    # Delete chunks first
-    db.query(DocumentChunk).filter(DocumentChunk.document_id == document_id).delete()
-    
-    # Skip vector deletion for now to avoid crashes
-    logger.info(f"Skipped vector deletion for document {document_id} (disabled for stability)")
-    
-    # Delete file from disk
-    try:
-        if os.path.exists(document.file_path):
-            os.remove(document.file_path)
-    except Exception as e:
-        logger.warning(f"Could not delete file {document.file_path}: {e}")
-    
-    # Delete from Neo4j first
-    try:
-        from app.services.neo4j_service import neo4j_service
-        await neo4j_service.delete_document(document_id, current_user.id)
-        logger.info(f"✅ Document {document_id} deleted from Neo4j")
-    except Exception as e:
-        logger.warning(f"Failed to delete document from Neo4j: {e}")
-    
-    # Delete document record
-    db.delete(document)
-    db.commit()
-    
-    return {"message": "Document deleted successfully"}
-
-@app.put("/documents/{document_id}", response_model=DocumentResponse)
-async def update_document(
-    document_id: str,
-    title: str,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Update document title"""
-    document = db.query(Document).filter(
-        Document.id == document_id,
-        Document.user_id == current_user.id
-    ).first()
-    
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
-    
-    # Update document title
-    document.title = title
-    db.commit()
-    db.refresh(document)
-    
-    # Update Neo4j if available
-    try:
-        from app.services.neo4j_service import neo4j_service
-        if neo4j_service.driver:
-            await neo4j_service.update_document_title(document_id, title)
-    except Exception as e:
-        logger.warning(f"Failed to update document title in Neo4j: {e}")
-    
-    return DocumentResponse(
-        id=document.id,
-        filename=document.filename,
-        original_filename=document.original_filename,
-        title=document.title,
-        mime_type=document.mime_type,
-        file_size=document.file_size,
-        is_processed=document.is_processed,
-        content_text=document.content_text,
-        created_at=document.created_at.isoformat(),
-        updated_at=document.updated_at.isoformat()
-    )
-
-@app.get("/documents/search")
-async def search_documents(
-    query: str,
-    limit: int = 5,
-    current_user: User = Depends(get_current_user)
-):
-    """Search for relevant document chunks using vector similarity"""
-    if not query.strip():
-        return {"results": []}
-    
-    try:
-        search_results = document_processor.search_documents(query, current_user.id, limit)
-        
-        return {
-            "query": query,
-            "results": search_results
-        }
-        
-    except Exception as e:
-        logger.error(f"Document search error: {e}")
-        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
 
 # 3D Model API endpoints
 ALLOWED_3D_FORMATS = {'stl', 'obj', 'gltf', 'glb'}
@@ -10941,760 +9815,12 @@ MODEL_MIME_TYPES = {
     'glb': 'model/gltf-binary',
 }
 
-@app.post("/models/upload", response_model=Model3DResponse)
-async def upload_3d_model(
-    file: UploadFile,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Upload a 3D model file (STL, OBJ, GLTF, GLB)"""
-    model_id = str(uuid.uuid4())
-
-    try:
-        # Validate file extension
-        if not file.filename:
-            raise HTTPException(status_code=400, detail="Filename is required")
-
-        file_extension = file.filename.rsplit('.', 1)[-1].lower() if '.' in file.filename else ''
-        if file_extension not in ALLOWED_3D_FORMATS:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid file format. Allowed: {', '.join(ALLOWED_3D_FORMATS)}"
-            )
-
-        # Create models directory if it doesn't exist
-        models_dir = "uploads/models"
-        os.makedirs(models_dir, exist_ok=True)
-
-        # Generate unique filename
-        unique_filename = f"{model_id}.{file_extension}"
-        file_path = os.path.join(models_dir, unique_filename)
-
-        # Save file to disk
-        file_content = await file.read()
-        async with aiofiles.open(file_path, 'wb') as f:
-            await f.write(file_content)
-
-        # Create database record
-        now = datetime.utcnow()
-        cursor = db.connection().connection.cursor()
-        cursor.execute("""
-            INSERT INTO models_3d (id, user_id, filename, display_name, file_format, minio_key, file_size, created_at, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """, (model_id, current_user.id, file.filename, file.filename.rsplit('.', 1)[0], file_extension, file_path, len(file_content), now, now))
-        db.commit()
-
-        logger.info(f"3D model uploaded: {model_id} ({file.filename})")
-
-        return Model3DResponse(
-            id=model_id,
-            filename=file.filename,
-            display_name=file.filename.rsplit('.', 1)[0],
-            file_format=file_extension,
-            file_size=len(file_content),
-            download_url=f"/models/{model_id}/file",
-            created_at=now.isoformat(),
-            updated_at=now.isoformat()
-        )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"3D model upload error: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to upload 3D model: {str(e)}")
-
-
-@app.get("/models", response_model=list[Model3DResponse])
-async def list_3d_models(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """List all 3D models for the current user"""
-    try:
-        cursor = db.connection().connection.cursor()
-        cursor.execute("""
-            SELECT id, filename, display_name, file_format, file_size, created_at, updated_at
-            FROM models_3d WHERE user_id = %s ORDER BY created_at DESC
-        """, (current_user.id,))
-        rows = cursor.fetchall()
-
-        return [
-            Model3DResponse(
-                id=row[0],
-                filename=row[1],
-                display_name=row[2],
-                file_format=row[3],
-                file_size=row[4],
-                download_url=f"/models/{row[0]}/file",
-                created_at=row[5].isoformat() if row[5] else "",
-                updated_at=row[6].isoformat() if row[6] else ""
-            )
-            for row in rows
-        ]
-    except Exception as e:
-        logger.error(f"Error listing 3D models: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to list models: {str(e)}")
-
-
-@app.get("/models/{model_id}", response_model=Model3DResponse)
-async def get_3d_model(
-    model_id: str,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get metadata for a specific 3D model"""
-    try:
-        cursor = db.connection().connection.cursor()
-        cursor.execute("""
-            SELECT id, filename, display_name, file_format, file_size, created_at, updated_at
-            FROM models_3d WHERE id = %s AND user_id = %s
-        """, (model_id, current_user.id))
-        row = cursor.fetchone()
-
-        if not row:
-            raise HTTPException(status_code=404, detail="Model not found")
-
-        return Model3DResponse(
-            id=row[0],
-            filename=row[1],
-            display_name=row[2],
-            file_format=row[3],
-            file_size=row[4],
-            download_url=f"/models/{row[0]}/file",
-            created_at=row[5].isoformat() if row[5] else "",
-            updated_at=row[6].isoformat() if row[6] else ""
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting 3D model: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get model: {str(e)}")
-
-
-@app.get("/models/{model_id}/file")
-async def download_3d_model(
-    model_id: str,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Download a 3D model file"""
-    try:
-        cursor = db.connection().connection.cursor()
-        cursor.execute("""
-            SELECT minio_key, filename, file_format FROM models_3d WHERE id = %s AND user_id = %s
-        """, (model_id, current_user.id))
-        row = cursor.fetchone()
-
-        if not row:
-            raise HTTPException(status_code=404, detail="Model not found")
-
-        file_path, filename, file_format = row
-
-        if not os.path.exists(file_path):
-            raise HTTPException(status_code=404, detail="Model file not found on disk")
-
-        async with aiofiles.open(file_path, 'rb') as f:
-            file_content = await f.read()
-
-        mime_type = MODEL_MIME_TYPES.get(file_format, 'application/octet-stream')
-
-        return Response(
-            content=file_content,
-            media_type=mime_type,
-            headers={
-                "Content-Disposition": f"inline; filename=\"{filename}\"",
-                "Access-Control-Expose-Headers": "Content-Disposition"
-            }
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error downloading 3D model: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to download model: {str(e)}")
-
-
-@app.delete("/models/{model_id}")
-async def delete_3d_model(
-    model_id: str,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Delete a 3D model"""
-    try:
-        cursor = db.connection().connection.cursor()
-        cursor.execute("""
-            SELECT minio_key FROM models_3d WHERE id = %s AND user_id = %s
-        """, (model_id, current_user.id))
-        row = cursor.fetchone()
-
-        if not row:
-            raise HTTPException(status_code=404, detail="Model not found")
-
-        file_path = row[0]
-
-        # Delete file from disk
-        if os.path.exists(file_path):
-            os.remove(file_path)
-
-        # Delete database record
-        cursor.execute("DELETE FROM models_3d WHERE id = %s", (model_id,))
-        db.commit()
-
-        logger.info(f"3D model deleted: {model_id}")
-        return {"message": "Model deleted successfully"}
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error deleting 3D model: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to delete model: {str(e)}")
-
 
 # Conversation memory API endpoints
-@app.get("/conversations", response_model=list[ConversationResponse])
-async def get_conversations(
-    limit: int = 20,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get recent conversations for the current user"""
-    conversations = db.query(Conversation).filter(
-        Conversation.user_id == current_user.id
-    ).order_by(Conversation.updated_at.desc()).limit(limit).all()
-    
-    return [
-        ConversationResponse(
-            id=conv.id,
-            title=conv.title or "Conversation",
-            summary=conv.summary or "",
-            total_messages=conv.total_messages,
-            created_at=conv.created_at.isoformat(),
-            updated_at=conv.updated_at.isoformat()
-        )
-        for conv in conversations
-    ]
-
-@app.get("/conversations/{conversation_id}/turns", response_model=list[ConversationTurnResponse])
-async def get_conversation_turns(
-    conversation_id: str,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get all turns/messages for a specific conversation"""
-    # Verify the conversation belongs to the user
-    conversation = db.query(Conversation).filter(
-        Conversation.id == conversation_id,
-        Conversation.user_id == current_user.id
-    ).first()
-    
-    if not conversation:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    
-    turns = db.query(ConversationTurn).filter(
-        ConversationTurn.conversation_id == conversation_id
-    ).order_by(ConversationTurn.message_index).all()
-    
-    return [
-        ConversationTurnResponse(
-            id=turn.id,
-            conversation_id=turn.conversation_id,
-            role=turn.role,
-            content=turn.content,
-            message_index=turn.message_index,
-            created_at=turn.created_at.isoformat()
-        )
-        for turn in turns
-    ]
-
-@app.delete("/conversations/{conversation_id}")
-async def delete_conversation(
-    conversation_id: str,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Delete a conversation and all its turns"""
-    try:
-        logger.info(f"Delete request for conversation {conversation_id} by user {current_user.id}")
-
-        # Verify the conversation belongs to the user
-        conversation = db.query(Conversation).filter(
-            Conversation.id == conversation_id,
-            Conversation.user_id == current_user.id
-        ).first()
-
-        if not conversation:
-            logger.warning(f"Conversation {conversation_id} not found for user {current_user.id}")
-            raise HTTPException(status_code=404, detail="Conversation not found")
-
-        # Delete all conversation turns first (due to foreign key constraints)
-        db.query(ConversationTurn).filter(
-            ConversationTurn.conversation_id == conversation_id
-        ).delete()
-
-        # Delete the conversation
-        db.delete(conversation)
-        db.commit()
-
-        logger.info(f"Deleted conversation {conversation_id} and its turns for user {current_user.id}")
-        return {"message": "Conversation deleted successfully"}
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error deleting conversation {conversation_id}: {e}")
-        db.rollback()
-        raise HTTPException(status_code=500, detail="Failed to delete conversation")
 
 # ==================== EPISODE-BASED CONVERSATION ENDPOINTS ====================
 
-@app.get("/api/conversations/list", response_model=list[ConversationSummaryResponse])
-async def list_conversations(
-    limit: int = 50,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get list of conversations based on Episodes"""
-    try:
-        # Query for distinct conversation_ids with aggregated data
-        from sqlalchemy import func, distinct
-
-        conversations = db.query(
-            Episode.conversation_id,
-            func.min(Episode.content).label('first_message'),
-            func.count(Episode.id).label('message_count'),
-            func.max(Episode.created_at).label('last_activity'),
-            func.min(Episode.created_at).label('created_at')
-        ).filter(
-            Episode.user_id == current_user.id,
-            Episode.conversation_id.isnot(None),
-            Episode.role.in_(['user', 'assistant'])
-        ).group_by(
-            Episode.conversation_id
-        ).order_by(
-            func.max(Episode.created_at).desc()
-        ).limit(limit).all()
-
-        return [
-            ConversationSummaryResponse(
-                conversation_id=conv.conversation_id,
-                first_message=conv.first_message[:100] if conv.first_message else "",
-                message_count=conv.message_count,
-                last_activity=conv.last_activity.isoformat(),
-                created_at=conv.created_at.isoformat()
-            )
-            for conv in conversations
-        ]
-    except Exception as e:
-        logger.error(f"Error fetching conversations list: {e}")
-        raise HTTPException(status_code=500, detail="Failed to fetch conversations")
-
-@app.get("/api/conversations/{conversation_id}/messages", response_model=list[EpisodeMessageResponse])
-async def get_conversation_messages(
-    conversation_id: str,
-    limit: int = 100,
-    offset: int = 0,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get messages for a specific conversation from Episodes"""
-    try:
-        # Verify at least one episode in this conversation belongs to the user
-        episode_exists = db.query(Episode).filter(
-            Episode.conversation_id == conversation_id,
-            Episode.user_id == current_user.id
-        ).first()
-
-        if not episode_exists:
-            raise HTTPException(status_code=404, detail="Conversation not found")
-
-        # Get messages for this conversation
-        episodes = db.query(Episode).filter(
-            Episode.conversation_id == conversation_id,
-            Episode.user_id == current_user.id,
-            Episode.role.in_(['user', 'assistant'])
-        ).order_by(
-            Episode.created_at.asc()
-        ).offset(offset).limit(limit).all()
-
-        return [
-            EpisodeMessageResponse(
-                id=ep.id,
-                role=ep.role,
-                content=ep.content,
-                created_at=format_iso_utc(ep.created_at),
-                importance=ep.importance
-            )
-            for ep in episodes
-        ]
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error fetching conversation messages: {e}")
-        raise HTTPException(status_code=500, detail="Failed to fetch conversation messages")
-
-@app.post("/api/conversations/active")
-async def set_active_conversation(
-    request: SetActiveConversationRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Set the user's current active conversation"""
-    try:
-        # Get or create user profile
-        user_profile = db.query(UserProfile).filter(
-            UserProfile.user_id == current_user.id
-        ).first()
-
-        if not user_profile:
-            user_profile = UserProfile(
-                user_id=current_user.id,
-                profile_data={}
-            )
-            db.add(user_profile)
-
-        # Store active conversation_id in profile_data field (JSONB)
-        if not user_profile.profile_data:
-            user_profile.profile_data = {}
-
-        # Make a copy to ensure SQLAlchemy detects the change
-        profile_data_copy = dict(user_profile.profile_data) if user_profile.profile_data else {}
-        profile_data_copy['active_conversation_id'] = request.conversation_id
-        user_profile.profile_data = profile_data_copy
-
-        # Mark as modified for SQLAlchemy to detect the change
-        from sqlalchemy.orm.attributes import flag_modified
-        flag_modified(user_profile, "profile_data")
-
-        db.commit()
-
-        return {"message": "Active conversation set", "conversation_id": request.conversation_id}
-    except Exception as e:
-        logger.error(f"Error setting active conversation: {e}")
-        db.rollback()
-        raise HTTPException(status_code=500, detail="Failed to set active conversation")
-
-@app.get("/api/conversations/active")
-async def get_active_conversation(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get the user's current active conversation"""
-    try:
-        user_profile = db.query(UserProfile).filter(
-            UserProfile.user_id == current_user.id
-        ).first()
-
-        active_conversation_id = None
-        if user_profile and user_profile.profile_data:
-            active_conversation_id = user_profile.profile_data.get('active_conversation_id')
-
-        return {
-            "conversation_id": active_conversation_id
-        }
-    except Exception as e:
-        logger.error(f"Error getting active conversation: {e}")
-        raise HTTPException(status_code=500, detail="Failed to get active conversation")
-
-@app.get("/memory/search")
-async def search_memory(
-    query: str,
-    limit: int = 10,
-    current_user: User = Depends(get_current_user)
-):
-    """Search through conversation memory"""
-    if not query.strip():
-        return {"results": []}
-    
-    try:
-        # Use the existing search_memory_tool method
-        search_results = await llm_client.search_memory_tool(query, current_user.id)
-        
-        return {
-            "query": query,
-            "results": search_results
-        }
-        
-    except Exception as e:
-        logger.error(f"Memory search error: {e}")
-        raise HTTPException(status_code=500, detail=f"Memory search failed: {str(e)}")
-
-@app.get("/memory/insights")
-async def get_dream_insights(
-    limit: int = 10,
-    insight_type: str = None,
-    current_user: User = Depends(get_current_user)
-):
-    """Get AI-generated insights from background dreaming/consolidation"""
-    try:
-        db = SessionLocal()
-        try:
-            query_filter = [DreamInsight.user_id == current_user.id]
-            
-            if insight_type:
-                query_filter.append(DreamInsight.insight_type == insight_type)
-            
-            insights = db.query(DreamInsight).filter(*query_filter).order_by(
-                DreamInsight.dream_date.desc()
-            ).limit(limit).all()
-            
-            insights_data = []
-            for insight in insights:
-                insight_dict = {
-                    "id": insight.id,
-                    "type": insight.insight_type,
-                    "title": insight.title,
-                    "content": insight.content,
-                    "confidence": insight.confidence,
-                    "dream_date": insight.dream_date.isoformat(),
-                    "surfaced_at": insight.surfaced_at.isoformat() if insight.surfaced_at else None,
-                    "user_feedback": insight.user_feedback,
-                    "related_episodes": json.loads(insight.related_episodes) if insight.related_episodes else []
-                }
-                insights_data.append(insight_dict)
-            
-            return {
-                "insights": insights_data,
-                "total": len(insights_data)
-            }
-        finally:
-            db.close()
-            
-    except Exception as e:
-        logger.error(f"Error fetching dream insights: {e}")
-        raise HTTPException(status_code=500, detail="Failed to fetch insights")
-
-@app.patch("/memory/insights/{insight_id}/feedback")
-async def update_insight_feedback(
-    insight_id: str,
-    feedback: str,
-    current_user: User = Depends(get_current_user)
-):
-    """Update user feedback on a dream insight"""
-    try:
-        db = SessionLocal()
-        try:
-            insight = db.query(DreamInsight).filter(
-                DreamInsight.id == insight_id,
-                DreamInsight.user_id == current_user.id
-            ).first()
-            
-            if not insight:
-                raise HTTPException(status_code=404, detail="Insight not found")
-            
-            insight.user_feedback = feedback
-            insight.surfaced_at = datetime.now(timezone.utc)
-            db.commit()
-            
-            return {"status": "updated", "feedback": feedback}
-        finally:
-            db.close()
-            
-    except Exception as e:
-        logger.error(f"Error updating insight feedback: {e}")
-        raise HTTPException(status_code=500, detail="Failed to update feedback")
-
 # Knowledge Graph Endpoints
-@app.get("/knowledge-graph/health")
-async def knowledge_graph_health():
-    """Check Neo4j connection health"""
-    try:
-        from app.services.neo4j_service import neo4j_service
-        logger.info(f"Neo4j driver status: {neo4j_service.driver}")
-        if not neo4j_service.driver:
-            logger.info("Attempting to connect to Neo4j...")
-            await neo4j_service.connect()
-            logger.info(f"After connect, driver status: {neo4j_service.driver}")
-        await neo4j_service.verify_connection()
-        return {
-            "status": "healthy",
-            "neo4j_connected": True,
-            "message": "Knowledge graph is operational"
-        }
-    except Exception as e:
-        logger.error(f"Neo4j health check failed: {e}")
-        return {
-            "status": "unhealthy", 
-            "neo4j_connected": False,
-            "error": str(e),
-            "message": "Knowledge graph connection failed"
-        }
-
-@app.get("/knowledge-graph/")
-async def get_user_knowledge_graph(
-    depth: int = 2,
-    current_user: User = Depends(get_current_user)
-):
-    """Get the complete knowledge graph for the current user"""
-    try:
-        from app.services.neo4j_service import neo4j_service
-        graph_data = await neo4j_service.get_user_knowledge_graph(
-            user_id=current_user.id,
-            depth=depth
-        )
-        
-        # If Neo4j returns empty results, fall back to PostgreSQL data
-        nodes = graph_data.get("nodes", [])
-        relationships = graph_data.get("relationships", [])
-        
-        if not nodes:
-            logger.info("Neo4j graph is empty, falling back to PostgreSQL episode data")
-            # Fetch episodes from PostgreSQL as fallback
-            from sqlalchemy import select, and_, func
-            
-            db = SessionLocal()
-            try:
-                # Get meaningful episodes (content longer than 50 chars) using synchronous query
-                episodes = db.query(Episode).filter(
-                    and_(
-                        Episode.user_id == current_user.id,
-                        func.length(Episode.content) > 50
-                    )
-                ).order_by(Episode.created_at.desc()).limit(20).all()
-                
-                # Convert episodes to graph nodes
-                fallback_nodes = []
-                for episode in episodes:
-                    fallback_nodes.append({
-                        "id": f"episode_{episode.id}",
-                        "labels": ["Episode"],
-                        "properties": {
-                            "id": episode.id,
-                            "title": f"{episode.role}: {episode.content[:50]}..." if len(episode.content) > 50 else episode.content,
-                            "content": episode.content,
-                            "type": "episode",
-                            "role": episode.role,
-                            "source": episode.source,
-                            "importance": episode.importance or 0.5,
-                            "created_at": format_iso_utc(episode.created_at),
-                            "group": 1 if episode.role == "user" else 2
-                        }
-                    })
-                
-                nodes = fallback_nodes
-                logger.info(f"Generated {len(nodes)} fallback nodes from episodes")
-            finally:
-                db.close()
-        
-        return {
-            "nodes": nodes,
-            "relationships": relationships,
-            "total_nodes": len(nodes),
-            "total_relationships": len(relationships)
-        }
-        
-    except Exception as e:
-        logger.error(f"Failed to get knowledge graph: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to retrieve knowledge graph: {str(e)}")
-
-@app.post("/knowledge-graph/search")
-async def search_knowledge_graph(
-    request: dict,
-    current_user: User = Depends(get_current_user)
-):
-    """Search across all content types in the knowledge graph"""
-    try:
-        from app.services.neo4j_service import neo4j_service
-        query = request.get("query")
-        content_types = request.get("content_types")
-        limit = request.get("limit", 20)
-        
-        if not query:
-            raise HTTPException(status_code=400, detail="Search query is required")
-        
-        search_results = await neo4j_service.search_knowledge_graph(
-            user_id=current_user.id,
-            query=query,
-            content_types=content_types,
-            limit=limit
-        )
-        
-        # Format results for frontend consumption
-        formatted_results = []
-        for item in search_results:
-            # Determine primary content type
-            primary_type = item.get("node_types", ["Unknown"])[0].lower()
-            
-            formatted_results.append({
-                "id": item.get("id"),
-                "type": primary_type,
-                "title": item.get("title") or item.get("content", "")[:50] + "...",
-                "content": item.get("content") or item.get("content_text", ""),
-                "created_at": item.get("created_at"),
-                "metadata": {
-                    "node_types": item.get("node_types", []),
-                    "properties": {k: v for k, v in item.items() if k not in ["id", "content", "content_text", "title", "created_at"]}
-                }
-            })
-        
-        return {
-            "query": query,
-            "results": formatted_results,
-            "total_found": len(formatted_results)
-        }
-        
-    except Exception as e:
-        logger.error(f"Knowledge graph search failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
-
-@app.post("/knowledge-graph/connection-details")
-async def get_connection_details(
-    request: dict,
-    current_user: User = Depends(get_current_user)
-):
-    """Get detailed information about a specific connection"""
-    try:
-        from app.services.neo4j_service import neo4j_service
-        source_id = request.get("source_id")
-        target_id = request.get("target_id")
-        
-        if not source_id or not target_id:
-            raise HTTPException(status_code=400, detail="Both source_id and target_id are required")
-        
-        # Get detailed connection info including shared content analysis
-        connection_details = await neo4j_service.get_connection_details(
-            source_id=source_id,
-            target_id=target_id,
-            user_id=current_user.id
-        )
-        
-        return connection_details
-        
-    except Exception as e:
-        logger.error(f"Failed to get connection details: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get connection details: {str(e)}")
-
-@app.post("/knowledge-graph/connected-content")
-async def get_connected_content(
-    request: dict,
-    current_user: User = Depends(get_current_user)
-):
-    """Find all content connected to a specific node"""
-    try:
-        from app.services.neo4j_service import neo4j_service
-        node_id = request.get("node_id")
-        depth = request.get("depth", 2)
-        relationship_types = request.get("relationship_types")
-        
-        if not node_id:
-            raise HTTPException(status_code=400, detail="Node ID is required")
-        
-        connected_items = await neo4j_service.find_connected_content(
-            node_id=node_id,
-            user_id=current_user.id,
-            depth=depth,
-            relationship_types=relationship_types
-        )
-        
-        return {
-            "source_node_id": node_id,
-            "connected_content": connected_items,
-            "total_connections": len(connected_items)
-        }
-        
-    except Exception as e:
-        logger.error(f"Failed to get connected content: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get connected content: {str(e)}")
-
 @app.get("/analytics/dashboard")
 async def get_analytics_dashboard(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Get comprehensive analytics dashboard data"""
@@ -11812,7 +9938,8 @@ async def get_analytics_dashboard(current_user: User = Depends(get_current_user)
 @app.get("/settings/ai")
 async def get_ai_settings(current_user: User = Depends(get_current_user)):
     """Get current AI configuration settings"""
-    return {
+    codex_connected = bool(CODEX_OAUTH_ACCESS_TOKEN and CODEX_OAUTH_REFRESH_TOKEN)
+    response = {
         "ai_provider": AI_PROVIDER,
         "openai_api_key": "***" if OPENAI_API_KEY and OPENAI_API_KEY != "dummy" else "",
         "anthropic_api_key": "***" if ANTHROPIC_API_KEY else "",
@@ -11826,33 +9953,46 @@ async def get_ai_settings(current_user: User = Depends(get_current_user)):
         "bg_llm_primary_url": BG_LLM_PRIMARY_URL,
         "bg_llm_primary_model": BG_LLM_PRIMARY_MODEL,
         "bg_llm_fallback_url": BG_LLM_FALLBACK_URL,
-        "bg_llm_fallback_model": BG_LLM_FALLBACK_MODEL
+        "bg_llm_fallback_model": BG_LLM_FALLBACK_MODEL,
+        "bg_llm_request_timeout": BG_LLM_REQUEST_TIMEOUT,
+        "bg_llm_connect_timeout": BG_LLM_CONNECT_TIMEOUT,
+        "bg_llm_num_ctx": BG_LLM_NUM_CTX,
+        "codex_oauth_connected": codex_connected,
+        "codex_oauth_email": CODEX_OAUTH_EMAIL if codex_connected else "",
+        "codex_oauth_expires_at": CODEX_OAUTH_EXPIRES_AT if codex_connected else "",
+        "codex_oauth_account_id": CODEX_OAUTH_ACCOUNT_ID if codex_connected else "",
     }
 
-class AISettingsUpdate(BaseModel):
-    ai_provider: Optional[str] = None
-    openai_api_key: Optional[str] = None
-    anthropic_api_key: Optional[str] = None
-    openai_base_url: Optional[str] = None
-    openai_model: Optional[str] = None
-    openai_notification_model: Optional[str] = None
-    embedding_base_url: Optional[str] = None
-    embedding_model: Optional[str] = None
-    embedding_dimension: Optional[int] = None
-    # Background processing settings
-    bg_llm_primary_url: Optional[str] = None
-    bg_llm_primary_model: Optional[str] = None
-    bg_llm_fallback_url: Optional[str] = None
-    bg_llm_fallback_model: Optional[str] = None
+    # Add VM sandbox settings from user preferences
+    try:
+        from app.models.user_settings import UserSettings as UserSettingsModel
+        db = SessionLocal()
+        try:
+            us = db.query(UserSettingsModel).filter(
+                UserSettingsModel.user_id == str(current_user.id)
+            ).first()
+            vm_prefs = (us.preferences or {}).get("vm_sandbox", {}) if us else {}
+            response["vm_sandbox_host"] = vm_prefs.get("host", "10.185.1.176")
+            response["vm_sandbox_username"] = vm_prefs.get("username", "sara")
+            response["vm_sandbox_ssh_key_path"] = vm_prefs.get("ssh_key_path", "~/.ssh/sara_agent")
+        finally:
+            db.close()
+    except Exception:
+        response["vm_sandbox_host"] = "10.185.1.176"
+        response["vm_sandbox_username"] = "sara"
+        response["vm_sandbox_ssh_key_path"] = "~/.ssh/sara_agent"
+
+    return response
 
 @app.put("/settings/ai")
 async def update_ai_settings(
     settings: AISettingsUpdate,
     current_user: User = Depends(get_current_user)
 ):
-    """Update AI configuration settings (requires restart to take effect)"""
+    """Update AI configuration settings and hot-reload runtime clients."""
     global AI_PROVIDER, OPENAI_API_KEY, ANTHROPIC_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL, OPENAI_NOTIFICATION_MODEL, EMBEDDING_BASE_URL, EMBEDDING_MODEL, EMBEDDING_DIM
     global BG_LLM_PRIMARY_URL, BG_LLM_PRIMARY_MODEL, BG_LLM_FALLBACK_URL, BG_LLM_FALLBACK_MODEL
+    global BG_LLM_REQUEST_TIMEOUT, BG_LLM_CONNECT_TIMEOUT, BG_LLM_NUM_CTX
 
     updated_settings = {}
     
@@ -11871,7 +10011,14 @@ async def update_ai_settings(
         # - URL already ends with /v1
         # - URL contains /openai/ (Gemini/other OpenAI-compatible endpoints)
         # - URL contains generativelanguage.googleapis.com (Gemini domain)
-        if u.endswith("/v1") or "/openai/" in u or "generativelanguage.googleapis.com" in u:
+        # - URL targets ChatGPT backend API for Codex OAuth
+        if (
+            u.endswith("/v1")
+            or "/openai/" in u
+            or "generativelanguage.googleapis.com" in u
+            or "chatgpt.com/backend-api" in u
+            or u.endswith("/backend-api")
+        ):
             return u
         # Only add /v1 for standard OpenAI or local endpoints
         return u + "/v1"
@@ -11961,6 +10108,51 @@ async def update_ai_settings(
         config.settings.bg_llm_fallback_model = settings.bg_llm_fallback_model
         updated_settings["bg_llm_fallback_model"] = settings.bg_llm_fallback_model
 
+    if settings.bg_llm_request_timeout is not None:
+        BG_LLM_REQUEST_TIMEOUT = max(10.0, float(settings.bg_llm_request_timeout))
+        config.settings.bg_llm_request_timeout = BG_LLM_REQUEST_TIMEOUT
+        updated_settings["bg_llm_request_timeout"] = BG_LLM_REQUEST_TIMEOUT
+
+    if settings.bg_llm_connect_timeout is not None:
+        BG_LLM_CONNECT_TIMEOUT = max(1.0, float(settings.bg_llm_connect_timeout))
+        config.settings.bg_llm_connect_timeout = BG_LLM_CONNECT_TIMEOUT
+        updated_settings["bg_llm_connect_timeout"] = BG_LLM_CONNECT_TIMEOUT
+
+    if settings.bg_llm_num_ctx is not None:
+        BG_LLM_NUM_CTX = max(2048, int(settings.bg_llm_num_ctx))
+        config.settings.bg_llm_num_ctx = BG_LLM_NUM_CTX
+        updated_settings["bg_llm_num_ctx"] = BG_LLM_NUM_CTX
+
+    # VM sandbox settings — stored in UserSettingsModel.preferences JSONB
+    vm_fields = {
+        "host": settings.vm_sandbox_host,
+        "username": settings.vm_sandbox_username,
+        "ssh_key_path": settings.vm_sandbox_ssh_key_path,
+    }
+    vm_updates = {k: v for k, v in vm_fields.items() if v is not None}
+    if vm_updates:
+        try:
+            from app.models.user_settings import UserSettings as UserSettingsModel
+            vm_db = SessionLocal()
+            try:
+                us = vm_db.query(UserSettingsModel).filter(
+                    UserSettingsModel.user_id == str(current_user.id)
+                ).first()
+                if not us:
+                    us = UserSettingsModel(user_id=str(current_user.id), preferences={})
+                    vm_db.add(us)
+                prefs = dict(us.preferences or {})
+                vm_sandbox = dict(prefs.get("vm_sandbox", {}))
+                vm_sandbox.update(vm_updates)
+                prefs["vm_sandbox"] = vm_sandbox
+                us.preferences = prefs
+                vm_db.commit()
+                updated_settings.update({f"vm_sandbox_{k}": v for k, v in vm_updates.items()})
+            finally:
+                vm_db.close()
+        except Exception as e:
+            logger.warning(f"Failed to save VM sandbox settings: {e}")
+
     # Persist settings to database for survival across restarts
     try:
         db = SessionLocal()
@@ -11980,9 +10172,27 @@ async def update_ai_settings(
     except Exception as e:
         logger.error(f"Failed to persist settings to database: {e}")
 
-    # No need to reinitialize services - EmbeddingService now reads settings dynamically
-    # SimpleLLMClient and other services already read from config.settings which was updated above
-    logger.info(f"✅ Settings applied immediately - services will use new URLs on next call")
+    # Hot-reload long-lived runtime singletons so background model changes apply immediately.
+    try:
+        from app.core.llm import get_background_llm_client
+        bg_client = get_background_llm_client()
+        await bg_client.refresh_config()
+    except Exception as e:
+        logger.warning(f"Background LLM client hot-reload failed (will apply on next restart): {e}")
+
+    try:
+        from app.services.autonomy.sara_invocation import get_sara_invocation_service
+        await get_sara_invocation_service()
+    except Exception as e:
+        logger.warning(f"Sara invocation service refresh failed (will apply on next access): {e}")
+
+    try:
+        from app.services.morning_brief_service import morning_brief_service
+        morning_brief_service._refresh_llm_config()
+    except Exception as e:
+        logger.warning(f"Morning brief service refresh failed (will apply on next restart): {e}")
+
+    logger.info("✅ Settings applied immediately - background clients hot-reloaded")
 
     logger.info(f"AI settings updated by user {current_user.email}: {updated_settings}")
 
@@ -11994,8 +10204,287 @@ async def update_ai_settings(
     return {
         "message": "AI settings updated successfully and persisted",
         "updated_settings": response_settings,
-        "note": "Settings applied immediately and will persist across restarts."
+        "note": "Settings applied immediately and persisted for future restarts."
     }
+
+
+@app.get("/settings/ai/codex/oauth/status")
+async def get_codex_oauth_status(current_user: User = Depends(get_current_user)):
+    """Get ChatGPT/Codex OAuth connection status."""
+    if not CODEX_OAUTH_ACCESS_TOKEN or not CODEX_OAUTH_REFRESH_TOKEN:
+        _load_codex_oauth_from_db()
+    connected = bool(CODEX_OAUTH_ACCESS_TOKEN and CODEX_OAUTH_REFRESH_TOKEN)
+    refresh_error = None
+    if connected:
+        try:
+            await _ensure_codex_access_token(updated_by=current_user.email, min_valid_seconds=120)
+        except Exception as e:
+            refresh_error = str(e)
+            logger.warning(f"Codex OAuth refresh failed for user {current_user.email}: {e}")
+
+    expires_at = _safe_parse_iso_datetime(CODEX_OAUTH_EXPIRES_AT)
+    return {
+        "connected": connected and refresh_error is None,
+        "email": CODEX_OAUTH_EMAIL or "",
+        "account_id": CODEX_OAUTH_ACCOUNT_ID or "",
+        "expires_at": CODEX_OAUTH_EXPIRES_AT or "",
+        "expires_in_seconds": max(0, int((expires_at - datetime.now(timezone.utc)).total_seconds())) if expires_at else None,
+        "error": refresh_error,
+    }
+
+
+@app.post("/settings/ai/codex/oauth/start")
+async def start_codex_oauth(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Start ChatGPT/Codex OAuth flow and return the OpenAI authorization URL."""
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    return_to = _resolve_frontend_return_url(request, body.get("return_to"))
+    # The default Codex OAuth client id uses localhost callback flow.
+    # When using that flow we complete auth via /settings/ai/codex/oauth/complete.
+    redirect_uri = CODEX_OAUTH_REDIRECT_URI or "http://localhost:1455/auth/callback"
+    manual_completion = ("localhost:1455" in redirect_uri) or ("127.0.0.1:1455" in redirect_uri)
+
+    verifier = secrets.token_urlsafe(64)
+    challenge = _build_pkce_challenge(verifier)
+    state = secrets.token_hex(16)
+    pending_payload = {
+        "state": state,
+        "verifier": verifier,
+        "redirect_uri": redirect_uri,
+        "return_to": return_to,
+        "user_id": str(current_user.id),
+        "user_email": current_user.email,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    _upsert_app_settings(
+        {"codex_oauth_pending": json.dumps(pending_payload)},
+        updated_by=current_user.email,
+    )
+
+    auth_params = {
+        "response_type": "code",
+        "client_id": CODEX_OAUTH_CLIENT_ID,
+        "redirect_uri": redirect_uri,
+        "scope": CODEX_OAUTH_SCOPE,
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+        "state": state,
+        "id_token_add_organizations": "true",
+        "codex_cli_simplified_flow": "true",
+    }
+    if CODEX_OAUTH_ORIGINATOR:
+        auth_params["originator"] = CODEX_OAUTH_ORIGINATOR
+    auth_url = f"{CODEX_OAUTH_AUTHORIZE_URL}?{urlencode(auth_params)}"
+    logger.info(
+        "Starting Codex OAuth for %s with redirect_uri=%s originator=%s",
+        current_user.email,
+        redirect_uri,
+        CODEX_OAUTH_ORIGINATOR,
+    )
+    return {
+        "auth_url": auth_url,
+        "redirect_uri": redirect_uri,
+        "return_to": return_to,
+        "requires_manual_code": manual_completion,
+    }
+
+
+class CodexOAuthCompleteRequest(BaseModel):
+    redirect_url: Optional[str] = None
+    code: Optional[str] = None
+    state: Optional[str] = None
+
+
+@app.post("/settings/ai/codex/oauth/complete")
+async def complete_codex_oauth(
+    payload: CodexOAuthCompleteRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Complete Codex OAuth from a pasted callback URL or explicit code/state."""
+    pending = None
+    db = SessionLocal()
+    try:
+        row = db.execute(
+            text("SELECT value FROM app_settings WHERE key = 'codex_oauth_pending'")
+        ).fetchone()
+        if row and row[0]:
+            pending = json.loads(row[0])
+    except Exception as e:
+        logger.error(f"Failed reading codex_oauth_pending: {e}")
+    finally:
+        db.close()
+
+    if not pending or not isinstance(pending, dict):
+        raise HTTPException(status_code=400, detail="No active Codex OAuth session. Start OAuth again.")
+
+    created_at = _safe_parse_iso_datetime(pending.get("created_at", ""))
+    if not created_at or created_at < datetime.now(timezone.utc) - timedelta(minutes=15):
+        raise HTTPException(status_code=400, detail="Codex OAuth session expired. Start OAuth again.")
+
+    code = (payload.code or "").strip()
+    state = (payload.state or "").strip()
+    if payload.redirect_url:
+        parsed = urlparse(payload.redirect_url)
+        params = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        if not code:
+            code = (params.get("code") or "").strip()
+        if not state:
+            state = (params.get("state") or "").strip()
+        oauth_error = (params.get("error") or "").strip()
+        if oauth_error:
+            raise HTTPException(status_code=400, detail=f"OAuth provider returned error: {oauth_error}")
+
+    if not code or not state:
+        raise HTTPException(status_code=400, detail="Missing code/state. Paste the full callback URL.")
+    if state != pending.get("state"):
+        raise HTTPException(status_code=400, detail="State mismatch. Start OAuth again.")
+
+    try:
+        token_data = await _codex_exchange_authorization_code(
+            code=code,
+            verifier=pending["verifier"],
+            redirect_uri=pending["redirect_uri"],
+        )
+    except HTTPException as e:
+        raise HTTPException(status_code=400, detail=f"Codex OAuth token exchange failed: {e.detail}")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Codex OAuth token exchange exception: {e}")
+
+    _apply_codex_oauth_token_data(
+        token_data=token_data,
+        updated_by=pending.get("user_email", current_user.email),
+    )
+
+    db = SessionLocal()
+    try:
+        db.execute(text("DELETE FROM app_settings WHERE key = 'codex_oauth_pending'"))
+        db.commit()
+    except Exception:
+        pass
+    finally:
+        db.close()
+
+    return {
+        "ok": True,
+        "connected": True,
+        "email": CODEX_OAUTH_EMAIL or "",
+        "expires_at": CODEX_OAUTH_EXPIRES_AT or "",
+    }
+
+
+@app.get("/settings/ai/codex/oauth/callback")
+async def codex_oauth_callback(
+    request: Request,
+    code: Optional[str] = None,
+    state: Optional[str] = None,
+    error: Optional[str] = None,
+):
+    """OAuth callback endpoint for ChatGPT/Codex."""
+    global AI_PROVIDER, OPENAI_BASE_URL, OPENAI_MODEL
+    global CODEX_OAUTH_ACCESS_TOKEN, CODEX_OAUTH_REFRESH_TOKEN, CODEX_OAUTH_EXPIRES_AT
+    global CODEX_OAUTH_ACCOUNT_ID, CODEX_OAUTH_EMAIL
+
+    default_return = f"{config.settings.frontend_url.rstrip('/')}/settings"
+    pending = None
+    db = SessionLocal()
+    try:
+        row = db.execute(
+            text("SELECT value FROM app_settings WHERE key = 'codex_oauth_pending'")
+        ).fetchone()
+        if row and row[0]:
+            pending = json.loads(row[0])
+    except Exception as e:
+        logger.error(f"Failed reading codex_oauth_pending: {e}")
+    finally:
+        try:
+            db.execute(text("DELETE FROM app_settings WHERE key = 'codex_oauth_pending'"))
+            db.commit()
+        except Exception:
+            pass
+        db.close()
+
+    return_to = default_return
+    if isinstance(pending, dict) and pending.get("return_to"):
+        return_to = _resolve_frontend_return_url(request, pending.get("return_to"))
+
+    if error:
+        redirect_url = _append_query_params(return_to, {"codex_oauth": "error", "reason": error})
+        return RedirectResponse(url=redirect_url, status_code=302)
+
+    if not pending or not isinstance(pending, dict):
+        redirect_url = _append_query_params(return_to, {"codex_oauth": "error", "reason": "missing_state"})
+        return RedirectResponse(url=redirect_url, status_code=302)
+
+    created_at = _safe_parse_iso_datetime(pending.get("created_at", ""))
+    if not created_at or created_at < datetime.now(timezone.utc) - timedelta(minutes=15):
+        redirect_url = _append_query_params(return_to, {"codex_oauth": "error", "reason": "expired_state"})
+        return RedirectResponse(url=redirect_url, status_code=302)
+
+    if not code or not state or state != pending.get("state"):
+        redirect_url = _append_query_params(return_to, {"codex_oauth": "error", "reason": "state_mismatch"})
+        return RedirectResponse(url=redirect_url, status_code=302)
+
+    try:
+        token_data = await _codex_exchange_authorization_code(
+            code=code,
+            verifier=pending["verifier"],
+            redirect_uri=pending["redirect_uri"],
+        )
+    except HTTPException as e:
+        redirect_url = _append_query_params(return_to, {"codex_oauth": "error", "reason": "token_exchange_failed"})
+        logger.warning(f"Codex OAuth token exchange failed: {e.detail}")
+        return RedirectResponse(url=redirect_url, status_code=302)
+    except Exception as e:
+        redirect_url = _append_query_params(return_to, {"codex_oauth": "error", "reason": "token_exchange_exception"})
+        logger.warning(f"Codex OAuth token exchange exception: {e}")
+        return RedirectResponse(url=redirect_url, status_code=302)
+
+    _apply_codex_oauth_token_data(
+        token_data=token_data,
+        updated_by=pending.get("user_email", "codex-oauth"),
+    )
+
+    redirect_url = _append_query_params(return_to, {"codex_oauth": "success"})
+    return RedirectResponse(url=redirect_url, status_code=302)
+
+
+@app.post("/settings/ai/codex/oauth/disconnect")
+async def disconnect_codex_oauth(current_user: User = Depends(get_current_user)):
+    """Disconnect ChatGPT/Codex OAuth and remove stored tokens."""
+    global CODEX_OAUTH_ACCESS_TOKEN, CODEX_OAUTH_REFRESH_TOKEN, CODEX_OAUTH_EXPIRES_AT
+    global CODEX_OAUTH_ACCOUNT_ID, CODEX_OAUTH_EMAIL
+    CODEX_OAUTH_ACCESS_TOKEN = ""
+    CODEX_OAUTH_REFRESH_TOKEN = ""
+    CODEX_OAUTH_EXPIRES_AT = ""
+    CODEX_OAUTH_ACCOUNT_ID = ""
+    CODEX_OAUTH_EMAIL = ""
+
+    db = SessionLocal()
+    try:
+        db.execute(text("""
+            DELETE FROM app_settings
+            WHERE key IN (
+                'codex_oauth_access_token',
+                'codex_oauth_refresh_token',
+                'codex_oauth_expires_at',
+                'codex_oauth_account_id',
+                'codex_oauth_email',
+                'codex_oauth_pending'
+            )
+        """))
+        db.commit()
+    finally:
+        db.close()
+
+    return {"ok": True, "message": "Codex OAuth disconnected"}
 
 @app.post("/settings/ai/test")
 async def test_ai_settings(current_user: User = Depends(get_current_user)):
@@ -12003,27 +10492,61 @@ async def test_ai_settings(current_user: User = Depends(get_current_user)):
     test_results = {}
     
     try:
-        # Test LLM connection
-        test_messages = [
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": "Hello, just testing the connection. Please respond with 'Connection successful'."}
-        ]
-        
-        response = await httpx.AsyncClient().post(
-            f"{OPENAI_BASE_URL}/chat/completions",
-            json={
-                "model": OPENAI_MODEL,
-                "messages": test_messages,
-                "max_tokens": 50
-            },
-            headers={"Authorization": "Bearer dummy"},
-            timeout=10.0
-        )
+        effective_model = OPENAI_MODEL or CODEX_DEFAULT_MODEL
+        model_config = get_model_config(effective_model)
 
-        if response.status_code == 200:
-            test_results["llm"] = {"status": "success", "message": "LLM connection successful"}
+        # Test LLM connection
+        if model_config["provider"] == "codex":
+            access_token = await _ensure_codex_access_token(updated_by=current_user.email, min_valid_seconds=120) or CODEX_OAUTH_ACCESS_TOKEN
+            account_id = CODEX_OAUTH_ACCOUNT_ID or _extract_codex_account_id_from_token(access_token or "")
+            if not access_token or not account_id:
+                raise RuntimeError("Codex OAuth is not connected or token is invalid")
+
+            codex_url = f"{model_config['base_url'].rstrip('/')}/codex/responses"
+            response = await httpx.AsyncClient().post(
+                codex_url,
+                json={
+                    "model": effective_model,
+                    "store": False,
+                    "stream": True,
+                    "instructions": "You are a helpful assistant.",
+                    "input": [{"role": "user", "content": [{"type": "input_text", "text": "Reply with exactly: Connection successful"}]}],
+                },
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "chatgpt-account-id": account_id,
+                    "OpenAI-Beta": "responses=experimental",
+                    "originator": CODEX_OAUTH_ORIGINATOR,
+                },
+                timeout=15.0,
+            )
+            if response.status_code == 200:
+                test_results["llm"] = {"status": "success", "message": "Codex OAuth connection successful"}
+            else:
+                test_results["llm"] = {"status": "error", "message": f"Codex connection failed: {response.status_code}"}
         else:
-            test_results["llm"] = {"status": "error", "message": f"LLM connection failed: {response.status_code}"}
+            test_messages = [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": "Hello, just testing the connection. Please respond with 'Connection successful'."}
+            ]
+
+            api_key = OPENAI_API_KEY or "dummy"
+            response = await httpx.AsyncClient().post(
+                f"{OPENAI_BASE_URL}/chat/completions",
+                json={
+                    "model": OPENAI_MODEL,
+                    "messages": test_messages,
+                    "max_tokens": 50,
+                    "chat_template_kwargs": {"enable_thinking": False},
+                },
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=10.0
+            )
+
+            if response.status_code == 200:
+                test_results["llm"] = {"status": "success", "message": "LLM connection successful"}
+            else:
+                test_results["llm"] = {"status": "error", "message": f"LLM connection failed: {response.status_code}"}
             
     except Exception as e:
         test_results["llm"] = {"status": "error", "message": f"LLM connection failed: {str(e)}"}
@@ -12041,923 +10564,115 @@ async def test_ai_settings(current_user: User = Depends(get_current_user)):
     
     return test_results
 
-# General user settings endpoints
+# Settings helpers extracted to app.core.settings_helpers
+from app.core.settings_helpers import (
+    get_or_create_user_settings_row as _get_or_create_user_settings_row,
+    merged_user_settings as _merged_user_settings,
+    _DEFAULT_USER_SETTINGS,
+)
+
+
 @app.get("/settings")
-async def get_user_settings(current_user: User = Depends(get_current_user)):
-    """Get user settings/preferences"""
-    # Return default settings for now
-    # In the future, this could be stored in a user_settings table
-    return {
-        "theme": "dark",
-        "notifications_enabled": True,
-        "model": "distil-small.en",
-                    "language": "en",
-        "timezone": "America/New_York",
-        "assistant_name": ASSISTANT_NAME
-    }
+async def get_user_settings(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Get persisted user settings/preferences."""
+    settings_row = _get_or_create_user_settings_row(db, str(current_user.id))
+    return _merged_user_settings(settings_row.preferences)
+
 
 @app.put("/settings")
-async def update_user_settings(settings: UserSettings, current_user: User = Depends(get_current_user)):
-    """Update user settings/preferences"""
-    # For now, just acknowledge the update
-    # In the future, this could persist to a user_settings table
+async def update_user_settings(
+    settings: dict,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Update persisted user settings/preferences."""
+    if not isinstance(settings, dict):
+        raise HTTPException(status_code=422, detail="Settings payload must be an object")
+
+    settings_row = _get_or_create_user_settings_row(db, str(current_user.id))
+    prefs = dict(settings_row.preferences or {})
+
+    for key, value in settings.items():
+        if key in {"id", "user_id", "created_at", "updated_at"}:
+            continue
+        if value is None:
+            prefs.pop(key, None)
+        else:
+            prefs[key] = value
+
+    settings_row.preferences = prefs
+    db.commit()
+    db.refresh(settings_row)
+
     return {
         "message": "Settings updated successfully",
-        "settings": settings.dict()
+        "settings": _merged_user_settings(settings_row.preferences),
     }
+
 
 # Settings alias endpoints (for iOS app compatibility)
 @app.get("/settings/preferences")
-async def get_user_preferences(current_user: User = Depends(get_current_user)):
-    """Alias to /settings for iOS app compatibility"""
-    return await get_user_settings(current_user)
+async def get_user_preferences(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return persisted preference fields used by iOS settings."""
+    settings_row = _get_or_create_user_settings_row(db, str(current_user.id))
+    return _merged_user_settings(settings_row.preferences)
+
 
 @app.put("/settings/preferences")
-async def update_user_preferences(settings: UserSettings, current_user: User = Depends(get_current_user)):
-    """Alias to /settings for iOS app compatibility"""
-    return await update_user_settings(settings, current_user)
+async def update_user_preferences(
+    settings: dict,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Update iOS preference fields and return the updated preferences."""
+    response = await update_user_settings(settings=settings, current_user=current_user, db=db)
+    return response["settings"]
 
 # Documents categories endpoint
-@app.get("/documents/categories")
-async def get_document_categories(current_user: User = Depends(get_current_user)):
-    """Get all unique document categories"""
-    # Document model doesn't have a category field yet
-    # Return empty list for iOS app compatibility
-    return []
-
-# Fitness proxy endpoints - return empty data for now (iOS app compatible)
-@app.get("/fitness/food")
-async def get_fitness_food(
-    start_date: str = None,
-    end_date: str = None,
-    current_user: User = Depends(get_current_user)
-):
-    """Get fitness food logs"""
-    # Return empty array for now - can be connected to actual food log system later
-    return []
-
-@app.post("/fitness/food")
-async def create_fitness_food(
-    food_data: dict,
-    current_user: User = Depends(get_current_user)
-):
-    """Create fitness food log"""
-    # Return success for now
-    return {
-        "id": "1",
-        "message": "Food log created",
-        **food_data
-    }
-
-@app.delete("/fitness/food/{id}")
-async def delete_fitness_food(
-    id: str,
-    current_user: User = Depends(get_current_user)
-):
-    """Delete fitness food log"""
-    return {"message": "Food log deleted"}
-
-@app.get("/fitness/workouts")
-async def get_fitness_workouts(
-    start_date: str = None,
-    end_date: str = None,
-    current_user: User = Depends(get_current_user)
-):
-    """Get fitness workouts"""
-    # Return empty array for now - can be connected to actual workout system later
-    return []
-
-@app.post("/fitness/workouts")
-async def create_fitness_workout(
-    workout_data: dict,
-    current_user: User = Depends(get_current_user)
-):
-    """Create fitness workout"""
-    # Return success for now
-    return {
-        "id": "1",
-        "message": "Workout created",
-        **workout_data
-    }
-
-@app.delete("/fitness/workouts/{id}")
-async def delete_fitness_workout(
-    id: str,
-    current_user: User = Depends(get_current_user)
-):
-    """Delete fitness workout"""
-    return {"message": "Workout deleted"}
-
-@app.get("/fitness/recovery")
-async def get_fitness_recovery(
-    start_date: str = None,
-    end_date: str = None,
-    current_user: User = Depends(get_current_user)
-):
-    """Get fitness recovery logs"""
-    db = SessionLocal()
-    try:
-        from datetime import datetime, timedelta
-
-        # Default to last 30 days if no dates provided
-        if not start_date:
-            start_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
-        if not end_date:
-            end_date = datetime.now().strftime("%Y-%m-%d")
-
-        # Query the daily_recovery_log table
-        query = text("""
-            SELECT id, user_id, log_date, hrv, heart_rate, sleep_hours,
-                   soreness_level, body_weight, weight_unit, notes, created_at, updated_at
-            FROM daily_recovery_log
-            WHERE user_id = :user_id
-              AND log_date >= :start_date
-              AND log_date <= :end_date
-            ORDER BY log_date DESC
-        """)
-
-        results = db.execute(query, {
-            "user_id": current_user.id,
-            "start_date": start_date,
-            "end_date": end_date
-        }).fetchall()
-
-        # Convert to list of dicts
-        recovery_logs = []
-        for row in results:
-            row_dict = row._mapping
-            recovery_logs.append({
-                "id": row_dict['id'],
-                "user_id": row_dict['user_id'],
-                "log_date": row_dict['log_date'].isoformat(),
-                "logged_at": row_dict['created_at'].isoformat() if row_dict['created_at'] else None,
-                "hrv": row_dict['hrv'],
-                "heart_rate": row_dict['heart_rate'],
-                "sleep_hours": float(row_dict['sleep_hours']) if row_dict['sleep_hours'] else None,
-                "soreness_level": row_dict['soreness_level'],
-                "body_weight": float(row_dict['body_weight']) if row_dict['body_weight'] else None,
-                "weight_unit": row_dict['weight_unit'],
-                "notes": row_dict['notes'],
-                "created_at": row_dict['created_at'].isoformat() if row_dict['created_at'] else None,
-                "updated_at": row_dict['updated_at'].isoformat() if row_dict['updated_at'] else None
-            })
-
-        return recovery_logs
-
-    finally:
-        db.close()
-
-@app.post("/fitness/recovery")
-async def create_fitness_recovery(
-    recovery_data: dict,
-    current_user: User = Depends(get_current_user)
-):
-    """Create fitness recovery log"""
-    db = SessionLocal()
-    try:
-        from datetime import datetime
-
-        # Get log_date from recovery_data or use today
-        log_date_str = recovery_data.get('log_date', datetime.now().strftime("%Y-%m-%d"))
-
-        # Validate soreness level if provided
-        soreness_level = recovery_data.get('soreness_level')
-        if soreness_level is not None:
-            if soreness_level < 1 or soreness_level > 10:
-                raise HTTPException(status_code=400, detail="Soreness level must be between 1 and 10")
-
-        # Parse log_date
-        try:
-            log_date = datetime.strptime(log_date_str, "%Y-%m-%d").date()
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
-
-        # Check if entry exists for this date
-        check_query = text("""
-            SELECT id FROM daily_recovery_log
-            WHERE user_id = :user_id AND log_date = :log_date
-        """)
-        existing = db.execute(check_query, {"user_id": current_user.id, "log_date": log_date}).fetchone()
-
-        if existing:
-            # Update existing entry
-            update_query = text("""
-                UPDATE daily_recovery_log
-                SET hrv = :hrv,
-                    heart_rate = :heart_rate,
-                    sleep_hours = :sleep_hours,
-                    soreness_level = :soreness_level,
-                    body_weight = :body_weight,
-                    weight_unit = :weight_unit,
-                    notes = :notes,
-                    updated_at = NOW()
-                WHERE user_id = :user_id AND log_date = :log_date
-                RETURNING id, user_id, log_date, hrv, heart_rate, sleep_hours, soreness_level, body_weight, weight_unit, notes, created_at, updated_at
-            """)
-            result = db.execute(update_query, {
-                "user_id": current_user.id,
-                "log_date": log_date,
-                "hrv": recovery_data.get('hrv'),
-                "heart_rate": recovery_data.get('heart_rate'),
-                "sleep_hours": recovery_data.get('sleep_hours'),
-                "soreness_level": recovery_data.get('soreness_level'),
-                "body_weight": recovery_data.get('body_weight'),
-                "weight_unit": recovery_data.get('weight_unit', 'lbs'),
-                "notes": recovery_data.get('notes', '')
-            }).fetchone()
-        else:
-            # Insert new entry
-            insert_query = text("""
-                INSERT INTO daily_recovery_log
-                (id, user_id, log_date, hrv, heart_rate, sleep_hours, soreness_level, body_weight, weight_unit, notes, created_at, updated_at)
-                VALUES (:id, :user_id, :log_date, :hrv, :heart_rate, :sleep_hours, :soreness_level, :body_weight, :weight_unit, :notes, NOW(), NOW())
-                RETURNING id, user_id, log_date, hrv, heart_rate, sleep_hours, soreness_level, body_weight, weight_unit, notes, created_at, updated_at
-            """)
-            result = db.execute(insert_query, {
-                "id": str(uuid.uuid4()),
-                "user_id": current_user.id,
-                "log_date": log_date,
-                "hrv": recovery_data.get('hrv'),
-                "heart_rate": recovery_data.get('heart_rate'),
-                "sleep_hours": recovery_data.get('sleep_hours'),
-                "soreness_level": recovery_data.get('soreness_level'),
-                "body_weight": recovery_data.get('body_weight'),
-                "weight_unit": recovery_data.get('weight_unit', 'lbs'),
-                "notes": recovery_data.get('notes', '')
-            }).fetchone()
-
-        db.commit()
-
-        # Convert result to response
-        row = result._mapping
-        return {
-            "id": row['id'],
-            "user_id": row['user_id'],
-            "log_date": row['log_date'].isoformat(),
-            "logged_at": row['created_at'].isoformat() if row['created_at'] else None,
-            "hrv": row['hrv'],
-            "heart_rate": row['heart_rate'],
-            "sleep_hours": float(row['sleep_hours']) if row['sleep_hours'] else None,
-            "soreness_level": row['soreness_level'],
-            "body_weight": float(row['body_weight']) if row['body_weight'] else None,
-            "weight_unit": row['weight_unit'],
-            "notes": row['notes'],
-            "created_at": row['created_at'].isoformat() if row['created_at'] else None,
-            "updated_at": row['updated_at'].isoformat() if row['updated_at'] else None
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        logger.error(f"Failed to save recovery log: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        db.close()
-
-@app.delete("/fitness/recovery/{id}")
-async def delete_fitness_recovery(
-    id: str,
-    current_user: User = Depends(get_current_user)
-):
-    """Delete fitness recovery log"""
-    db = SessionLocal()
-    try:
-        # Delete the recovery log
-        delete_query = text("""
-            DELETE FROM daily_recovery_log
-            WHERE id = :id AND user_id = :user_id
-        """)
-        db.execute(delete_query, {"id": id, "user_id": current_user.id})
-        db.commit()
-        return {"message": "Recovery log deleted"}
-    finally:
-        db.close()
-
-# /fitness/habits and /fitness/habits/streaks endpoints moved to app.routes.habits
-
-@app.get("/fitness/summary")
-async def get_fitness_summary(date: str = None, current_user: User = Depends(get_current_user)):
-    """Get fitness summary for a specific date"""
-    from datetime import datetime, timedelta
-
-    if not date:
-        date = datetime.now().strftime("%Y-%m-%d")
-
-    # Return a basic summary
-    # In the future, this could aggregate data from food logs, workouts, recovery, and habits
-    return {
-        "date": date,
-        "calories_consumed": 0,
-        "calories_burned": 0,
-        "workouts_completed": 0,
-        "habits_completed": 0,
-        "recovery_score": 0,
-        "notes": "No data available for this date"
-    }
-
-
-
-# HABIT TRACKING ENDPOINTS moved to app.routes.habits
-
-# ==========================================
-# Worker Management Endpoints
-# ==========================================
-
-# Initialize worker coordinator
-try:
-    from app.workers.habit_worker_coordinator import HabitWorkerCoordinator
-    worker_coordinator = HabitWorkerCoordinator()
-    worker_coordinator.start_background_tasks()
-    logger.info("✅ Habit worker coordinator initialized")
-except Exception as e:
-    logger.warning(f"⚠️ Habit worker coordinator not available: {e}")
-    worker_coordinator = None
-
-@app.get("/workers/status")
-async def get_worker_status(current_user: User = Depends(get_current_user)):
-    """Get status of all habit workers"""
-    if not worker_coordinator:
-        raise HTTPException(status_code=503, detail="Worker coordinator not available")
-    return worker_coordinator.get_status()
-
-@app.post("/workers/run/{task_name}")
-async def run_worker_task(
-    task_name: str,
-    request: Dict[str, Any] = None,
-    current_user: User = Depends(get_current_user)
-):
-    """Manually run a specific worker task"""
-    if not worker_coordinator:
-        raise HTTPException(status_code=503, detail="Worker coordinator not available")
-    
-    kwargs = request or {}
-    result = await worker_coordinator.run_manual_task(task_name, **kwargs)
-    return result
-
-@app.post("/workers/generate-instances/{user_id}")
-async def generate_past_instances(
-    user_id: str,
-    days_back: int = 7,
-    current_user: User = Depends(get_current_user)
-):
-    """Generate habit instances for past days (retro logging support)"""
-    if not worker_coordinator:
-        raise HTTPException(status_code=503, detail="Worker coordinator not available")
-    
-    # Only allow users to generate for themselves or admin
-    if current_user.id != user_id and not current_user.is_admin:
-        raise HTTPException(status_code=403, detail="Not authorized")
-    
-    result = await worker_coordinator.run_manual_task(
-        "generate_past_instances", 
-        user_id=user_id, 
-        days_back=days_back
-    )
-    return result
-
-@app.post("/workers/streak-alerts/{user_id}")
-async def send_streak_alerts(
-    user_id: str,
-    current_user: User = Depends(get_current_user)
-):
-    """Send streak alerts for a specific user"""
-    if not worker_coordinator:
-        raise HTTPException(status_code=503, detail="Worker coordinator not available")
-    
-    # Only allow users to send for themselves or admin
-    if current_user.id != user_id and not current_user.is_admin:
-        raise HTTPException(status_code=403, detail="Not authorized")
-    
-    result = await worker_coordinator.run_manual_task("streak_alerts", user_id=user_id)
-    return result
 
 # ==================== SARA AUTONOMOUS SYSTEM ENDPOINTS ====================
-
-@app.get("/autonomous/insights", response_model=List[AutonomousInsightResponse])
-async def get_autonomous_insights(
-    limit: int = 20,
-    sweep_type: Optional[str] = None,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get autonomous insights for the current user"""
-    
-    query = db.query(AutonomousInsight).filter(AutonomousInsight.user_id == current_user.id)
-    
-    if sweep_type:
-        query = query.filter(AutonomousInsight.sweep_type == sweep_type)
-    
-    insights = query.order_by(desc(AutonomousInsight.generated_at)).limit(limit).all()
-    
-    return [AutonomousInsightResponse(
-        id=insight.id,
-        user_id=insight.user_id,
-        insight_type=insight.insight_type,
-        sweep_type=insight.sweep_type,
-        priority_score=insight.priority_score,
-        title=insight.title,
-        message=insight.message,
-        action_suggestion=json.loads(insight.action_suggestion) if insight.action_suggestion else None,
-        related_data=json.loads(insight.related_data) if insight.related_data else None,
-        surfaced_at=insight.surfaced_at,
-        user_action=insight.user_action,
-        feedback_score=insight.feedback_score,
-        generated_at=insight.generated_at,
-        expires_at=insight.expires_at
-    ) for insight in insights]
-
-@app.post("/autonomous/insights/{insight_id}/feedback")
-async def submit_insight_feedback(
-    insight_id: str,
-    feedback: InsightFeedbackRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Submit feedback for an autonomous insight"""
-    
-    insight = db.query(AutonomousInsight).filter(
-        and_(
-            AutonomousInsight.id == insight_id,
-            AutonomousInsight.user_id == current_user.id
-        )
-    ).first()
-    
-    if not insight:
-        raise HTTPException(status_code=404, detail="Insight not found")
-    
-    insight.feedback_score = feedback.feedback_score
-    insight.user_action = feedback.user_action
-    insight.surfaced_at = datetime.now()
-    
-    db.commit()
-    
-    return {"message": "Feedback recorded", "insight_id": insight_id}
-
-@app.post("/autonomous/sweep/{sweep_type}")
-async def trigger_autonomous_sweep(
-    sweep_type: str,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Manually trigger an autonomous sweep for testing/debugging"""
-
-    if sweep_type not in ['quick_sweep', 'standard_sweep', 'digest_sweep']:
-        raise HTTPException(status_code=400, detail="Invalid sweep type")
-
-    try:
-        from app.services.autonomous_sweep_service import AutonomousSweepService
-
-        sweep_service = AutonomousSweepService(db)
-        raw_insights = await sweep_service.execute_sweep(
-            user_id=current_user.id,
-            sweep_type=sweep_type,
-            triggered_by="manual"
-        )
-
-        # Check for recent similar insights to avoid duplicates
-        recent_cutoff = datetime.now() - timedelta(hours=6)
-        recent_insights = db.query(AutonomousInsight).filter(
-            and_(
-                AutonomousInsight.user_id == current_user.id,
-                AutonomousInsight.generated_at >= recent_cutoff
-            )
-        ).all()
-
-        recent_types = {insight.insight_type for insight in recent_insights}
-        recent_titles = {insight.title for insight in recent_insights}
-
-        # Store insights in database, filtering out duplicates
-        stored_insights = []
-        new_insights = []
-        for insight_data in raw_insights:
-            if sweep_service.scorer.should_surface(insight_data['priority_score'], sweep_type):
-                is_new = (insight_data['type'] not in recent_types and
-                         insight_data['title'] not in recent_titles)
-
-                insight = AutonomousInsight(
-                    user_id=current_user.id,
-                    insight_type=insight_data['type'],
-                    sweep_type=sweep_type,
-                    priority_score=insight_data['priority_score'],
-                    title=insight_data['title'],
-                    message=insight_data['message'],
-                    action_suggestion=json.dumps(insight_data.get('action_suggestion')),
-                    related_data=json.dumps({
-                        **insight_data.get('related_data', {}),
-                        **(insight_data.get('memory_context', {}))
-                    }),
-                    generated_at=datetime.now()
-                )
-                db.add(insight)
-                stored_insights.append(insight)
-
-                if is_new:
-                    new_insights.append(insight)
-
-        db.commit()
-
-        return {
-            "message": f"{sweep_type} completed successfully",
-            "insights_generated": len(raw_insights),
-            "insights_stored": len(stored_insights),
-            "new_insights": len(new_insights),
-            "sweep_type": sweep_type
-        }
-        
-    except Exception as e:
-        logger.error(f"Autonomous sweep error: {e}")
-        raise HTTPException(status_code=500, detail=f"Sweep execution failed: {str(e)}")
-
-@app.get("/autonomous/profile", response_model=Optional[UserProfileResponse])
-async def get_user_profile(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get user's autonomous system profile"""
-    
-    profile = db.query(UserProfile).filter(UserProfile.user_id == current_user.id).first()
-    
-    if not profile:
-        return None
-    
-    return UserProfileResponse(
-        id=profile.id,
-        user_id=profile.user_id,
-        current_mode=profile.current_mode,
-        mode_preferences=json.loads(profile.mode_preferences) if profile.mode_preferences else None,
-        autonomy_level=profile.autonomy_level,
-        quiet_hours_start=profile.quiet_hours_start,
-        quiet_hours_end=profile.quiet_hours_end,
-        idle_thresholds=json.loads(profile.idle_thresholds) if profile.idle_thresholds else None,
-        ntfy_enabled=profile.ntfy_enabled,
-        ntfy_topics=json.loads(profile.ntfy_topics) if profile.ntfy_topics else None,
-        sprite_notifications=profile.sprite_notifications,
-        created_at=profile.created_at,
-        updated_at=profile.updated_at
-    )
-
-@app.put("/autonomous/profile")
-async def update_user_profile(
-    profile_data: UserProfileCreate,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Update user's autonomous system profile"""
-    
-    profile = db.query(UserProfile).filter(UserProfile.user_id == current_user.id).first()
-    
-    if not profile:
-        profile = UserProfile(user_id=current_user.id)
-        db.add(profile)
-    
-    # Update fields if provided
-    if profile_data.current_mode is not None:
-        profile.current_mode = profile_data.current_mode
-    
-    if profile_data.mode_preferences is not None:
-        profile.mode_preferences = json.dumps(profile_data.mode_preferences)
-    
-    if profile_data.autonomy_level is not None:
-        profile.autonomy_level = profile_data.autonomy_level
-        
-    if profile_data.quiet_hours_start is not None:
-        profile.quiet_hours_start = profile_data.quiet_hours_start
-        
-    if profile_data.quiet_hours_end is not None:
-        profile.quiet_hours_end = profile_data.quiet_hours_end
-        
-    if profile_data.idle_thresholds is not None:
-        profile.idle_thresholds = json.dumps(profile_data.idle_thresholds)
-        
-    if profile_data.ntfy_enabled is not None:
-        profile.ntfy_enabled = profile_data.ntfy_enabled
-        
-    if profile_data.ntfy_topics is not None:
-        profile.ntfy_topics = json.dumps(profile_data.ntfy_topics)
-        
-    if profile_data.sprite_notifications is not None:
-        profile.sprite_notifications = profile_data.sprite_notifications
-    
-    profile.updated_at = datetime.now()
-    
-    db.commit()
-    
-    return {"message": "Profile updated successfully", "profile_id": profile.id}
-
-@app.get("/autonomous/sweeps", response_model=List[BackgroundSweepResponse])
-async def get_background_sweeps(
-    limit: int = 50,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get background sweep execution history"""
-    
-    sweeps = db.query(BackgroundSweep).filter(
-        BackgroundSweep.user_id == current_user.id
-    ).order_by(desc(BackgroundSweep.executed_at)).limit(limit).all()
-    
-    return [BackgroundSweepResponse(
-        id=sweep.id,
-        user_id=sweep.user_id,
-        sweep_type=sweep.sweep_type,
-        triggered_by=sweep.triggered_by,
-        execution_time_ms=sweep.execution_time_ms,
-        insights_generated=sweep.insights_generated,
-        errors_encountered=json.loads(sweep.errors_encountered) if sweep.errors_encountered else None,
-        episodes_analyzed=sweep.episodes_analyzed,
-        notes_analyzed=sweep.notes_analyzed,
-        patterns_found=json.loads(sweep.patterns_found) if sweep.patterns_found else None,
-        executed_at=sweep.executed_at
-    ) for sweep in sweeps]
-
-
 # GTKY endpoints removed - was broken and unused
 
 # =====================
 # Nightly Reflection Endpoints
 # =====================
+# Daily brief endpoints extracted to app/routes/daily_brief.py
 
-class ReflectionStartResponse(BaseModel):
-    status: str
-    reflection_id: Optional[str] = None
-    message: Optional[str] = None
-    reflection_date: Optional[str] = None
-    current_question_index: Optional[int] = None
-    total_questions: Optional[int] = None
-    question: Optional[Dict[str, Any]] = None
-    progress: Optional[str] = None
-    estimated_time: Optional[str] = None
-    responses: Optional[Dict[str, Any]] = None
-    insights_generated: Optional[Dict[str, Any]] = None
-    mood_score: Optional[int] = None
-    can_update: Optional[bool] = None
 
-class ReflectionResponseRequest(BaseModel):
-    question_id: str
-    response: Any
-    question_index: int
+def _assert_unique_routes() -> None:
+    """Fail startup when multiple handlers claim the same method/path."""
+    seen: Dict[tuple[str, str], APIRoute] = {}
+    duplicates: List[str] = []
 
-class ReflectionResponseReply(BaseModel):
-    status: str
-    question: Optional[Dict[str, Any]] = None
-    follow_up: Optional[str] = None
-    progress: Optional[str] = None
-    current_question_index: Optional[int] = None
-    message: Optional[str] = None
-    insights: Optional[Dict[str, Any]] = None
-    reflection_summary: Optional[str] = None
-    mood_score: Optional[int] = None
-    next_steps: Optional[List[str]] = None
+    for route in app.routes:
+        if not isinstance(route, APIRoute):
+            continue
+        for method in sorted(route.methods or []):
+            if method in {"HEAD", "OPTIONS"}:
+                continue
+            key = (method, route.path)
+            existing = seen.get(key)
+            if existing:
+                prev_endpoint = f"{existing.endpoint.__module__}.{existing.endpoint.__name__}"
+                new_endpoint = f"{route.endpoint.__module__}.{route.endpoint.__name__}"
+                duplicates.append(f"{method} {route.path} ({prev_endpoint} vs {new_endpoint})")
+            else:
+                seen[key] = route
 
-class ReflectionHistoryResponse(BaseModel):
-    history: List[Dict[str, Any]]
-    total_count: int
-    current_streak: int
-    pagination: Dict[str, Any]
-
-class ReflectionInsightsResponse(BaseModel):
-    reflection_id: str
-    reflection_date: str
-    insights: Dict[str, Any]
-    responses: Dict[str, Any]
-    mood_score: Optional[int] = None
-    summary: str
-
-class ReflectionSettingsRequest(BaseModel):
-    enabled: Optional[bool] = None
-    preferred_time: Optional[str] = None
-    timezone: Optional[str] = None
-    quiet_hours: Optional[Dict[str, Any]] = None
-    reminder_channels: Optional[Dict[str, Any]] = None
-
-@app.post("/reflection/start", response_model=ReflectionStartResponse)
-async def start_reflection(
-    reflection_date: Optional[str] = None,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Start a new daily reflection"""
-    
-    if not REFLECTION_SERVICE_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Reflection service not available")
-    
-    reflection_service = ReflectionService(db)
-    
-    try:
-        # Parse reflection date if provided
-        parsed_date = None
-        if reflection_date:
-            from datetime import date
-            parsed_date = date.fromisoformat(reflection_date)
-        
-        result = await reflection_service.start_reflection(
-            user_id=str(current_user.id),
-            reflection_date=parsed_date
+    if duplicates:
+        raise RuntimeError(
+            "Duplicate FastAPI routes detected. Resolve collisions before startup: "
+            + "; ".join(duplicates)
         )
-        
-        return ReflectionStartResponse(**result)
-        
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        logger.error(f"Failed to start reflection: {e}")
-        raise HTTPException(status_code=500, detail="Failed to start reflection")
-
-@app.post("/reflection/{reflection_id}/respond", response_model=ReflectionResponseReply)
-async def respond_to_reflection_question(
-    reflection_id: str,
-    request: ReflectionResponseRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Respond to a reflection question"""
-    
-    if not REFLECTION_SERVICE_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Reflection service not available")
-    
-    reflection_service = ReflectionService(db)
-    
-    try:
-        result = await reflection_service.respond_to_question(
-            reflection_id=reflection_id,
-            user_id=str(current_user.id),
-            question_id=request.question_id,
-            response=request.response,
-            question_index=request.question_index
-        )
-        
-        return ReflectionResponseReply(**result)
-        
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        logger.error(f"Failed to process reflection response: {e}")
-        raise HTTPException(status_code=500, detail="Failed to process response")
-
-@app.get("/reflection/history", response_model=ReflectionHistoryResponse)
-async def get_reflection_history(
-    limit: int = Query(30, ge=1, le=100),
-    offset: int = Query(0, ge=0),
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get user's reflection history"""
-    
-    if not REFLECTION_SERVICE_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Reflection service not available")
-    
-    reflection_service = ReflectionService(db)
-    
-    try:
-        result = await reflection_service.get_reflection_history(
-            user_id=str(current_user.id),
-            limit=limit,
-            offset=offset
-        )
-        
-        return ReflectionHistoryResponse(**result)
-        
-    except Exception as e:
-        logger.error(f"Failed to get reflection history: {e}")
-        raise HTTPException(status_code=500, detail="Failed to retrieve reflection history")
-
-@app.get("/reflection/{reflection_id}/insights", response_model=ReflectionInsightsResponse)
-async def get_reflection_insights(
-    reflection_id: str,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get insights for a specific reflection"""
-    
-    if not REFLECTION_SERVICE_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Reflection service not available")
-    
-    reflection_service = ReflectionService(db)
-    
-    try:
-        result = await reflection_service.get_reflection_insights(
-            reflection_id=reflection_id,
-            user_id=str(current_user.id)
-        )
-        
-        return ReflectionInsightsResponse(**result)
-        
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        logger.error(f"Failed to get reflection insights: {e}")
-        raise HTTPException(status_code=500, detail="Failed to retrieve insights")
-
-@app.post("/reflection/settings")
-async def update_reflection_settings(
-    request: ReflectionSettingsRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Update reflection settings"""
-    
-    if not REFLECTION_SERVICE_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Reflection service not available")
-    
-    reflection_service = ReflectionService(db)
-    
-    try:
-        result = await reflection_service.update_reflection_settings(
-            user_id=str(current_user.id),
-            settings_data=request.dict(exclude_none=True)
-        )
-        
-        return result
-        
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        logger.error(f"Failed to update reflection settings: {e}")
-        raise HTTPException(status_code=500, detail="Failed to update settings")
 
 
-# ==================== DAILY BRIEF ENDPOINTS ====================
-
-@app.get("/api/daily-brief/stats")
-async def get_daily_brief_stats(
-    current_user: User = Depends(get_current_user)
-):
-    """Get statistics about the user's daily brief system"""
-    if not DAILY_BRIEF_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Daily Brief service not available")
-
-    try:
-        stats = daily_brief_service.get_brief_stats(current_user.id)
-        stats["is_bootstrapped"] = daily_brief_service.has_stable_layer(current_user.id)
-        return stats
-    except Exception as e:
-        logger.error(f"Failed to get daily brief stats: {e}")
-        raise HTTPException(status_code=500, detail="Failed to retrieve stats")
-
-
-@app.post("/api/daily-brief/bootstrap")
-async def bootstrap_daily_brief(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Manually trigger bootstrap of the stable layer from conversation history"""
-    if not DAILY_BRIEF_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Daily Brief service not available")
-
-    try:
-        success = await daily_brief_service.bootstrap_stable_layer(current_user.id, db)
-        return {
-            "success": success,
-            "message": "Stable layer bootstrapped successfully" if success else "Bootstrap failed - check logs"
-        }
-    except Exception as e:
-        logger.error(f"Failed to bootstrap daily brief: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/api/daily-brief/compiled")
-async def get_compiled_brief(
-    current_user: User = Depends(get_current_user)
-):
-    """Get the current compiled daily brief (for debugging/inspection)"""
-    if not DAILY_BRIEF_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Daily Brief service not available")
-
-    try:
-        brief = await daily_brief_service.get_compiled_brief(current_user.id)
-        return {
-            "content": brief,
-            "length": len(brief) if brief else 0
-        }
-    except Exception as e:
-        logger.error(f"Failed to get compiled brief: {e}")
-        raise HTTPException(status_code=500, detail="Failed to retrieve brief")
-
-
-@app.get("/api/daily-brief/layers/{layer_name}")
-async def get_brief_layer(
-    layer_name: str,
-    current_user: User = Depends(get_current_user)
-):
-    """Get a specific layer of the daily brief"""
-    if not DAILY_BRIEF_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Daily Brief service not available")
-
-    valid_layers = ["moment", "day", "context", "stable"]
-    if layer_name not in valid_layers:
-        raise HTTPException(status_code=400, detail=f"Invalid layer. Must be one of: {valid_layers}")
-
-    try:
-        content = daily_brief_service._read_layer(current_user.id, layer_name)
-        return {
-            "layer": layer_name,
-            "content": content,
-            "length": len(content)
-        }
-    except Exception as e:
-        logger.error(f"Failed to get layer {layer_name}: {e}")
-        raise HTTPException(status_code=500, detail="Failed to retrieve layer")
+_assert_unique_routes()
 
 
 if __name__ == "__main__":

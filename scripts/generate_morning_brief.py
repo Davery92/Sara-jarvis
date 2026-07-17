@@ -2,9 +2,10 @@
 """
 Morning Brief Generation Script
 
-Generates morning briefs for all active users at 6 AM.
-Run via cron:
-    0 6 * * * /home/david/jarvis/scripts/generate_morning_brief.py >> /home/david/jarvis/logs/morning_brief.log 2>&1
+Generates the morning brief for the configured solo user at 6 AM ET.
+Run via cron (system timezone is UTC, CRON_TZ is NOT supported by vixie cron):
+    # 11:00 UTC = 6 AM EST / 7 AM EDT
+    0 11 * * * SOLO_USER_ID=64f37c56-85cb-4590-8de9-adfc17d343ed DATABASE_URL="postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub" /usr/bin/python3 /home/david/jarvis/scripts/generate_morning_brief.py >> /home/david/jarvis/logs/morning_brief.log 2>&1
 
 Push notification is sent automatically when brief is ready (via notification_service).
 """
@@ -15,6 +16,7 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 # Add backend to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "backend"))
@@ -41,19 +43,16 @@ from sqlalchemy.orm import sessionmaker
 
 from app.services.morning_brief_service import morning_brief_service
 
-
-def get_active_users(session) -> list:
-    """Get list of active user IDs."""
-    result = session.execute(text("""
-        SELECT id FROM app_user
-    """))
-    return [str(row.id) for row in result.fetchall()]
+# Solo user — only generate for David
+SOLO_USER_ID = os.getenv("SOLO_USER_ID", "64f37c56-85cb-4590-8de9-adfc17d343ed")
 
 
-async def generate_briefs_for_all_users():
-    """Generate morning briefs for all active users."""
+async def generate_brief():
+    """Generate morning brief for the solo user."""
+    eastern = ZoneInfo("America/New_York")
     logger.info("=" * 60)
-    logger.info(f"Starting morning brief generation at {datetime.now()}")
+    logger.info(f"Starting morning brief generation at {datetime.now(eastern).strftime('%Y-%m-%d %I:%M %p %Z')}")
+    logger.info(f"Solo user: {SOLO_USER_ID}")
     logger.info("=" * 60)
 
     # Create database connection
@@ -64,35 +63,35 @@ async def generate_briefs_for_all_users():
     session = SessionLocal()
 
     try:
-        # Get all active users
-        users = get_active_users(session)
-        logger.info(f"Found {len(users)} active users")
-
-        success_count = 0
-        error_count = 0
-
-        for user_id in users:
-            try:
-                logger.info(f"Generating brief for user: {user_id}")
-                brief = await morning_brief_service.generate_brief(user_id, session)
-                logger.info(f"Successfully generated brief for {user_id}")
-                logger.info(f"  - News sources: {len(brief.news_sources or [])}")
-                logger.info(f"  - Calendar events: {len(brief.calendar_events or [])}")
-                logger.info(f"  - Audio duration: {brief.audio_duration_seconds or 'N/A'}s")
-                success_count += 1
-
-            except Exception as e:
-                logger.error(f"Failed to generate brief for {user_id}: {e}")
-                error_count += 1
+        logger.info(f"Generating brief for user: {SOLO_USER_ID}")
+        brief = await morning_brief_service.generate_brief(SOLO_USER_ID, session)
+        logger.info(f"Successfully generated brief for {SOLO_USER_ID}")
+        logger.info(f"  - News sources: {len(brief.news_sources or [])}")
+        logger.info(f"  - Calendar events: {len(brief.calendar_events or [])}")
+        logger.info(f"  - Audio duration: {brief.audio_duration_seconds or 'N/A'}s")
 
         logger.info("=" * 60)
-        logger.info(f"Morning brief generation complete")
-        logger.info(f"  - Successful: {success_count}")
-        logger.info(f"  - Errors: {error_count}")
+        logger.info("Morning brief generation complete")
         logger.info("=" * 60)
 
     except Exception as e:
-        logger.error(f"Fatal error in morning brief generation: {e}")
+        logger.error(f"Failed to generate brief: {e}")
+        # Send error notification so David knows the brief failed
+        try:
+            from app.services.unified_notification import send_notification
+            from app.db.session import AsyncSessionLocal
+            async with AsyncSessionLocal() as async_db:
+                await send_notification(
+                    user_id=SOLO_USER_ID,
+                    title="Morning brief failed",
+                    message=f"Brief generation error: {str(e)[:200]}",
+                    priority="important",
+                    category="system",
+                    source="morning_brief_script",
+                    db=async_db,
+                )
+        except Exception as notify_err:
+            logger.error(f"Failed to send error notification: {notify_err}")
         raise
 
     finally:
@@ -102,7 +101,7 @@ async def generate_briefs_for_all_users():
 def main():
     """Main entry point."""
     try:
-        asyncio.run(generate_briefs_for_all_users())
+        asyncio.run(generate_brief())
     except KeyboardInterrupt:
         logger.info("Generation interrupted by user")
     except Exception as e:

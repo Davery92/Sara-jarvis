@@ -12,7 +12,7 @@ const TOKEN_KEY = '@sara_auth_token';
 export interface ChatModel {
   id: string;
   name: string;
-  provider: 'anthropic' | 'google' | 'local';
+  provider: 'anthropic' | 'google' | 'local' | 'openai' | 'codex';
 }
 
 export interface ChatModelsResponse {
@@ -23,6 +23,74 @@ export interface ChatModelsResponse {
 export interface ChatOptions {
   model?: string;
   ephemeral?: boolean;
+  notifyOnComplete?: boolean;  // Send push notification when response is ready (for background completion)
+  inboxItemId?: string;  // Pre-load inbox item content for discussion
+  noteId?: string;  // Pre-load note content for discussion
+  source?: string;  // 'ios' | 'ios_overlay' | 'workspace'
+  currentScreen?: string;  // Current iOS screen for context-aware tool loading
+  onContentCard?: (card: any) => void;  // Content card callback
+  onToolStatus?: (status: { tool: string; status: string }) => void;  // Tool execution status
+  onSuggestedActions?: (actions: any[]) => void;  // Suggested follow-up actions
+  onUiCommand?: (command: any) => void;  // Jarvis-style navigation/overlay command ("open my inbox")
+}
+
+export interface CodexOAuthStatus {
+  connected: boolean;
+  email?: string;
+  account_id?: string;
+  expires_at?: string;
+  expires_in_seconds?: number | null;
+  error?: string | null;
+}
+
+export interface AutonomyFlags {}
+
+export interface ScheduledJob {
+  key: string;
+  display_name: string;
+  description: string | null;
+  category: string;
+  task_name: string;
+  schedule_kind: 'cron' | 'interval';
+  cron_expr: string | null;
+  interval_seconds: number | null;
+  timezone: string;
+  args: unknown[];
+  kwargs: Record<string, unknown>;
+  queue: string | null;
+  expires_seconds: number | null;
+  enabled: boolean;
+  editable: boolean;
+  source: string;
+  visibility: 'user' | 'system';
+  last_run_at: string | null;
+  last_status: string | null;
+  last_error: string | null;
+  last_run_duration_ms: number | null;
+  human_readable: string;
+}
+
+export interface SchedulePatch {
+  schedule_kind?: 'cron' | 'interval';
+  cron_expr?: string | null;
+  interval_seconds?: number | null;
+  timezone?: string;
+  enabled?: boolean;
+  kwargs?: Record<string, unknown>;
+}
+
+export interface TunableSetting {
+  key: string;
+  display_name: string;
+  description: string | null;
+  category: string;
+  value_type: 'int' | 'float' | 'string' | 'bool' | 'json';
+  value: any;
+  default_value: any;
+  min_value: any;
+  max_value: any;
+  unit: string | null;
+  editable: boolean;
 }
 
 class ApiClient {
@@ -40,12 +108,17 @@ class ApiClient {
       },
     });
 
-    // Request interceptor to add auth token
+    // Request interceptor to add auth token and fix FormData headers
     this.client.interceptors.request.use(
       async (config) => {
         const token = await AsyncStorage.getItem(TOKEN_KEY);
         if (token && config.headers) {
           config.headers.Authorization = `Bearer ${token}`;
+        }
+        // For FormData uploads, delete Content-Type so the RN networking
+        // layer auto-sets multipart/form-data WITH the boundary parameter.
+        if (config.data instanceof FormData) {
+          delete config.headers['Content-Type'];
         }
         return config;
       },
@@ -104,12 +177,11 @@ class ApiClient {
   }
 
   async upload<T>(url: string, formData: FormData, config?: AxiosRequestConfig): Promise<T> {
+    // The request interceptor strips Content-Type for FormData so the RN
+    // networking layer sets multipart/form-data with the correct boundary.
     const response: AxiosResponse<T> = await this.client.post(url, formData, {
       ...config,
-      headers: {
-        ...config?.headers,
-        'Content-Type': 'multipart/form-data',
-      },
+      timeout: 300000,  // 5 min for large file uploads
     });
     return response.data;
   }
@@ -159,17 +231,87 @@ class ApiClient {
         let lastProcessedIndex = 0;
         let receivedConversationId: string | undefined = undefined;
         let receivedEpisodeId: string | undefined = undefined;
+        let emittedText = '';
+        let completed = false;
+        let sawAnyStreamBytes = false;
+        let firstEventTimer: ReturnType<typeof setTimeout> | null = null;
+        let postTextFinalizeTimer: ReturnType<typeof setTimeout> | null = null;
+
+        const clearTimers = () => {
+          if (firstEventTimer) {
+            clearTimeout(firstEventTimer);
+            firstEventTimer = null;
+          }
+          if (postTextFinalizeTimer) {
+            clearTimeout(postTextFinalizeTimer);
+            postTextFinalizeTimer = null;
+          }
+        };
+
+        const schedulePostTextFinalizeWatchdog = () => {
+          if (postTextFinalizeTimer) {
+            clearTimeout(postTextFinalizeTimer);
+          }
+          // If text has arrived but completion markers never come, recover automatically.
+          // Window must be longer than the longest expected silence between server events
+          // (tool runs can stall text for tens of seconds; heartbeats fire every 5s, so any
+          // gap > heartbeat cadence means the stream is genuinely dead).
+          postTextFinalizeTimer = setTimeout(() => {
+            if (!completed && emittedText.trim().length > 0) {
+              console.warn('[API] No completion marker after streamed text; forcing complete');
+              completeOnce();
+            }
+          }, 60000);
+        };
+
+        const completeOnce = () => {
+          if (completed) return;
+          completed = true;
+          clearTimers();
+          if (receivedConversationId) {
+            console.log('[API] ✅ Stream complete - calling onComplete with conversation_id:', receivedConversationId, 'episode_id:', receivedEpisodeId);
+          } else {
+            console.warn('[API] ⚠️ Stream complete but NO conversation_id received!');
+          }
+          onComplete(receivedConversationId, receivedEpisodeId);
+          resolve();
+          try {
+            xhr.abort();
+          } catch {
+            // no-op
+          }
+        };
 
         xhr.open('POST', `${API_URL}/chat/stream`, true);
         xhr.setRequestHeader('Content-Type', 'application/json');
+        // Never let chat stream hang forever on iOS.
+        xhr.timeout = 180000;
         if (token) {
           xhr.setRequestHeader('Authorization', `Bearer ${token}`);
         }
+
+        firstEventTimer = setTimeout(() => {
+          if (!completed && !sawAnyStreamBytes) {
+            const error = new Error('No stream events received from server');
+            console.error('[API] Stream startup timeout:', error);
+            try {
+              xhr.abort();
+            } catch {
+              // no-op
+            }
+            onError(error);
+            reject(error);
+          }
+        }, 25000);
 
         xhr.onprogress = () => {
           // Get the new chunk of data
           const newData = xhr.responseText.substring(lastProcessedIndex);
           lastProcessedIndex = xhr.responseText.length;
+          if (newData.length > 0) {
+            sawAnyStreamBytes = true;
+            clearTimers();
+          }
 
           // Add new data to buffer
           buffer += newData;
@@ -190,13 +332,39 @@ class ApiClient {
 
               try {
                 const parsed = JSON.parse(data);
+                // Any parsed event proves the stream is alive — keep the post-text watchdog
+                // from firing during long tool runs or other non-text activity.
+                if (emittedText.trim().length > 0 && parsed.type !== 'final_response' && parsed.type !== 'done') {
+                  schedulePostTextFinalizeWatchdog();
+                }
                 // Handle text_chunk events from backend
                 if (parsed.type === 'text_chunk' && parsed.data?.content) {
-                  onChunk(parsed.data.content);
+                  const chunk = String(parsed.data.content);
+                  if (chunk) {
+                    emittedText += chunk;
+                    onChunk(chunk);
+                    schedulePostTextFinalizeWatchdog();
+                  }
                 } else if (parsed.type === 'final_response') {
                   // Final response event - extract conversation_id and episode_id
                   console.log('[API] Received final_response event');
                   console.log('[API] Full final_response data:', JSON.stringify(parsed.data));
+                  const finalContent = parsed.data?.content || parsed.content || '';
+                  if (finalContent) {
+                    const finalText = String(finalContent);
+                    if (finalText.startsWith(emittedText)) {
+                      const delta = finalText.slice(emittedText.length);
+                      if (delta) {
+                        emittedText += delta;
+                        onChunk(delta);
+                        schedulePostTextFinalizeWatchdog();
+                      }
+                    } else if (!emittedText) {
+                      emittedText = finalText;
+                      onChunk(finalText);
+                      schedulePostTextFinalizeWatchdog();
+                    }
+                  }
                   if (parsed.data?.conversation_id) {
                     receivedConversationId = parsed.data.conversation_id;
                     console.log('[API] ✅ Got conversation_id:', receivedConversationId);
@@ -209,9 +377,26 @@ class ApiClient {
                   } else {
                     console.warn('[API] ⚠️ No episode_id in final_response!');
                   }
+                  completeOnce();
+                } else if (parsed.type === 'done') {
+                  completeOnce();
+                } else if (parsed.type === 'content_card' && options?.onContentCard) {
+                  options.onContentCard(parsed.data);
+                } else if (parsed.type === 'tool_executing' && options?.onToolStatus) {
+                  options.onToolStatus({ tool: parsed.data?.tool, status: 'executing' });
+                } else if (parsed.type === 'tool_completed' && options?.onToolStatus) {
+                  options.onToolStatus({ tool: parsed.data?.tool, status: 'completed' });
+                } else if (parsed.type === 'suggested_actions' && options?.onSuggestedActions) {
+                  options.onSuggestedActions(parsed.data?.actions || []);
+                } else if (parsed.type === 'ui_command' && options?.onUiCommand) {
+                  options.onUiCommand(parsed.data);
                 } else if (parsed.content) {
                   // Fallback for other formats
-                  onChunk(parsed.content);
+                  const fallbackChunk = String(parsed.content);
+                  if (fallbackChunk) {
+                    emittedText += fallbackChunk;
+                    onChunk(fallbackChunk);
+                  }
                 }
               } catch (e) {
                 // Skip invalid JSON or non-JSON lines
@@ -222,6 +407,7 @@ class ApiClient {
         };
 
         xhr.onload = () => {
+          clearTimers();
           if (xhr.status === 200) {
             // Process any remaining buffered data
             if (buffer.trim()) {
@@ -231,8 +417,29 @@ class ApiClient {
                 try {
                   const parsed = JSON.parse(data);
                   if (parsed.type === 'text_chunk' && parsed.data?.content) {
-                    onChunk(parsed.data.content);
-                  } else if (parsed.type === 'final_response') {
+                    const chunk = String(parsed.data.content);
+                  if (chunk) {
+                    emittedText += chunk;
+                    onChunk(chunk);
+                    schedulePostTextFinalizeWatchdog();
+                  }
+                } else if (parsed.type === 'final_response') {
+                    const finalContent = parsed.data?.content || parsed.content || '';
+                    if (finalContent) {
+                      const finalText = String(finalContent);
+                      if (finalText.startsWith(emittedText)) {
+                        const delta = finalText.slice(emittedText.length);
+                        if (delta) {
+                          emittedText += delta;
+                          onChunk(delta);
+                          schedulePostTextFinalizeWatchdog();
+                        }
+                      } else if (!emittedText) {
+                        emittedText = finalText;
+                        onChunk(finalText);
+                        schedulePostTextFinalizeWatchdog();
+                      }
+                    }
                     if (parsed.data?.conversation_id) {
                       receivedConversationId = parsed.data.conversation_id;
                       console.log('[API] ✅ Got conversation_id from final buffer:', receivedConversationId);
@@ -241,6 +448,9 @@ class ApiClient {
                       receivedEpisodeId = parsed.data.episode_id;
                       console.log('[API] ✅ Got episode_id from final buffer:', receivedEpisodeId);
                     }
+                    completeOnce();
+                  } else if (parsed.type === 'done') {
+                    completeOnce();
                   }
                 } catch (e) {
                   // Ignore parse errors for final buffer
@@ -248,14 +458,9 @@ class ApiClient {
               }
             }
 
-            if (receivedConversationId) {
-              console.log('[API] ✅ Stream complete - calling onComplete with conversation_id:', receivedConversationId, 'episode_id:', receivedEpisodeId);
-            } else {
-              console.warn('[API] ⚠️ Stream complete but NO conversation_id received!');
+            if (!completed) {
+              completeOnce();
             }
-            // Call onComplete with the conversation_id and episode_id from backend
-            onComplete(receivedConversationId, receivedEpisodeId);
-            resolve();
           } else {
             const error = new Error(`HTTP error! status: ${xhr.status} - ${xhr.responseText}`);
             console.error('[API] Chat error:', error);
@@ -265,8 +470,19 @@ class ApiClient {
         };
 
         xhr.onerror = () => {
+          if (completed) return;
+          clearTimers();
           const error = new Error('Network error during streaming');
           console.error('[API] Network error:', error);
+          onError(error);
+          reject(error);
+        };
+
+        xhr.ontimeout = () => {
+          if (completed) return;
+          clearTimers();
+          const error = new Error('Chat stream timed out');
+          console.error('[API] Stream timeout:', error);
           onError(error);
           reject(error);
         };
@@ -280,6 +496,21 @@ class ApiClient {
         }
         if (options?.ephemeral) {
           requestBody.ephemeral = options.ephemeral;
+        }
+        if (options?.notifyOnComplete) {
+          requestBody.notify_on_complete = options.notifyOnComplete;
+        }
+        if (options?.inboxItemId) {
+          requestBody.inbox_item_id = options.inboxItemId;
+        }
+        if (options?.noteId) {
+          requestBody.note_id = options.noteId;
+        }
+        if (options?.source) {
+          requestBody.source = options.source;
+        }
+        if (options?.currentScreen) {
+          requestBody.current_screen = options.currentScreen;
         }
         xhr.send(JSON.stringify(requestBody));
       });
@@ -354,7 +585,7 @@ class ApiClient {
 
   // Detected Patterns endpoints
   async getDetectedPatterns(): Promise<any[]> {
-    const response = await this.client.get('/api/patterns');
+    const response = await this.client.get('/api/detected-patterns');
     return response.data;
   }
 
@@ -374,6 +605,133 @@ class ApiClient {
     return response.data;
   }
 
+  async getCodexOAuthStatus(): Promise<CodexOAuthStatus> {
+    const response = await this.client.get('/settings/ai/codex/oauth/status');
+    return response.data;
+  }
+
+  async startCodexOAuth(returnTo?: string): Promise<{ auth_url: string; redirect_uri: string; return_to: string; requires_manual_code?: boolean }> {
+    const response = await this.client.post('/settings/ai/codex/oauth/start', {
+      return_to: returnTo,
+    });
+    return response.data;
+  }
+
+  async completeCodexOAuth(payload: { redirect_url?: string; code?: string; state?: string }): Promise<{ ok: boolean; connected: boolean; email: string; expires_at: string }> {
+    const response = await this.client.post('/settings/ai/codex/oauth/complete', payload);
+    return response.data;
+  }
+
+  async disconnectCodexOAuth(): Promise<{ ok: boolean; message: string }> {
+    const response = await this.client.post('/settings/ai/codex/oauth/disconnect');
+    return response.data;
+  }
+
+  // ==================== NOTIFICATION PREFERENCES ====================
+
+  async getNotificationPreferences(): Promise<{ preferences: Array<{ category: string; enabled: boolean; custom_ban_phrases: string[] }> }> {
+    const response = await this.client.get('/api/settings/notification-preferences');
+    return response.data;
+  }
+
+  async updateNotificationPreferences(prefs: Array<{ category: string; enabled: boolean; custom_ban_phrases: string[] }>): Promise<{ preferences: Array<{ category: string; enabled: boolean; custom_ban_phrases: string[] }> }> {
+    const response = await this.client.put('/api/settings/notification-preferences', { preferences: prefs });
+    return response.data;
+  }
+
+  async getAutonomyFlags(): Promise<AutonomyFlags> {
+    const response = await this.client.get('/api/settings/autonomy-flags');
+    return response.data;
+  }
+
+  // ==================== SCHEDULED JOBS (DB-backed Celery beat) ====================
+
+  async listSchedules(): Promise<ScheduledJob[]> {
+    const response = await this.client.get('/api/settings/schedules');
+    return response.data;
+  }
+
+  async updateSchedule(key: string, patch: SchedulePatch): Promise<ScheduledJob> {
+    const response = await this.client.patch(
+      `/api/settings/schedules/${encodeURIComponent(key)}`,
+      patch,
+    );
+    return response.data;
+  }
+
+  async runScheduleNow(key: string): Promise<{ ok: boolean; task_id: string; task_name: string }> {
+    const response = await this.client.post(
+      `/api/settings/schedules/${encodeURIComponent(key)}/run-now`,
+    );
+    return response.data;
+  }
+
+  // ==================== TUNABLES ====================
+
+  async listTunables(): Promise<TunableSetting[]> {
+    const response = await this.client.get('/api/settings/tunables');
+    return response.data;
+  }
+
+  async updateTunable(key: string, value: unknown): Promise<TunableSetting> {
+    const response = await this.client.patch(
+      `/api/settings/tunables/${encodeURIComponent(key)}`,
+      { value },
+    );
+    return response.data;
+  }
+
+  async resetTunable(key: string): Promise<TunableSetting> {
+    const response = await this.client.post(
+      `/api/settings/tunables/${encodeURIComponent(key)}/reset`,
+    );
+    return response.data;
+  }
+
+  // ==================== CONTENT INBOX ====================
+
+  async getInboxItems(status?: string, limit: number = 50): Promise<any[]> {
+    const params = new URLSearchParams();
+    if (status) params.set('status', status);
+    params.set('limit', String(limit));
+    const response = await this.client.get(`/api/inbox?${params.toString()}`);
+    return response.data;
+  }
+
+  async getInboxStats(): Promise<{ unread: number; read: number; kept: number; total: number }> {
+    const response = await this.client.get('/api/inbox/stats');
+    return response.data;
+  }
+
+  async markAllInboxRead(): Promise<{ success: boolean; updated: number }> {
+    const response = await this.client.post('/api/inbox/mark-all-read');
+    return response.data as any;
+  }
+
+  async getInboxItem(id: string): Promise<any> {
+    const response = await this.client.get(`/api/inbox/${id}`);
+    return response.data;
+  }
+
+  async shareToInbox(url: string, title?: string): Promise<any> {
+    const response = await this.client.post('/api/inbox/share', { url, title });
+    return response.data;
+  }
+
+  async shareTextToInbox(text: string, title?: string): Promise<any> {
+    const response = await this.client.post('/api/inbox/share/text', { text, title });
+    return response.data;
+  }
+
+  async updateInboxItemStatus(id: string, status: 'kept' | 'discarded'): Promise<any> {
+    const response = await this.client.patch(`/api/inbox/${id}/status`, { status });
+    return response.data;
+  }
+
+  async deleteInboxItem(id: string): Promise<void> {
+    await this.client.delete(`/api/inbox/${id}`);
+  }
+
   // ==================== PRESENCE LOGGING ====================
 
   /**
@@ -390,6 +748,174 @@ class ApiClient {
       // Don't throw - presence logging is best-effort
       console.warn('[API] Failed to log presence:', error);
     }
+  }
+
+  // ==================== UNIFIED ASSISTANT INBOX ====================
+
+  async getUnifiedInbox(): Promise<{
+    needs_you: any[];
+    fyi: any[];
+    counts: { needs_you: number; fyi_unread: number; badge: number };
+  }> {
+    const response = await this.client.get('/api/assistant-inbox/unified');
+    return response.data as any;
+  }
+
+  async getInboxBadge(): Promise<number> {
+    const response = await this.client.get('/api/assistant-inbox/badge');
+    return (response.data as any)?.badge || 0;
+  }
+
+  // ==================== AUTONOMY (Cortana Evolution) ====================
+
+  async getAttentionItems(status?: string, limit: number = 50): Promise<any[]> {
+    const params = new URLSearchParams({ limit: limit.toString() });
+    if (status) params.append('status', status);
+    const response = await this.client.get(`/autonomy/attention?${params}`);
+    return (response.data as any)?.items || [];
+  }
+
+  async getAttentionCount(): Promise<{ counts: Record<string, number>; unread: number }> {
+    const response = await this.client.get('/autonomy/attention/count');
+    return response.data as any;
+  }
+
+  async markAttentionRead(id: string): Promise<void> {
+    await this.client.post(`/autonomy/attention/${id}/read`);
+  }
+
+  async engageAttentionItem(id: string): Promise<void> {
+    await this.client.post(`/autonomy/attention/${id}/engage`);
+  }
+
+  async archiveAttentionItem(id: string): Promise<void> {
+    await this.client.post(`/autonomy/attention/${id}/archive`);
+  }
+
+  async archiveAllAttention(): Promise<{ archived: number }> {
+    const response = await this.client.post('/autonomy/attention/archive-all');
+    return response.data as any;
+  }
+
+  async runAttentionAction(id: string, actionId: string, params?: Record<string, any>): Promise<any> {
+    const response = await this.client.post(
+      `/autonomy/attention/${id}/actions/${actionId}`,
+      params || undefined,
+    );
+    return response.data;
+  }
+
+  async replyToAttentionItem(id: string, message: string): Promise<any> {
+    const response = await this.client.post(
+      `/autonomy/attention/${id}/reply`,
+      { message },
+    );
+    return response.data;
+  }
+
+  async sendNotificationFeedback(
+    notificationId: number,
+    action: 'read' | 'engaged' | 'dismissed',
+    responseText?: string,
+  ): Promise<void> {
+    try {
+      await this.client.post(`/api/notifications/${notificationId}/feedback`, {
+        action,
+        response_text: responseText || null,
+      });
+    } catch (error) {
+      // Best-effort — don't fail the calling flow
+      console.log('[API] Notification feedback failed (non-critical):', error);
+    }
+  }
+
+  async markNotificationRead(notificationId: string | number, itemType?: string): Promise<void> {
+    if (itemType === 'acs_discovery') {
+      await this.client.post(`/api/notifications/acs/${notificationId}/mark-read`, {});
+      return;
+    }
+    await this.client.post(`/api/notifications/${notificationId}/feedback`, { action: 'read' });
+  }
+
+  async markAllNotificationsRead(): Promise<{ success: boolean; updated: number; acs_updated: number }> {
+    const response = await this.client.post('/api/notifications/mark-all-read');
+    return response.data as any;
+  }
+
+  async getMissions(state?: string): Promise<any[]> {
+    const params = state ? `?state=${state}` : '';
+    const response = await this.client.get(`/autonomy/missions${params}`);
+    return (response.data as any)?.missions || [];
+  }
+
+  async getMission(id: string): Promise<any> {
+    const response = await this.client.get(`/autonomy/missions/${id}`);
+    return response.data;
+  }
+
+  async cancelMission(id: string): Promise<void> {
+    await this.client.post(`/autonomy/missions/${id}/cancel`);
+  }
+
+  async confirmMission(id: string): Promise<void> {
+    await this.client.post(`/autonomy/missions/${id}/confirm`);
+  }
+
+  async getActionTraces(hours: number = 24, limit: number = 50): Promise<any[]> {
+    const response = await this.client.get(`/autonomy/traces?hours=${hours}&limit=${limit}`);
+    return (response.data as any)?.traces || [];
+  }
+
+  async getTraceStats(hours: number = 24): Promise<any> {
+    const response = await this.client.get(`/autonomy/traces/stats?hours=${hours}`);
+    return response.data;
+  }
+
+  async getPolicyCandidates(status?: string): Promise<any[]> {
+    const params = status ? `?status=${status}` : '';
+    const response = await this.client.get(`/autonomy/policy-candidates${params}`);
+    return (response.data as any)?.candidates || [];
+  }
+
+  async acceptPolicyCandidate(id: string): Promise<any> {
+    const response = await this.client.post(`/autonomy/policy-candidates/${id}/accept`);
+    return response.data;
+  }
+
+  async rejectPolicyCandidate(id: string): Promise<any> {
+    const response = await this.client.post(`/autonomy/policy-candidates/${id}/reject`);
+    return response.data;
+  }
+  // ── Daily Tasks ──────────────────────────────────────
+
+  async getDailyTasks(date?: string): Promise<any[]> {
+    const params = date ? `?date_str=${date}` : '';
+    const response = await this.client.get(`/api/daily-tasks${params}`);
+    return response.data;
+  }
+
+  async createDailyTask(data: { title: string; description?: string; priority?: string; task_date?: string }): Promise<any> {
+    const response = await this.client.post('/api/daily-tasks', data);
+    return response.data;
+  }
+
+  async updateDailyTask(id: string, data: { title?: string; description?: string; priority?: string; is_completed?: boolean }): Promise<any> {
+    const response = await this.client.patch(`/api/daily-tasks/${id}`, data);
+    return response.data;
+  }
+
+  async deleteDailyTask(id: string): Promise<void> {
+    await this.client.delete(`/api/daily-tasks/${id}`);
+  }
+
+  async toggleDailyTask(id: string): Promise<any> {
+    const response = await this.client.patch(`/api/daily-tasks/${id}/toggle`);
+    return response.data;
+  }
+
+  async carryOverTasks(): Promise<any[]> {
+    const response = await this.client.post('/api/daily-tasks/carry-over');
+    return response.data;
   }
 }
 

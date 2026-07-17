@@ -1,13 +1,14 @@
 import React from 'react';
-import { Text, View, StyleSheet, Platform } from 'react-native';
+import { Text, View, StyleSheet, Platform, Linking } from 'react-native';
 import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
 
 interface SimpleMarkdownProps {
   children: string;
   style?: any;
+  linkStyle?: any;
 }
 
-export default function SimpleMarkdown({ children, style }: SimpleMarkdownProps) {
+export default function SimpleMarkdown({ children, style, linkStyle }: SimpleMarkdownProps) {
   const renderContent = () => {
     const lines = children.split('\n');
     const elements: JSX.Element[] = [];
@@ -26,19 +27,19 @@ export default function SimpleMarkdown({ children, style }: SimpleMarkdownProps)
       if (line.startsWith('### ')) {
         elements.push(
           <Text key={key++} style={[styles.text, styles.h3, style]}>
-            {line.substring(4)}
+            {renderInlineMarkdown(line.substring(4))}
           </Text>
         );
       } else if (line.startsWith('## ')) {
         elements.push(
           <Text key={key++} style={[styles.text, styles.h2, style]}>
-            {line.substring(3)}
+            {renderInlineMarkdown(line.substring(3))}
           </Text>
         );
       } else if (line.startsWith('# ')) {
         elements.push(
           <Text key={key++} style={[styles.text, styles.h1, style]}>
-            {line.substring(2)}
+            {renderInlineMarkdown(line.substring(2))}
           </Text>
         );
       }
@@ -47,7 +48,7 @@ export default function SimpleMarkdown({ children, style }: SimpleMarkdownProps)
         const content = line.trim().substring(2);
         elements.push(
           <View key={key++} style={styles.listItem}>
-            <Text style={[styles.text, style]}>• {renderInlineMarkdown(content)}</Text>
+            <Text style={[styles.text, style]}>{'\u2022 '}{renderInlineMarkdown(content)}</Text>
           </View>
         );
       }
@@ -88,80 +89,114 @@ export default function SimpleMarkdown({ children, style }: SimpleMarkdownProps)
     return elements;
   };
 
-  const renderInlineMarkdown = (text: string): any => {
-    const parts: any[] = [];
-    let currentText = text;
-    let key = 0;
+  const handleInternalLink = (path: string) => {
+    const API_URL = __DEV__
+      ? 'http://10.185.1.180:8000'
+      : 'https://sara-api.avery.cloud';
+    // Open in browser which will handle the download natively
+    Linking.openURL(`${API_URL}${path}`);
+  };
 
-    // Handle **bold**
-    const boldRegex = /\*\*(.+?)\*\*/g;
+  // Single-pass inline markdown: markdown links, bare URLs, bold, inline code
+  const renderInlineMarkdown = (text: string): any => {
+    // Combined regex matching (in priority order):
+    // 1. Markdown links: [text](url) — supports both http and internal /paths
+    // 2. Bare URLs: https?://...
+    // 3. Bold: **text**
+    // 4. Inline code: `code`
+    const combinedRegex = /(\[([^\]]+)\]\(([^)]+)\))|(https?:\/\/[^\s<]+[^\s<.,;:!?)}\]'"])|((?<!\*)\*\*(.+?)\*\*(?!\*))|(`([^`]+)`)/g;
+
+    const parts: any[] = [];
     let lastIndex = 0;
     let match;
+    let key = 0;
 
-    while ((match = boldRegex.exec(currentText)) !== null) {
-      // Add text before bold
+    while ((match = combinedRegex.exec(text)) !== null) {
+      // Add plain text before this match
       if (match.index > lastIndex) {
+        parts.push(text.substring(lastIndex, match.index));
+      }
+
+      if (match[1]) {
+        // Markdown link: [text](url)
+        const linkText = match[2];
+        const url = match[3];
+
+        if (url.startsWith('/email/') || url.startsWith('/api/')) {
+          // Internal API link — download with auth
+          parts.push(
+            <Text
+              key={`ilink-${key++}`}
+              style={[styles.internalLink, linkStyle]}
+              onPress={() => handleInternalLink(url)}
+            >
+              📎 {linkText}
+            </Text>
+          );
+        } else if (url.startsWith('http')) {
+          parts.push(
+            <Text
+              key={`link-${key++}`}
+              style={[styles.link, linkStyle]}
+              onPress={() => Linking.openURL(url)}
+            >
+              {linkText}
+            </Text>
+          );
+        } else {
+          // Non-http, non-internal link — just show as text
+          parts.push(
+            <Text key={`text-${key++}`} style={[styles.link, linkStyle]}>
+              {linkText}
+            </Text>
+          );
+        }
+      } else if (match[4]) {
+        // Bare URL — strip trailing punctuation
+        let url = match[4];
+        let trailing = '';
+        const trailingMatch = url.match(/([.,;:!?)}\]'"]+)$/);
+        if (trailingMatch) {
+          trailing = trailingMatch[1];
+          url = url.substring(0, url.length - trailing.length);
+        }
         parts.push(
-          <Text key={key++} style={styles.text}>
-            {currentText.substring(lastIndex, match.index)}
+          <Text
+            key={`url-${key++}`}
+            style={[styles.link, linkStyle]}
+            onPress={() => Linking.openURL(url)}
+          >
+            {url}
+          </Text>
+        );
+        if (trailing) {
+          parts.push(trailing);
+        }
+      } else if (match[5]) {
+        // Bold: **text**
+        parts.push(
+          <Text key={`bold-${key++}`} style={styles.bold}>
+            {match[6]}
+          </Text>
+        );
+      } else if (match[7]) {
+        // Inline code: `code`
+        parts.push(
+          <Text key={`code-${key++}`} style={styles.inlineCode}>
+            {match[8]}
           </Text>
         );
       }
-      // Add bold text
-      parts.push(
-        <Text key={key++} style={styles.bold}>
-          {match[1]}
-        </Text>
-      );
+
       lastIndex = match.index + match[0].length;
     }
 
     // Add remaining text
-    if (lastIndex < currentText.length) {
-      parts.push(
-        <Text key={key++} style={styles.text}>
-          {currentText.substring(lastIndex)}
-        </Text>
-      );
+    if (lastIndex < text.length) {
+      parts.push(text.substring(lastIndex));
     }
 
-    // Handle `code`
-    const codeRegex = /`(.+?)`/g;
-    const finalParts: any[] = [];
-    parts.forEach((part, index) => {
-      if (typeof part.props.children === 'string') {
-        const str = part.props.children;
-        let lastIdx = 0;
-        let codeMatch;
-        const subParts: any[] = [];
-
-        while ((codeMatch = codeRegex.exec(str)) !== null) {
-          if (codeMatch.index > lastIdx) {
-            subParts.push(str.substring(lastIdx, codeMatch.index));
-          }
-          subParts.push(
-            <Text key={`${index}-${subParts.length}`} style={styles.inlineCode}>
-              {codeMatch[1]}
-            </Text>
-          );
-          lastIdx = codeMatch.index + codeMatch[0].length;
-        }
-
-        if (lastIdx < str.length) {
-          subParts.push(str.substring(lastIdx));
-        }
-
-        if (subParts.length > 0) {
-          finalParts.push(...subParts);
-        } else {
-          finalParts.push(part);
-        }
-      } else {
-        finalParts.push(part);
-      }
-    });
-
-    return finalParts.length > 0 ? finalParts : text;
+    return parts.length > 0 ? parts : text;
   };
 
   return <View>{renderContent()}</View>;
@@ -190,6 +225,15 @@ const styles = StyleSheet.create({
   },
   bold: {
     fontWeight: 'bold',
+  },
+  link: {
+    color: colors.accent,
+    textDecorationLine: 'underline',
+  },
+  internalLink: {
+    color: colors.hues.sky,
+    textDecorationLine: 'underline',
+    fontWeight: '500',
   },
   listItem: {
     marginLeft: spacing.sm,

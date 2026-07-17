@@ -14,10 +14,12 @@ import { MainTabScreenProps } from '../../types/navigation';
 import { Recipe } from '../../types/api';
 import { recipesService } from '../../services/recipes';
 import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
+import { useToast } from '../../context/ToastContext';
 
 type Props = MainTabScreenProps<'Recipes'>;
 
 export default function RecipesScreen({ navigation }: Props) {
+  const { showToast } = useToast();
   const [recipes, setRecipes] = useState<Recipe[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -33,7 +35,7 @@ export default function RecipesScreen({ navigation }: Props) {
       setRecipes(data);
     } catch (error) {
       console.error('Failed to load recipes:', error);
-      Alert.alert('Error', 'Failed to load recipes');
+      showToast('error', 'Failed to load recipes');
     } finally {
       setLoading(false);
     }
@@ -47,7 +49,10 @@ export default function RecipesScreen({ navigation }: Props) {
 
   const handleRecipePress = (recipe: Recipe) => {
     const ingredientsList = recipe.ingredients
-      .map((ing, i) => `${i + 1}. ${ing.name} - ${ing.quantity} ${ing.unit}`)
+      .map((ing, i) => {
+        const amount = ing.quantity != null && ing.unit ? ` - ${ing.quantity} ${ing.unit}` : '';
+        return `${i + 1}. ${ing.name}${amount}`;
+      })
       .join('\n');
 
     const nutritionInfo = recipe.calories
@@ -105,7 +110,7 @@ export default function RecipesScreen({ navigation }: Props) {
               await recipesService.deleteRecipe(recipe.id);
               await loadRecipes();
             } catch (error) {
-              Alert.alert('Error', 'Failed to delete recipe');
+              showToast('error', 'Failed to delete recipe');
             }
           },
         },

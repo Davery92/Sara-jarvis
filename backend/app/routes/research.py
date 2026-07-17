@@ -51,6 +51,8 @@ async def stream_llm_completion(messages: List[Dict], model: str):
         "messages": messages,
         "stream": True,
         "temperature": 0.7,
+        # Local qwen: disable thinking or `content` comes back empty.
+        "chat_template_kwargs": {"enable_thinking": False},
     }
 
     async with httpx.AsyncClient(timeout=120.0) as client:

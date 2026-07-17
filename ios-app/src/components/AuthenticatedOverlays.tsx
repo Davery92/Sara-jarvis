@@ -2,20 +2,24 @@
  * AuthenticatedOverlays Component
  *
  * Container for overlay components that should only be visible when authenticated.
- * Includes TimerOverlayContainer and PushToTalkButton.
+ * Includes TimerOverlayContainer and FloatingAssistant (Sara orb/mini-chat overlay).
  * Also handles authenticated-only initialization like push notifications.
  */
 
 import React, { useEffect, useRef, useState } from 'react';
-import { Platform } from 'react-native';
+import { Platform, AppState, AppStateStatus, DeviceEventEmitter } from 'react-native';
 import { useAuth } from '../context/AuthContext';
 import TimerOverlayContainer from './TimerOverlayContainer';
-import { PushToTalkButton } from './PushToTalkButton';
+import FloatingAssistant from './sara/FloatingAssistant';
 import { pushNotificationService } from '../services/pushNotifications';
 import { healthSyncService } from '../services/healthSync';
 import { registerBackgroundHealthSync, triggerManualSync } from '../services/backgroundHealthSync';
+import { isLocationTrackingEnabled, startTracking as startLocationTracking, resyncGeofences } from '../services/locationTracking';
 import { iosCalendarSyncService } from '../services/iosCalendarSync';
 import { navigateToChat } from '../services/navigation';
+import apiClient from '../services/api';
+import { consumeSiriPrompt } from '../services/siriDeepLink';
+import { refreshWidgetData } from '../services/widgetBridge';
 
 export const AuthenticatedOverlays: React.FC = () => {
   const { isAuthenticated } = useAuth();
@@ -66,6 +70,14 @@ export const AuthenticatedOverlays: React.FC = () => {
             });
           });
 
+          // Set up heartbeat tap handler - proactive check-ins from Sara
+          pushNotificationService.setOnHeartbeatTapped((title, message, priority) => {
+            console.log('[AuthenticatedOverlays] Heartbeat notification tapped:', title);
+            navigateToChat({
+              heartbeat: { title, message, priority }
+            });
+          });
+
           // Set up log meal action handler - navigate to fitness tab to log meal
           pushNotificationService.setOnLogMealAction(() => {
             console.log('[AuthenticatedOverlays] Log meal action tapped');
@@ -73,6 +85,12 @@ export const AuthenticatedOverlays: React.FC = () => {
             navigateToChat({
               quickReply: { message: 'I want to log a meal' }
             });
+          });
+
+          // Set up task chat inject handler - task result was persisted, reload conversation
+          pushNotificationService.setOnTaskChatInject((taskId, conversationId, noteId) => {
+            console.log('[AuthenticatedOverlays] Task chat inject, reloading conversation:', taskId);
+            navigateToChat({ taskInject: { taskId, conversationId, noteId } });
           });
 
           // Mark callbacks as ready - this will process any pending notification that launched the app
@@ -111,6 +129,19 @@ export const AuthenticatedOverlays: React.FC = () => {
       }
     };
 
+    // Resume location tracking if the user previously enabled it
+    const initLocationTracking = async () => {
+      try {
+        const enabled = await isLocationTrackingEnabled();
+        if (enabled) {
+          await startLocationTracking();
+          console.log('[AuthenticatedOverlays] Location tracking resumed');
+        }
+      } catch (error) {
+        console.log('[AuthenticatedOverlays] Failed to resume location tracking:', error);
+      }
+    };
+
     // Sync iOS calendar on app open
     const syncIOSCalendar = async () => {
       if (Platform.OS !== 'ios') return;
@@ -125,15 +156,92 @@ export const AuthenticatedOverlays: React.FC = () => {
       }
     };
 
+    // Log presence — tells Sara the app is open
+    const logPresence = async (activityType: string) => {
+      try {
+        await apiClient.post('/api/presence', { activity_type: activityType, platform: 'ios' });
+      } catch {}
+    };
+
+    // Heartbeat — reports current screen every 30s for smart delivery routing
+    const clientId = `ios_${Math.random().toString(36).slice(2, 10)}`;
+    let currentScreen = 'sara'; // default tab
+    const sendHeartbeat = async () => {
+      try {
+        await apiClient.post('/api/presence/heartbeat', {
+          platform: 'ios',
+          client_id: clientId,
+          current_view: currentScreen,
+          visible: true,
+        });
+      } catch {}
+    };
+    sendHeartbeat();
+    const heartbeatInterval = setInterval(sendHeartbeat, 30_000);
+
+    // Sync the icon badge to the server's unread notification count, so the
+    // number on the icon always matches the Notifications screen (and clears
+    // once everything is read) instead of being wiped on every app open.
+    const syncBadge = async () => {
+      try {
+        const data = await apiClient.get<{ unread: number }>('/api/notifications/unread-count');
+        await pushNotificationService.setBadgeCount(data?.unread ?? 0);
+      } catch {
+        // Offline or endpoint unavailable — leave the badge as-is.
+      }
+    };
+
+    // Check backend health on startup
+    const checkHealth = async () => {
+      try {
+        const data = await apiClient.get('/health');
+        if ((data as any)?.status === 'degraded') {
+          console.log('[AuthenticatedOverlays] Backend health: degraded');
+        }
+      } catch {}
+    };
+
     // Run all initializations
     initNotifications();
     initBackgroundHealthSync();
+    initLocationTracking();
     syncHealth();
     syncIOSCalendar();
+    logPresence('app_open');
+    checkHealth();
+    refreshWidgetData();
+
+    // Siri "Ask Sara": consume any prompt stashed by the App Intent (cold start).
+    consumeSiriPrompt();
+
+    // Log presence on app resume + pause heartbeat when backgrounded
+    const appStateSubscription = AppState.addEventListener('change', (nextState: AppStateStatus) => {
+      if (nextState === 'active') {
+        logPresence('app_resume');
+        sendHeartbeat();
+        refreshWidgetData();
+        // The App Intent foregrounds the app via openAppWhenRun → pick up the prompt.
+        consumeSiriPrompt();
+        // Sync badge to real unread count when app comes to foreground
+        syncBadge();
+        // Keep native geofence regions current with armed triggers/places
+        resyncGeofences();
+      }
+    });
+
+    // Sync badge on initial open too
+    syncBadge();
+
+    // Re-sync when notifications get marked read in-app (Notifications screen
+    // and inbox emit this after read/mark-all-read).
+    const badgeRefreshSub = DeviceEventEmitter.addListener('assistantInboxBadgeRefresh', syncBadge);
 
     // Cleanup on unmount
     return () => {
       pushNotificationService.cleanup();
+      appStateSubscription.remove();
+      clearInterval(heartbeatInterval);
+      badgeRefreshSub.remove();
     };
   }, [isAuthenticated]);
 
@@ -145,7 +253,7 @@ export const AuthenticatedOverlays: React.FC = () => {
   return (
     <>
       <TimerOverlayContainer />
-      <PushToTalkButton />
+      <FloatingAssistant />
     </>
   );
 };

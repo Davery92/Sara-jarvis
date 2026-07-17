@@ -9,6 +9,8 @@ from datetime import datetime
 from typing import Optional, Dict, List
 from redis import Redis
 
+from app.core.timezone import now as local_now
+
 logger = logging.getLogger(__name__)
 
 
@@ -86,7 +88,7 @@ class SessionToolCache:
             history_entry = json.dumps({
                 "tool": tool_name,
                 "params": params,
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": local_now().isoformat(),
                 "result_preview": result[:100] if isinstance(result, str) else str(result)[:100]
             })
             self.redis.lpush(history_key, history_entry)

@@ -9,7 +9,7 @@ Dynamic importance scoring for memories based on:
 from typing import Dict, Any, List, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import text
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pydantic import BaseModel
 import math
 import logging
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 class ImportanceScore(BaseModel):
     """Calculated importance score with components"""
-    episode_id: int
+    episode_id: str
     base_importance: float
     recency_factor: float
     frequency_factor: float
@@ -60,7 +60,7 @@ class ImportanceScorer:
         Returns:
             Factor from 0.0 to 1.0 (1.0 = today, decays over time)
         """
-        days_ago = (datetime.utcnow() - created_at).days
+        days_ago = (datetime.now(timezone.utc) - created_at).days
 
         # Exponential decay: score = e^(-λt)
         # Where λ = ln(2) / halflife
@@ -90,48 +90,32 @@ class ImportanceScorer:
 
         # Apply recency decay to frequency
         if last_accessed:
-            days_since_access = (datetime.utcnow() - last_accessed).days
+            days_since_access = (datetime.now(timezone.utc) - last_accessed).days
             recency_weight = max(0.1, 1.0 - (days_since_access / self.frequency_decay_days))
         else:
             recency_weight = 0.5  # Default if no access data
 
         return count_factor * recency_weight
 
-    async def calculate_popularity_factor(self, episode_id: int) -> float:
+    async def calculate_popularity_factor(self, episode_id: str) -> float:
         """
-        Calculate popularity based on cross-references
-
-        Args:
-            episode_id: Episode ID
-
-        Returns:
-            Factor from 0.0 to 1.0
+        Calculate popularity based on cross-references.
+        Currently returns 0.0 — memory_references table not yet created.
+        Uses access_count as a proxy instead.
         """
         try:
-            # Count how many times this episode is referenced
-            # This could be from:
-            # - Memory retrieval in other contexts
-            # - Citations in generated responses
-            # - Links from notes
             query = text("""
-                SELECT COUNT(*) as ref_count
-                FROM memory_references
-                WHERE target_episode_id = :episode_id
-                AND created_at > NOW() - INTERVAL '90 days'
+                SELECT COALESCE(access_count, 0) as acc
+                FROM episode WHERE id = :episode_id
             """)
-
             result = self.db.execute(query, {"episode_id": episode_id})
             row = result.fetchone()
-
-            if not row or row.ref_count == 0:
+            if not row or row.acc == 0:
                 return 0.0
-
-            # Logarithmic scaling
-            normalized = math.log(row.ref_count + 1) / math.log(50)  # Max at ~50 references
+            # Logarithmic scaling of access count as proxy for popularity
+            normalized = math.log(row.acc + 1) / math.log(50)
             return min(1.0, normalized)
-
-        except Exception as e:
-            logger.debug(f"Popularity calculation failed (table may not exist): {e}")
+        except Exception:
             return 0.0
 
     def calculate_user_rating_factor(self, user_rating: Optional[float]) -> float:
@@ -152,7 +136,7 @@ class ImportanceScorer:
 
     async def calculate_importance(
         self,
-        episode_id: int,
+        episode_id: str,
         base_importance: float,
         created_at: datetime,
         access_count: int,
@@ -199,10 +183,10 @@ class ImportanceScorer:
             popularity_factor=popularity_factor,
             user_rating_factor=user_rating_factor,
             final_score=final_score,
-            score_date=datetime.utcnow()
+            score_date=datetime.now(timezone.utc)
         )
 
-    async def rescore_episode(self, episode_id: int) -> Optional[float]:
+    async def rescore_episode(self, episode_id: str) -> Optional[float]:
         """
         Rescore a single episode and update in database
 
@@ -288,22 +272,24 @@ class ImportanceScorer:
         Returns:
             Statistics about rescoring
         """
+        rescored = 0
+        failed = 0
+        batches = 0
+
         try:
             # Count total episodes
-            count_query = text("""
+            user_filter = "WHERE user_id = :user_id" if user_id else ""
+            count_query = text(f"""
                 SELECT COUNT(*) as total
                 FROM episode
-                WHERE (:user_id IS NULL OR user_id = :user_id)
+                {user_filter}
             """)
 
-            result = self.db.execute(count_query, {"user_id": user_id})
+            params = {"user_id": user_id} if user_id else {}
+            result = self.db.execute(count_query, params)
             total_episodes = result.fetchone().total
 
             logger.info(f"🔄 Starting importance rescoring for {total_episodes} episodes")
-
-            rescored = 0
-            failed = 0
-            batches = 0
 
             # Process in batches
             while True:
@@ -311,7 +297,7 @@ class ImportanceScorer:
                     break
 
                 # Get batch of episodes
-                batch_query = text("""
+                batch_query = text(f"""
                     SELECT
                         id,
                         base_importance,
@@ -321,17 +307,16 @@ class ImportanceScorer:
                         last_accessed,
                         user_rating
                     FROM episode
-                    WHERE (:user_id IS NULL OR user_id = :user_id)
+                    {user_filter}
                     ORDER BY id
                     LIMIT :limit
                     OFFSET :offset
                 """)
 
-                result = self.db.execute(batch_query, {
-                    "user_id": user_id,
-                    "limit": batch_size,
-                    "offset": batches * batch_size
-                })
+                batch_params = {"limit": batch_size, "offset": batches * batch_size}
+                if user_id:
+                    batch_params["user_id"] = user_id
+                result = self.db.execute(batch_query, batch_params)
 
                 episodes = result.fetchall()
 
@@ -428,7 +413,7 @@ class ImportanceScorer:
                 FROM episode
                 WHERE user_id = :user_id
                 AND importance < :threshold
-                AND created_at < NOW() - INTERVAL ':age_days days'
+                AND created_at < NOW() - make_interval(days => :age_days)
                 AND consolidated = FALSE
                 ORDER BY importance ASC, created_at ASC
                 LIMIT :limit

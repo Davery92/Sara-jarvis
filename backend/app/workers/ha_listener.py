@@ -35,12 +35,20 @@ logger = logging.getLogger(__name__)
 HA_HOST = os.getenv('HA_HOST', '10.185.1.61')
 HA_PORT = int(os.getenv('HA_PORT', '8123'))
 HA_TOKEN = os.getenv('HA_TOKEN', 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJjODhkZGQ0ZWVlOWI0ODNjOTIwMTU1YTA0ZTM3YTk0NCIsImlhdCI6MTc2NTU2OTczNiwiZXhwIjoyMDgwOTI5NzM2fQ.oLO_hR-RzJFP-TsrKWEteDZbUReVEUdtENIeMAE5Teg')
-DATABASE_URL = os.getenv('DATABASE_URL', 'postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub')
+DATABASE_URL = os.getenv('DATABASE_URL')
 
 
 async def main():
     """Main entry point."""
     logger.info(f"Starting Home Assistant listener for {HA_HOST}:{HA_PORT}")
+
+    # Connect the event bus so HA events reach the reactive engine
+    try:
+        from app.services.event_bus import event_bus
+        await event_bus.connect()
+        logger.info("Event bus connected for HA event bridging")
+    except Exception as e:
+        logger.warning(f"Event bus connection failed (reactive features degraded): {e}")
 
     service = HAWebsocketService(
         ha_host=HA_HOST,
@@ -67,6 +75,12 @@ async def main():
         await shutdown_event.wait()
     finally:
         await service.stop()
+        # Disconnect event bus
+        try:
+            from app.services.event_bus import event_bus
+            await event_bus.disconnect()
+        except Exception:
+            pass
         service_task.cancel()
         try:
             await service_task

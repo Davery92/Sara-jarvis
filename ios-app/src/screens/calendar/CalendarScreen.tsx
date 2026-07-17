@@ -8,7 +8,6 @@ import {
   Alert,
   ActivityIndicator,
   RefreshControl,
-  SectionList,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { MainTabScreenProps } from '../../types/navigation';
@@ -20,6 +19,8 @@ import {
 import EventListItem from '../../components/calendar/EventListItem';
 import ReminderListItem from '../../components/calendar/ReminderListItem';
 import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
+import { Ionicons } from '@expo/vector-icons';
+import { navigateToChat } from '../../services/navigation';
 
 type Props = MainTabScreenProps<'Calendar'>;
 
@@ -74,30 +75,40 @@ export default function CalendarScreen({ navigation }: Props) {
     });
   };
 
-  const handleEventPress = (event: CalendarEvent) => {
-    Alert.alert(
-      event.title,
-      `${calendarService.formatDateTime(event.start_time)} - ${calendarService.formatTime(event.end_time)}\n\n${event.description || 'No description'}`,
-      [{ text: 'OK' }]
-    );
-  };
+  const showEventActions = (event: CalendarEvent) => {
+    const isIOS = event.read_only || event.source === 'ios_calendar';
+    const timeRange = `${calendarService.formatDateTime(event.start_time)} - ${calendarService.formatTime(event.end_time)}`;
+    const description = event.description ? `\n\n${event.description}` : '';
 
-  const handleEventLongPress = (event: CalendarEvent) => {
-    // iOS calendar events are read-only
-    if (event.read_only || event.source === 'ios_calendar') {
+    if (isIOS) {
+      const source = event.ios_calendar_name ? `\n\n📱 Synced from ${event.ios_calendar_name} — edit in iOS Calendar` : '\n\n📱 Synced from iOS Calendar — edit in iOS Calendar';
       Alert.alert(
         event.title,
-        `This event is synced from iOS Calendar${event.ios_calendar_name ? ` (${event.ios_calendar_name})` : ''} and cannot be edited here.`,
-        [{ text: 'OK' }]
+        `${timeRange}${description}${source}`,
+        [
+          { text: 'Close', style: 'cancel' },
+          {
+            text: 'Hide from Sara',
+            style: 'destructive',
+            onPress: async () => {
+              try {
+                await calendarService.deleteEvent(event.id);
+                loadData();
+              } catch (error) {
+                Alert.alert('Error', 'Failed to hide event');
+              }
+            },
+          },
+        ]
       );
       return;
     }
 
     Alert.alert(
       event.title,
-      'What would you like to do?',
+      `${timeRange}${description}`,
       [
-        { text: 'Cancel', style: 'cancel' },
+        { text: 'Close', style: 'cancel' },
         {
           text: 'Edit',
           onPress: () => {
@@ -121,6 +132,14 @@ export default function CalendarScreen({ navigation }: Props) {
         },
       ]
     );
+  };
+
+  const handleEventPress = (event: CalendarEvent) => {
+    showEventActions(event);
+  };
+
+  const handleEventLongPress = (event: CalendarEvent) => {
+    showEventActions(event);
   };
 
   // Reminder handlers
@@ -204,6 +223,72 @@ export default function CalendarScreen({ navigation }: Props) {
   // Separate completed and pending reminders
   const pendingReminders = reminders.filter((r) => !r.is_completed);
   const completedReminders = reminders.filter((r) => r.is_completed);
+  const nextEvent = [...events].sort((a, b) => new Date(a.start_time).getTime() - new Date(b.start_time).getTime())[0];
+  const nextReminder = [...pendingReminders].sort(
+    (a, b) => new Date(a.reminder_time).getTime() - new Date(b.reminder_time).getTime()
+  )[0];
+
+  const openCalendarPrompt = () => {
+    const message = nextReminder
+      ? `Help me plan around my next reminder, "${nextReminder.title}", and organize the rest of today.`
+      : nextEvent
+        ? `Help me prepare for "${nextEvent.title}" and organize my calendar around it.`
+        : 'Help me plan my day and suggest the next calendar event or reminder I should add.';
+
+    navigateToChat({
+      quickReply: {
+        title: 'Calendar',
+        message,
+        nudgeType: 'calendar_planning',
+      },
+    });
+  };
+
+  const renderPlannerCard = () => {
+    const title = nextReminder
+      ? `Next move: clear "${nextReminder.title}"`
+      : nextEvent
+        ? `Next move: prepare for "${nextEvent.title}"`
+        : 'Nothing scheduled yet';
+
+    const body = nextReminder
+      ? `${pendingReminders.length} reminder${pendingReminders.length === 1 ? '' : 's'} still need attention.`
+      : nextEvent
+        ? `${events.length} upcoming event${events.length === 1 ? '' : 's'} are on your calendar.`
+        : 'Add the next commitment or let Sara help you shape the day before things pile up.';
+
+    return (
+      <View style={styles.plannerCard}>
+        <View style={styles.plannerHeader}>
+          <View style={styles.plannerIcon}>
+            <Ionicons name="today-outline" size={18} color={colors.primary} />
+          </View>
+          <View style={styles.plannerCopy}>
+            <Text style={styles.plannerEyebrow}>What can I do next?</Text>
+            <Text style={styles.plannerTitle}>{title}</Text>
+            <Text style={styles.plannerBody}>{body}</Text>
+          </View>
+        </View>
+
+        <View style={styles.plannerActions}>
+          <TouchableOpacity
+            style={[styles.plannerButton, styles.plannerButtonPrimary]}
+            onPress={openCalendarPrompt}
+          >
+            <Text style={styles.plannerButtonPrimaryText}>Ask Sara</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.plannerButton, styles.plannerButtonSecondary]}
+            onPress={() => setViewMode(nextReminder ? 'reminders' : 'events')}
+          >
+            <Text style={styles.plannerButtonSecondaryText}>
+              {nextReminder ? 'Open Reminders' : 'Open Events'}
+            </Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  };
 
   const renderEventsView = () => (
     <ScrollView
@@ -279,22 +364,34 @@ export default function CalendarScreen({ navigation }: Props) {
 
   return (
     <SafeAreaView style={styles.container} edges={['bottom']}>
+      {renderPlannerCard()}
+
       {/* Navigation Tabs */}
       <View style={styles.tabs}>
         <TouchableOpacity
           style={[styles.tab, viewMode === 'events' && styles.tabActive]}
           onPress={() => setViewMode('events')}
         >
+          <Ionicons
+            name="calendar-outline"
+            size={16}
+            color={viewMode === 'events' ? colors.text : colors.textSecondary}
+          />
           <Text style={[styles.tabText, viewMode === 'events' && styles.tabTextActive]}>
-            📅 Events
+            Events
           </Text>
         </TouchableOpacity>
         <TouchableOpacity
           style={[styles.tab, viewMode === 'reminders' && styles.tabActive]}
           onPress={() => setViewMode('reminders')}
         >
+          <Ionicons
+            name="checkmark-circle-outline"
+            size={16}
+            color={viewMode === 'reminders' ? colors.text : colors.textSecondary}
+          />
           <Text style={[styles.tabText, viewMode === 'reminders' && styles.tabTextActive]}>
-            ✅ Reminders
+            Reminders
           </Text>
         </TouchableOpacity>
       </View>
@@ -333,9 +430,13 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surface,
     paddingHorizontal: spacing.sm,
     paddingVertical: spacing.xs,
+    gap: spacing.sm,
   },
   tab: {
     flex: 1,
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: spacing.xs,
     paddingVertical: spacing.sm,
     alignItems: 'center',
     borderRadius: borderRadius.md,
@@ -350,6 +451,79 @@ const styles = StyleSheet.create({
   },
   tabTextActive: {
     color: colors.text,
+  },
+  plannerCard: {
+    marginHorizontal: spacing.md,
+    marginTop: spacing.md,
+    marginBottom: spacing.sm,
+    backgroundColor: colors.surface,
+    borderRadius: borderRadius.lg,
+    padding: spacing.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  plannerHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: spacing.sm,
+  },
+  plannerIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: borderRadius.full,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: `${colors.primary}1a`,
+  },
+  plannerCopy: {
+    flex: 1,
+  },
+  plannerEyebrow: {
+    color: colors.primary,
+    fontSize: fontSizes.xs,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    marginBottom: 2,
+  },
+  plannerTitle: {
+    color: colors.text,
+    fontSize: fontSizes.lg,
+    fontWeight: '600',
+    marginBottom: spacing.xs,
+  },
+  plannerBody: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    lineHeight: 20,
+  },
+  plannerActions: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+    marginTop: spacing.md,
+  },
+  plannerButton: {
+    flex: 1,
+    borderRadius: borderRadius.md,
+    paddingVertical: spacing.sm,
+    alignItems: 'center',
+  },
+  plannerButtonPrimary: {
+    backgroundColor: colors.primary,
+  },
+  plannerButtonSecondary: {
+    backgroundColor: colors.background,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  plannerButtonPrimaryText: {
+    color: colors.text,
+    fontSize: fontSizes.sm,
+    fontWeight: '600',
+  },
+  plannerButtonSecondaryText: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    fontWeight: '600',
   },
   actionBar: {
     padding: spacing.md,

@@ -158,7 +158,7 @@ export default function DailyBriefings() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="bg-card border border-card rounded-xl p-6">
+      <div className="bg-card border border-card rounded-md p-6">
         <div className="flex items-center justify-between mb-4">
           <div>
             <h2 className="text-2xl font-bold text-white">Daily Briefings</h2>
@@ -324,7 +324,7 @@ export default function DailyBriefings() {
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Briefings List */}
-        <div className="lg:col-span-1 bg-card border border-card rounded-xl p-4">
+        <div className="lg:col-span-1 bg-card border border-card rounded-md p-4">
           <h3 className="text-lg font-semibold text-white mb-4">Recent Briefings</h3>
           {briefings.length === 0 ? (
             <p className="text-gray-400 text-center py-8">No briefings yet</p>
@@ -364,7 +364,7 @@ export default function DailyBriefings() {
         </div>
 
         {/* Briefing Content */}
-        <div className="lg:col-span-2 bg-card border border-card rounded-xl p-6">
+        <div className="lg:col-span-2 bg-card border border-card rounded-md p-6">
           {selectedBriefing ? (
             <div>
               <div className="flex items-center justify-between mb-6 pb-4 border-b border-gray-700">

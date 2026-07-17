@@ -1,6 +1,7 @@
 import React from 'react';
 import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
-import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
+import { Ionicons } from '@expo/vector-icons';
+import { colors, spacing, borderRadius, fontSizes, fontWeights } from '../../styles/theme';
 
 export interface WorkoutSet {
   id: string;
@@ -25,6 +26,16 @@ export interface WorkoutSession {
   session_date?: string;
   created_at: string;
   exercises: WorkoutSet[];
+  // Melded from the Apple Watch workout that overlapped this session.
+  heart_rate?: {
+    activity?: string;
+    avg_heart_rate?: number;
+    max_heart_rate?: number;
+    min_heart_rate?: number;
+    calories?: number;
+    distance_m?: number | null;
+    duration_min?: number | null;
+  } | null;
 }
 
 interface WorkoutSessionItemProps {
@@ -73,14 +84,16 @@ export default function WorkoutSessionItem({ session, onPress, onLongPress }: Wo
     >
       <View style={styles.header}>
         <View style={styles.workoutInfo}>
-          <Text style={styles.emoji}>💪</Text>
+          <View style={styles.iconBadge}>
+            <Ionicons name="barbell" size={18} color={colors.accent} />
+          </View>
           <View style={styles.headerText}>
             <Text style={styles.date}>{dateStr}</Text>
             <Text style={styles.time}>{timeStr}</Text>
           </View>
         </View>
         <View style={styles.chevron}>
-          <Text style={styles.chevronText}>›</Text>
+          <Ionicons name="chevron-forward" size={18} color={colors.textMuted} />
         </View>
       </View>
 
@@ -89,6 +102,17 @@ export default function WorkoutSessionItem({ session, onPress, onLongPress }: Wo
           {exerciseCount} {exerciseCount === 1 ? 'exercise' : 'exercises'} • {totalSets} {totalSets === 1 ? 'set' : 'sets'}
         </Text>
         <Text style={styles.exerciseList} numberOfLines={1}>{exerciseList}</Text>
+        {session.heart_rate?.avg_heart_rate ? (
+          <View style={styles.hrRow}>
+            <Ionicons name="heart" size={12} color="#ff5a3a" />
+            <Text style={styles.hrText}>
+              {session.heart_rate.avg_heart_rate} avg
+              {session.heart_rate.max_heart_rate ? ` · ${session.heart_rate.max_heart_rate} max bpm` : ' bpm'}
+              {session.heart_rate.calories ? ` · ${session.heart_rate.calories} cal` : ''}
+              {session.heart_rate.distance_m ? ` · ${(session.heart_rate.distance_m / 1609.34).toFixed(2)} mi` : ''}
+            </Text>
+          </View>
+        ) : null}
       </View>
     </TouchableOpacity>
   );
@@ -97,7 +121,9 @@ export default function WorkoutSessionItem({ session, onPress, onLongPress }: Wo
 const styles = StyleSheet.create({
   container: {
     backgroundColor: colors.surface,
-    borderRadius: borderRadius.md,
+    borderRadius: borderRadius.xl,
+    borderWidth: 1,
+    borderColor: colors.border,
     padding: spacing.md,
     marginHorizontal: spacing.md,
     marginBottom: spacing.sm,
@@ -113,8 +139,15 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     flex: 1,
   },
-  emoji: {
-    fontSize: fontSizes.xl,
+  iconBadge: {
+    width: 36,
+    height: 36,
+    borderRadius: borderRadius.full,
+    backgroundColor: colors.assistant.actionSoft,
+    borderWidth: 1,
+    borderColor: colors.assistant.borderStrong,
+    alignItems: 'center',
+    justifyContent: 'center',
     marginRight: spacing.sm,
   },
   headerText: {
@@ -123,7 +156,7 @@ const styles = StyleSheet.create({
   date: {
     color: colors.text,
     fontSize: fontSizes.md,
-    fontWeight: '600',
+    fontWeight: fontWeights.semibold,
   },
   time: {
     color: colors.textMuted,
@@ -133,13 +166,11 @@ const styles = StyleSheet.create({
   chevron: {
     paddingLeft: spacing.sm,
   },
-  chevronText: {
-    color: colors.textSecondary,
-    fontSize: 24,
-    fontWeight: '300',
-  },
   summary: {
     marginTop: spacing.xs,
+    paddingTop: spacing.sm,
+    borderTopWidth: 1,
+    borderTopColor: colors.divider,
   },
   summaryText: {
     color: colors.textSecondary,
@@ -149,6 +180,17 @@ const styles = StyleSheet.create({
   exerciseList: {
     color: colors.text,
     fontSize: fontSizes.sm,
-    fontWeight: '500',
+    fontWeight: fontWeights.medium,
+  },
+  hrRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginTop: 4,
+  },
+  hrText: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.xs,
+    fontWeight: fontWeights.medium,
   },
 });

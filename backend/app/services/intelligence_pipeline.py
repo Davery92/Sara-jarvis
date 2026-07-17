@@ -173,17 +173,17 @@ class IntelligencePipeline:
                     )
     
     async def nightly_dream_worker(self, worker_id: str):
-        """Nightly dream worker - processes daily conversations at 2 AM Eastern using content intelligence"""
-        logger.info(f"🌙 Nightly dream worker {worker_id} started")
-        
-        # Import nightly dream service here to avoid circular imports
-        from app.services.nightly_dream_service import nightly_dream_service
-        
-        # Start the nightly dream scheduler
-        try:
-            await nightly_dream_service.start_dream_scheduler()
-        except Exception as e:
-            logger.error(f"❌ Nightly dream scheduler failed: {e}")
+        """Nightly dream worker — DISABLED.
+
+        The nightly dream cycle is now driven by Celery beat via the
+        `nightly-dream-cycle` row in the `scheduled_job` table
+        (see app/tasks/inproc_schedulers.py). This in-process loop is left
+        as a no-op stub to keep the intelligence pipeline worker count stable.
+        """
+        logger.info(
+            "🌙 nightly_dream_worker %s noop — managed by celery beat (nightly-dream-cycle)",
+            worker_id,
+        )
     
     async def contextual_awareness_worker(self, worker_id: str):
         """Contextual awareness worker - monitors context every 30 minutes and maintains living context note"""

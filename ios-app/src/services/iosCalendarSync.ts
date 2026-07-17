@@ -16,6 +16,12 @@ export interface IOSCalendar {
   isPrimary: boolean;
 }
 
+export interface IOSEventAttendee {
+  name?: string;
+  email?: string;
+  status?: string;
+}
+
 export interface IOSCalendarEvent {
   id: string;
   calendarId: string;
@@ -26,6 +32,7 @@ export interface IOSCalendarEvent {
   location?: string;
   allDay: boolean;
   timeZone?: string;
+  organizer?: string;
 }
 
 export interface SyncResult {
@@ -127,7 +134,7 @@ class IOSCalendarSyncService {
       return calendars.map((cal: any) => ({
         id: cal.id,
         title: cal.title,
-        color: cal.color || '#0d7ff2',
+        color: cal.color || '#14b8a6',
         source: {
           id: cal.source?.id || '',
           name: cal.source?.name || 'Unknown',
@@ -173,9 +180,31 @@ class IOSCalendarSyncService {
         location: event.location,
         allDay: event.allDay ?? false,
         timeZone: event.timeZone,
+        // organizer is only populated by EventKit on iOS; expo-calendar
+        // surfaces it as an Attendee-shaped object when present.
+        organizer: event.organizer?.name || event.organizer?.email || undefined,
       }));
     } catch (error) {
       console.log('[IOSCalendar] Error getting events:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Attendees for a single event. iOS-only (EventKit); expo-calendar doesn't
+   * include attendees in getEventsAsync, so this is a separate per-event call.
+   * Best-effort — a failure here should never block the rest of the sync.
+   */
+  async getAttendeesForEvent(eventId: string): Promise<IOSEventAttendee[]> {
+    if (!this.isAvailable || !this.calendarModule) return [];
+    if (typeof this.calendarModule.getAttendeesForEventAsync !== 'function') return [];
+    try {
+      const attendees = await this.calendarModule.getAttendeesForEventAsync(eventId);
+      return (attendees || [])
+        .filter((a: any) => !a.isCurrentUser)
+        .map((a: any) => ({ name: a.name || undefined, email: a.email || undefined, status: a.status || undefined }));
+    } catch (error) {
+      console.log(`[IOSCalendar] Error getting attendees for ${eventId}:`, error);
       return [];
     }
   }
@@ -310,28 +339,56 @@ class IOSCalendarSyncService {
       const calendars = await this.getCalendars();
       const calendarMap = new Map(calendars.map(c => [c.id, c]));
 
-      // Transform events for backend
-      const eventsToSync = events.map(event => ({
-        ios_event_id: event.id,
-        ios_calendar_id: event.calendarId,
-        ios_calendar_name: calendarMap.get(event.calendarId)?.title || 'Unknown',
-        title: event.title,
-        description: event.notes || null,
-        start_time: event.startDate,
-        end_time: event.endDate,
-        location: event.location || null,
-        all_day: event.allDay,
+      // Attendees are a separate per-event EventKit call (not included in
+      // getEventsAsync) — fetch them for every event in the sync window.
+      // Best-effort: a per-event failure falls back to no attendees rather
+      // than failing the whole sync (getAttendeesForEvent already swallows
+      // its own errors).
+      const attendeesByEventId = new Map<string, IOSEventAttendee[]>();
+      await Promise.all(events.map(async event => {
+        const attendees = await this.getAttendeesForEvent(event.id);
+        if (attendees.length > 0) attendeesByEventId.set(event.id, attendees);
       }));
 
-      // Send to backend
-      const response = await apiClient.post<{ synced: number; errors: number }>(
+      // Transform events for backend
+      // expo-calendar returns dates as ISO strings in the event's timezone
+      // We need to ensure they're sent as proper UTC ISO strings
+      const eventsToSync = events.map(event => {
+        // Parse the date strings and convert to UTC ISO format
+        const startDate = new Date(event.startDate);
+        const endDate = new Date(event.endDate);
+
+        return {
+          ios_event_id: event.id,
+          ios_calendar_id: event.calendarId,
+          ios_calendar_name: calendarMap.get(event.calendarId)?.title || 'Unknown',
+          title: event.title,
+          description: event.notes || null,
+          start_time: startDate.toISOString(),  // Converts to UTC with 'Z' suffix
+          end_time: endDate.toISOString(),      // Converts to UTC with 'Z' suffix
+          location: event.location || null,
+          all_day: event.allDay,
+          attendees: attendeesByEventId.get(event.id) || undefined,
+          organizer: event.organizer || null,
+        };
+      });
+
+      // Send to backend, including the sync window + calendar IDs so the
+      // backend can reconcile deletions (events removed on iOS that still
+      // exist on Sara's side inside the window).
+      const response = await apiClient.post<{ synced: number; errors: number; deleted?: number }>(
         '/api/calendar/ios-sync',
-        { events: eventsToSync }
+        {
+          events: eventsToSync,
+          window_start: startDate.toISOString(),
+          window_end: endDate.toISOString(),
+          calendar_ids: selectedCalendarIds,
+        }
       );
 
       await this.updateLastSyncTime();
 
-      console.log(`[IOSCalendar] Sync complete: ${response.synced} synced, ${response.errors} errors`);
+      console.log(`[IOSCalendar] Sync complete: ${response.synced} synced, ${response.deleted ?? 0} deleted, ${response.errors} errors`);
       return {
         success: true,
         synced: response.synced,

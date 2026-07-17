@@ -5,7 +5,7 @@ Generates weekly, monthly, and quarterly reports with insights
 from typing import Dict, Any, List, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import text
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 from pydantic import BaseModel
 import json
 import logging
@@ -52,7 +52,7 @@ class TemporalIntelligenceEngine:
         Returns:
             IntelligenceReport with weekly insights
         """
-        start_time = datetime.utcnow()
+        start_time = datetime.now(timezone.utc)
 
         # Calculate period
         if week_start is None:
@@ -81,7 +81,7 @@ class TemporalIntelligenceEngine:
             )
 
         # Calculate generation time
-        generation_time_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
+        generation_time_ms = int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000)
 
         # Create report
         report = IntelligenceReport(
@@ -119,7 +119,7 @@ class TemporalIntelligenceEngine:
         Returns:
             IntelligenceReport with monthly insights
         """
-        start_time = datetime.utcnow()
+        start_time = datetime.now(timezone.utc)
 
         # Calculate period
         if month is None:
@@ -152,7 +152,7 @@ class TemporalIntelligenceEngine:
             )
 
         # Calculate generation time
-        generation_time_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
+        generation_time_ms = int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000)
 
         # Create report
         report = IntelligenceReport(
@@ -190,7 +190,7 @@ class TemporalIntelligenceEngine:
         Returns:
             IntelligenceReport with quarterly insights
         """
-        start_time = datetime.utcnow()
+        start_time = datetime.now(timezone.utc)
 
         # Calculate period
         if quarter_start is None:
@@ -230,7 +230,7 @@ class TemporalIntelligenceEngine:
             )
 
         # Calculate generation time
-        generation_time_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
+        generation_time_ms = int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000)
 
         # Create report
         report = IntelligenceReport(

@@ -53,15 +53,23 @@ async def create_folder(
         if not parent:
             raise HTTPException(status_code=404, detail="Parent folder not found")
 
-    folder = Folder(
-        name=folder_data.name,
-        parent_id=folder_data.parent_id,
-        user_id=current_user.id
-    )
-
-    db.add(folder)
-    db.commit()
-    db.refresh(folder)
+    # Check if folder with same name already exists in same parent
+    existing = db.query(Folder).filter(
+        Folder.user_id == current_user.id,
+        Folder.name == folder_data.name,
+        Folder.parent_id == folder_data.parent_id
+    ).first()
+    if existing:
+        folder = existing
+    else:
+        folder = Folder(
+            name=folder_data.name,
+            parent_id=folder_data.parent_id,
+            user_id=current_user.id
+        )
+        db.add(folder)
+        db.commit()
+        db.refresh(folder)
 
     return FolderResponse(
         id=str(folder.id),

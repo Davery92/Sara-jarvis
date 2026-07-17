@@ -46,6 +46,16 @@ class BodyStateEstimate:
     stress_trend: str = "stable"  # rising, falling, stable
     stress_contributors: List[str] = field(default_factory=list)  # What's driving it
 
+    # Sleep quality (from stage breakdown — distinct from quantity)
+    sleep_quality: float = 0.7   # 0=poor architecture, 1=textbook
+    sleep_efficiency: float = 0.0  # asleep / (asleep+awake), 0-1
+    sleep_deep_pct: float = 0.0
+    sleep_rem_pct: float = 0.0
+
+    # Autonomic recovery (from HRV vs personal baseline)
+    autonomic_recovery: float = 0.7  # 0=stressed/sick, 1=well recovered
+    hrv_zscore: Optional[float] = None  # latest HRV vs 7d mean, in std-deviations
+
     # Physical recovery
     recovery_status: Dict[str, float] = field(default_factory=dict)  # muscle_group -> 0-1
     overall_physical_readiness: float = 0.8  # 0=wrecked, 1=fully recovered
@@ -133,6 +143,7 @@ class BodyStateService:
         await self._estimate_blood_sugar(estimate, signals, now, coefficients)
         await self._estimate_alertness(estimate, signals, subconscious_state, now, coefficients)
         await self._estimate_stress(estimate, signals, subconscious_state, now, coefficients)
+        await self._estimate_autonomic_recovery(estimate, signals)
         await self._estimate_recovery(estimate, signals, now, coefficients)
         await self._detect_pattern_breaks(estimate, signals, db, user_id, now)
 
@@ -197,6 +208,49 @@ class BodyStateService:
 
         signals['sleep_history'] = [float(s.value) for s in sleep_history]
 
+        # Last night's sleep STAGE breakdown (deep/REM/core/awake) — drives sleep
+        # quality scoring distinct from total hours. Each stage has its own row
+        # in health_metric, all stamped at the morning's 6 AM canonical timestamp.
+        stage_rows = db.execute(text("""
+            SELECT metric_type, value
+            FROM health_metric
+            WHERE user_id = :user_id
+              AND metric_type IN ('sleep_deep_min','sleep_rem_min','sleep_core_min','sleep_awake_min')
+              AND recorded_at >= NOW() - INTERVAL '36 hours'
+        """), {"user_id": user_id}).fetchall()
+        if stage_rows:
+            signals['sleep_stages'] = {r.metric_type: float(r.value) for r in stage_rows}
+
+        # Recent HRV — latest reading + 7-day daily-average history for autonomic
+        # recovery scoring. Prefer hrv_morning when present (single canonical row
+        # per day stamped 6 AM); fall back to all-day samples otherwise.
+        hrv_latest = db.execute(text("""
+            SELECT value, recorded_at, metric_type
+            FROM health_metric
+            WHERE user_id = :user_id
+              AND metric_type IN ('hrv_morning','hrv')
+              AND recorded_at >= NOW() - INTERVAL '36 hours'
+            ORDER BY
+              CASE metric_type WHEN 'hrv_morning' THEN 0 ELSE 1 END,
+              recorded_at DESC
+            LIMIT 1
+        """), {"user_id": user_id}).fetchone()
+        if hrv_latest:
+            signals['hrv_latest'] = float(hrv_latest.value)
+
+        # Per-day HRV averages over the last 7 days for baseline comparison.
+        hrv_daily = db.execute(text("""
+            SELECT DATE(recorded_at AT TIME ZONE 'America/New_York') AS d,
+                   AVG(value) AS avg_value
+            FROM health_metric
+            WHERE user_id = :user_id
+              AND metric_type IN ('hrv_morning','hrv')
+              AND recorded_at >= NOW() - INTERVAL '7 days'
+            GROUP BY DATE(recorded_at AT TIME ZONE 'America/New_York')
+            ORDER BY d ASC
+        """), {"user_id": user_id}).fetchall()
+        signals['hrv_history_daily'] = [float(r.avg_value) for r in hrv_daily if r.avg_value is not None]
+
         # Recent workouts (last 5 days for recovery tracking)
         # workout_sessions has the actual session data, workout_log has individual sets
         workouts = db.execute(text("""
@@ -227,8 +281,23 @@ class BodyStateService:
 
         signals['workouts'] = [dict(w._mapping) for w in workouts]
 
+        # External workouts from HealthKit (Apple Watch / Fitness app) — separate
+        # stream from app-logged strength sessions. Surfaced as a parallel signal
+        # so cardio load (long walks, runs, etc.) influences recovery estimates.
+        ext_workouts = db.execute(text("""
+            SELECT activity_type, started_at, ended_at, duration_seconds,
+                   total_energy_kcal, avg_heart_rate, max_heart_rate
+            FROM external_workout
+            WHERE user_id = :user_id
+              AND started_at >= NOW() - INTERVAL '5 days'
+            ORDER BY started_at DESC
+        """), {"user_id": user_id}).fetchall()
+        signals['external_workouts'] = [dict(w._mapping) for w in ext_workouts]
+
         # First activity today
-        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        # Convert to UTC for DB comparisons (DB stores timestamps in UTC)
+        today_start_local = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        today_start = today_start_local.astimezone(ZoneInfo('UTC'))
         first_activity = db.execute(text("""
             SELECT MIN(activity_time) as first_activity FROM (
                 SELECT created_at as activity_time FROM presence_log
@@ -241,8 +310,11 @@ class BodyStateService:
 
         if first_activity and first_activity.first_activity:
             signals['first_activity'] = first_activity.first_activity
+            # DB returns UTC - if naive, treat as UTC then convert to user TZ
             if signals['first_activity'].tzinfo is None:
-                signals['first_activity'] = signals['first_activity'].replace(tzinfo=self.tz)
+                signals['first_activity'] = signals['first_activity'].replace(tzinfo=ZoneInfo('UTC')).astimezone(self.tz)
+            else:
+                signals['first_activity'] = signals['first_activity'].astimezone(self.tz)
 
         # Message count today (for cognitive load)
         msg_count = db.execute(text("""
@@ -277,7 +349,9 @@ class BodyStateService:
         user_tz = 'America/New_York'
 
         # Average wake time - IMPORTANT: Convert to user's timezone before extracting hour/date
-        # Otherwise late-night activity (11 PM local) becomes next day's "first activity" in UTC
+        # Normalize timestamps in UNION: presence_log is tz-aware, episode is naive (UTC)
+        # Then convert uniformly to user timezone for grouping and extraction
+        # Filter: >= 4 AM (exclude late night), <= 10 AM (exclude days user didn't use app until later)
         wake_times = db.execute(text("""
             SELECT EXTRACT(HOUR FROM MIN(activity_time AT TIME ZONE :tz)) +
                    EXTRACT(MINUTE FROM MIN(activity_time AT TIME ZONE :tz))/60.0 as wake_hour,
@@ -286,11 +360,12 @@ class BodyStateService:
                 SELECT created_at as activity_time FROM presence_log
                 WHERE user_id = :user_id AND created_at >= NOW() - INTERVAL '14 days'
                 UNION ALL
-                SELECT created_at as activity_time FROM episode
+                SELECT created_at AT TIME ZONE 'UTC' as activity_time FROM episode
                 WHERE user_id = :user_id AND created_at >= NOW() - INTERVAL '14 days' AND role = 'user'
             ) combined
             GROUP BY DATE(activity_time AT TIME ZONE :tz)
-            HAVING EXTRACT(HOUR FROM MIN(activity_time AT TIME ZONE :tz)) >= 4  -- Filter out late night activity (before 4 AM)
+            HAVING EXTRACT(HOUR FROM MIN(activity_time AT TIME ZONE :tz)) >= 4
+               AND EXTRACT(HOUR FROM MIN(activity_time AT TIME ZONE :tz)) <= 10
         """), {"user_id": user_id, "tz": user_tz}).fetchall()
 
         if wake_times:
@@ -300,16 +375,17 @@ class BodyStateService:
                 patterns['avg_wake_hour'] = sum(wake_hours) / len(wake_hours)
                 patterns['wake_hour_std'] = self._calculate_std(wake_hours)
 
-        # Average meal times by type - also convert to user timezone
+        # Average meal times by type
+        # NOTE: food_log stores naive timestamps in EASTERN time (not UTC!) - extract hour directly
         for meal_type in ['breakfast', 'lunch', 'dinner']:
             meal_times = db.execute(text("""
-                SELECT EXTRACT(HOUR FROM logged_at AT TIME ZONE :tz) +
-                       EXTRACT(MINUTE FROM logged_at AT TIME ZONE :tz)/60.0 as meal_hour
+                SELECT EXTRACT(HOUR FROM logged_at) +
+                       EXTRACT(MINUTE FROM logged_at)/60.0 as meal_hour
                 FROM food_log
                 WHERE user_id = :user_id
                   AND meal_type = :meal_type
                   AND logged_at >= NOW() - INTERVAL '14 days'
-            """), {"user_id": user_id, "meal_type": meal_type, "tz": user_tz}).fetchall()
+            """), {"user_id": user_id, "meal_type": meal_type}).fetchall()
 
             if meal_times:
                 meal_hours = [float(m.meal_hour) for m in meal_times if m.meal_hour is not None]
@@ -317,13 +393,14 @@ class BodyStateService:
                     patterns[f'avg_{meal_type}_hour'] = sum(meal_hours) / len(meal_hours)
 
         # Average daily message count - also use user timezone for date grouping
+        # Use double AT TIME ZONE for consistent handling of naive timestamps
         daily_msgs = db.execute(text("""
-            SELECT COUNT(*) as count, DATE(created_at AT TIME ZONE :tz) as day
+            SELECT COUNT(*) as count, DATE(created_at AT TIME ZONE 'UTC' AT TIME ZONE :tz) as day
             FROM episode
             WHERE user_id = :user_id
               AND created_at >= NOW() - INTERVAL '14 days'
               AND role = 'user'
-            GROUP BY DATE(created_at AT TIME ZONE :tz)
+            GROUP BY DATE(created_at AT TIME ZONE 'UTC' AT TIME ZONE :tz)
         """), {"user_id": user_id, "tz": user_tz}).fetchall()
 
         if daily_msgs:
@@ -528,6 +605,35 @@ class BodyStateService:
         else:
             base_alertness = 0.6  # Assume moderate if no data
 
+        # Sleep QUALITY adjustment from stage breakdown (HealthKit/Apple Watch).
+        # Quantity alone misses fragmented or low-deep-sleep nights — a 7h night
+        # with poor architecture leaves you less rested than 6h with healthy
+        # cycles. We compute three signals and fold them into base_alertness.
+        stages = signals.get('sleep_stages')
+        if stages:
+            deep = stages.get('sleep_deep_min', 0.0)
+            rem = stages.get('sleep_rem_min', 0.0)
+            core = stages.get('sleep_core_min', 0.0)
+            awake = stages.get('sleep_awake_min', 0.0)
+            asleep = deep + rem + core
+            if asleep > 0:
+                efficiency = asleep / (asleep + awake) if (asleep + awake) > 0 else 1.0
+                deep_pct = deep / asleep
+                rem_pct = rem / asleep
+                # Healthy adult targets: ~13-23% deep, ~20-25% REM, ~85%+ efficiency.
+                # Score each component on a [0,1] scale around the target band.
+                deep_score = min(1.0, deep_pct / 0.18)        # 18% is comfortable target
+                rem_score = min(1.0, rem_pct / 0.22)          # 22% target
+                eff_score = max(0.0, (efficiency - 0.7) / 0.25)  # ramps from 70%→95%
+                quality = max(0.0, min(1.0, 0.4 * deep_score + 0.3 * rem_score + 0.3 * eff_score))
+                estimate.sleep_quality = round(quality, 3)
+                estimate.sleep_efficiency = round(efficiency, 3)
+                estimate.sleep_deep_pct = round(deep_pct, 3)
+                estimate.sleep_rem_pct = round(rem_pct, 3)
+                # Quality biases base alertness up to ±0.1 — meaningful but not dominant.
+                base_alertness += (quality - 0.7) * 0.15
+                base_alertness = min(0.95, max(0.1, base_alertness))
+
         # Decay based on time awake
         if signals.get('first_activity'):
             hours_awake = (now - signals['first_activity']).total_seconds() / 3600
@@ -671,6 +777,44 @@ class BodyStateService:
         else:
             estimate.stress_trend = "stable"
 
+    async def _estimate_autonomic_recovery(
+        self,
+        estimate: BodyStateEstimate,
+        signals: dict,
+    ):
+        """
+        Estimate autonomic recovery from HRV.
+
+        Latest HRV is compared against the 7-day daily-average mean. A drop
+        of >1σ below baseline signals stress/fatigue/illness; well above
+        baseline signals well-recovered. Result feeds into the overall
+        recovery readiness alongside muscular recovery.
+        """
+        latest = signals.get('hrv_latest')
+        history = signals.get('hrv_history_daily') or []
+        if latest is None or len(history) < 3:
+            return  # keep default 0.7
+
+        mean = sum(history) / len(history)
+        if len(history) >= 2:
+            var = sum((v - mean) ** 2 for v in history) / (len(history) - 1)
+            std = var ** 0.5
+        else:
+            std = 0.0
+
+        if std > 0:
+            z = (latest - mean) / std
+        else:
+            z = 0.0
+        estimate.hrv_zscore = round(z, 2)
+
+        # Map z-score to recovery score in [0.2, 1.0]:
+        #   z = -2σ → 0.3 (significantly stressed)
+        #   z =  0  → 0.7 (baseline)
+        #   z = +2σ → 0.95 (well recovered)
+        recovery = 0.7 + 0.125 * z
+        estimate.autonomic_recovery = round(max(0.2, min(0.95, recovery)), 3)
+
     async def _estimate_recovery(
         self,
         estimate: BodyStateEstimate,
@@ -685,6 +829,7 @@ class BodyStateService:
         - Each workout impacts specific muscle groups
         - Recovery is exponential based on time
         - Intensity affects recovery time
+        - HealthKit cardio (long walks, runs) adds whole-body load
         """
         workouts = signals.get('workouts', [])
         recovery_status = {}
@@ -749,9 +894,34 @@ class BodyStateService:
 
         # Overall physical readiness (weighted average, legs/back weighted higher)
         weights = {'legs': 0.25, 'back': 0.25, 'chest': 0.15, 'shoulders': 0.15, 'arms': 0.1, 'core': 0.1}
-        estimate.overall_physical_readiness = sum(
-            recovery_status.get(g, 1.0) * w for g, w in weights.items()
-        )
+        muscular_readiness = sum(recovery_status.get(g, 1.0) * w for g, w in weights.items())
+
+        # Cardio load from HealthKit-tracked workouts. Long aerobic sessions
+        # (runs, hikes, cycling) deplete recovery globally even though they
+        # don't show up in workout_log. We compute an exponential decay on
+        # cumulative duration in the last 48h.
+        cardio_penalty = 0.0
+        for ext in signals.get('external_workouts', []) or []:
+            started = ext.get('started_at')
+            if not started:
+                continue
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=self.tz)
+            hours_since = (now - started).total_seconds() / 3600
+            if hours_since > 48:
+                continue
+            duration_min = (ext.get('duration_seconds') or 0) / 60
+            # Roughly: 60min run within 24h ≈ 0.10 penalty; decays exponentially
+            base_load = min(0.15, duration_min / 600)
+            cardio_penalty += base_load * math.exp(-hours_since / 24)
+        cardio_penalty = min(0.25, cardio_penalty)
+
+        # Blend muscular recovery with autonomic recovery (HRV-based) and
+        # subtract cardio load. Final readiness is a holistic single number.
+        autonomic = estimate.autonomic_recovery
+        estimate.overall_physical_readiness = max(0.0, min(1.0,
+            0.55 * muscular_readiness + 0.35 * autonomic + 0.10 * 1.0 - cardio_penalty
+        ))
 
     async def _detect_pattern_breaks(
         self,
@@ -802,10 +972,10 @@ class BodyStateService:
 
         # Check meal timing
         meals = signals.get('meals', [])
-        # Convert meal timestamps to user timezone for comparison
+        # food_log stores naive timestamps in EASTERN time (not UTC!)
         for meal in meals:
             if meal['logged_at'].tzinfo is None:
-                meal['logged_at'] = meal['logged_at'].replace(tzinfo=ZoneInfo('UTC')).astimezone(self.tz)
+                meal['logged_at'] = meal['logged_at'].replace(tzinfo=self.tz)
             else:
                 meal['logged_at'] = meal['logged_at'].astimezone(self.tz)
         meals_today = [m for m in meals if m['logged_at'].date() == now.date()]

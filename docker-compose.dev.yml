@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   redis:
     image: redis:7-alpine
@@ -9,6 +7,55 @@ services:
       - /data/redis:/data
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  embeddings:
+    build:
+      context: ./embedding-service
+    restart: unless-stopped
+    ports:
+      - "8100:8100"
+    volumes:
+      - embedding_model_cache:/root/.cache
+    environment:
+      - TRANSFORMERS_CACHE=/root/.cache/huggingface
+    deploy:
+      resources:
+        limits:
+          memory: 4g
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8100/health')\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  acs-tool-runner:
+    build:
+      context: ./acs-tool-runner
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    environment:
+      - ACS_DAEMON_TOKEN=${ACS_DAEMON_TOKEN}
+      - ACS_TOOL_TIMEOUT_SEC=30
+      - ACS_TOOL_MEMORY_BYTES=268435456
+      - ACS_TOOL_CPU_SEC=30
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8001/health')\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
   frontend:
     build:
@@ -39,8 +86,6 @@ services:
     ports:
       - "3002:3002"
     restart: unless-stopped
-    environment:
-      - VITE_API_URL=http://10.185.1.180:8000
     volumes:
       # Mount source code for live editing
       - ./workbench-canvas:/app
@@ -58,28 +103,29 @@ services:
     ports:
       - "8000:8000"
     restart: unless-stopped
+    env_file: .env
     environment:
       - SEARCH_PROVIDER=tavily
       - TAVILY_API_KEY=${TAVILY_API_KEY}
       - SEARXNG_BASE_URL=${SEARXNG_BASE_URL-http://10.185.1.8:4000}
       - REDIS_URL=redis://redis:6379/0
-      # AI Provider - defaults to local gpt-oss, can be overridden via settings
+      # AI Provider - defaults to local Qwen via llama-server
       - AI_PROVIDER=${AI_PROVIDER-openai}
-      - OPENAI_BASE_URL=${OPENAI_BASE_URL-http://100.104.68.115:11434/v1}
-      - OPENAI_MODEL=${OPENAI_MODEL-gpt-oss:120b}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL-http://100.104.68.115:8081/v1}
+      - OPENAI_MODEL=${OPENAI_MODEL-qwen3.6-27b}
       - OPENAI_API_KEY=${OPENAI_API_KEY-}
       - GEMINI_API_KEY=${GEMINI_API_KEY-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY-}
-      - FAST_MODEL_URL=${FAST_MODEL_URL-http://100.104.68.115:11434/v1}
-      - FAST_MODEL=${FAST_MODEL-gpt-oss:20b}
+      - FAST_MODEL_URL=${FAST_MODEL_URL-http://10.185.1.8:8686/v1}
+      - FAST_MODEL=${FAST_MODEL-Qwen3.5-35B-A3B}
       - FAST_MODEL_API_KEY=${FAST_MODEL_API_KEY-}
-      - EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL-http://10.185.1.8:11434}
+      - EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL-http://embeddings:8100}
       - EMBEDDING_MODEL=bge-m3
       - EMBEDDING_DIM=1024
       - ASSISTANT_NAME=Sara
       - DOMAIN=${DOMAIN-sara.avery.cloud}
       - COOKIE_DOMAIN=${COOKIE_DOMAIN-.sara.avery.cloud}
-      - CORS_ORIGINS=["https://sara.avery.cloud","http://sara.avery.cloud","https://dash.avery.cloud","http://dash.avery.cloud","http://10.185.1.188:3000","http://10.185.1.180:3000","http://localhost:3000","http://10.185.1.180:3001","http://localhost:3001","http://10.185.1.180:3002","http://localhost:3002"]
+      - CORS_ORIGINS=["https://sara.avery.cloud","http://sara.avery.cloud","https://canvas.avery.cloud","http://canvas.avery.cloud","https://dash.avery.cloud","http://dash.avery.cloud","http://10.185.1.188:3000","http://10.185.1.180:3000","http://localhost:3000","http://10.185.1.180:3001","http://localhost:3001","http://10.185.1.180:3002","http://localhost:3002"]
       - DATABASE_URL=${DATABASE_URL-postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub}
       - JARVIS_MODE=true
       - SOLO_USER_ID=64f37c56-85cb-4590-8de9-adfc17d343ed
@@ -87,16 +133,27 @@ services:
       - MINIO_URL=http://minio:9000
       - MINIO_BUCKET=sara-docs
       - MINIO_ACCESS_KEY=sara
-      - MINIO_SECRET_KEY=sara1234
-      - JWT_SECRET=sara-hub-jwt-secret-change-in-production
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
+      - JWT_SECRET=${JWT_SECRET}
       - TIMEZONE=America/New_York
       - TZ=America/New_York
       - NEO4J_URI=${NEO4J_URI-bolt://neo4j:7687}
       - NEO4J_USER=neo4j
-      - NEO4J_PASSWORD=sara-graph-secret
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD}
       # FatSecret API credentials for food search
       - FATSECRET_CLIENT_ID=${FATSECRET_CLIENT_ID}
       - FATSECRET_CLIENT_SECRET=${FATSECRET_CLIENT_SECRET}
+      # Microsoft Graph API credentials for email integration
+      - MSGRAPH_CLIENT_ID=${MSGRAPH_CLIENT_ID}
+      - MSGRAPH_CLIENT_SECRET=${MSGRAPH_CLIENT_SECRET}
+      - MSGRAPH_TENANT_ID=${MSGRAPH_TENANT_ID}
+      # Proxmox container provisioning
+      - PROXMOX_TOKEN_SECRET=${PROXMOX_TOKEN_SECRET-}
+      # Sentry error tracking
+      - SENTRY_DSN=${SENTRY_DSN-}
+      - SENTRY_ENVIRONMENT=${SENTRY_ENVIRONMENT-development}
+      # ACS tool runner sidecar — sandbox for user-defined tools
+      - ACS_TOOL_RUNNER_URL=http://acs-tool-runner:8001
     volumes:
       # Mount source code for live editing
       - ./backend:/app
@@ -104,14 +161,32 @@ services:
       - ./shadow-agent:/shadow-agent
       # Mount data directory for audio files (morning briefs, etc.)
       - ./data:/home/david/jarvis/data
+      # Mount SSH keys for Jetson access
+      - /home/david/.ssh:/root/.ssh:ro
+      # Mount desktop app release dir for OTA updates
+      - ./sara-desktop/release:/updates:ro
       # Exclude Python cache
       - /app/__pycache__
       - /app/app/__pycache__
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 2g
     depends_on:
       db:
-        condition: service_started
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
       minio:
         condition: service_started
+      embeddings:
+        condition: service_healthy
 
   db:
     image: pgvector/pgvector:pg16
@@ -119,11 +194,17 @@ services:
     environment:
       POSTGRES_DB: sara_hub
       POSTGRES_USER: sara
-      POSTGRES_PASSWORD: sara123
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
       - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sara -d sara_hub"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
   minio:
     image: quay.io/minio/minio
@@ -131,19 +212,24 @@ services:
     restart: unless-stopped
     environment:
       MINIO_ROOT_USER: sara
-      MINIO_ROOT_PASSWORD: sara1234
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
     ports:
       - "9000:9000"
       - "9001:9001"
     volumes:
       - minio_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "mc ready local --insecure 2>/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
   neo4j:
     image: neo4j:5.15-community
-    profiles: ["graph-neo4j"]
     restart: unless-stopped
     environment:
-      NEO4J_AUTH: neo4j/sara-graph-secret
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD}
       NEO4J_PLUGINS: '["apoc", "graph-data-science"]'
       NEO4J_dbms_security_procedures_unrestricted: apoc.*,gds.*
       NEO4J_dbms_security_procedures_allowlist: apoc.*,gds.*
@@ -160,11 +246,275 @@ services:
       - neo4j_import:/var/lib/neo4j/import
       - neo4j_plugins:/plugins
     healthcheck:
-      test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "sara-graph-secret", "RETURN 1;"]
+      test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "${NEO4J_PASSWORD}", "RETURN 1;"]
       interval: 10s
       timeout: 5s
       retries: 10
       start_period: 25s
+
+  # Celery Worker - processes background tasks
+  celery-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    restart: unless-stopped
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=4 -Q cognitive,health,input,maintenance,low_priority,reflection
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.celery_app inspect ping -d celery@$$HOSTNAME --timeout=10 2>/dev/null | grep -q OK"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 30s
+    env_file: .env
+    environment:
+      - HOME=/home/david
+      - REDIS_URL=redis://redis:6379/0
+      - AI_PROVIDER=${AI_PROVIDER-openai}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL-http://100.104.68.115:8081/v1}
+      - OPENAI_MODEL=${OPENAI_MODEL-qwen3.6-27b}
+      - OPENAI_API_KEY=${OPENAI_API_KEY-}
+      - FAST_MODEL_URL=${FAST_MODEL_URL-http://10.185.1.8:8686/v1}
+      - FAST_MODEL=${FAST_MODEL-Qwen3.5-35B-A3B}
+      - FAST_MODEL_API_KEY=${FAST_MODEL_API_KEY-}
+      - EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL-http://embeddings:8100}
+      - EMBEDDING_MODEL=bge-m3
+      - EMBEDDING_DIM=1024
+      - DATABASE_URL=${DATABASE_URL-postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub}
+      - SOLO_USER_ID=64f37c56-85cb-4590-8de9-adfc17d343ed
+      - TIMEZONE=America/New_York
+      - TZ=America/New_York
+      - SENTRY_DSN=${SENTRY_DSN-}
+      - SENTRY_ENVIRONMENT=${SENTRY_ENVIRONMENT-development}
+      - CELERY_WORKER_QUEUES=cognitive,health,input,maintenance,low_priority,reflection
+      # Note: 'critical' is handled exclusively by celery-critical worker
+      # Note: 'acs' is handled exclusively by celery-acs worker
+    volumes:
+      - ./backend:/app
+      - /app/__pycache__
+      - /app/app/__pycache__
+      - /home/david/.ssh:/home/david/.ssh:ro
+      # Shared with backend so generated artifacts (morning brief audio,
+      # briefing TTS, etc.) are visible to the API that serves them.
+      - ./data:/home/david/jarvis/data
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      embeddings:
+        condition: service_healthy
+
+  # Celery ACS Worker - dedicated to long-running autonomous cognition sessions
+  # Isolated from critical queue so multi-hour sessions don't starve standing orders
+  celery-acs:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    restart: unless-stopped
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=2 -Q acs -n acs@%h
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.celery_app inspect ping -d acs@$$HOSTNAME --timeout=10 2>/dev/null | grep -q OK"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 30s
+    env_file: .env
+    environment:
+      - HOME=/home/david
+      - REDIS_URL=redis://redis:6379/0
+      - AI_PROVIDER=${AI_PROVIDER-openai}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL-http://100.104.68.115:8081/v1}
+      - OPENAI_MODEL=${OPENAI_MODEL-qwen3.6-27b}
+      - OPENAI_API_KEY=${OPENAI_API_KEY-}
+      - FAST_MODEL_URL=${FAST_MODEL_URL-http://10.185.1.8:8686/v1}
+      - FAST_MODEL=${FAST_MODEL-Qwen3.5-35B-A3B}
+      - FAST_MODEL_API_KEY=${FAST_MODEL_API_KEY-}
+      - EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL-http://embeddings:8100}
+      - EMBEDDING_MODEL=bge-m3
+      - EMBEDDING_DIM=1024
+      - DATABASE_URL=${DATABASE_URL-postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub}
+      - SOLO_USER_ID=64f37c56-85cb-4590-8de9-adfc17d343ed
+      - GRAPH_BACKEND=neo4j
+      - NEO4J_URI=${NEO4J_URI-bolt://neo4j:7687}
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD}
+      - TIMEZONE=America/New_York
+      - TZ=America/New_York
+      - CELERY_WORKER_QUEUES=acs
+      - ACS_ASYNC_DB_NULLPOOL=1
+      - SENTRY_DSN=${SENTRY_DSN-}
+      - SENTRY_ENVIRONMENT=${SENTRY_ENVIRONMENT-development}
+    volumes:
+      - ./backend:/app
+      - /app/__pycache__
+      - /app/app/__pycache__
+      - /home/david/.ssh:/home/david/.ssh:ro
+      - ./data:/home/david/jarvis/data
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      embeddings:
+        condition: service_healthy
+
+  # Celery Critical Worker - dedicated to fast, must-run tasks (standing orders, lifecycle, automation)
+  # Prevents long-running LLM tasks from starving time-sensitive checks
+  celery-critical:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    restart: unless-stopped
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=2 -Q critical -n critical@%h
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.celery_app inspect ping -d critical@$$HOSTNAME --timeout=10 2>/dev/null | grep -q OK"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 30s
+    env_file: .env
+    environment:
+      - HOME=/home/david
+      - REDIS_URL=redis://redis:6379/0
+      - AI_PROVIDER=${AI_PROVIDER-openai}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL-http://100.104.68.115:8081/v1}
+      - OPENAI_MODEL=${OPENAI_MODEL-qwen3.6-27b}
+      - OPENAI_API_KEY=${OPENAI_API_KEY-}
+      - FAST_MODEL_URL=${FAST_MODEL_URL-http://10.185.1.8:8686/v1}
+      - FAST_MODEL=${FAST_MODEL-Qwen3.5-35B-A3B}
+      - FAST_MODEL_API_KEY=${FAST_MODEL_API_KEY-}
+      - EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL-http://embeddings:8100}
+      - EMBEDDING_MODEL=bge-m3
+      - EMBEDDING_DIM=1024
+      - DATABASE_URL=${DATABASE_URL-postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub}
+      - SOLO_USER_ID=64f37c56-85cb-4590-8de9-adfc17d343ed
+      - TIMEZONE=America/New_York
+      - TZ=America/New_York
+      - SENTRY_DSN=${SENTRY_DSN-}
+      - SENTRY_ENVIRONMENT=${SENTRY_ENVIRONMENT-development}
+    volumes:
+      - ./backend:/app
+      - /app/__pycache__
+      - /app/app/__pycache__
+      - /home/david/.ssh:/home/david/.ssh:ro
+      - ./data:/home/david/jarvis/data
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+
+  # Celery David-Priority Worker — chat-initiated research from David
+  # Isolated so a long research run never starves ACS or vice versa.
+  celery-david-priority:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    restart: unless-stopped
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=2 -Q david_priority -n david_priority@%h
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.celery_app inspect ping -d david_priority@$$HOSTNAME --timeout=10 2>/dev/null | grep -q OK"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 30s
+    env_file: .env
+    environment:
+      - HOME=/home/david
+      - REDIS_URL=redis://redis:6379/0
+      - AI_PROVIDER=${AI_PROVIDER-openai}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL-http://100.104.68.115:8081/v1}
+      - OPENAI_MODEL=${OPENAI_MODEL-qwen3.6-27b}
+      - OPENAI_API_KEY=${OPENAI_API_KEY-}
+      - FAST_MODEL_URL=${FAST_MODEL_URL-http://10.185.1.8:8686/v1}
+      - FAST_MODEL=${FAST_MODEL-Qwen3.5-35B-A3B}
+      - FAST_MODEL_API_KEY=${FAST_MODEL_API_KEY-}
+      - EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL-http://embeddings:8100}
+      - EMBEDDING_MODEL=bge-m3
+      - EMBEDDING_DIM=1024
+      - DATABASE_URL=${DATABASE_URL-postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub}
+      - SOLO_USER_ID=64f37c56-85cb-4590-8de9-adfc17d343ed
+      - GRAPH_BACKEND=neo4j
+      - NEO4J_URI=${NEO4J_URI-bolt://neo4j:7687}
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD}
+      - TIMEZONE=America/New_York
+      - TZ=America/New_York
+      - CELERY_WORKER_QUEUES=david_priority
+      - SENTRY_DSN=${SENTRY_DSN-}
+      - SENTRY_ENVIRONMENT=${SENTRY_ENVIRONMENT-development}
+    volumes:
+      - ./backend:/app
+      - /app/__pycache__
+      - /app/app/__pycache__
+      - /home/david/.ssh:/home/david/.ssh:ro
+      - ./data:/home/david/jarvis/data
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      embeddings:
+        condition: service_healthy
+
+  # Celery Beat - schedules periodic tasks
+  celery-beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    restart: unless-stopped
+    command: celery -A app.celery_app beat --loglevel=info -s /tmp/celerybeat-schedule
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import pathlib, sys; data = pathlib.Path('/proc/1/cmdline').read_bytes(); sys.exit(0 if b'celery' in data and b'beat' in data else 1)\""]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    env_file: .env
+    environment:
+      - HOME=/home/david
+      - REDIS_URL=redis://redis:6379/0
+      - SOLO_USER_ID=64f37c56-85cb-4590-8de9-adfc17d343ed
+      - TIMEZONE=America/New_York
+      - TZ=America/New_York
+    volumes:
+      - ./backend:/app
+      - /app/__pycache__
+      - /app/app/__pycache__
+    depends_on:
+      - redis
+      - celery-worker
 
 volumes:
   postgres_data:
@@ -173,3 +523,4 @@ volumes:
   neo4j_logs:
   neo4j_import:
   neo4j_plugins:
+  embedding_model_cache:

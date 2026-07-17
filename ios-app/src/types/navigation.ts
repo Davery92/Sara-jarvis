@@ -19,8 +19,8 @@ export type RootStackParamList = {
     onSave?: () => void;
   };
   NoteEditor: {
-    noteId?: number;
-    folderId?: number;
+    noteId?: string | number;
+    folderId?: string | number;
     onSave?: () => void;
   };
   NutritionGoalsForm: {
@@ -33,6 +33,7 @@ export type RootStackParamList = {
   WorkoutMode: {
     templateId?: string;  // If provided, starts workout with this template
   } | undefined;
+  DailyPlan: undefined;
 };
 
 // Auth Stack Navigator
@@ -65,25 +66,49 @@ export type QuickReplyContext = {
   title?: string;
 };
 
+// Heartbeat context passed when opening chat from heartbeat notification (proactive check-ins from Sara)
+export type HeartbeatContext = {
+  title: string;
+  message: string;
+  priority: string;  // 'low', 'normal', 'high'
+};
+
+// ACS notification context passed when opening chat from notification screen
+export type NotificationContext = {
+  id: string;
+  title: string;
+  message: string;
+  category: string;
+  item_type: string;  // 'notification' | 'acs_discovery'
+};
+
+export type NoteContext = {
+  id: string;
+  title: string;
+  prompt?: string;
+  preview?: string;
+};
+
+// Chat screen params (used by Sara tab)
+export type ChatScreenParams = {
+  healthAlert?: HealthAlertContext;
+  nudge?: NudgeContext;
+  quickReply?: QuickReplyContext;
+  heartbeat?: HeartbeatContext;
+  inboxItem?: { id: string; title: string };
+  noteContext?: NoteContext;
+  notification?: NotificationContext;
+  taskInject?: { taskId: string; conversationId?: string; noteId?: string };
+};
+
 // Main Tab Navigator
 export type MainTabParamList = {
-  Home: undefined;
-  Chat: {
-    healthAlert?: HealthAlertContext;
-    nudge?: NudgeContext;
-    quickReply?: QuickReplyContext;
+  Sara: undefined;
+  AssistantInboxTab: {
+    focus?: 'all' | 'waiting' | 'in_progress' | 'new' | 'done' | 'archived';
   } | undefined;
-  Learning: undefined;
-  Notes: undefined;
   Fitness: undefined;
   More: undefined;
-  Recipes: undefined;
-  Documents: undefined;
-  Calendar: undefined;
-  Briefings: undefined;
-  Health: undefined;
-  Settings: undefined;
-  Projects: undefined;
 };
 
 // Screen Props Types

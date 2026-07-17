@@ -13,7 +13,12 @@ class ToolResult(BaseModel):
 
 class BaseTool(ABC):
     """Base class for all AI tools"""
-    
+
+    # If True, the tool may only be invoked when the originating context is a user
+    # chat turn. The registry refuses to dispatch when origin != "chat", which
+    # blocks the ACS autonomous loop from invoking actuators on its own.
+    requires_user_origin: bool = False
+
     @property
     @abstractmethod
     def name(self) -> str:

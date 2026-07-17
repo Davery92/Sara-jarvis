@@ -12,6 +12,8 @@ from typing import Optional, List, Dict, Any
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
+from app.core.timezone import now as local_now
+
 logger = logging.getLogger(__name__)
 
 
@@ -170,7 +172,7 @@ class HealthInsightService:
                 "metrics": metrics,
                 "recent_alerts": recent_alerts,
                 "has_alerts": len(recent_alerts) > 0,
-                "last_updated": datetime.now().isoformat(),
+                "last_updated": local_now().isoformat(),
             }
 
         except Exception as e:

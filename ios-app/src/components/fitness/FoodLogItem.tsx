@@ -1,7 +1,7 @@
 import React from 'react';
 import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
 import { FoodLog } from '../../services/fitness';
-import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
+import { colors, spacing, borderRadius, fontSizes, fontWeights } from '../../styles/theme';
 
 // Format numbers to max 2 decimal places, removing trailing zeros
 const formatNumber = (value: number | undefined): string => {
@@ -28,7 +28,14 @@ export default function FoodLogItem({ log, onPress, onLongPress }: FoodLogItemPr
     minute: '2-digit',
   });
 
-  const hasMacros = log.calories || log.protein || log.carbs || log.fat;
+  // Must be a real boolean: a `||` chain over these numeric fields yields the
+  // number 0 when all are 0, and `{0 && <View/>}` renders a bare `0` — which
+  // throws "Text strings must be rendered within a <Text> component".
+  const hasMacros =
+    log.calories !== undefined ||
+    log.protein !== undefined ||
+    log.carbs !== undefined ||
+    log.fat !== undefined;
 
   return (
     <TouchableOpacity
@@ -87,7 +94,9 @@ export default function FoodLogItem({ log, onPress, onLongPress }: FoodLogItemPr
 const styles = StyleSheet.create({
   container: {
     backgroundColor: colors.surface,
-    borderRadius: borderRadius.md,
+    borderRadius: borderRadius.xl,
+    borderWidth: 1,
+    borderColor: colors.border,
     padding: spacing.md,
     marginHorizontal: spacing.md,
     marginBottom: spacing.sm,
@@ -109,7 +118,7 @@ const styles = StyleSheet.create({
   mealType: {
     color: colors.text,
     fontSize: fontSizes.md,
-    fontWeight: '600',
+    fontWeight: fontWeights.semibold,
     textTransform: 'capitalize',
   },
   time: {
@@ -118,15 +127,17 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
   caloriesBadge: {
-    backgroundColor: colors.primary,
-    borderRadius: borderRadius.sm,
+    backgroundColor: colors.assistant.actionSoft,
+    borderRadius: borderRadius.full,
+    borderWidth: 1,
+    borderColor: colors.assistant.borderStrong,
     paddingHorizontal: spacing.sm,
     paddingVertical: spacing.xs,
   },
   caloriesText: {
-    color: colors.text,
+    color: colors.accent,
     fontSize: fontSizes.sm,
-    fontWeight: '600',
+    fontWeight: fontWeights.bold,
   },
   foodName: {
     color: colors.text,
@@ -146,7 +157,7 @@ const styles = StyleSheet.create({
   macroLabel: {
     color: colors.textSecondary,
     fontSize: fontSizes.sm,
-    fontWeight: '600',
+    fontWeight: fontWeights.semibold,
   },
   macroValue: {
     color: colors.text,

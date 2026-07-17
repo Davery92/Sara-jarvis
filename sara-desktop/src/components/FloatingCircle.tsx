@@ -1,13 +1,23 @@
-import { useCallback, useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { apiClient } from '../services/api'
 
 interface FloatingCircleProps {
-  chatOpen?: boolean
   onClick: () => void
   onRightClick: () => void
 }
 
+export type OrbState = 'idle' | 'listening' | 'thinking' | 'speaking' | 'attention' | 'alert'
+
+const ORB_COLORS: Record<OrbState, { primary: string; secondary: string; tertiary: string }> = {
+  idle: { primary: '255, 130, 200', secondary: '200, 100, 255', tertiary: '150, 80, 220' }, // pink/purple (default)
+  listening: { primary: '110, 231, 255', secondary: '56, 189, 248', tertiary: '14, 165, 233' }, // cyan
+  thinking: { primary: '253, 224, 71', secondary: '250, 204, 21', tertiary: '202, 138, 4' }, // amber
+  speaking: { primary: '110, 231, 183', secondary: '52, 211, 153', tertiary: '5, 150, 105' }, // emerald
+  attention: { primary: '45, 212, 191', secondary: '20, 184, 166', tertiary: '15, 118, 110' }, // teal
+  alert: { primary: '252, 165, 165', secondary: '248, 113, 113', tertiary: '220, 38, 38' }, // red
+}
+
 class SmokeRing {
-  private canvas: HTMLCanvasElement
   private ctx: CanvasRenderingContext2D
   private width: number
   private height: number
@@ -18,9 +28,9 @@ class SmokeRing {
   private ringThickness: number
   private segments: number
   private animationId: number | null = null
+  private state: OrbState = 'idle'
 
   constructor(canvas: HTMLCanvasElement) {
-    this.canvas = canvas
     this.ctx = canvas.getContext('2d')!
 
     const dpr = window.devicePixelRatio || 1
@@ -41,6 +51,10 @@ class SmokeRing {
     this.segments = 80
   }
 
+  setState(state: OrbState) {
+    this.state = state
+  }
+
   // Smooth noise function
   private noise(x: number, seed: number = 0): number {
     const n = Math.sin(x * 1.2 + seed) * 0.5 +
@@ -49,19 +63,22 @@ class SmokeRing {
     return n
   }
 
-  // Get colors (pink/purple theme)
   private getColors(): { primary: string; secondary: string; tertiary: string } {
-    return {
-      primary: '255, 130, 200',    // Pink
-      secondary: '200, 100, 255',  // Purple
-      tertiary: '150, 80, 220'     // Dark purple
-    }
+    return ORB_COLORS[this.state] || ORB_COLORS.idle
+  }
+
+  // Thinking/alert pulse a bit faster and tighter than the idle drift.
+  private speedMultiplier(): number {
+    if (this.state === 'thinking') return 2.2
+    if (this.state === 'alert') return 1.8
+    if (this.state === 'listening' || this.state === 'speaking') return 1.4
+    return 1
   }
 
   private draw() {
     this.ctx.clearRect(0, 0, this.width, this.height)
 
-    const time = this.time * 0.0005
+    const time = this.time * 0.0005 * this.speedMultiplier()
 
     // Draw multiple smoke layers for depth
     for (let layer = 0; layer < 5; layer++) {
@@ -142,9 +159,176 @@ class SmokeRing {
   }
 }
 
-export default function FloatingCircle({ chatOpen, onClick, onRightClick }: FloatingCircleProps) {
+interface FlyoutData {
+  timers: Array<{ id: string; title: string; remaining_seconds: number }>
+  nextEvent: { title: string; start_time: string; all_day: boolean } | null
+  statusLine: string | null
+  listening: boolean
+}
+
+function FlyoutPanel({ attentionCount, onOpenChat }: { attentionCount: number; onOpenChat: () => void }) {
+  const [data, setData] = useState<FlyoutData | null>(null)
+  const [muteBusy, setMuteBusy] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    Promise.all([
+      apiClient.getActiveTimers(),
+      apiClient.getNextCalendarEvent(),
+      apiClient.getSaraStatusLine(),
+      apiClient.getVoiceListening(),
+    ]).then(([timers, nextEvent, statusLine, listening]) => {
+      if (!cancelled) setData({ timers, nextEvent, statusLine, listening })
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const toggleMute = useCallback(async () => {
+    if (!data) return
+    setMuteBusy(true)
+    const next = !data.listening
+    const confirmed = await apiClient.setVoiceListening(next)
+    setData((d) => (d ? { ...d, listening: confirmed } : d))
+    setMuteBusy(false)
+  }, [data])
+
+  return (
+    <div
+      className="no-drag absolute bottom-full mb-2 left-1/2 -translate-x-1/2 w-64 rounded-xl bg-gray-900/95 border border-gray-700 shadow-2xl p-3 text-xs text-gray-200 backdrop-blur-sm"
+      onClick={(e) => e.stopPropagation()}
+    >
+      {!data ? (
+        <p className="text-gray-500 animate-pulse">Loading…</p>
+      ) : (
+        <>
+          <p className="text-gray-300 mb-2 leading-snug">
+            {data.statusLine || "Nothing on Sara's mind right now."}
+          </p>
+          <div
+            className={`flex items-center justify-between text-gray-400 mb-1 ${attentionCount > 0 ? 'cursor-pointer hover:text-gray-200' : ''}`}
+            onClick={() => {
+              if (attentionCount > 0) window.electronAPI?.openOverlay('inbox', {})
+            }}
+          >
+            <span>Attention</span>
+            <span className={attentionCount > 0 ? 'text-teal-400 font-semibold' : ''}>
+              {attentionCount}
+            </span>
+          </div>
+          {data.timers.length > 0 && (
+            <div className="flex items-center justify-between text-gray-400 mb-1">
+              <span>Timer</span>
+              <span>{data.timers[0].title} — {Math.ceil(data.timers[0].remaining_seconds / 60)}m</span>
+            </div>
+          )}
+          {data.nextEvent && (
+            <div className="flex items-center justify-between text-gray-400 mb-2">
+              <span>Next</span>
+              <span className="truncate max-w-[140px]">
+                {data.nextEvent.all_day ? 'All day' : new Date(data.nextEvent.start_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} {data.nextEvent.title}
+              </span>
+            </div>
+          )}
+          <div className="grid grid-cols-2 gap-1 mt-2 pt-2 border-t border-gray-800">
+            <button
+              className="rounded-lg bg-gray-800 hover:bg-gray-700 px-2 py-1.5 text-left"
+              onClick={() => window.electronAPI?.openQuickNote()}
+            >
+              New note
+            </button>
+            <button
+              className="rounded-lg bg-gray-800 hover:bg-gray-700 px-2 py-1.5 text-left"
+              onClick={() => window.electronAPI?.requestVoiceNote()}
+            >
+              Record voice note
+            </button>
+            <button
+              className="rounded-lg bg-gray-800 hover:bg-gray-700 px-2 py-1.5 text-left"
+              onClick={() => window.electronAPI?.requestScreenshotAndAsk()}
+            >
+              Screenshot &amp; ask
+            </button>
+            <button
+              className="rounded-lg bg-gray-800 hover:bg-gray-700 px-2 py-1.5 text-left"
+              disabled={muteBusy}
+              onClick={toggleMute}
+            >
+              {data.listening ? 'Mute voice' : 'Unmute voice'}
+            </button>
+            <button
+              className="col-span-2 rounded-lg bg-gray-800 hover:bg-gray-700 px-2 py-1.5 text-left"
+              onClick={onOpenChat}
+            >
+              Open chat
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+export default function FloatingCircle({ onClick, onRightClick }: FloatingCircleProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const smokeRingRef = useRef<SmokeRing | null>(null)
+  const [attentionCount, setAttentionCount] = useState(0)
+  const [orbState, setOrbState] = useState<OrbState>('idle')
+  const [showFlyout, setShowFlyout] = useState(false)
+  const [screenshotsEnabled, setScreenshotsEnabled] = useState(true)
+
+  // Fetch attention count periodically (via the app's configured backend,
+  // not a hardcoded dev URL — this previously always hit 10.185.1.180:8000
+  // regardless of the user's configured API URL).
+  useEffect(() => {
+    const fetchCount = async () => {
+      const count = await apiClient.getAttentionCount()
+      setAttentionCount(count)
+    }
+    fetchCount()
+    const interval = setInterval(fetchCount, 30000)
+    return () => clearInterval(interval)
+  }, [])
+
+  // Orb state driven by backend/sidecar realtime events (A1/A3).
+  useEffect(() => {
+    window.electronAPI?.onVoiceState((state) => {
+      if (state === 'listening' || state === 'thinking' || state === 'speaking' || state === 'idle') {
+        setOrbState(state as OrbState)
+      }
+    })
+    window.electronAPI?.onBackendEvent((event, data) => {
+      if (event === 'hud_state' && data?.state) {
+        setOrbState(data.state as OrbState)
+      }
+      if (event === 'attention_count' && typeof data?.count === 'number') {
+        setAttentionCount(data.count)
+      }
+    })
+    // Voice-note mic level (A4): show 'listening' while recording, drop
+    // back to idle the moment the level meter reports silence/stopped.
+    window.electronAPI?.onVoiceNoteLevel((level) => {
+      setOrbState(level > 0 ? 'listening' : 'idle')
+    })
+    // Camera-off badge (A5) — be honest about whether ambient screenshots
+    // are currently on.
+    window.electronAPI?.onScreenshotConfig(setScreenshotsEnabled)
+  }, [])
+
+  // Fall back to an 'attention' tint when idle and there's something unread,
+  // without stomping on an active listening/thinking/speaking state.
+  useEffect(() => {
+    if (orbState === 'idle' && attentionCount > 0) {
+      setOrbState('attention')
+    } else if (orbState === 'attention' && attentionCount === 0) {
+      setOrbState('idle')
+    }
+  }, [attentionCount]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    smokeRingRef.current?.setState(orbState)
+  }, [orbState])
 
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
@@ -153,8 +337,7 @@ export default function FloatingCircle({ chatOpen, onClick, onRightClick }: Floa
 
   const handleQuickNote = useCallback((e: React.MouseEvent) => {
     e.stopPropagation()
-    // Show a new note window
-    window.electronAPI?.showNote({ id: 'new', title: 'Quick Note', content: '' })
+    window.electronAPI?.openQuickNote()
   }, [])
 
   const handleQuickTimer = useCallback((e: React.MouseEvent) => {
@@ -179,9 +362,16 @@ export default function FloatingCircle({ chatOpen, onClick, onRightClick }: Floa
   }, [])
 
   return (
-    <div className="w-full h-full flex items-center justify-center p-2" style={{ background: 'transparent' }}>
-      {/* Container for smoke ring and buttons - p-2 on parent creates draggable border */}
-      <div className="flex items-center gap-4 no-drag">
+    <div
+      className="w-full h-full flex items-center justify-center p-2 relative"
+      style={{ background: 'transparent' }}
+      onMouseEnter={() => setShowFlyout(true)}
+      onMouseLeave={() => setShowFlyout(false)}
+    >
+      {showFlyout && <FlyoutPanel attentionCount={attentionCount} onOpenChat={onClick} />}
+
+      {/* Container: parent div is draggable (inherits from .circle-window), only buttons/canvas are no-drag */}
+      <div className="flex items-center gap-4">
         {/* Quick Note button - left side */}
         <button
           onClick={handleQuickNote}
@@ -211,6 +401,31 @@ export default function FloatingCircle({ chatOpen, onClick, onRightClick }: Floa
             className="absolute inset-0 w-full h-full"
             style={{ width: '100px', height: '100px', background: 'transparent' }}
           />
+          {/* Attention count badge — opens the inbox overlay so the count
+              is never just a number with no way to see what it means. */}
+          {attentionCount > 0 && (
+            <div
+              className="absolute -top-1 -right-1 min-w-[20px] h-5 rounded-full flex items-center justify-center text-xs font-bold text-white no-drag cursor-pointer hover:scale-110 transition-transform"
+              style={{ background: 'rgba(20, 184, 166, 0.9)', padding: '0 5px' }}
+              title="View what needs your attention"
+              onClick={(e) => {
+                e.stopPropagation()
+                window.electronAPI?.openOverlay('inbox', {})
+              }}
+            >
+              {attentionCount > 9 ? '9+' : attentionCount}
+            </div>
+          )}
+          {/* Camera-off badge: ambient screenshots are disabled */}
+          {!screenshotsEnabled && (
+            <div
+              className="absolute -bottom-1 -left-1 w-5 h-5 rounded-full flex items-center justify-center text-xs no-drag"
+              style={{ background: 'rgba(75, 85, 99, 0.9)' }}
+              title="Ambient screenshots off"
+            >
+              🚫
+            </div>
+          )}
         </button>
 
         {/* Quick Timer button - right side */}

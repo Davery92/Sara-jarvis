@@ -2,6 +2,10 @@
 Description=Sara Subconscious - Background mental model service
 After=network.target postgresql.service
 Wants=postgresql.service
+# DEPRECATED: superseded by unified agent scheduling.
+# Primary runtime paths:
+# - backend/app/services/unified_agent.py
+# - backend/app/tasks/autonomy.py
 
 [Service]
 Type=simple
@@ -13,7 +17,7 @@ WorkingDirectory=/home/david/jarvis/backend
 Environment=PYTHONPATH=/home/david/jarvis/backend
 Environment=DATABASE_URL=postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub
 Environment=OPENAI_BASE_URL=http://100.104.68.115:11434/v1
-Environment=OPENAI_MODEL=gpt-oss:120b
+Environment=OPENAI_MODEL=gpt-oss:20b
 Environment=OPENAI_API_KEY=dummy
 Environment=LLM_PRIMARY_URL=http://100.104.68.115:11434/v1
 Environment=LLM_FALLBACK_URL=http://100.104.68.115:11435/v1

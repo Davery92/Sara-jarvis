@@ -14,14 +14,32 @@ import logging
 from datetime import datetime, timedelta
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import text
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from app.db.session import get_db
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/health", tags=["health"])
+
+
+# Module-level: ensure 400s on this router log enough detail to debug client issues.
+# FastAPI's default RequestValidationError handler returns the standard JSON but
+# doesn't log the body content; for the metrics/workouts batch routes we want
+# server-side visibility when the iOS side sends something unexpected.
+async def _log_validation_error(request: Request, exc: RequestValidationError):
+    try:
+        body = (await request.body()).decode("utf-8", errors="replace")[:1000]
+    except Exception:
+        body = "<could not read body>"
+    logger.warning(
+        f"health validation error on {request.method} {request.url.path}: "
+        f"errors={exc.errors()[:3]} body_preview={body!r}"
+    )
+    return JSONResponse(status_code=400, content={"detail": exc.errors()})
 
 
 # Import get_current_user from main_simple (deferred to avoid circular imports)
@@ -36,9 +54,19 @@ def get_current_user(request: Request, db: Session = Depends(get_db)):
 # ====================
 
 class MetricInput(BaseModel):
-    """Single health metric from iOS"""
-    metric_type: str  # resting_hr, hrv, sleep_hours, steps, active_energy, heart_rate, weight
-    value: float
+    """Single health metric from iOS.
+
+    metric_type values currently emitted by the iOS background sync:
+      Vitals:         resting_hr, weight, spo2, respiratory_rate, body_temp
+      Cardio:         heart_rate, hrv, hrv_morning, vo2_max, walking_hr_avg, hr_recovery_1min
+      Sleep:          sleep_hours, sleep_deep_min, sleep_rem_min, sleep_core_min, sleep_awake_min
+      Activity:       steps, active_energy, stand_minutes, exercise_minutes,
+                      flights_climbed, mindful_minutes
+    Workouts go through /api/health/workouts/batch instead.
+    """
+    metric_type: str
+    # Optional so a single NaN/null doesn't 400 the whole batch — we filter at insert time.
+    value: Optional[float] = None
     recorded_at: str  # ISO timestamp
     source: str = "apple_health"
     metadata: Optional[dict] = None
@@ -62,6 +90,7 @@ class BatchMetricsResponse(BaseModel):
     success: bool
     inserted_count: int
     duplicate_count: int
+    skipped_invalid: int = 0
     daily_recovery_updated: bool
     message: str
 
@@ -120,9 +149,16 @@ async def ingest_metrics_batch(
     user_id = current_user.id
     inserted_count = 0
     duplicate_count = 0
+    skipped_invalid = 0
 
     try:
+        import math
         for metric in request.metrics:
+            # Skip rows with bad value (NaN, None, infinity). These come through
+            # when HealthKit returns nullable samples for some types.
+            if metric.value is None or not math.isfinite(metric.value):
+                skipped_invalid += 1
+                continue
             metric_id = str(uuid.uuid4())
 
             # Try to insert, skip duplicates
@@ -162,8 +198,12 @@ async def ingest_metrics_batch(
             success=True,
             inserted_count=inserted_count,
             duplicate_count=duplicate_count,
+            skipped_invalid=skipped_invalid,
             daily_recovery_updated=daily_recovery_updated,
-            message=f"Ingested {inserted_count} new metrics ({duplicate_count} duplicates)"
+            message=(
+                f"Ingested {inserted_count} new metrics "
+                f"({duplicate_count} dup, {skipped_invalid} invalid)"
+            ),
         )
 
     except Exception as e:
@@ -483,6 +523,153 @@ async def get_health_summary(
 
     except Exception as e:
         logger.error(f"Error getting health summary: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ====================
+# External Workouts (Apple Health / Watch-tracked)
+# ====================
+
+class WorkoutInput(BaseModel):
+    """Single workout record from HealthKit."""
+    external_id: str  # HKWorkout UUID — used for dedup
+    activity_type: str  # e.g. "running", "walking", "cycling", "yoga"
+    started_at: str
+    ended_at: str
+    duration_seconds: int
+    total_energy_kcal: Optional[float] = None
+    total_distance_m: Optional[float] = None
+    avg_heart_rate: Optional[int] = None
+    max_heart_rate: Optional[int] = None
+    min_heart_rate: Optional[int] = None
+    hr_zones: Optional[dict] = None  # {"zone_1": minutes, ...}
+    workout_metadata: Optional[dict] = None
+    source: str = "apple_health"
+
+
+class BatchWorkoutsRequest(BaseModel):
+    workouts: List[WorkoutInput]
+
+
+class BatchWorkoutsResponse(BaseModel):
+    success: bool
+    inserted_count: int
+    duplicate_count: int
+
+
+@router.post("/workouts/batch", response_model=BatchWorkoutsResponse)
+async def ingest_workouts_batch(
+    request: BatchWorkoutsRequest,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Batch-ingest HealthKit workouts. Deduped on (user_id, source, external_id)."""
+    user_id = current_user.id
+    inserted = 0
+    duplicates = 0
+
+    try:
+        for w in request.workouts:
+            workout_id = str(uuid.uuid4())
+            hr_zones_json = json.dumps(w.hr_zones) if w.hr_zones else None
+            metadata_json = json.dumps(w.workout_metadata) if w.workout_metadata else None
+            result = db.execute(text("""
+                INSERT INTO external_workout (
+                    id, user_id, source, external_id, activity_type,
+                    started_at, ended_at, duration_seconds,
+                    total_energy_kcal, total_distance_m,
+                    avg_heart_rate, max_heart_rate, min_heart_rate,
+                    hr_zones, workout_metadata
+                ) VALUES (
+                    :id, :user_id, :source, :external_id, :activity_type,
+                    :started_at, :ended_at, :duration_seconds,
+                    :total_energy_kcal, :total_distance_m,
+                    :avg_hr, :max_hr, :min_hr,
+                    CAST(:hr_zones AS jsonb), CAST(:meta AS jsonb)
+                )
+                ON CONFLICT (user_id, source, external_id) DO NOTHING
+                RETURNING id
+            """), {
+                "id": workout_id,
+                "user_id": user_id,
+                "source": w.source,
+                "external_id": w.external_id,
+                "activity_type": w.activity_type,
+                "started_at": w.started_at,
+                "ended_at": w.ended_at,
+                "duration_seconds": w.duration_seconds,
+                "total_energy_kcal": w.total_energy_kcal,
+                "total_distance_m": w.total_distance_m,
+                "avg_hr": w.avg_heart_rate,
+                "max_hr": w.max_heart_rate,
+                "min_hr": w.min_heart_rate,
+                "hr_zones": hr_zones_json,
+                "meta": metadata_json,
+            })
+            if result.fetchone():
+                inserted += 1
+            else:
+                duplicates += 1
+
+        db.commit()
+        logger.info(f"External workouts: {inserted} inserted, {duplicates} duplicates for user {user_id}")
+        return BatchWorkoutsResponse(success=True, inserted_count=inserted, duplicate_count=duplicates)
+
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error ingesting workouts: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/workouts/recent")
+async def get_recent_external_workouts(
+    days: int = 30,
+    activity_type: Optional[str] = None,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """List recent external workouts (HealthKit/Watch) for the user."""
+    user_id = current_user.id
+    cutoff = datetime.now() - timedelta(days=days)
+
+    query = """
+        SELECT id, source, external_id, activity_type, started_at, ended_at,
+               duration_seconds, total_energy_kcal, total_distance_m,
+               avg_heart_rate, max_heart_rate, min_heart_rate,
+               hr_zones, workout_metadata
+        FROM external_workout
+        WHERE user_id = :user_id AND started_at >= :cutoff
+    """
+    params = {"user_id": user_id, "cutoff": cutoff, "limit": limit}
+    if activity_type:
+        query += " AND activity_type = :activity_type"
+        params["activity_type"] = activity_type
+    query += " ORDER BY started_at DESC LIMIT :limit"
+
+    try:
+        result = db.execute(text(query), params)
+        workouts = []
+        for row in result.fetchall():
+            workouts.append({
+                "id": row.id,
+                "source": row.source,
+                "external_id": row.external_id,
+                "activity_type": row.activity_type,
+                "started_at": row.started_at.isoformat() if row.started_at else None,
+                "ended_at": row.ended_at.isoformat() if row.ended_at else None,
+                "duration_seconds": row.duration_seconds,
+                "total_energy_kcal": float(row.total_energy_kcal) if row.total_energy_kcal else None,
+                "total_distance_m": float(row.total_distance_m) if row.total_distance_m else None,
+                "avg_heart_rate": row.avg_heart_rate,
+                "max_heart_rate": row.max_heart_rate,
+                "min_heart_rate": row.min_heart_rate,
+                "hr_zones": row.hr_zones,
+                "workout_metadata": row.workout_metadata,
+            })
+        return {"workouts": workouts, "count": len(workouts)}
+    except Exception as e:
+        logger.error(f"Error listing external workouts: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

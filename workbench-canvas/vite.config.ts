@@ -13,6 +13,7 @@ export default defineConfig({
     host: '0.0.0.0',
     port: 3002,
     strictPort: true,
+    allowedHosts: ['canvas.avery.cloud'],
   },
   define: {
     global: 'globalThis',

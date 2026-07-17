@@ -34,7 +34,7 @@ export interface SceneObject {
 }
 
 // Window types
-export type WindowType = 'note' | 'chat' | 'fitness' | 'projects' | 'timers' | 'settings' | 'fileviewer' | 'modelviewer' | 'research' | 'report'
+export type WindowType = 'note' | 'chat' | 'learning' | 'fitness' | 'projects' | 'timers' | 'settings' | 'fileviewer' | 'modelviewer' | 'research' | 'report' | 'email' | 'documents' | 'automation' | 'pkg' | 'intelligence'
 
 export interface Position {
   x: number
@@ -61,10 +61,16 @@ export interface NoteWindowData {
   noteId?: string
   title?: string
   content?: string
+  initialQuery?: string
 }
 
 export interface ChatWindowData {
   conversationId?: string
+}
+
+export interface LearningWindowData {
+  topicId?: string
+  initialTab?: 'chat' | 'library'
 }
 
 export interface FitnessWindowData {
@@ -107,9 +113,24 @@ export interface ReportWindowData {
   content: string
 }
 
+export interface EmailWindowData {
+  emailId?: string
+  initialQuery?: string
+}
+
+export interface DocumentsWindowData {
+  initialQuery?: string
+}
+
+export interface AutomationWindowData {
+  taskId?: string  // Optional: open specific task details
+  initialTab?: 'list' | 'endpoints'  // Which view to show
+}
+
 export type WindowData =
   | NoteWindowData
   | ChatWindowData
+  | LearningWindowData
   | FitnessWindowData
   | ProjectsWindowData
   | TimersWindowData
@@ -118,6 +139,19 @@ export type WindowData =
   | ModelViewerWindowData
   | ResearchWindowData
   | ReportWindowData
+  | EmailWindowData
+  | DocumentsWindowData
+  | AutomationWindowData
+  | PKGWindowData
+  | IntelligenceWindowData
+
+export interface PKGWindowData {
+  category?: string  // Filter by category on open
+}
+
+export interface IntelligenceWindowData {
+  sourceCategory?: string  // Filter by source category on open
+}
 
 // API types
 export interface Note {
@@ -252,4 +286,21 @@ export interface VisibleMapState {
   mapId: string
   position: Position
   collapsed: boolean
+}
+
+// Workspace scenes
+export interface WorkspaceScene {
+  id: string
+  name: string
+  description?: string
+  windows: Array<{
+    type: WindowType
+    title: string
+    position: Position
+    size: Size
+    data: WindowData
+  }>
+  transform: CanvasTransform
+  isBuiltIn: boolean
+  suggestedTimePeriods?: string[] // 'morning' | 'afternoon' | 'evening' | 'night'
 }

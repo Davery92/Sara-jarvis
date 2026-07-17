@@ -2,13 +2,18 @@
 Device Commands API Routes
 WebSocket and HTTP endpoints for cross-device command routing
 """
+import asyncio
 import logging
 from datetime import datetime
 from typing import Optional, List
+import secrets
+import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query
+from app.core.timezone import now as local_now
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 
 from app.core.auth import verify_token
 from app.core.deps import get_current_user
@@ -20,6 +25,11 @@ from app.services.machine_registry import machine_registry_service
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/devices", tags=["devices"])
+
+# Last-known media_state per user, so heartbeats only trigger a Jetson relay
+# on an actual change (B2.4) — best-effort/in-process, fine for a soft
+# ambient-sensitivity heuristic.
+_media_state_cache: dict = {}
 
 
 # Request/Response models
@@ -43,10 +53,19 @@ class DeviceInfo(BaseModel):
     device_id: str
     hostname: Optional[str]
     platform: Optional[str]
+    friendly_name: Optional[str] = None
     is_online: bool
     is_connected: bool  # Has active WebSocket
     activity_level: str
     last_activity_at: Optional[datetime]
+
+    @property
+    def status(self) -> str:
+        if self.is_connected:
+            return "connected"
+        if self.is_online:
+            return "online"
+        return "offline"
 
 
 class HeartbeatRequest(BaseModel):
@@ -149,14 +168,26 @@ async def device_websocket(
                     active_app=active_app
                 )
 
+                # Ambient-aware wake threshold (B2.4): relay a media_state
+                # change to the Jetson so it can boost its wake/barge-in
+                # sensitivity requirements while music/video is playing.
+                media_state = bool(data.get("media_state", False))
+                if _media_state_cache.get(user_id) != media_state:
+                    _media_state_cache[user_id] = media_state
+                    try:
+                        from app.routes.sensory import relay_media_state
+                        asyncio.ensure_future(relay_media_state(media_state))
+                    except Exception as e:
+                        logger.debug(f"media_state relay skipped: {e}")
+
                 # Acknowledge heartbeat
                 await websocket.send_json({
                     "type": "heartbeat_ack",
-                    "server_time": datetime.utcnow().isoformat()
+                    "server_time": local_now().isoformat()
                 })
 
             elif msg_type == "command_result":
-                # Log command result
+                # Log and resolve any pending send_command_and_wait() future
                 command_id = data.get("command_id")
                 success = data.get("success", False)
                 error = data.get("error")
@@ -164,10 +195,81 @@ async def device_websocket(
                     f"Command {command_id} result from {device_id}: "
                     f"success={success}, error={error}"
                 )
+                if command_id:
+                    command_router.resolve_command_result(command_id, {
+                        "success": success,
+                        "result": data.get("result"),
+                        "error": error,
+                    })
 
             elif msg_type == "screenshot_ready":
                 # Device has a screenshot ready to upload
                 logger.info(f"Screenshot ready from {device_id}")
+
+            elif msg_type == "focus_span":
+                # Desktop focus tracker emitted a completed span. Publish to the
+                # event bus so the salience subscriber can score it and feed
+                # ACS working memory.
+                try:
+                    from app.services.event_bus import event_bus, Event, EventType
+                    await event_bus.publish(Event(
+                        event_type=EventType.DESKTOP_FOCUS_SPAN,
+                        user_id=user_id,
+                        source="desktop",
+                        payload={
+                            "device_id": device_id,
+                            "app": data.get("app"),
+                            "window": data.get("window"),
+                            "start_ts": data.get("start_ts"),
+                            "end_ts": data.get("end_ts"),
+                            "duration_seconds": data.get("duration_seconds", 0),
+                            "keyboard_events": data.get("keyboard_events", 0),
+                            "mouse_events": data.get("mouse_events", 0),
+                            "derived_state": data.get("derived_state"),
+                            # Browser-extension enrichment (only present when
+                            # the focused app is a browser AND the extension
+                            # has been streaming).
+                            "url": data.get("url"),
+                            "domain": data.get("domain"),
+                            "page_title": data.get("page_title"),
+                        },
+                    ))
+                except Exception as e:
+                    logger.warning(f"Failed to publish focus_span from {device_id}: {e}")
+
+            elif msg_type == "activity_state":
+                # Desktop activity state transition.
+                try:
+                    from app.services.event_bus import event_bus, Event, EventType
+                    await event_bus.publish(Event(
+                        event_type=EventType.DESKTOP_ACTIVITY_STATE,
+                        user_id=user_id,
+                        source="desktop",
+                        payload={
+                            "device_id": device_id,
+                            "state": data.get("state"),
+                            "previous_state": data.get("previous_state"),
+                            "since_ts": data.get("since_ts"),
+                            "active_app": data.get("active_app"),
+                            "active_window": data.get("active_window"),
+                        },
+                    ))
+                except Exception as e:
+                    logger.warning(f"Failed to publish activity_state from {device_id}: {e}")
+
+            elif msg_type == "playback_state":
+                # Local TTS playback state from a sidecar SPEAK command.
+                # Relay as a voice_state event to this user's other connected
+                # devices so multi-device HUDs mirror the speaking orb (A3).
+                is_playing = bool((data.get("data") or {}).get("is_playing"))
+                try:
+                    await command_router.push_event(
+                        user_id,
+                        event="voice_state",
+                        data={"state": "speaking" if is_playing else "idle", "device_id": device_id},
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to relay playback_state from {device_id}: {e}")
 
             else:
                 logger.warning(f"Unknown message type from {device_id}: {msg_type}")
@@ -203,6 +305,9 @@ async def send_command(
     - take_screenshot: Request a screenshot. Payload: {"analyze": bool, "analyze_prompt": "..."}
     - speak: Speak text via TTS. Payload: {"text": "..."}
     - show_notification: Show a notification. Payload: {"title": "...", "message": "..."}
+    - open_overlay: Open an overlay window. Payload: {"kind": "...", "payload": {...}}
+    - record_voice_note: Ask the device to start recording a voice note. Payload: {}
+    - cancel_speech: Stop any in-progress TTS playback. Payload: {}
     """
     user_id = current_user.id
 
@@ -221,6 +326,17 @@ async def send_command(
     )
 
     success = await command_router.send_command(db, user_id, command)
+
+    # CANCEL_SPEECH is a "stop everywhere" gesture (B2.6) — always also try
+    # the Jetson's separate control channel, regardless of whether a WS-
+    # connected desktop picked it up (fire-and-forget: a Jetson that's
+    # offline or not in use just silently ignores this).
+    if command_type == CommandType.CANCEL_SPEECH:
+        try:
+            from app.routes.sensory import request_jetson_stop
+            asyncio.ensure_future(request_jetson_stop())
+        except Exception as e:
+            logger.debug(f"Jetson stop relay skipped: {e}")
 
     if success:
         target = request.target_device_id or "active device"
@@ -301,15 +417,17 @@ async def get_connected_devices(
 
     devices = []
     for machine in machines:
-        devices.append(DeviceInfo(
+        info = DeviceInfo(
             device_id=machine.device_id,
             hostname=machine.hostname,
             platform=machine.platform,
+            friendly_name=getattr(machine, 'friendly_name', None),
             is_online=machine.is_online,
             is_connected=machine.device_id in connected_ids,
             activity_level=machine.activity_level or "idle",
-            last_activity_at=machine.last_activity_at
-        ))
+            last_activity_at=machine.last_activity_at,
+        )
+        devices.append(info)
 
     return devices
 
@@ -339,41 +457,153 @@ async def get_active_device(
     return {"device_id": None, "message": "No active device"}
 
 
-@router.post("/register")
-async def register_device(
-    device_id: str,
-    hostname: str,
-    platform: str,
-    os_version: Optional[str] = None,
-    agent_version: Optional[str] = None,
+@router.get("/presence")
+async def get_device_presence(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
-    Register a new device or update existing registration.
-    Called by desktop agents on startup.
+    Unified "where is David active right now" answer (A7) — combines
+    desktop heartbeats, iOS/web foreground presence, Jetson desk presence,
+    and location into one resolved snapshot. Used for chat context, overlay
+    routing, and voice-note device selection so every caller agrees.
     """
-    user_id = current_user.id
+    from app.services.device_presence import resolve as resolve_presence
+    from dataclasses import asdict
 
-    machine = await machine_registry_service.register_machine(
-        db=db,
-        user_id=user_id,
-        device_id=device_id,
-        hostname=hostname,
-        platform=platform,
-        os_version=os_version,
-        capabilities=["screenshot", "wake_word", "commands"],
-        agent_version=agent_version
+    presence = await resolve_presence(db, str(current_user.id))
+    return asdict(presence)
+
+
+@router.post("/register")
+async def register_device(
+    request: Request,
+    payload: Optional[dict] = Body(default=None),
+    device_id: Optional[str] = None,
+    hostname: Optional[str] = None,
+    platform: Optional[str] = None,
+    os_version: Optional[str] = None,
+    agent_version: Optional[str] = None,
+    capabilities: Optional[List[str]] = Query(default=None),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Unified device registration endpoint.
+
+    Supports both:
+    - Desktop/headless agents (query params): device_id, hostname, platform
+    - Pi dashboard (JSON body): device_name/device_type -> returns device_token
+    """
+    body = payload or {}
+    user_id = str(current_user.id)
+
+    resolved_device_id = device_id or body.get("device_id")
+    resolved_hostname = hostname or body.get("hostname")
+    resolved_platform = platform or body.get("platform")
+
+    # Desktop/headless agent flow
+    if resolved_device_id and resolved_hostname and resolved_platform:
+        # Capabilities actually used by the caller (A3): overlays, tts, mic,
+        # screenshot, actuators, multi_monitor. Accepted as repeated query
+        # params (?capabilities=screenshot&capabilities=mic) or a JSON body
+        # list. Falls back to the historical default set for agents that
+        # haven't been updated to report them yet.
+        resolved_capabilities = capabilities or body.get("capabilities")
+        if not resolved_capabilities:
+            resolved_capabilities = ["screenshot", "wake_word", "commands"]
+
+        machine = await machine_registry_service.register_machine(
+            db=db,
+            user_id=user_id,
+            device_id=resolved_device_id,
+            hostname=resolved_hostname,
+            platform=resolved_platform,
+            os_version=os_version,
+            capabilities=resolved_capabilities,
+            agent_version=agent_version,
+        )
+
+        return {
+            "success": True,
+            "machine_id": machine.id,
+            "device_id": machine.device_id,
+            "config": {
+                "screenshot_enabled": machine.screenshot_enabled,
+                "screenshot_interval_seconds": machine.screenshot_interval_seconds,
+                # Used by headless agent if provided by server
+                "heartbeat_interval": 30,
+                "metrics_interval": 60,
+            },
+        }
+
+    # Pi dashboard flow (requires JSON body contract)
+    pi_payload = bool(body.get("device_name") or body.get("device_type"))
+    if not pi_payload:
+        raise HTTPException(
+            status_code=422,
+            detail="Provide either device_id/hostname/platform or device_name/device_type",
+        )
+
+    device_name = (body.get("device_name") or request.headers.get("X-Device-Name") or "Unknown Device").strip()
+    device_type = str(body.get("device_type") or "pi_dashboard").strip() or "pi_dashboard"
+
+    # Reuse existing token for same user+device_name to avoid token churn.
+    existing = db.execute(
+        text(
+            """
+            SELECT id, device_token
+            FROM device_registration
+            WHERE user_id = :user_id
+              AND device_name = :device_name
+            ORDER BY created_at DESC
+            LIMIT 1
+            """
+        ),
+        {"user_id": user_id, "device_name": device_name},
+    ).fetchone()
+
+    if existing:
+        db.execute(
+            text(
+                """
+                UPDATE device_registration
+                SET last_seen = NOW(), device_type = :device_type
+                WHERE id = :id
+                """
+            ),
+            {"id": existing.id, "device_type": device_type},
+        )
+        db.commit()
+        return {
+            "device_id": existing.id,
+            "device_token": existing.device_token,
+            "message": "Device already registered. Returning existing token.",
+        }
+
+    device_token = secrets.token_urlsafe(32)
+    token_id = str(uuid.uuid4())
+    db.execute(
+        text(
+            """
+            INSERT INTO device_registration (id, user_id, device_name, device_token, device_type, last_seen, created_at)
+            VALUES (:id, :user_id, :device_name, :device_token, :device_type, NOW(), NOW())
+            """
+        ),
+        {
+            "id": token_id,
+            "user_id": user_id,
+            "device_name": device_name,
+            "device_token": device_token,
+            "device_type": device_type,
+        },
     )
+    db.commit()
 
     return {
-        "success": True,
-        "machine_id": machine.id,
-        "device_id": machine.device_id,
-        "config": {
-            "screenshot_enabled": machine.screenshot_enabled,
-            "screenshot_interval_seconds": machine.screenshot_interval_seconds
-        }
+        "device_id": token_id,
+        "device_token": device_token,
+        "message": "Device registered. Store this token securely.",
     }
 
 
@@ -396,7 +626,7 @@ async def device_heartbeat(
 
     return HeartbeatResponse(
         acknowledged=True,
-        server_time=datetime.utcnow(),
+        server_time=local_now(),
         screenshot_interval=machine.screenshot_interval_seconds
     )
 
@@ -477,6 +707,59 @@ async def update_device_name(
         "success": True,
         "device_id": device_id,
         "friendly_name": body.friendly_name
+    }
+
+
+class UpdateDeviceConfigRequest(BaseModel):
+    """Desktop settings panel toggles (A9) — all fields optional/partial."""
+    screenshot_enabled: Optional[bool] = None
+    screenshot_interval_seconds: Optional[int] = None
+    clipboard_enabled: Optional[bool] = None
+    terminal_enabled: Optional[bool] = None
+    file_access_enabled: Optional[bool] = None
+
+
+@router.patch("/{device_id}/config")
+async def update_device_config(
+    device_id: str,
+    body: UpdateDeviceConfigRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Update capture/privacy configuration for a device (desktop Settings > Privacy tab)."""
+    machine = await machine_registry_service.get_machine_by_device_id(db, device_id)
+    if not machine or machine.user_id != str(current_user.id):
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    updated = await machine_registry_service.update_machine_config(
+        db, device_id,
+        screenshot_enabled=body.screenshot_enabled,
+        screenshot_interval_seconds=body.screenshot_interval_seconds,
+        clipboard_enabled=body.clipboard_enabled,
+        terminal_enabled=body.terminal_enabled,
+        file_access_enabled=body.file_access_enabled,
+    )
+
+    if not updated:
+        raise HTTPException(status_code=500, detail="Failed to update device config")
+
+    # Push live so a connected sidecar applies it immediately, not just on
+    # its next reconnect.
+    if body.screenshot_enabled is not None or body.screenshot_interval_seconds is not None:
+        await command_router.send_config_update(
+            device_id,
+            screenshot_enabled=body.screenshot_enabled,
+            screenshot_interval_seconds=body.screenshot_interval_seconds,
+        )
+
+    return {
+        "success": True,
+        "device_id": device_id,
+        "screenshot_enabled": updated.screenshot_enabled,
+        "screenshot_interval_seconds": updated.screenshot_interval_seconds,
+        "clipboard_enabled": updated.clipboard_enabled,
+        "terminal_enabled": updated.terminal_enabled,
+        "file_access_enabled": updated.file_access_enabled,
     }
 
 

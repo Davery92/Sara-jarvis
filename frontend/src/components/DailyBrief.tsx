@@ -135,7 +135,7 @@ export const DailyBrief: React.FC<DailyBriefProps> = ({ date, className }) => {
   if (loading) {
     return (
       <div className={`daily-brief ${className || ''}`}>
-        <div className="bg-card border border-card rounded-xl p-6">
+        <div className="bg-card border border-card rounded-md p-6">
           <div className="text-center py-8">
             <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-teal-500 mx-auto mb-4"></div>
             <p className="text-gray-400">Loading daily brief...</p>
@@ -148,7 +148,7 @@ export const DailyBrief: React.FC<DailyBriefProps> = ({ date, className }) => {
   if (error || !brief) {
     return (
       <div className={`daily-brief ${className || ''}`}>
-        <div className="bg-card border border-card rounded-xl p-6">
+        <div className="bg-card border border-card rounded-md p-6">
           <div className="text-center py-8">
             <p className="text-red-400">{error || 'Failed to load brief'}</p>
             <button
@@ -165,7 +165,7 @@ export const DailyBrief: React.FC<DailyBriefProps> = ({ date, className }) => {
 
   return (
     <div className={`daily-brief ${className || ''}`}>
-      <div className="bg-card border border-card rounded-xl">
+      <div className="bg-card border border-card rounded-md">
         {/* Header */}
         <div className="flex items-center justify-between p-6 border-b border-gray-700">
           <div>

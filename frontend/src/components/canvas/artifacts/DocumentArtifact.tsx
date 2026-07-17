@@ -9,8 +9,6 @@ import { Copy, Check, FileText, Code } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Artifact, DocumentContent, ArtifactContent } from '../types';
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 
 interface DocumentArtifactProps {
   artifact: Artifact;
@@ -59,19 +57,11 @@ export const DocumentArtifact: React.FC<DocumentArtifactProps> = ({
 
       if (!inline && language) {
         return (
-          <SyntaxHighlighter
-            style={oneDark}
-            language={language}
-            PreTag="div"
-            customStyle={{
-              margin: '1rem 0',
-              borderRadius: '0.5rem',
-              fontSize: '0.875rem',
-            }}
-            {...props}
-          >
-            {String(children).replace(/\n$/, '')}
-          </SyntaxHighlighter>
+          <pre className="my-4 rounded-lg bg-gray-950 border border-gray-800 p-4 overflow-x-auto">
+            <code className={`${className} text-gray-100 text-sm`} {...props}>
+              {String(children).replace(/\n$/, '')}
+            </code>
+          </pre>
         );
       }
 

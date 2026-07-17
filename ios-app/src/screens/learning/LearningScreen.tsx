@@ -1,1194 +1,810 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
-  Text,
+  FlatList,
   StyleSheet,
   TouchableOpacity,
-  ScrollView,
-  FlatList,
-  TextInput,
-  ActivityIndicator,
+  Text,
   Alert,
-  Animated,
-  RefreshControl,
-  Modal,
-  Switch,
-  KeyboardAvoidingView,
-  Platform,
+  ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
-import { apiClient } from '../../services/api';
-import { voiceService } from '../../services/voice';
-import { chatService } from '../../services/chat';
+import apiClient from '../../services/api';
+import { Ionicons } from '@expo/vector-icons';
+import { navigateToChat } from '../../services/navigation';
 
-type TabType = 'topics' | 'flashcards' | 'chat';
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
 
 interface Topic {
   id: string;
+  user_id: string;
+  parent_id: string | null;
   title: string;
-  description: string;
-  mastery_level: number;
+  description: string | null;
   status: string;
+  mastery_level: number;
   priority: number;
+  created_at: string;
+  updated_at: string;
 }
 
-interface Flashcard {
+interface ReviewItem {
   id: string;
-  front: string;
-  back: string;
-  hint?: string;
-  topic_id?: string;
-  topic_title?: string;
+  topic_id: string | null;
+  source_id: string | null;
+  concept: string | null;
+  ease_factor: number;
+  interval_days: number;
+  repetitions: number;
+  next_review_at: string | null;
+  last_reviewed_at: string | null;
 }
 
-interface Message {
-  id: string;
-  role: 'user' | 'assistant';
-  content: string;
+interface ReviewQueue {
+  due_count: number;
+  items: ReviewItem[];
 }
+
+interface NextSession {
+  topic_id: string;
+  topic_title: string;
+  suggested_duration: number;
+  focus_areas: string[];
+  reason: string;
+}
+
+type TabMode = 'topics' | 'review';
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+const BASE = apiClient.baseURL || 'http://10.185.1.180:8000';
+
+async function fetchJSON<T>(path: string): Promise<T> {
+  const response = await fetch(`${BASE}${path}`, { credentials: 'include' });
+  if (!response.ok) {
+    throw new Error(`Request failed: ${response.status}`);
+  }
+  return response.json();
+}
+
+function statusColor(status: string): string {
+  switch (status) {
+    case 'active':
+      return colors.success;
+    case 'completed':
+      return colors.primary;
+    case 'paused':
+      return colors.warning;
+    default:
+      return colors.textMuted;
+  }
+}
+
+function priorityLabel(priority: number): string {
+  if (priority >= 8) return 'High';
+  if (priority >= 5) return 'Med';
+  return 'Low';
+}
+
+function priorityColor(priority: number): string {
+  if (priority >= 8) return colors.error;
+  if (priority >= 5) return colors.warning;
+  return colors.textMuted;
+}
+
+// ---------------------------------------------------------------------------
+// Component
+// ---------------------------------------------------------------------------
 
 export default function LearningScreen() {
-  const [activeTab, setActiveTab] = useState<TabType>('topics');
+  const [tab, setTab] = useState<TabMode>('topics');
   const [topics, setTopics] = useState<Topic[]>([]);
-  const [selectedTopic, setSelectedTopic] = useState<Topic | null>(null);
-  const [flashcards, setFlashcards] = useState<Flashcard[]>([]);
-  const [currentCardIndex, setCurrentCardIndex] = useState(0);
-  const [showAnswer, setShowAnswer] = useState(false);
-  const [scratchpadContent, setScratchpadContent] = useState('');
-  const [loading, setLoading] = useState(false);
+  const [reviewQueue, setReviewQueue] = useState<ReviewQueue>({ due_count: 0, items: [] });
+  const [nextSession, setNextSession] = useState<NextSession | null>(null);
+  const [expandedTopicId, setExpandedTopicId] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
-  // Chat state
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [chatInput, setChatInput] = useState('');
-  const [isStreaming, setIsStreaming] = useState(false);
-  const [streamingMessage, setStreamingMessage] = useState('');
+  // Topic name lookup for review items
+  const topicNameMap = React.useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const t of topics) {
+      map[t.id] = t.title;
+    }
+    return map;
+  }, [topics]);
 
-  // New topic creation state
-  const [showNewTopicModal, setShowNewTopicModal] = useState(false);
-  const [newTopicTitle, setNewTopicTitle] = useState('');
-  const [newTopicDescription, setNewTopicDescription] = useState('');
-  const [autoResearch, setAutoResearch] = useState(true);
-  const [creatingTopic, setCreatingTopic] = useState(false);
-
-  // Voice state
-  const [voiceInitialized, setVoiceInitialized] = useState(false);
-  const [ambientMode, setAmbientMode] = useState(false);
-  const [isListening, setIsListening] = useState(false);
-  const [isPlayingAudio, setIsPlayingAudio] = useState(false);
-  const shouldResumeListening = useRef(false);
-  const streamingMessageRef = useRef('');
-  const scaleAnim = useRef(new Animated.Value(1)).current;
-
-  useEffect(() => {
-    loadTopics();
-    initVoice();
-    return () => {
-      voiceService.cleanup();
-    };
-  }, []);
-
-  const initVoice = async () => {
-    const initialized = await voiceService.initialize();
-    setVoiceInitialized(initialized);
-  };
-
-  const loadTopics = async () => {
+  const loadData = useCallback(async () => {
     try {
-      setLoading(true);
-      const response = await apiClient.get<Topic[]>('/api/learn/topics?status=active');
-      // apiClient.get already returns response.data, not wrapped in a .data property
-      setTopics(response || []);
+      const [topicsData, reviewData, sessionData] = await Promise.allSettled([
+        fetchJSON<Topic[]>('/api/learn/topics?include_all=true'),
+        fetchJSON<ReviewQueue>('/api/learn/review-queue'),
+        fetchJSON<NextSession>('/api/learn/path/next-session'),
+      ]);
+
+      if (topicsData.status === 'fulfilled') {
+        setTopics(topicsData.value);
+      }
+      if (reviewData.status === 'fulfilled') {
+        setReviewQueue(reviewData.value);
+      }
+      if (sessionData.status === 'fulfilled') {
+        setNextSession(sessionData.value);
+      } else {
+        setNextSession(null);
+      }
     } catch (error) {
-      console.error('Failed to load topics:', error);
+      console.error('Failed to load learning data:', error);
+      Alert.alert('Error', 'Failed to load learning data');
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  };
+  }, []);
 
-  const loadFlashcards = async (topicId: string) => {
-    try {
-      setLoading(true);
-      const response = await apiClient.post<{flashcards: Flashcard[], has_sources?: boolean}>(`/api/learn/topics/${topicId}/flashcards`, {
-        card_count: 10
-      });
-      if (response?.flashcards) {
-        setFlashcards(response.flashcards);
-        setCurrentCardIndex(0);
-        setShowAnswer(false);
-        if (response.has_sources === false) {
-          Alert.alert('Note', 'Flashcards generated from general knowledge. Add sources in the web app for more targeted content.');
-        }
-      }
-    } catch (error) {
-      console.error('Failed to load flashcards:', error);
-      Alert.alert('Error', 'Failed to generate flashcards. Please try again.');
-    } finally {
-      setLoading(false);
-    }
-  };
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
 
-  const loadScratchpad = async (topicId: string) => {
-    try {
-      const response = await apiClient.get<{content: string}>(`/api/learn/topics/${topicId}/scratchpad`);
-      setScratchpadContent(response?.content || '');
-    } catch (error) {
-      console.error('Failed to load scratchpad:', error);
-    }
-  };
+  const handleRefresh = useCallback(() => {
+    setRefreshing(true);
+    loadData();
+  }, [loadData]);
 
-  const saveScratchpad = async () => {
-    if (!selectedTopic) return;
-    try {
-      await apiClient.put(`/api/learn/topics/${selectedTopic.id}/scratchpad`, {
-        content: scratchpadContent
-      });
-    } catch (error) {
-      console.error('Failed to save scratchpad:', error);
-    }
-  };
+  // ------ Grouped topics: active first, then completed, then paused ------
+  const groupedTopics = React.useMemo(() => {
+    const order: Record<string, number> = { active: 0, paused: 1, completed: 2 };
+    return [...topics].sort((a, b) => {
+      const oa = order[a.status] ?? 3;
+      const ob = order[b.status] ?? 3;
+      if (oa !== ob) return oa - ob;
+      return b.priority - a.priority;
+    });
+  }, [topics]);
 
-  const selectTopic = (topic: Topic) => {
-    setSelectedTopic(topic);
-    loadScratchpad(topic.id);
-    setMessages([]);
-  };
+  // ------ Renderers ------
 
-  const createTopic = async () => {
-    if (!newTopicTitle.trim()) {
-      Alert.alert('Error', 'Please enter a topic title');
-      return;
-    }
-
-    try {
-      setCreatingTopic(true);
-
-      // Create the topic
-      const topic = await apiClient.post<Topic>('/api/learn/topics', {
-        title: newTopicTitle.trim(),
-        description: newTopicDescription.trim() || null,
-        priority: 5
-      });
-
-      // If auto-research is enabled, trigger it
-      if (autoResearch && topic?.id) {
-        try {
-          const researchResult = await apiClient.post<{sources_added: number, sources_fetched: number}>(
-            `/api/learn/topics/${topic.id}/auto-research`
-          );
-          Alert.alert(
-            'Topic Created',
-            `"${newTopicTitle}" created with ${researchResult.sources_added || 0} sources found and ${researchResult.sources_fetched || 0} processed.`
-          );
-        } catch (researchError) {
-          console.error('Auto-research failed:', researchError);
-          Alert.alert('Topic Created', `"${newTopicTitle}" created. Auto-research encountered an error, but the topic is ready.`);
-        }
-      } else {
-        Alert.alert('Topic Created', `"${newTopicTitle}" has been created.`);
-      }
-
-      // Reset and refresh
-      setShowNewTopicModal(false);
-      setNewTopicTitle('');
-      setNewTopicDescription('');
-      loadTopics();
-
-    } catch (error) {
-      console.error('Failed to create topic:', error);
-      Alert.alert('Error', 'Failed to create topic. Please try again.');
-    } finally {
-      setCreatingTopic(false);
-    }
-  };
-
-  // Chat functions
-  const sendMessage = async (text: string) => {
-    if (!text.trim() || isStreaming) return;
-
-    const userMessage: Message = {
-      id: `user-${Date.now()}`,
-      role: 'user',
-      content: text.trim(),
-    };
-
-    setMessages(prev => [...prev, userMessage]);
-    setChatInput('');
-    setIsStreaming(true);
-    setStreamingMessage('');
-    streamingMessageRef.current = '';
-
-    try {
-      // Get auth token for the request
-      const token = await apiClient.getToken();
-
-      // Use learning chat endpoint
-      const response = await fetch(`${apiClient.baseURL}/api/learn/chat/stream`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
-        },
-        body: JSON.stringify({
-          message: text.trim(),
-          topic_id: selectedTopic?.id,
-        }),
-      });
-
-      const reader = response.body?.getReader();
-      const decoder = new TextDecoder();
-
-      if (reader) {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          const chunk = decoder.decode(value);
-          const lines = chunk.split('\n');
-
-          for (const line of lines) {
-            if (line.startsWith('data: ')) {
-              try {
-                const data = JSON.parse(line.slice(6));
-                if (data.type === 'token' && data.data?.content) {
-                  streamingMessageRef.current += data.data.content;
-                  setStreamingMessage(streamingMessageRef.current);
-                } else if (data.type === 'final_response') {
-                  streamingMessageRef.current = data.data?.content || streamingMessageRef.current;
-                }
-              } catch (e) {
-                // Ignore parse errors
-              }
-            }
-          }
-        }
-      }
-
-      const assistantMessage: Message = {
-        id: `assistant-${Date.now()}`,
-        role: 'assistant',
-        content: streamingMessageRef.current,
-      };
-      setMessages(prev => [...prev, assistantMessage]);
-
-      // Speak in ambient mode
-      if (ambientMode && streamingMessageRef.current) {
-        setIsPlayingAudio(true);
-        await voiceService.speak(streamingMessageRef.current);
-        setIsPlayingAudio(false);
-
-        if (shouldResumeListening.current) {
-          startContinuousListening();
-        }
-      }
-    } catch (error) {
-      console.error('Chat error:', error);
-      Alert.alert('Error', 'Failed to send message');
-    } finally {
-      setIsStreaming(false);
-      setStreamingMessage('');
-      streamingMessageRef.current = '';
-    }
-  };
-
-  // Voice functions
-  const startContinuousListening = async () => {
-    try {
-      setIsListening(true);
-      Animated.loop(
-        Animated.sequence([
-          Animated.timing(scaleAnim, { toValue: 1.3, duration: 600, useNativeDriver: true }),
-          Animated.timing(scaleAnim, { toValue: 1, duration: 600, useNativeDriver: true }),
-        ])
-      ).start();
-
-      await voiceService.startContinuousRecording(async () => {
-        setIsListening(false);
-        scaleAnim.stopAnimation();
-        scaleAnim.setValue(1);
-
-        const audioUri = await voiceService.stopRecording();
-        if (audioUri) {
-          const transcribed = await voiceService.transcribeAudio(audioUri);
-          if (transcribed?.trim()) {
-            await sendMessage(transcribed);
-          } else if (shouldResumeListening.current) {
-            startContinuousListening();
-          }
-        }
-      });
-    } catch (error) {
-      console.error('Failed to start listening:', error);
-      setIsListening(false);
-    }
-  };
-
-  const toggleAmbientMode = async () => {
-    if (ambientMode) {
-      shouldResumeListening.current = false;
-      setAmbientMode(false);
-      setIsListening(false);
-      try {
-        await voiceService.stopRecording();
-      } catch (e) {}
-    } else {
-      setAmbientMode(true);
-      shouldResumeListening.current = true;
-      await startContinuousListening();
-    }
-  };
-
-  const getMasteryColor = (level: number) => {
-    if (level >= 0.85) return '#10B981';
-    if (level >= 0.6) return '#14B8A6';
-    if (level >= 0.3) return '#F59E0B';
-    return '#F97316';
-  };
-
-  const renderTopicsList = () => (
-    <ScrollView
-      style={styles.tabContent}
-      refreshControl={
-        <RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); loadTopics(); }} />
-      }
-    >
-      {selectedTopic ? (
-        <View>
-          {/* Selected Topic Header */}
-          <TouchableOpacity style={styles.backButton} onPress={() => setSelectedTopic(null)}>
-            <Text style={styles.backButtonText}>← All Topics</Text>
-          </TouchableOpacity>
-
-          <View style={styles.topicHeader}>
-            <Text style={styles.topicTitle}>{selectedTopic.title}</Text>
-            <View style={styles.masteryBadge}>
-              <View style={[styles.masteryDot, { backgroundColor: getMasteryColor(selectedTopic.mastery_level) }]} />
-              <Text style={styles.masteryText}>{Math.round(selectedTopic.mastery_level * 100)}% mastery</Text>
-            </View>
-            {selectedTopic.description && (
-              <Text style={styles.topicDescription}>{selectedTopic.description}</Text>
-            )}
-          </View>
-
-          {/* Actions */}
-          <View style={styles.actionsRow}>
-            <TouchableOpacity
-              style={styles.actionButton}
-              onPress={() => { loadFlashcards(selectedTopic.id); setActiveTab('flashcards'); }}
-            >
-              <Text style={styles.actionIcon}>🎴</Text>
-              <Text style={styles.actionText}>Flashcards</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.actionButton}
-              onPress={() => setActiveTab('chat')}
-            >
-              <Text style={styles.actionIcon}>💬</Text>
-              <Text style={styles.actionText}>Study Chat</Text>
-            </TouchableOpacity>
-          </View>
-
-          {/* Scratchpad */}
-          <View style={styles.scratchpadSection}>
-            <Text style={styles.sectionTitle}>Notes</Text>
-            <TextInput
-              style={styles.scratchpad}
-              value={scratchpadContent}
-              onChangeText={setScratchpadContent}
-              onBlur={saveScratchpad}
-              placeholder="Take notes while studying..."
-              placeholderTextColor={colors.textMuted}
-              multiline
-              textAlignVertical="top"
-            />
-          </View>
-        </View>
-      ) : (
-        <View>
-          <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>Your Learning Topics</Text>
-            <TouchableOpacity
-              style={styles.addButton}
-              onPress={() => setShowNewTopicModal(true)}
-            >
-              <Text style={styles.addButtonText}>+ New</Text>
-            </TouchableOpacity>
-          </View>
-          {loading ? (
-            <ActivityIndicator color={colors.primary} style={{ marginTop: 40 }} />
-          ) : topics.length === 0 ? (
-            <View style={styles.emptyState}>
-              <Text style={styles.emptyIcon}>📚</Text>
-              <Text style={styles.emptyText}>No topics yet</Text>
-              <Text style={styles.emptySubtext}>Tap "+ New" above to create your first learning topic</Text>
-              <TouchableOpacity
-                style={styles.createTopicButton}
-                onPress={() => setShowNewTopicModal(true)}
-              >
-                <Text style={styles.createTopicButtonText}>Create Topic</Text>
-              </TouchableOpacity>
-            </View>
-          ) : (
-            topics.map(topic => (
-              <TouchableOpacity
-                key={topic.id}
-                style={styles.topicCard}
-                onPress={() => selectTopic(topic)}
-              >
-                <View style={styles.topicCardContent}>
-                  <Text style={styles.topicCardTitle}>{topic.title}</Text>
-                  {topic.description && (
-                    <Text style={styles.topicCardDesc} numberOfLines={2}>{topic.description}</Text>
-                  )}
-                  <View style={styles.topicCardMeta}>
-                    <View style={[styles.masteryBar, { backgroundColor: colors.border }]}>
-                      <View style={[
-                        styles.masteryFill,
-                        { width: `${topic.mastery_level * 100}%`, backgroundColor: getMasteryColor(topic.mastery_level) }
-                      ]} />
-                    </View>
-                    <Text style={styles.masteryPercent}>{Math.round(topic.mastery_level * 100)}%</Text>
-                  </View>
-                </View>
-                <Text style={styles.chevron}>›</Text>
-              </TouchableOpacity>
-            ))
+  const renderNextSessionCard = () => {
+    if (!nextSession) return null;
+    return (
+      <View style={styles.nextSessionCard}>
+        <Text style={styles.nextSessionLabel}>Next Session</Text>
+        <Text style={styles.nextSessionTitle}>{nextSession.topic_title}</Text>
+        <View style={styles.nextSessionMeta}>
+          <Text style={styles.nextSessionDuration}>
+            {nextSession.suggested_duration} min
+          </Text>
+          {nextSession.focus_areas && nextSession.focus_areas.length > 0 && (
+            <Text style={styles.nextSessionFocus} numberOfLines={1}>
+              Focus: {nextSession.focus_areas.join(', ')}
+            </Text>
           )}
         </View>
-      )}
-    </ScrollView>
-  );
-
-  const renderFlashcards = () => {
-    const currentCard = flashcards[currentCardIndex];
-
-    return (
-      <View style={styles.tabContent}>
-        {selectedTopic && (
-          <TouchableOpacity style={styles.backButton} onPress={() => setActiveTab('topics')}>
-            <Text style={styles.backButtonText}>← Back to {selectedTopic.title}</Text>
-          </TouchableOpacity>
-        )}
-
-        {loading ? (
-          <ActivityIndicator color={colors.primary} style={{ marginTop: 100 }} />
-        ) : flashcards.length === 0 ? (
-          <View style={styles.emptyState}>
-            <Text style={styles.emptyIcon}>🎴</Text>
-            <Text style={styles.emptyText}>No flashcards</Text>
-            <Text style={styles.emptySubtext}>Select a topic to generate flashcards</Text>
-          </View>
-        ) : currentCard ? (
-          <View style={styles.flashcardContainer}>
-            <Text style={styles.cardProgress}>
-              Card {currentCardIndex + 1} of {flashcards.length}
-            </Text>
-
-            <TouchableOpacity
-              style={[styles.flashcard, showAnswer && styles.flashcardFlipped]}
-              onPress={() => setShowAnswer(!showAnswer)}
-              activeOpacity={0.9}
-            >
-              <Text style={styles.flashcardLabel}>{showAnswer ? 'ANSWER' : 'QUESTION'}</Text>
-              <Text style={styles.flashcardText}>
-                {showAnswer ? currentCard.back : currentCard.front}
-              </Text>
-              {!showAnswer && currentCard.hint && (
-                <Text style={styles.flashcardHint}>Hint: {currentCard.hint}</Text>
-              )}
-              <Text style={styles.tapHint}>Tap to {showAnswer ? 'see question' : 'reveal answer'}</Text>
-            </TouchableOpacity>
-
-            <View style={styles.cardNavigation}>
-              <TouchableOpacity
-                style={[styles.navButton, currentCardIndex === 0 && styles.navButtonDisabled]}
-                onPress={() => { setCurrentCardIndex(i => i - 1); setShowAnswer(false); }}
-                disabled={currentCardIndex === 0}
-              >
-                <Text style={styles.navButtonText}>← Previous</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.navButton, currentCardIndex === flashcards.length - 1 && styles.navButtonDisabled]}
-                onPress={() => { setCurrentCardIndex(i => i + 1); setShowAnswer(false); }}
-                disabled={currentCardIndex === flashcards.length - 1}
-              >
-                <Text style={styles.navButtonText}>Next →</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
+        {nextSession.reason ? (
+          <Text style={styles.nextSessionReason} numberOfLines={2}>
+            {nextSession.reason}
+          </Text>
         ) : null}
       </View>
     );
   };
 
-  const renderChat = () => (
-    <KeyboardAvoidingView
-      style={styles.chatContainer}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      keyboardVerticalOffset={0}
-    >
-      {selectedTopic && (
-        <View style={styles.chatHeader}>
-          <TouchableOpacity onPress={() => setActiveTab('topics')}>
-            <Text style={styles.backButtonText}>← {selectedTopic.title}</Text>
+  const openLearningPrompt = () => {
+    const message = reviewQueue.due_count > 0
+      ? `Help me work through my ${reviewQueue.due_count} due learning review${reviewQueue.due_count === 1 ? '' : 's'} and tell me what to study first.`
+      : nextSession
+        ? `Help me plan a ${nextSession.suggested_duration}-minute study session for ${nextSession.topic_title}.`
+        : 'Help me decide what to learn next and suggest a focused study session.';
+
+    navigateToChat({
+      quickReply: {
+        title: 'Learning',
+        message,
+        nudgeType: 'learning_focus',
+      },
+    });
+  };
+
+  const renderLearningGuideCard = () => {
+    const primaryTitle = reviewQueue.due_count > 0
+      ? `Best next move: review ${reviewQueue.due_count} due item${reviewQueue.due_count === 1 ? '' : 's'}`
+      : nextSession
+        ? `Best next move: continue ${nextSession.topic_title}`
+        : 'Best next move: pick a learning direction';
+
+    const detail = reviewQueue.due_count > 0
+      ? 'Clear what is already due first, then continue with a focused study session.'
+      : nextSession
+        ? `${nextSession.suggested_duration} minutes is enough to keep momentum without turning this into a big project.`
+        : 'Start with one topic that matters now, then let Sara turn it into a study path.';
+
+    return (
+      <View style={styles.guideCard}>
+        <View style={styles.guideHeader}>
+          <View style={styles.guideIcon}>
+            <Ionicons name="school-outline" size={18} color={colors.accent} />
+          </View>
+          <View style={styles.guideCopy}>
+            <Text style={styles.guideEyebrow}>What can I do next?</Text>
+            <Text style={styles.guideTitle}>{primaryTitle}</Text>
+            <Text style={styles.guideBody}>{detail}</Text>
+          </View>
+        </View>
+
+        <View style={styles.guideActions}>
+          <TouchableOpacity
+            style={[styles.guideButton, styles.guideButtonPrimary]}
+            onPress={() => setTab(reviewQueue.due_count > 0 ? 'review' : 'topics')}
+          >
+            <Text style={styles.guideButtonPrimaryText}>
+              {reviewQueue.due_count > 0 ? 'Open Reviews' : 'Open Topics'}
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.guideButton, styles.guideButtonSecondary]}
+            onPress={openLearningPrompt}
+          >
+            <Text style={styles.guideButtonSecondaryText}>Ask Sara</Text>
           </TouchableOpacity>
         </View>
-      )}
+      </View>
+    );
+  };
 
-      {/* Ambient Mode Button */}
-      {voiceInitialized && (
-        <TouchableOpacity
-          style={[styles.ambientButton, ambientMode && styles.ambientButtonActive]}
-          onPress={toggleAmbientMode}
-        >
-          <View style={styles.ambientContent}>
-            {ambientMode && isListening && (
-              <Animated.View style={[styles.listeningPulse, { transform: [{ scale: scaleAnim }] }]} />
-            )}
-            <Text style={styles.ambientIcon}>{ambientMode ? '🎧' : '🎤'}</Text>
-            <View style={styles.ambientTextContainer}>
-              <Text style={[styles.ambientTitle, ambientMode && styles.ambientTitleActive]}>
-                {ambientMode ? 'Ambient Learning Active' : 'Start Ambient Learning'}
-              </Text>
-              <Text style={styles.ambientSubtitle}>
-                {ambientMode
-                  ? (isListening ? 'Listening...' : isPlayingAudio ? 'Speaking...' : 'Processing...')
-                  : 'Voice-to-voice study with Sara'}
+  const renderProgressBar = (mastery: number) => {
+    const pct = Math.min(Math.max(mastery, 0), 100);
+    return (
+      <View style={styles.progressBarTrack}>
+        <View
+          style={[
+            styles.progressBarFill,
+            {
+              width: `${pct}%`,
+              backgroundColor: pct >= 80 ? colors.success : pct >= 40 ? colors.warning : colors.primary,
+            },
+          ]}
+        />
+      </View>
+    );
+  };
+
+  const renderTopicItem = ({ item }: { item: Topic }) => {
+    const expanded = expandedTopicId === item.id;
+    return (
+      <TouchableOpacity
+        style={styles.topicCard}
+        activeOpacity={0.7}
+        onPress={() => setExpandedTopicId(expanded ? null : item.id)}
+      >
+        {/* Header row */}
+        <View style={styles.topicHeader}>
+          <View style={styles.topicTitleRow}>
+            <Text style={styles.topicTitle} numberOfLines={1}>
+              {item.title}
+            </Text>
+            <View style={[styles.statusBadge, { backgroundColor: statusColor(item.status) + '22' }]}>
+              <Text style={[styles.statusBadgeText, { color: statusColor(item.status) }]}>
+                {item.status}
               </Text>
             </View>
           </View>
-        </TouchableOpacity>
-      )}
 
-      {/* Messages */}
-      <FlatList
-        data={messages}
-        keyExtractor={(item) => item.id}
-        style={styles.messagesList}
-        contentContainerStyle={styles.messagesContent}
-        renderItem={({ item }) => (
-          <View style={[styles.messageBubble, item.role === 'user' ? styles.userBubble : styles.assistantBubble]}>
-            <Text style={[styles.messageText, item.role === 'user' && styles.userMessageText]}>
-              {item.content}
+          {/* Priority */}
+          <View style={styles.priorityRow}>
+            <View style={[styles.priorityDot, { backgroundColor: priorityColor(item.priority) }]} />
+            <Text style={[styles.priorityText, { color: priorityColor(item.priority) }]}>
+              {priorityLabel(item.priority)}
             </Text>
+          </View>
+        </View>
+
+        {/* Description */}
+        {item.description ? (
+          <Text style={styles.topicDescription} numberOfLines={expanded ? undefined : 1}>
+            {item.description}
+          </Text>
+        ) : null}
+
+        {/* Mastery progress */}
+        <View style={styles.masteryRow}>
+          <Text style={styles.masteryLabel}>Mastery</Text>
+          <Text style={styles.masteryValue}>{Math.round(item.mastery_level)}%</Text>
+        </View>
+        {renderProgressBar(item.mastery_level)}
+
+        {/* Expanded detail */}
+        {expanded && (
+          <View style={styles.expandedSection}>
+            <Text style={styles.expandedDetail}>
+              Priority: {item.priority}/10
+            </Text>
+            <Text style={styles.expandedDetail}>
+              Updated: {new Date(item.updated_at).toLocaleDateString()}
+            </Text>
+            {item.parent_id && (
+              <Text style={styles.expandedDetail}>
+                Sub-topic of: {topicNameMap[item.parent_id] || item.parent_id}
+              </Text>
+            )}
           </View>
         )}
-        ListFooterComponent={
-          streamingMessage ? (
-            <View style={[styles.messageBubble, styles.assistantBubble]}>
-              <Text style={styles.messageText}>{streamingMessage}</Text>
-            </View>
-          ) : null
-        }
-        ListEmptyComponent={
-          <View style={styles.chatEmpty}>
-            <Text style={styles.chatEmptyText}>
-              {selectedTopic
-                ? `Ask Sara about ${selectedTopic.title}`
-                : 'Select a topic or start chatting'}
-            </Text>
-          </View>
-        }
-      />
+      </TouchableOpacity>
+    );
+  };
 
-      {/* Text Input */}
-      <View style={styles.chatInputContainer}>
-        <TextInput
-          style={styles.chatInput}
-          value={chatInput}
-          onChangeText={setChatInput}
-          placeholder="Ask a question..."
-          placeholderTextColor={colors.textMuted}
-          multiline
-          editable={!isStreaming && !ambientMode}
-        />
+  const renderReviewItem = ({ item }: { item: ReviewItem }) => {
+    const topicName = item.topic_id ? topicNameMap[item.topic_id] || 'Unknown Topic' : 'General';
+    return (
+      <View style={styles.reviewCard}>
+        <View style={styles.reviewHeader}>
+          <Text style={styles.reviewConcept} numberOfLines={2}>
+            {item.concept || topicName}
+          </Text>
+          <Text style={styles.reviewReps}>
+            {item.repetitions} rep{item.repetitions !== 1 ? 's' : ''}
+          </Text>
+        </View>
+        <Text style={styles.reviewTopic} numberOfLines={1}>
+          {topicName}
+        </Text>
+        {item.next_review_at && (
+          <Text style={styles.reviewDue}>
+            Due: {new Date(item.next_review_at).toLocaleDateString()}
+          </Text>
+        )}
         <TouchableOpacity
-          style={[styles.sendButton, (!chatInput.trim() || isStreaming) && styles.sendButtonDisabled]}
-          onPress={() => sendMessage(chatInput)}
-          disabled={!chatInput.trim() || isStreaming || ambientMode}
+          style={styles.startReviewButton}
+          onPress={() => {
+            Alert.alert('Start Review', `Review: ${item.concept || topicName}`);
+          }}
         >
-          <Text style={styles.sendButtonText}>➤</Text>
+          <Text style={styles.startReviewButtonText}>Start Review</Text>
         </TouchableOpacity>
       </View>
-    </KeyboardAvoidingView>
-  );
+    );
+  };
+
+  // ------ Loading state ------
+
+  if (loading) {
+    return (
+      <View style={styles.loadingContainer}>
+        <ActivityIndicator size="large" color={colors.primary} />
+      </View>
+    );
+  }
+
+  // ------ Main render ------
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
-      {/* Tab Bar */}
+      {/* Tab bar */}
       <View style={styles.tabBar}>
-        {(['topics', 'flashcards', 'chat'] as TabType[]).map(tab => (
-          <TouchableOpacity
-            key={tab}
-            style={[styles.tab, activeTab === tab && styles.activeTab]}
-            onPress={() => setActiveTab(tab)}
-          >
-            <Text style={[styles.tabText, activeTab === tab && styles.activeTabText]}>
-              {tab === 'topics' ? '📚 Topics' : tab === 'flashcards' ? '🎴 Cards' : '💬 Chat'}
-            </Text>
-          </TouchableOpacity>
-        ))}
+        <TouchableOpacity
+          style={[styles.tabButton, tab === 'topics' && styles.tabButtonActive]}
+          onPress={() => setTab('topics')}
+        >
+          <Text style={[styles.tabButtonText, tab === 'topics' && styles.tabButtonTextActive]}>
+            Topics
+          </Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.tabButton, tab === 'review' && styles.tabButtonActive]}
+          onPress={() => setTab('review')}
+        >
+          <Text style={[styles.tabButtonText, tab === 'review' && styles.tabButtonTextActive]}>
+            Review
+          </Text>
+          {reviewQueue.due_count > 0 && (
+            <View style={styles.reviewBadge}>
+              <Text style={styles.reviewBadgeText}>{reviewQueue.due_count}</Text>
+            </View>
+          )}
+        </TouchableOpacity>
       </View>
 
-      {/* Content */}
-      {activeTab === 'topics' && renderTopicsList()}
-      {activeTab === 'flashcards' && renderFlashcards()}
-      {activeTab === 'chat' && renderChat()}
-
-      {/* New Topic Modal */}
-      <Modal
-        visible={showNewTopicModal}
-        animationType="slide"
-        transparent={true}
-        onRequestClose={() => setShowNewTopicModal(false)}
-      >
-        <KeyboardAvoidingView
-          style={styles.modalOverlay}
-          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        >
-          <TouchableOpacity
-            style={styles.modalDismiss}
-            activeOpacity={1}
-            onPress={() => setShowNewTopicModal(false)}
-          />
-          <View style={styles.modalContent}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>New Learning Topic</Text>
-              <TouchableOpacity onPress={() => setShowNewTopicModal(false)}>
-                <Text style={styles.modalClose}>✕</Text>
-              </TouchableOpacity>
+      {/* Topics tab */}
+      {tab === 'topics' && (
+        <FlatList
+          data={groupedTopics}
+          renderItem={renderTopicItem}
+          keyExtractor={(item) => item.id}
+          onRefresh={handleRefresh}
+          refreshing={refreshing}
+          ListHeaderComponent={
+            <>
+              {renderLearningGuideCard()}
+              {renderNextSessionCard()}
+            </>
+          }
+          ListEmptyComponent={
+            <View style={styles.emptyContainer}>
+              <Text style={styles.emptyText}>
+                No learning topics yet. Ask Sara to suggest a study path or create one from the web app.
+              </Text>
             </View>
+          }
+          contentContainerStyle={styles.listContent}
+        />
+      )}
 
-            <TextInput
-              style={styles.modalInput}
-              placeholder="Topic Title (e.g., Machine Learning, Spanish, Photography)"
-              placeholderTextColor={colors.textMuted}
-              value={newTopicTitle}
-              onChangeText={setNewTopicTitle}
-              autoFocus
-            />
-
-            <TextInput
-              style={[styles.modalInput, styles.modalTextArea]}
-              placeholder="Description (optional) - What do you want to learn about this topic?"
-              placeholderTextColor={colors.textMuted}
-              value={newTopicDescription}
-              onChangeText={setNewTopicDescription}
-              multiline
-              numberOfLines={3}
-              textAlignVertical="top"
-            />
-
-            <View style={styles.switchRow}>
-              <View style={styles.switchLabel}>
-                <Text style={styles.switchTitle}>Auto-find sources</Text>
-                <Text style={styles.switchSubtitle}>Search the web for learning materials</Text>
-              </View>
-              <Switch
-                value={autoResearch}
-                onValueChange={setAutoResearch}
-                trackColor={{ false: colors.border, true: colors.primary }}
-                thumbColor="#fff"
-              />
+      {/* Review tab */}
+      {tab === 'review' && (
+        <FlatList
+          data={reviewQueue.items}
+          renderItem={renderReviewItem}
+          keyExtractor={(item) => item.id}
+          onRefresh={handleRefresh}
+          refreshing={refreshing}
+          ListHeaderComponent={
+            <>
+              {renderLearningGuideCard()}
+              {reviewQueue.due_count > 0 ? (
+                <View style={styles.reviewSummary}>
+                  <Text style={styles.reviewSummaryText}>
+                    {reviewQueue.due_count} item{reviewQueue.due_count !== 1 ? 's' : ''} due for review
+                  </Text>
+                </View>
+              ) : null}
+            </>
+          }
+          ListEmptyComponent={
+            <View style={styles.emptyContainer}>
+              <Text style={styles.emptyText}>
+                No reviews due right now. Open Topics or ask Sara what to study next.
+              </Text>
             </View>
-
-            <TouchableOpacity
-              style={[styles.modalCreateButton, creatingTopic && styles.modalCreateButtonDisabled]}
-              onPress={createTopic}
-              disabled={creatingTopic}
-            >
-              {creatingTopic ? (
-                <ActivityIndicator color="#fff" />
-              ) : (
-                <Text style={styles.modalCreateButtonText}>
-                  {autoResearch ? 'Create & Find Sources' : 'Create Topic'}
-                </Text>
-              )}
-            </TouchableOpacity>
-          </View>
-        </KeyboardAvoidingView>
-      </Modal>
+          }
+          contentContainerStyle={styles.listContent}
+        />
+      )}
     </SafeAreaView>
   );
 }
+
+// ---------------------------------------------------------------------------
+// Styles
+// ---------------------------------------------------------------------------
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: colors.background,
   },
-  tabBar: {
-    flexDirection: 'row',
-    backgroundColor: colors.surface,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.border,
-  },
-  tab: {
+  loadingContainer: {
     flex: 1,
-    paddingVertical: spacing.md,
-    alignItems: 'center',
-  },
-  activeTab: {
-    borderBottomWidth: 2,
-    borderBottomColor: colors.primary,
-  },
-  tabText: {
-    color: colors.textMuted,
-    fontSize: fontSizes.sm,
-    fontWeight: '600',
-  },
-  activeTabText: {
-    color: colors.primary,
-  },
-  tabContent: {
-    flex: 1,
-    padding: spacing.md,
-  },
-  sectionTitle: {
-    fontSize: fontSizes.lg,
-    fontWeight: '700',
-    color: colors.text,
-    marginBottom: spacing.md,
-  },
-  backButton: {
-    marginBottom: spacing.md,
-  },
-  backButtonText: {
-    color: colors.primary,
-    fontSize: fontSizes.md,
-  },
-  topicCard: {
-    backgroundColor: colors.surface,
-    borderRadius: borderRadius.lg,
-    padding: spacing.md,
-    marginBottom: spacing.sm,
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  topicCardContent: {
-    flex: 1,
-  },
-  topicCardTitle: {
-    fontSize: fontSizes.md,
-    fontWeight: '600',
-    color: colors.text,
-    marginBottom: 4,
-  },
-  topicCardDesc: {
-    fontSize: fontSizes.sm,
-    color: colors.textMuted,
-    marginBottom: spacing.sm,
-  },
-  topicCardMeta: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  masteryBar: {
-    flex: 1,
-    height: 4,
-    borderRadius: 2,
-    marginRight: spacing.sm,
-  },
-  masteryFill: {
-    height: '100%',
-    borderRadius: 2,
-  },
-  masteryPercent: {
-    fontSize: fontSizes.xs,
-    color: colors.textMuted,
-    width: 35,
-  },
-  chevron: {
-    fontSize: 24,
-    color: colors.textMuted,
-  },
-  topicHeader: {
-    marginBottom: spacing.lg,
-  },
-  topicTitle: {
-    fontSize: fontSizes.xl,
-    fontWeight: '700',
-    color: colors.text,
-    marginBottom: spacing.sm,
-  },
-  masteryBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: spacing.sm,
-  },
-  masteryDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    marginRight: spacing.xs,
-  },
-  masteryText: {
-    fontSize: fontSizes.sm,
-    color: colors.textMuted,
-  },
-  topicDescription: {
-    fontSize: fontSizes.md,
-    color: colors.textSecondary,
-  },
-  actionsRow: {
-    flexDirection: 'row',
-    gap: spacing.sm,
-    marginBottom: spacing.lg,
-  },
-  actionButton: {
-    flex: 1,
-    backgroundColor: colors.surface,
-    borderRadius: borderRadius.lg,
-    padding: spacing.md,
-    alignItems: 'center',
-  },
-  actionIcon: {
-    fontSize: 28,
-    marginBottom: spacing.xs,
-  },
-  actionText: {
-    fontSize: fontSizes.sm,
-    color: colors.text,
-    fontWeight: '600',
-  },
-  scratchpadSection: {
-    marginTop: spacing.md,
-  },
-  scratchpad: {
-    backgroundColor: colors.surface,
-    borderRadius: borderRadius.lg,
-    padding: spacing.md,
-    color: colors.text,
-    fontSize: fontSizes.md,
-    minHeight: 150,
-  },
-  emptyState: {
-    alignItems: 'center',
-    paddingVertical: 60,
-  },
-  emptyIcon: {
-    fontSize: 48,
-    marginBottom: spacing.md,
-  },
-  emptyText: {
-    fontSize: fontSizes.lg,
-    fontWeight: '600',
-    color: colors.text,
-    marginBottom: spacing.xs,
-  },
-  emptySubtext: {
-    fontSize: fontSizes.sm,
-    color: colors.textMuted,
-    textAlign: 'center',
-  },
-  // Flashcards
-  flashcardContainer: {
-    flex: 1,
-    alignItems: 'center',
-    paddingTop: spacing.xl,
-  },
-  cardProgress: {
-    fontSize: fontSizes.sm,
-    color: colors.textMuted,
-    marginBottom: spacing.md,
-  },
-  flashcard: {
-    width: '100%',
-    backgroundColor: colors.surface,
-    borderRadius: borderRadius.xl,
-    padding: spacing.xl,
-    minHeight: 250,
     justifyContent: 'center',
     alignItems: 'center',
-    borderWidth: 2,
-    borderColor: colors.border,
-  },
-  flashcardFlipped: {
-    backgroundColor: '#059669' + '15',
-    borderColor: '#059669',
-  },
-  flashcardLabel: {
-    fontSize: fontSizes.xs,
-    color: colors.textMuted,
-    marginBottom: spacing.md,
-    letterSpacing: 1,
-  },
-  flashcardText: {
-    fontSize: fontSizes.lg,
-    color: colors.text,
-    textAlign: 'center',
-    lineHeight: 28,
-  },
-  flashcardHint: {
-    fontSize: fontSizes.sm,
-    color: colors.textMuted,
-    marginTop: spacing.lg,
-    fontStyle: 'italic',
-  },
-  tapHint: {
-    fontSize: fontSizes.xs,
-    color: colors.textMuted,
-    marginTop: spacing.xl,
-  },
-  cardNavigation: {
-    flexDirection: 'row',
-    marginTop: spacing.xl,
-    gap: spacing.md,
-  },
-  navButton: {
-    paddingVertical: spacing.sm,
-    paddingHorizontal: spacing.lg,
-    backgroundColor: colors.surface,
-    borderRadius: borderRadius.md,
-  },
-  navButtonDisabled: {
-    opacity: 0.4,
-  },
-  navButtonText: {
-    color: colors.text,
-    fontSize: fontSizes.md,
-    fontWeight: '600',
-  },
-  // Chat
-  chatContainer: {
-    flex: 1,
-  },
-  chatHeader: {
-    padding: spacing.md,
-    backgroundColor: colors.surface,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.border,
-  },
-  ambientButton: {
-    margin: spacing.md,
-    backgroundColor: colors.surface,
-    borderRadius: borderRadius.lg,
-    borderWidth: 2,
-    borderColor: colors.border,
-    overflow: 'hidden',
-  },
-  ambientButtonActive: {
-    backgroundColor: '#059669' + '15',
-    borderColor: '#059669',
-  },
-  ambientContent: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    padding: spacing.md,
-  },
-  listeningPulse: {
-    position: 'absolute',
-    left: spacing.md,
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: '#059669' + '30',
-  },
-  ambientIcon: {
-    fontSize: 28,
-    marginRight: spacing.md,
-    zIndex: 1,
-  },
-  ambientTextContainer: {
-    flex: 1,
-  },
-  ambientTitle: {
-    fontSize: fontSizes.md,
-    fontWeight: '700',
-    color: colors.text,
-  },
-  ambientTitleActive: {
-    color: '#059669',
-  },
-  ambientSubtitle: {
-    fontSize: fontSizes.xs,
-    color: colors.textMuted,
-    marginTop: 2,
-  },
-  messagesList: {
-    flex: 1,
-  },
-  messagesContent: {
-    padding: spacing.md,
-    paddingBottom: spacing.xl,
-  },
-  messageBubble: {
-    maxWidth: '85%',
-    padding: spacing.md,
-    borderRadius: borderRadius.lg,
-    marginBottom: spacing.sm,
-  },
-  userBubble: {
-    backgroundColor: colors.primary,
-    alignSelf: 'flex-end',
-    borderBottomRightRadius: 4,
-  },
-  assistantBubble: {
-    backgroundColor: colors.surface,
-    alignSelf: 'flex-start',
-    borderBottomLeftRadius: 4,
-  },
-  messageText: {
-    color: colors.text,
-    fontSize: fontSizes.md,
-    lineHeight: 22,
-  },
-  userMessageText: {
-    color: '#fff',
-  },
-  chatEmpty: {
-    alignItems: 'center',
-    paddingVertical: 60,
-  },
-  chatEmptyText: {
-    color: colors.textMuted,
-    fontSize: fontSizes.md,
-  },
-  chatInputContainer: {
-    flexDirection: 'row',
-    alignItems: 'flex-end',
-    padding: spacing.md,
-    backgroundColor: colors.surface,
-    borderTopWidth: 1,
-    borderTopColor: colors.border,
-  },
-  chatInput: {
-    flex: 1,
     backgroundColor: colors.background,
-    borderRadius: borderRadius.lg,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
-    color: colors.text,
-    fontSize: fontSizes.md,
-    maxHeight: 100,
   },
-  sendButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: colors.primary,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginLeft: spacing.sm,
+  listContent: {
+    paddingBottom: 100,
   },
-  sendButtonDisabled: {
-    opacity: 0.4,
-  },
-  sendButtonText: {
-    color: '#fff',
-    fontSize: fontSizes.lg,
-  },
-  // Section header with add button
-  sectionHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: spacing.md,
-  },
-  addButton: {
-    backgroundColor: colors.primary,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
-    borderRadius: borderRadius.md,
-  },
-  addButtonText: {
-    color: '#fff',
-    fontSize: fontSizes.sm,
-    fontWeight: '600',
-  },
-  createTopicButton: {
-    backgroundColor: colors.primary,
-    paddingHorizontal: spacing.xl,
-    paddingVertical: spacing.md,
-    borderRadius: borderRadius.lg,
-    marginTop: spacing.lg,
-  },
-  createTopicButtonText: {
-    color: '#fff',
-    fontSize: fontSizes.md,
-    fontWeight: '600',
-  },
-  // Modal styles
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.7)',
-    justifyContent: 'flex-end',
-  },
-  modalDismiss: {
-    flex: 1,
-  },
-  modalContent: {
+
+  guideCard: {
     backgroundColor: colors.surface,
-    borderTopLeftRadius: borderRadius.xl,
-    borderTopRightRadius: borderRadius.xl,
-    padding: spacing.lg,
-    paddingBottom: spacing.xl + 20,
-  },
-  modalHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: spacing.lg,
-  },
-  modalTitle: {
-    fontSize: fontSizes.lg,
-    fontWeight: '700',
-    color: colors.text,
-  },
-  modalClose: {
-    fontSize: 24,
-    color: colors.textMuted,
-    padding: spacing.sm,
-  },
-  modalInput: {
-    backgroundColor: colors.background,
     borderRadius: borderRadius.lg,
     padding: spacing.md,
-    color: colors.text,
-    fontSize: fontSizes.md,
+    marginHorizontal: spacing.md,
+    marginTop: spacing.sm,
     marginBottom: spacing.md,
     borderWidth: 1,
     borderColor: colors.border,
   },
-  modalTextArea: {
-    minHeight: 80,
-    textAlignVertical: 'top',
-  },
-  switchRow: {
+  guideHeader: {
     flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingVertical: spacing.md,
-    marginBottom: spacing.md,
+    alignItems: 'flex-start',
+    gap: spacing.sm,
   },
-  switchLabel: {
+  guideIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: borderRadius.full,
+    backgroundColor: `${colors.accent}1a`,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  guideCopy: {
     flex: 1,
   },
-  switchTitle: {
-    fontSize: fontSizes.md,
+  guideEyebrow: {
+    color: colors.accent,
+    fontSize: fontSizes.xs,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    marginBottom: 2,
+  },
+  guideTitle: {
+    color: colors.text,
+    fontSize: fontSizes.lg,
     fontWeight: '600',
+    marginBottom: spacing.xs,
+  },
+  guideBody: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    lineHeight: 20,
+  },
+  guideActions: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+    marginTop: spacing.md,
+  },
+  guideButton: {
+    flex: 1,
+    borderRadius: borderRadius.md,
+    paddingVertical: spacing.sm,
+    alignItems: 'center',
+  },
+  guideButtonPrimary: {
+    backgroundColor: colors.primary,
+  },
+  guideButtonSecondary: {
+    backgroundColor: colors.background,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  guideButtonPrimaryText: {
+    color: colors.text,
+    fontSize: fontSizes.sm,
+    fontWeight: '600',
+  },
+  guideButtonSecondaryText: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    fontWeight: '600',
+  },
+
+  // Tab bar
+  tabBar: {
+    flexDirection: 'row',
+    paddingHorizontal: spacing.md,
+    paddingTop: spacing.md,
+    paddingBottom: spacing.sm,
+    gap: spacing.sm,
+  },
+  tabButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.md,
+    borderRadius: borderRadius.md,
+    backgroundColor: colors.surface,
+  },
+  tabButtonActive: {
+    backgroundColor: colors.primary,
+  },
+  tabButtonText: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    fontWeight: '600',
+  },
+  tabButtonTextActive: {
     color: colors.text,
   },
-  switchSubtitle: {
-    fontSize: fontSizes.xs,
-    color: colors.textMuted,
-    marginTop: 2,
+  reviewBadge: {
+    backgroundColor: colors.error,
+    borderRadius: borderRadius.full,
+    minWidth: 20,
+    height: 20,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginLeft: spacing.xs,
+    paddingHorizontal: 6,
   },
-  modalCreateButton: {
-    backgroundColor: colors.primary,
+  reviewBadgeText: {
+    color: colors.text,
+    fontSize: fontSizes.xs,
+    fontWeight: '700',
+  },
+
+  // Next session card
+  nextSessionCard: {
+    backgroundColor: colors.surface,
     borderRadius: borderRadius.lg,
     padding: spacing.md,
-    alignItems: 'center',
+    marginHorizontal: spacing.md,
     marginTop: spacing.sm,
+    marginBottom: spacing.md,
+    borderLeftWidth: 3,
+    borderLeftColor: colors.accent,
   },
-  modalCreateButtonDisabled: {
-    opacity: 0.6,
+  nextSessionLabel: {
+    color: colors.accent,
+    fontSize: fontSizes.xs,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    marginBottom: spacing.xs,
   },
-  modalCreateButtonText: {
-    color: '#fff',
+  nextSessionTitle: {
+    color: colors.text,
+    fontSize: fontSizes.lg,
+    fontWeight: '600',
+    marginBottom: spacing.xs,
+  },
+  nextSessionMeta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    marginBottom: spacing.xs,
+  },
+  nextSessionDuration: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+  },
+  nextSessionFocus: {
+    color: colors.textMuted,
+    fontSize: fontSizes.sm,
+    flex: 1,
+  },
+  nextSessionReason: {
+    color: colors.textMuted,
+    fontSize: fontSizes.xs,
+    marginTop: spacing.xs,
+  },
+
+  // Topic cards
+  topicCard: {
+    backgroundColor: colors.surface,
+    borderRadius: borderRadius.lg,
+    padding: spacing.md,
+    marginHorizontal: spacing.md,
+    marginBottom: spacing.sm,
+  },
+  topicHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginBottom: spacing.xs,
+  },
+  topicTitleRow: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    marginRight: spacing.sm,
+  },
+  topicTitle: {
+    color: colors.text,
     fontSize: fontSizes.md,
-    fontWeight: '700',
+    fontWeight: '600',
+    flexShrink: 1,
+  },
+  statusBadge: {
+    borderRadius: borderRadius.sm,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 2,
+  },
+  statusBadgeText: {
+    fontSize: fontSizes.xs,
+    fontWeight: '600',
+    textTransform: 'capitalize',
+  },
+  priorityRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  priorityDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+  priorityText: {
+    fontSize: fontSizes.xs,
+    fontWeight: '500',
+  },
+  topicDescription: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    marginBottom: spacing.sm,
+  },
+  masteryRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  masteryLabel: {
+    color: colors.textMuted,
+    fontSize: fontSizes.xs,
+  },
+  masteryValue: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.xs,
+    fontWeight: '600',
+  },
+  progressBarTrack: {
+    height: 6,
+    backgroundColor: colors.surfaceLight,
+    borderRadius: 3,
+    overflow: 'hidden',
+  },
+  progressBarFill: {
+    height: 6,
+    borderRadius: 3,
+  },
+  expandedSection: {
+    marginTop: spacing.sm,
+    paddingTop: spacing.sm,
+    borderTopWidth: 1,
+    borderTopColor: colors.surfaceLight,
+  },
+  expandedDetail: {
+    color: colors.textMuted,
+    fontSize: fontSizes.sm,
+    marginBottom: 4,
+  },
+
+  // Review cards
+  reviewCard: {
+    backgroundColor: colors.surface,
+    borderRadius: borderRadius.lg,
+    padding: spacing.md,
+    marginHorizontal: spacing.md,
+    marginBottom: spacing.sm,
+  },
+  reviewHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginBottom: spacing.xs,
+  },
+  reviewConcept: {
+    color: colors.text,
+    fontSize: fontSizes.md,
+    fontWeight: '600',
+    flex: 1,
+    marginRight: spacing.sm,
+  },
+  reviewReps: {
+    color: colors.textMuted,
+    fontSize: fontSizes.xs,
+  },
+  reviewTopic: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    marginBottom: spacing.xs,
+  },
+  reviewDue: {
+    color: colors.warning,
+    fontSize: fontSizes.xs,
+    marginBottom: spacing.sm,
+  },
+  startReviewButton: {
+    backgroundColor: colors.primary,
+    borderRadius: borderRadius.md,
+    paddingVertical: spacing.sm,
+    alignItems: 'center',
+  },
+  startReviewButtonText: {
+    color: colors.text,
+    fontSize: fontSizes.sm,
+    fontWeight: '600',
+  },
+  reviewSummary: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+  },
+  reviewSummaryText: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    fontWeight: '500',
+  },
+
+  // Empty state
+  emptyContainer: {
+    padding: spacing.xl,
+    alignItems: 'center',
+  },
+  emptyText: {
+    color: colors.textMuted,
+    fontSize: fontSizes.md,
+    textAlign: 'center',
   },
 });

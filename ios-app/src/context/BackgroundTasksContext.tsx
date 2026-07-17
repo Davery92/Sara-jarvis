@@ -1,7 +1,8 @@
-import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef, ReactNode } from 'react';
 import { BackgroundTask } from '../types/api';
 import { backgroundTaskService } from '../services/backgroundTasks';
 import AgentClarificationModal from '../components/AgentClarificationModal';
+import { startEvent, updateEvent, endEvent, endAllEvents } from '../services/eventActivity';
 
 interface BackgroundTasksContextType {
   tasks: BackgroundTask[];
@@ -21,9 +22,10 @@ export function BackgroundTasksProvider({ children }: BackgroundTasksProviderPro
   const [clarificationTask, setClarificationTask] = useState<BackgroundTask | null>(null);
   const [dismissedTaskId, setDismissedTaskId] = useState<string | null>(null);
 
-  // Start polling when provider mounts
+  // Start polling when provider mounts (30s default, scales to 60s when idle)
   useEffect(() => {
-    backgroundTaskService.startPolling(5000);
+    // 10s while a task is active (snappy Live Activity step updates), 60s when idle.
+    backgroundTaskService.startPolling(10000);
 
     return () => {
       backgroundTaskService.stopPolling();
@@ -47,6 +49,40 @@ export function BackgroundTasksProvider({ children }: BackgroundTasksProviderPro
     });
     return () => unsubscribe();
   }, [dismissedTaskId]);
+
+  // "Sara is working on…" Live Activity for the currently-running task.
+  const taskActivityRef = useRef<string | null>(null);
+  const reconciledOrphansRef = useRef(false);
+  useEffect(() => {
+    const running = tasks.find((t) => t.status === 'running');
+    // Once per app session, after the first real task fetch: reap task
+    // activities left behind by a previous session (app killed mid-task, or
+    // the completion push landed while we weren't running).
+    if (!reconciledOrphansRef.current && !running) {
+      reconciledOrphansRef.current = true;
+      endAllEvents('task');
+      taskActivityRef.current = null;
+      return;
+    }
+    reconciledOrphansRef.current = true;
+    if (running) {
+      // Prefer the live current-step label (code mode emits "editing X",
+      // "running tests", "pushing branch"); fall back to the original request.
+      const subtitle = (running.status_label || running.original_query || running.task_type || 'Working…').slice(0, 80);
+      const startMsRaw = running.started_at ? new Date(running.started_at).getTime() : Date.now();
+      const startMs = isNaN(startMsRaw) ? Date.now() : startMsRaw;
+      if (taskActivityRef.current !== running.id) {
+        if (taskActivityRef.current) endEvent(taskActivityRef.current);
+        startEvent(running.id, 'task', 'Sara is working', subtitle, startMs);
+        taskActivityRef.current = running.id;
+      } else {
+        updateEvent(running.id, subtitle, startMs);
+      }
+    } else if (taskActivityRef.current) {
+      endEvent(taskActivityRef.current);
+      taskActivityRef.current = null;
+    }
+  }, [tasks]);
 
   const refreshTasks = useCallback(async () => {
     await backgroundTaskService.fetchTasks();

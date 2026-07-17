@@ -83,7 +83,7 @@ export const setAIApiKey = (v: string) => setStringPref(AI_API_KEY_KEY, v)
 export const getAIBaseUrl = () => getStringPref(AI_BASE_URL_KEY, 'http://100.104.68.115:11434/v1')
 export const setAIBaseUrl = (v: string) => setStringPref(AI_BASE_URL_KEY, v)
 
-export const getAIModel = () => getStringPref(AI_MODEL_KEY, 'gpt-oss:120b')
+export const getAIModel = () => getStringPref(AI_MODEL_KEY, 'gpt-oss:20b')
 export const setAIModel = (v: string) => setStringPref(AI_MODEL_KEY, v)
 
 export const getAINotificationModel = () => getStringPref(AI_NOTIFICATION_MODEL_KEY, 'gpt-oss:20b')
@@ -97,4 +97,3 @@ export const setEmbeddingModel = (v: string) => setStringPref(EMBEDDING_MODEL_KE
 
 export const getEmbeddingDimension = () => getNumberPref(EMBEDDING_DIMENSION_KEY, 1024)
 export const setEmbeddingDimension = (v: number) => setNumberPref(EMBEDDING_DIMENSION_KEY, v)
-

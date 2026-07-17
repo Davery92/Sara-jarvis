@@ -116,8 +116,8 @@ class CalendarListTool(BaseTool):
         db: Session = next(db_gen)
         
         try:
-            # Parse dates
-            now = datetime.now(timezone.utc)
+            # Parse dates — use local time since DB stores naive local
+            now = datetime.now(USER_TIMEZONE)
             
             if start_date_str:
                 try:
@@ -143,9 +143,9 @@ class CalendarListTool(BaseTool):
                 from datetime import timedelta
                 end_date = start_date + timedelta(days=7)
             
-            # Convert to datetime ranges
-            start_datetime = datetime.combine(start_date, time.min, timezone.utc)
-            end_datetime = datetime.combine(end_date, time.max, timezone.utc)
+            # Convert to datetime ranges (naive local, matching DB convention)
+            start_datetime = datetime.combine(start_date, time.min)
+            end_datetime = datetime.combine(end_date, time.max)
             
             # Query events from calendar_event table (includes iOS synced events)
             events = db.query(CalendarEvent).filter(
@@ -158,17 +158,17 @@ class CalendarListTool(BaseTool):
 
             event_list = []
             for event in events:
-                # Convert times to user timezone for display
-                local_start = event.start_time.replace(tzinfo=timezone.utc).astimezone(USER_TIMEZONE)
-                local_end = event.end_time.replace(tzinfo=timezone.utc).astimezone(USER_TIMEZONE)
+                # Times are stored as naive local — tag with timezone for display
+                local_start = event.start_time.replace(tzinfo=USER_TIMEZONE)
+                local_end = event.end_time.replace(tzinfo=USER_TIMEZONE)
 
                 event_data = {
                     "event_id": str(event.id),
                     "title": event.title,
                     "starts_at": local_start.strftime("%Y-%m-%d %I:%M %p"),
                     "ends_at": local_end.strftime("%Y-%m-%d %I:%M %p"),
-                    "starts_at_iso": event.start_time.isoformat(),
-                    "ends_at_iso": event.end_time.isoformat(),
+                    "starts_at_iso": local_start.isoformat(),
+                    "ends_at_iso": local_end.isoformat(),
                     "location": event.location or "",
                     "description": event.description or "",
                     "created_at": event.created_at.isoformat(),
@@ -178,10 +178,14 @@ class CalendarListTool(BaseTool):
                 if hasattr(event, 'rrule') and event.rrule:
                     event_data["rrule"] = event.rrule
                     event_data["is_recurring"] = True
-                # Include source info for iOS events
+                # Include source/calendar info for iOS events
                 if hasattr(event, 'source') and event.source == 'ios_calendar':
                     event_data["source"] = "ios_calendar"
-                    event_data["ios_calendar_name"] = getattr(event, 'ios_calendar_name', None)
+                    cal_name = getattr(event, 'ios_calendar_name', None)
+                    event_data["calendar_name"] = cal_name
+                    event_data["ios_calendar_name"] = cal_name
+                else:
+                    event_data["calendar_name"] = "Sara"
                 event_list.append(event_data)
             
             return ToolResult(
@@ -260,11 +264,15 @@ class CalendarCreateTool(BaseTool):
                 "recurrence_count": {
                     "type": "integer",
                     "description": "Number of occurrences (alternative to recurrence_until)"
+                },
+                "reminder_minutes": {
+                    "type": "integer",
+                    "description": "Send a push notification this many minutes before the event starts. Omit to skip notification. Use 0 to fire at event start."
                 }
             },
             "required": ["title", "starts_at", "ends_at"]
         }
-    
+
     async def execute(self, user_id: str, **kwargs) -> ToolResult:
         """Create a new calendar event"""
 
@@ -273,6 +281,7 @@ class CalendarCreateTool(BaseTool):
         ends_at_str = kwargs.get("ends_at")
         location = kwargs.get("location", "")
         description = kwargs.get("description", "")
+        reminder_minutes = kwargs.get("reminder_minutes")
 
         # Recurrence parameters
         recurrence = kwargs.get("recurrence")
@@ -298,14 +307,14 @@ class CalendarCreateTool(BaseTool):
         
         try:
             # Parse the datetime strings
-            # IMPORTANT: If no timezone is specified, assume user's local timezone (EST/EDT)
+            # DB stores naive local times (same convention as iOS calendar sync).
+            # If no timezone, treat as local. If timezone given, convert to local then strip tzinfo.
             try:
                 starts_at = datetime.fromisoformat(starts_at_str.replace('Z', '+00:00'))
-                if starts_at.tzinfo is None:
-                    # No timezone specified - assume user's local timezone
-                    starts_at = starts_at.replace(tzinfo=USER_TIMEZONE)
-                # Convert to UTC for storage
-                starts_at = starts_at.astimezone(timezone.utc)
+                if starts_at.tzinfo is not None:
+                    # Has timezone — convert to local time
+                    starts_at = starts_at.astimezone(USER_TIMEZONE).replace(tzinfo=None)
+                # else: naive = already local, store as-is
             except ValueError:
                 return ToolResult(
                     success=False,
@@ -314,11 +323,10 @@ class CalendarCreateTool(BaseTool):
 
             try:
                 ends_at = datetime.fromisoformat(ends_at_str.replace('Z', '+00:00'))
-                if ends_at.tzinfo is None:
-                    # No timezone specified - assume user's local timezone
-                    ends_at = ends_at.replace(tzinfo=USER_TIMEZONE)
-                # Convert to UTC for storage
-                ends_at = ends_at.astimezone(timezone.utc)
+                if ends_at.tzinfo is not None:
+                    # Has timezone — convert to local time
+                    ends_at = ends_at.astimezone(USER_TIMEZONE).replace(tzinfo=None)
+                # else: naive = already local, store as-is
             except ValueError:
                 return ToolResult(
                     success=False,
@@ -384,16 +392,22 @@ class CalendarCreateTool(BaseTool):
                 location=location or "",
                 description=description or "",
                 source="sara",
-                rrule=rrule
+                rrule=rrule,
+                reminder_minutes=reminder_minutes,
             )
 
             db.add(event)
             db.commit()
             db.refresh(event)
 
-            # Convert times back to user timezone for display
-            local_start = event.start_time.replace(tzinfo=timezone.utc).astimezone(USER_TIMEZONE)
-            local_end = event.end_time.replace(tzinfo=timezone.utc).astimezone(USER_TIMEZONE)
+            if reminder_minutes is not None:
+                from app.services.calendar_reminders import sync_event_reminders
+                sync_event_reminders(db, event)
+                db.commit()
+
+            # Times are stored as naive local — use directly for display
+            local_start = event.start_time.replace(tzinfo=USER_TIMEZONE)
+            local_end = event.end_time.replace(tzinfo=USER_TIMEZONE)
 
             # Build response data
             response_data = {
@@ -401,8 +415,8 @@ class CalendarCreateTool(BaseTool):
                 "title": event.title,
                 "starts_at": local_start.strftime("%Y-%m-%d %I:%M %p %Z"),
                 "ends_at": local_end.strftime("%Y-%m-%d %I:%M %p %Z"),
-                "starts_at_iso": event.start_time.isoformat(),
-                "ends_at_iso": event.end_time.isoformat(),
+                "starts_at_iso": local_start.isoformat(),
+                "ends_at_iso": local_end.isoformat(),
                 "location": event.location,
                 "description": event.description,
                 "created_at": event.created_at.isoformat()
@@ -412,6 +426,9 @@ class CalendarCreateTool(BaseTool):
             if rrule:
                 response_data["recurrence"] = recurrence
                 response_data["rrule"] = rrule
+
+            if reminder_minutes is not None:
+                response_data["reminder_minutes"] = reminder_minutes
 
             # Build message
             base_msg = f"Created event: {title} on {local_start.strftime('%A, %B %d at %I:%M %p')}"
@@ -424,6 +441,11 @@ class CalendarCreateTool(BaseTool):
                     "weekdays": "repeating on weekdays"
                 }.get(recurrence.lower(), f"repeating {recurrence}")
                 base_msg += f" ({recurrence_desc})"
+            if reminder_minutes is not None:
+                if reminder_minutes == 0:
+                    base_msg += " with a notification at start"
+                else:
+                    base_msg += f" with a {reminder_minutes}-minute notification"
 
             return ToolResult(
                 success=True,
@@ -569,8 +591,8 @@ class CalendarSetRecurringTool(BaseTool):
             db.commit()
             db.refresh(event)
 
-            # Convert times to user timezone for display
-            local_start = event.start_time.replace(tzinfo=timezone.utc).astimezone(USER_TIMEZONE)
+            # Times are stored as naive local — tag with timezone for display
+            local_start = event.start_time.replace(tzinfo=USER_TIMEZONE)
 
             recurrence_desc = {
                 "daily": "repeating daily",

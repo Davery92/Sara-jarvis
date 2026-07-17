@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List
 
+from app.core.timezone import now as local_now, to_local
 from app.db.session import get_db
 from app.models.user import User
 from app.models.reminder import Reminder, Timer
@@ -99,7 +100,7 @@ async def update_reminder(
     if reminder_data.is_completed is not None:
         reminder.is_completed = reminder_data.is_completed
 
-    reminder.updated_at = datetime.now()
+    reminder.updated_at = local_now()
     db.commit()
     db.refresh(reminder)
 
@@ -151,7 +152,7 @@ async def complete_reminder(
         raise HTTPException(status_code=404, detail="Reminder not found")
 
     reminder.is_completed = True
-    reminder.updated_at = datetime.now()
+    reminder.updated_at = local_now()
     db.commit()
 
     return {"message": f"Marked reminder '{reminder.title}' as completed"}
@@ -211,11 +212,11 @@ async def list_timers(
             id=timer.id,
             title=timer.title,
             duration_minutes=timer.duration_minutes,
-            start_time=timer.start_time.replace(tzinfo=timezone.utc).isoformat(),
-            end_time=timer.end_time.replace(tzinfo=timezone.utc).isoformat(),
+            start_time=to_local(timer.start_time).isoformat(),
+            end_time=to_local(timer.end_time).isoformat(),
             is_active=timer.is_active,
             is_completed=timer.is_completed == "true",
-            created_at=timer.created_at.replace(tzinfo=timezone.utc).isoformat()
+            created_at=to_local(timer.created_at).isoformat()
         )
         for timer in timers
     ]
@@ -236,7 +237,7 @@ async def start_timer(
     from datetime import timedelta
 
     logger.info(f"Creating timer: title={timer_data.title}, duration_minutes={timer_data.duration_minutes}, duration_seconds={timer_data.duration_seconds}")
-    start_time = datetime.now(timezone.utc)
+    start_time = local_now()
 
     # Support both duration_seconds and duration_minutes for backward compatibility
     if timer_data.duration_seconds is not None:
@@ -266,11 +267,11 @@ async def start_timer(
         id=timer.id,
         title=timer.title,
         duration_minutes=timer.duration_minutes,
-        start_time=timer.start_time.replace(tzinfo=timezone.utc).isoformat(),
-        end_time=timer.end_time.replace(tzinfo=timezone.utc).isoformat(),
+        start_time=to_local(timer.start_time).isoformat(),
+        end_time=to_local(timer.end_time).isoformat(),
         is_active=timer.is_active,
         is_completed=timer.is_completed == "true",
-        created_at=timer.created_at.replace(tzinfo=timezone.utc).isoformat()
+        created_at=to_local(timer.created_at).isoformat()
     )
 
 
@@ -318,10 +319,8 @@ async def stop_timer(
     # Send notification for stopped timer
     try:
         from app.main_simple import ntfy_service
-        now = datetime.now(timezone.utc)
-        timer_end_time = timer.end_time
-        if timer_end_time.tzinfo is None:
-            timer_end_time = timer_end_time.replace(tzinfo=timezone.utc)
+        now = local_now()
+        timer_end_time = to_local(timer.end_time)
 
         if timer_end_time > now:
             # Timer was stopped early, send immediate notification

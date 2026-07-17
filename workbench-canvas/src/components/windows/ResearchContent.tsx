@@ -41,7 +41,7 @@ export default function ResearchContent({ data }: ResearchContentProps) {
   const [query, setQuery] = useState(data.initialQuery || '')
   const [mode, setMode] = useState<ResearchMode>(data.mode || 'simple')
   const [isSearching, setIsSearching] = useState(false)
-  const [selectedModel, setSelectedModel] = useState<string>('gpt-oss:120b')
+  const [selectedModel, setSelectedModel] = useState<string>('gpt-oss:20b')
   const [showModelDropdown, setShowModelDropdown] = useState(false)
   const [currentResult, setCurrentResult] = useState<SearchResult | null>(null)
   const [streamingContent, setStreamingContent] = useState('')
@@ -68,7 +68,7 @@ export default function ResearchContent({ data }: ResearchContentProps) {
 
   // Set default model when loaded
   useEffect(() => {
-    if (modelsData?.default && selectedModel === 'gpt-oss:120b') {
+    if (modelsData?.default && selectedModel === 'gpt-oss:20b') {
       setSelectedModel(modelsData.default)
     }
   }, [modelsData])

@@ -5,13 +5,17 @@ Runs once per night to consolidate the day's interactions into meaningful knowle
 """
 import asyncio
 import logging
+import os
+import uuid as _uuid
 from datetime import datetime, timedelta, time
 from typing import Dict, List, Any, Optional
 from sqlalchemy.orm import Session
 import pytz
+import redis.asyncio as aioredis
+
+from app.core.timezone import now as local_now
 
 from app.db.session import SessionLocal
-from app.models.user import User
 from app.models.episode import Episode
 from app.services.content_intelligence import content_intelligence, ContentType
 from app.services.metadata_extractor import metadata_extractor
@@ -20,38 +24,77 @@ from app.services.enhanced_neo4j_schema import enhanced_neo4j
 
 logger = logging.getLogger(__name__)
 
+DREAM_LOCK_KEY = "sara:dream_scheduler_lock"
+DREAM_LOCK_TTL = 120  # seconds
+REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+SOLO_USER_ID = os.getenv("SOLO_USER_ID", "64f37c56-85cb-4590-8de9-adfc17d343ed")
+
+RELEASE_SCRIPT = """
+if redis.call("get", KEYS[1]) == ARGV[1] then
+    return redis.call("del", KEYS[1])
+else
+    return 0
+end
+"""
+
+
 class NightlyDreamService:
     """Intelligent nightly processing of daily conversations and content"""
-    
+
     def __init__(self):
         self.eastern_tz = pytz.timezone('America/New_York')
         self.dream_time = time(2, 0)  # 2:00 AM Eastern
         self.is_dreaming = False
         self.last_dream_date = None
-        logger.info("🌙 NightlyDreamService initialized - dreams at 2:00 AM Eastern time")
-    
+        self._owner_token: str = ""
+        logger.info("NightlyDreamService initialized - dreams at 2:00 AM Eastern time")
+
     async def start_dream_scheduler(self):
-        """Start the nightly dream scheduler"""
-        logger.info("🌙 Starting nightly dream scheduler...")
-        
-        while True:
+        """Start the nightly dream scheduler with Redis distributed lock."""
+        self._owner_token = str(_uuid.uuid4())
+        r = await aioredis.from_url(REDIS_URL, decode_responses=True)
+
+        # Acquire lock
+        acquired = await r.set(DREAM_LOCK_KEY, self._owner_token, nx=True, ex=DREAM_LOCK_TTL)
+        if not acquired:
+            logger.warning("Dream scheduler already running (lock held by another instance)")
+            await r.aclose()
+            return
+
+        logger.info("Starting nightly dream scheduler (lock acquired)...")
+        try:
+            while True:
+                try:
+                    # Refresh lock ownership
+                    current = await r.get(DREAM_LOCK_KEY)
+                    if current != self._owner_token:
+                        logger.error("Dream scheduler lost lock - another instance took over")
+                        return
+                    await r.expire(DREAM_LOCK_KEY, DREAM_LOCK_TTL)
+
+                    # Get current time in Eastern timezone
+                    utc_now = datetime.now(pytz.UTC)
+                    eastern_now = utc_now.astimezone(self.eastern_tz)
+
+                    # Check if it's time to dream and we haven't dreamed today
+                    if self._should_dream(eastern_now):
+                        logger.info(f"Time to dream! It's {eastern_now.strftime('%I:%M %p')} Eastern")
+                        await self._run_nightly_dream_cycle()
+                        self.last_dream_date = eastern_now.date()
+
+                    # Sleep for 60 seconds (must refresh faster than TTL)
+                    await asyncio.sleep(60)
+
+                except Exception as e:
+                    logger.error(f"Dream scheduler error: {e}")
+                    await asyncio.sleep(60)
+        finally:
+            # Compare-and-delete via Lua to avoid race release
             try:
-                # Get current time in Eastern timezone
-                utc_now = datetime.now(pytz.UTC)
-                eastern_now = utc_now.astimezone(self.eastern_tz)
-                
-                # Check if it's time to dream and we haven't dreamed today
-                if self._should_dream(eastern_now):
-                    logger.info(f"🌙 Time to dream! It's {eastern_now.strftime('%I:%M %p')} Eastern - Processing daily conversations...")
-                    await self._run_nightly_dream_cycle()
-                    self.last_dream_date = eastern_now.date()
-                
-                # Sleep for 30 minutes before checking again
-                await asyncio.sleep(1800)  # 30 minutes
-                
-            except Exception as e:
-                logger.error(f"❌ Dream scheduler error: {e}")
-                await asyncio.sleep(3600)  # Wait 1 hour on error
+                await r.eval(RELEASE_SCRIPT, 1, DREAM_LOCK_KEY, self._owner_token)
+            except Exception:
+                pass
+            await r.aclose()
     
     def _should_dream(self, eastern_now: datetime) -> bool:
         """Check if we should run the dream sequence (Eastern time)"""
@@ -81,14 +124,22 @@ class NightlyDreamService:
             self.is_dreaming = True
             logger.info("🌙 Starting nightly dream cycle...")
             
-            # Get all users for processing
-            db = SessionLocal()
-            users = db.query(User).all()
-            db.close()
-            
-            for user in users:
-                await self._process_user_daily_conversations(user.id)
-            
+            # Solo-user deployment: HA/workout/location events aren't user-scoped,
+            # so looping all app_user rows (including test accounts) cloned David's
+            # home patterns onto every test account. Scope to the real user only.
+            eastern_yesterday = (
+                datetime.now(pytz.UTC).astimezone(self.eastern_tz) - timedelta(days=1)
+            ).date()
+
+            await self._process_user_daily_conversations(SOLO_USER_ID)
+            await self._consolidate_inbox_items(SOLO_USER_ID)
+            # Pattern detection learns from HA/workout/meal data, so it must
+            # run even on days with no chat — _process_user_daily_conversations
+            # returns early when there were no conversations yesterday.
+            await self._run_full_day_replay_and_pattern_detection(
+                SOLO_USER_ID, eastern_yesterday
+            )
+
             logger.info("🌙 Nightly dream cycle complete!")
             
         except Exception as e:
@@ -132,8 +183,14 @@ class NightlyDreamService:
             # Run cognitive enhancement processing
             await self._run_cognitive_processing(user_id, conversation_sessions)
 
+            # Extract personal knowledge for the PKG
+            await self._extract_personal_knowledge(user_id, conversation_sessions, daily_episodes)
+
             # Emit importance_decay event for memory self-curation
             await self._emit_importance_decay_event(user_id)
+
+            # (Day replay + pattern detection moved to _run_nightly_dream_cycle so
+            # it runs even when there were no conversations yesterday.)
 
             logger.info(f"✅ Processed {len(conversation_sessions)} conversation sessions for user {user_id}")
             
@@ -436,12 +493,12 @@ class NightlyDreamService:
             )
             
             # Store as special summary content
-            summary_id = f"{user_id}_daily_summary_{datetime.now().strftime('%Y%m%d')}"
+            summary_id = f"{user_id}_daily_summary_{local_now().strftime('%Y%m%d')}"
             
             # Process summary through intelligence pipeline
             content_type, chunks = content_intelligence.process_content(
                 summary_content, 
-                f"Daily Summary - {datetime.now().strftime('%Y-%m-%d')}"
+                f"Daily Summary - {local_now().strftime('%Y-%m-%d')}"
             )
             
             metadata = metadata_extractor.extract_metadata(
@@ -469,7 +526,7 @@ class NightlyDreamService:
                 enhanced_neo4j.store_intelligent_content,
                 content_id=summary_id,
                 user_id=user_id,
-                title=f"Daily Summary - {datetime.now().strftime('%Y-%m-%d')}",
+                title=f"Daily Summary - {local_now().strftime('%Y-%m-%d')}",
                 content=summary_content,
                 content_type=content_type,
                 chunks=chunks,
@@ -564,7 +621,7 @@ class NightlyDreamService:
         """Format all daily insights into a comprehensive summary"""
         summary_parts = []
         
-        summary_parts.append(f"# Daily Summary - {datetime.now().strftime('%Y-%m-%d')}")
+        summary_parts.append(f"# Daily Summary - {local_now().strftime('%Y-%m-%d')}")
         summary_parts.append("")
         
         if themes:
@@ -652,6 +709,46 @@ class NightlyDreamService:
         except Exception as e:
             logger.error(f"❌ Cognitive enhancement processing failed: {e}")
 
+    async def _extract_personal_knowledge(self, user_id: str, conversation_sessions: Dict[str, List[Episode]], daily_episodes: List[Episode]):
+        """Extract personal knowledge about David into the PKG from the day's conversations"""
+        try:
+            from app.services.pkg_extractor import pkg_extractor
+            from app.services.personal_knowledge_graph import personal_kg
+
+            # Combine all conversation sessions into text
+            conversation_text = ""
+            for session_id, episodes in conversation_sessions.items():
+                conversation_text += f"\n--- Session {session_id} ---\n"
+                for ep in episodes:
+                    role = getattr(ep, 'role', 'unknown')
+                    content = getattr(ep, 'content', '')
+                    if role == 'user':
+                        conversation_text += f"David: {content}\n"
+                    elif role == 'assistant':
+                        conversation_text += f"Sara: {content}\n"
+
+            if len(conversation_text.strip()) < 100:
+                logger.info(f"   PKG: Skipping extraction - too little conversation text")
+                return
+
+            # Run deep extraction
+            logger.info(f"   🧠 PKG: Starting deep knowledge extraction ({len(conversation_text)} chars)...")
+            result = await pkg_extractor.deep_extract(conversation_text, user_id)
+
+            extracted = result.get("extracted", [])
+            contradictions = result.get("contradictions", [])
+            stats = result.get("stats", {})
+
+            # Run stale knowledge decay as maintenance
+            personal_kg.decay_stale_knowledge(days_threshold=90)
+
+            logger.info(f"   🧠 PKG: Extracted {stats.get('total', 0)} facts "
+                       f"(types: {stats.get('by_type', {})}), "
+                       f"{len(contradictions)} contradictions found")
+
+        except Exception as e:
+            logger.error(f"❌ PKG extraction failed (non-critical): {e}")
+
     async def _emit_importance_decay_event(self, user_id: str):
         """Emit an importance_decay event to gradually fade old, unreferenced memories"""
         try:
@@ -680,6 +777,174 @@ class NightlyDreamService:
                 db.close()
         except Exception as e:
             logger.error(f"❌ Failed to emit importance decay event: {e}")
+
+    async def _consolidate_inbox_items(self, user_id: str):
+        """Consolidate kept inbox items into episodic memory."""
+        logger.info(f"   📥 Consolidating kept inbox items for user {user_id}")
+
+        try:
+            from app.models.shared_content import SharedContent
+            from app.models.episode import Episode
+            from app.services.embedding_service import embedding_service
+            import uuid
+            import json
+
+            db = SessionLocal()
+            try:
+                # Find kept, unconsolidated items
+                items = db.query(SharedContent).filter(
+                    SharedContent.user_id == user_id,
+                    SharedContent.status == "kept",
+                    SharedContent.consolidated == False,
+                    SharedContent.extraction_status == "extracted",
+                ).all()
+
+                if not items:
+                    logger.info(f"   📥 No inbox items to consolidate for user {user_id}")
+                    return
+
+                logger.info(f"   📥 Consolidating {len(items)} kept inbox items...")
+
+                for item in items:
+                    try:
+                        # Summarize using LLM
+                        summary = await self._summarize_inbox_item(item)
+                        if not summary:
+                            summary = (item.description or item.title or "Shared content")[:300]
+
+                        # Create episode
+                        episode_id = str(uuid.uuid4())
+                        episode = Episode(
+                            id=episode_id,
+                            user_id=user_id,
+                            source="content_inbox",
+                            role="system",
+                            content=summary,
+                            importance=0.6,
+                            base_importance=0.6,
+                        )
+
+                        # Generate embedding for the episode
+                        emb = await embedding_service.generate_embedding(summary)
+                        if emb:
+                            episode.embedding = emb
+
+                        db.add(episode)
+
+                        # Mark item as consolidated
+                        item.consolidated = True
+                        item.consolidated_at = datetime.now(pytz.UTC)
+                        item.episode_id = episode_id
+
+                        db.commit()
+                        logger.info(f"   📥 Consolidated: {item.title} -> episode {episode_id}")
+
+                    except Exception as e:
+                        logger.error(f"   ❌ Failed to consolidate item {item.id}: {e}")
+                        db.rollback()
+                        continue
+
+            finally:
+                db.close()
+
+        except Exception as e:
+            logger.error(f"❌ Inbox consolidation failed: {e}")
+
+    async def _summarize_inbox_item(self, item) -> Optional[str]:
+        """Use LLM to summarize an inbox item for memory consolidation."""
+        try:
+            from app.main_simple import call_llm_simple
+
+            text_content = (item.extracted_text or "")[:4000]
+            if not text_content:
+                return None
+
+            prompt = (
+                f"Summarize this {item.content_type} that David shared and decided to keep.\n"
+                f"Title: {item.title} | Source: {item.original_url or 'shared file'}\n\n"
+                f"{text_content}\n\n"
+                f"Write 2-4 sentences capturing the key points David would want to remember. "
+                f"Include what it's about, why it might matter to him, and any actionable takeaways."
+            )
+
+            summary = await call_llm_simple(
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=300,
+            )
+            return summary.strip() if summary else None
+
+        except Exception as e:
+            logger.warning(f"LLM summarization failed for inbox item: {e}")
+            return None
+
+    async def _run_full_day_replay_and_pattern_detection(self, user_id: str, replay_date):
+        """
+        Run FULL day replay and pattern detection.
+
+        This is like the human brain's memory consolidation during sleep -
+        replaying ALL events from the day (not just conversations) and
+        detecting behavioral patterns that can be used for proactive suggestions.
+        """
+        logger.info(f"   🧠 Running full day replay and pattern detection...")
+
+        try:
+            from app.services.day_replay_builder import day_replay_builder
+            from app.services.pattern_detector import pattern_detector
+            from app.services.weather_service import weather_service
+            from app.db.session import SessionLocal
+
+            db = SessionLocal()
+            try:
+                # Step 1: Build full day replay from ALL data sources
+                logger.info(f"   📼 Building full day replay for {replay_date}...")
+                replay = await day_replay_builder.build_replay(db, user_id, replay_date)
+
+                if replay.total_events == 0:
+                    logger.info(f"   ℹ️ No events to replay for {replay_date}")
+                    return
+
+                logger.info(
+                    f"   ✅ Day replay built: {replay.total_events} events from "
+                    f"{len(replay.data_sources_included)} sources: {', '.join(replay.data_sources_included)}"
+                )
+
+                # Step 2: Get weather data for context
+                weather_history = {}
+                try:
+                    weather = await weather_service.get_weather()
+                    if weather:
+                        weather_history[replay_date] = {
+                            "current_temp": weather.current.temperature,
+                            "temp_high": weather.forecast[0].temp_high if weather.forecast else None,
+                            "temp_low": weather.forecast[0].temp_low if weather.forecast else None,
+                            "description": weather.current.description
+                        }
+                except Exception as we:
+                    logger.warning(f"   ⚠️ Failed to get weather for pattern detection: {we}")
+
+                # Step 3: Cache the replay for future analysis
+                await day_replay_builder.cache_replay(db, replay)
+
+                # Step 4: Run pattern detection across recent days
+                logger.info(f"   🔍 Running pattern detection...")
+                detection_result = await pattern_detector.run_detection_cycle(db, user_id)
+
+                if detection_result.get("patterns_detected", 0) > 0:
+                    logger.info(
+                        f"   ✅ Pattern detection complete: {detection_result['patterns_detected']} patterns "
+                        f"detected from {detection_result.get('days_analyzed', 0)} days of data"
+                    )
+                else:
+                    logger.info(f"   ℹ️ No new patterns detected")
+
+            finally:
+                db.close()
+
+        except ImportError as ie:
+            logger.warning(f"   ⚠️ Day replay/pattern detection not available: {ie}")
+        except Exception as e:
+            logger.error(f"   ❌ Full day replay failed: {e}")
 
 
 # Global service instance

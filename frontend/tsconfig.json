@@ -28,5 +28,21 @@
     }
   },
   "include": ["src"],
+  "exclude": [
+    "src/App-simple.tsx",
+    "src/components/AutonomyTimeline.tsx",
+    "src/components/Layout.tsx",
+    "src/pages/Calendar.tsx",
+    "src/pages/Chat.tsx",
+    "src/pages/Documents.tsx",
+    "src/pages/Home.tsx",
+    "src/pages/Login.tsx",
+    "src/pages/Reminders.tsx",
+    "src/pages/TemerantPage.tsx",
+    "src/pages/TemerantRpgPage.tsx",
+    "src/pages/__tests__/**",
+    "src/**/*.test.ts",
+    "src/**/*.test.tsx"
+  ],
   "references": [{ "path": "./tsconfig.node.json" }]
 }

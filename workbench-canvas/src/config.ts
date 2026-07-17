@@ -5,7 +5,12 @@ const getApiUrl = () => {
     return import.meta.env.VITE_API_URL
   }
 
-  // Use current hostname with port 8000 for API
+  // Production: use sara-api.avery.cloud
+  if (typeof window !== 'undefined' && window.location.hostname.includes('avery.cloud')) {
+    return 'https://sara-api.avery.cloud'
+  }
+
+  // Use current hostname with port 8000 for API (LAN dev)
   if (typeof window !== 'undefined') {
     return `http://${window.location.hostname}:8000`
   }

@@ -13,22 +13,36 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useWorkoutMode } from '../../context/WorkoutModeContext';
+import { colors, spacing, borderRadius, fontSizes, fontWeights } from '../../styles/theme';
+import ExercisePickerModal from './ExercisePickerModal';
 
 interface WorkoutPanelProps {
   onCollapse?: () => void;
   isCollapsed?: boolean;
+  onFinish?: () => void;   // screen supplies this to show the summary; falls back to completeWorkout
 }
 
-export default function WorkoutPanel({ onCollapse, isCollapsed = false }: WorkoutPanelProps) {
+type Feeling = 'light' | 'moderate' | 'hard';
+
+// RPE feedback chips — selected before logging a set (mockup: Too Hard / Perfect / Too Easy).
+const FEELINGS: { key: Feeling; label: string; emoji: string; color: string }[] = [
+  { key: 'hard', label: 'Too Hard', emoji: '😣', color: colors.error },
+  { key: 'moderate', label: 'Perfect', emoji: '😊', color: colors.warning },
+  { key: 'light', label: 'Too Easy', emoji: '😄', color: colors.success },
+];
+
+export default function WorkoutPanel({ onCollapse, isCollapsed = false, onFinish }: WorkoutPanelProps) {
   const {
-    session,
     isActive,
+    session,
     currentExercise,
     currentSetNumber,
     progress,
     restTimer,
     logSet,
     skipExercise,
+    selectExercise,
+    setVariant,
     startRestTimer,
     stopRestTimer,
     completeWorkout,
@@ -39,16 +53,37 @@ export default function WorkoutPanel({ onCollapse, isCollapsed = false }: Workou
   const [timerPulse] = useState(new Animated.Value(1));
   const [customWeight, setCustomWeight] = useState<string>('');
   const [customReps, setCustomReps] = useState<string>('');
+  const [feeling, setFeeling] = useState<Feeling>('moderate');
+  const [variantInput, setVariantInput] = useState<string>('');
+  const [showVariantPicker, setShowVariantPicker] = useState(false);
 
-  // Update custom weight/reps when exercise changes
+  // Reset inputs when the exercise (or its scoped suggestion, e.g. after setting a
+  // machine variant) changes.
   useEffect(() => {
     if (currentExercise) {
       setCustomWeight(currentExercise.suggested_weight?.toString() || '');
-      // Parse target reps (e.g., "8-10" -> "8")
       const targetReps = currentExercise.reps?.toString().split('-')[0] || '';
       setCustomReps(targetReps);
+      setFeeling('moderate');
+      setVariantInput(currentExercise.variant || '');
     }
-  }, [currentExercise?.name, session?.current_exercise_index]);
+  }, [currentExercise?.name, session?.current_exercise_index, currentExercise?.variant, currentExercise?.suggested_weight]);
+
+  // Commit the machine/variation the user typed (null reverts to the base lift).
+  const commitVariant = () => {
+    const trimmed = variantInput.trim();
+    const current = currentExercise?.variant || '';
+    if (trimmed === current) return;
+    setVariant(session?.current_exercise_index ?? 0, trimmed || null);
+  };
+
+  // Picking from the variant-history list (or adding a new one) commits
+  // immediately — don't rely on variantInput's state, which won't have
+  // updated yet inside this same handler.
+  const handlePickVariant = (name: string) => {
+    setVariantInput(name);
+    setVariant(session?.current_exercise_index ?? 0, name || null);
+  };
 
   // Vibrate when rest timer ends
   useEffect(() => {
@@ -69,30 +104,36 @@ export default function WorkoutPanel({ onCollapse, isCollapsed = false }: Workou
 
   if (!isActive || !session) return null;
 
-  const handleLogSet = async (feeling?: 'light' | 'moderate' | 'hard') => {
+  const adjustWeight = (delta: number) => {
+    const current = parseFloat(customWeight) || 0;
+    setCustomWeight(Math.max(0, current + delta).toString());
+  };
+  const adjustReps = (delta: number) => {
+    const current = parseInt(customReps, 10) || 0;
+    setCustomReps(Math.max(0, current + delta).toString());
+  };
+
+  const handleLogSet = async () => {
     Keyboard.dismiss();
     setIsLogging(true);
     try {
       const weight = customWeight ? parseFloat(customWeight) : currentExercise?.suggested_weight;
       const reps = customReps ? parseInt(customReps, 10) : undefined;
-      console.log('[WorkoutPanel] Logging set:', { feeling, weight, reps });
-      const result = await logSet({
-        rpe_feeling: feeling,
-        weight,
-        reps,
-      });
-      console.log('[WorkoutPanel] Log result:', result);
+      const result = await logSet({ rpe_feeling: feeling, weight, reps });
       if (result.coaching_feedback) {
         setLastFeedback(result.coaching_feedback);
-        // Clear feedback after 5 seconds
         setTimeout(() => setLastFeedback(null), 5000);
       }
-      // Start rest timer after logging
       if (result.success) {
-        const isCompound = ['squat', 'deadlift', 'bench', 'press', 'row'].some(
-          kw => currentExercise?.name.toLowerCase().includes(kw)
-        );
-        startRestTimer(isCompound ? 180 : 90);
+        // Rest length is backend-driven now — scaled to the set's intensity
+        // (RPE) + lift type, instead of a flat 180/90.
+        startRestTimer(result.rest_seconds || 120);
+        if (result.pr?.is_pr) {
+          const e1rm = result.pr.estimated_1rm
+            ? ` Est. 1RM: ${Math.round(result.pr.estimated_1rm)} lbs.`
+            : '';
+          Alert.alert('🏆 New PR!', `${currentExercise?.name || 'Lift'} — new best!${e1rm}`);
+        }
       } else {
         Alert.alert('Error', 'Failed to log set. Please try again.');
       }
@@ -104,24 +145,24 @@ export default function WorkoutPanel({ onCollapse, isCollapsed = false }: Workou
     }
   };
 
+  const handleFinish = () => {
+    Alert.alert('Finish Workout?', 'End and save this workout?', [
+      { text: 'Keep Going', style: 'cancel' },
+      { text: 'Finish', style: 'default', onPress: () => (onFinish ? onFinish() : completeWorkout()) },
+    ]);
+  };
+
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
     const secs = seconds % 60;
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
-  const workoutDuration = () => {
-    if (!session.started_at) return '0:00';
-    const start = new Date(session.started_at).getTime();
-    const elapsed = Math.floor((Date.now() - start) / 1000);
-    return formatTime(elapsed);
-  };
-
   if (isCollapsed) {
     return (
       <TouchableOpacity style={styles.collapsedPanel} onPress={onCollapse}>
         <View style={styles.collapsedContent}>
-          <Ionicons name="barbell" size={18} color="#fff" />
+          <Ionicons name="barbell" size={18} color={colors.text} />
           <Text style={styles.collapsedText}>
             {currentExercise?.name} - Set {currentSetNumber}/{currentExercise?.sets}
           </Text>
@@ -138,544 +179,795 @@ export default function WorkoutPanel({ onCollapse, isCollapsed = false }: Workou
     );
   }
 
+  const scheme = currentExercise
+    ? `${currentExercise.sets} × ${currentExercise.reps}${currentExercise.suggested_weight ? ` @ ${currentExercise.suggested_weight} lbs` : ''}`
+    : '';
+  const last = currentExercise?.last_session;
+
   return (
     <View style={styles.container}>
-      {/* Header */}
-      <View style={styles.header}>
-        <View>
-          <Text style={styles.workoutName}>
-            {session.workout_snapshot?.template_name || 'Workout'}
-          </Text>
-          <Text style={styles.duration}>{workoutDuration()}</Text>
-        </View>
-        <View style={styles.headerRight}>
-          <Text style={styles.progressText}>
-            {progress.completed}/{progress.total} sets
-          </Text>
-          <TouchableOpacity onPress={onCollapse} style={styles.collapseButton}>
-            <Ionicons name="chevron-down" size={20} color="#888" />
-          </TouchableOpacity>
-        </View>
+      {/* SET x OF y + progress */}
+      <View style={styles.setHeader}>
+        <Text style={styles.setHeaderText}>
+          SET {Math.min(progress.completed + 1, progress.total)} OF {progress.total}
+        </Text>
+      </View>
+      <View style={styles.progressBar}>
+        <View style={[styles.progressFill, { width: `${progress.percentage}%` }]} />
       </View>
 
-      {/* Progress Bar */}
-      <View style={styles.progressContainer}>
-        <View style={styles.progressBar}>
-          <View style={[styles.progressFill, { width: `${progress.percentage}%` }]} />
-        </View>
-      </View>
+      <ScrollView
+        style={styles.scroll}
+        contentContainerStyle={styles.scrollContent}
+        showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
+      >
+        {/* Rest timer (only while resting). Tap anywhere on it to end the rest
+            early when you're ready to start your next set. */}
+        {restTimer?.is_active && restTimer.remaining_seconds !== undefined && (
+          <Animated.View style={{ transform: [{ scale: timerPulse }] }}>
+            <TouchableOpacity
+              style={styles.restTimerContainer}
+              onPress={stopRestTimer}
+              activeOpacity={0.8}
+            >
+              <Ionicons name="time-outline" size={22} color={colors.accent} />
+              <Text style={styles.restTimerText}>Rest: {formatTime(restTimer.remaining_seconds)}</Text>
+              <View style={styles.skipRestButton}>
+                <Text style={styles.skipRestText}>Tap to skip</Text>
+              </View>
+            </TouchableOpacity>
+          </Animated.View>
+        )}
 
-      {/* Rest Timer */}
-      {restTimer?.is_active && restTimer.remaining_seconds !== undefined && (
-        <Animated.View style={[styles.restTimerContainer, { transform: [{ scale: timerPulse }] }]}>
-          <Ionicons name="time-outline" size={20} color="#3b82f6" />
-          <Text style={styles.restTimerText}>
-            Rest: {formatTime(restTimer.remaining_seconds)}
-          </Text>
-          <TouchableOpacity onPress={stopRestTimer} style={styles.skipRestButton}>
-            <Text style={styles.skipRestText}>Skip</Text>
-          </TouchableOpacity>
-        </Animated.View>
-      )}
+        {currentExercise && (
+          <>
+            {/* Deload week badge — the program intentionally backs off this week. */}
+            {session?.workout_snapshot?.is_deload && (
+              <View style={styles.deloadBadge}>
+                <Ionicons name="refresh-outline" size={14} color="#1a1408" />
+                <Text style={styles.deloadBadgeText}>
+                  DELOAD WEEK · lighter loads, focus on form
+                </Text>
+              </View>
+            )}
 
-      {/* Current Exercise */}
-      {currentExercise && (
-        <View style={styles.currentExercise}>
-          <View style={styles.exerciseHeader}>
-            <Text style={styles.exerciseName}>{currentExercise.name}</Text>
-            <Text style={styles.setInfo}>
-              Set {currentSetNumber} of {currentExercise.sets}
-            </Text>
-          </View>
-
-          <View style={styles.targetInfo}>
-            <View style={styles.targetItem}>
-              <Text style={styles.targetLabel}>Weight</Text>
-              <View style={styles.inputRow}>
-                <TouchableOpacity
-                  style={styles.adjustButton}
-                  onPress={() => {
-                    const current = parseFloat(customWeight) || 0;
-                    setCustomWeight(Math.max(0, current - 5).toString());
-                  }}
-                >
-                  <Text style={styles.adjustButtonText}>-5</Text>
-                </TouchableOpacity>
-                <View style={styles.inputContainer}>
-                  <TextInput
-                    style={styles.input}
-                    value={customWeight}
-                    onChangeText={setCustomWeight}
-                    keyboardType="numeric"
-                    placeholder={currentExercise.suggested_weight?.toString() || '0'}
-                    placeholderTextColor="#666"
-                    selectTextOnFocus
-                    returnKeyType="done"
-                    onSubmitEditing={() => Keyboard.dismiss()}
-                  />
-                  <Text style={styles.inputUnit}>lbs</Text>
-                </View>
-                <TouchableOpacity
-                  style={styles.adjustButton}
-                  onPress={() => {
-                    const current = parseFloat(customWeight) || 0;
-                    setCustomWeight((current + 5).toString());
-                  }}
-                >
-                  <Text style={styles.adjustButtonText}>+5</Text>
-                </TouchableOpacity>
+            {/* Exercise header */}
+            <View style={styles.exerciseHeader}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.exerciseName}>{currentExercise.name}</Text>
+                <Text style={styles.exerciseScheme}>{scheme}</Text>
+                {/* Why this weight — the progression reasoning, finally shown. */}
+                {currentExercise.progression_note ? (
+                  <Text style={styles.progressionNote}>{currentExercise.progression_note}</Text>
+                ) : null}
+                {/* Coaching cue from the template. */}
+                {currentExercise.notes ? (
+                  <Text style={styles.exerciseNote}>💡 {currentExercise.notes}</Text>
+                ) : null}
+                {/* Advanced-set hints (were captured but invisible before). */}
+                {(currentExercise.is_per_side || currentExercise.set_technique || currentExercise.superset_group) ? (
+                  <View style={styles.exerciseTags}>
+                    {currentExercise.is_per_side ? (
+                      <Text style={styles.exerciseTag}>per side</Text>
+                    ) : null}
+                    {currentExercise.set_technique ? (
+                      <Text style={styles.exerciseTag}>{currentExercise.set_technique}</Text>
+                    ) : null}
+                    {currentExercise.superset_group ? (
+                      <Text style={styles.exerciseTag}>superset</Text>
+                    ) : null}
+                  </View>
+                ) : null}
+              </View>
+              <View style={styles.rpeTarget}>
+                <Text style={styles.rpeTargetLabel}>TARGET RPE</Text>
+                <Text style={styles.rpeTargetValue}>{currentExercise.rpe_target ?? '—'}</Text>
               </View>
             </View>
-            <View style={styles.targetItem}>
-              <Text style={styles.targetLabel}>Reps</Text>
-              <View style={styles.inputContainer}>
+
+            {/* Machine / variation — scopes weight history so a different machine
+                (e.g. hack squat vs barbell squat) is tracked separately. */}
+            <View style={styles.variantBox}>
+              <Text style={styles.variantLabel}>MACHINE / VARIATION</Text>
+              <View style={styles.variantRow}>
                 <TextInput
-                  style={styles.input}
-                  value={customReps}
-                  onChangeText={setCustomReps}
-                  keyboardType="numeric"
-                  placeholder={currentExercise.reps?.toString().split('-')[0] || '8'}
-                  placeholderTextColor="#666"
-                  selectTextOnFocus
+                  style={[styles.variantInput, { flex: 1 }]}
+                  value={variantInput}
+                  onChangeText={setVariantInput}
+                  onEndEditing={commitVariant}
+                  onSubmitEditing={() => { commitVariant(); Keyboard.dismiss(); }}
+                  placeholder={currentExercise.name}
+                  placeholderTextColor={colors.textMuted}
                   returnKeyType="done"
-                  onSubmitEditing={() => Keyboard.dismiss()}
                 />
+                <TouchableOpacity
+                  style={styles.variantBrowseButton}
+                  onPress={() => setShowVariantPicker(true)}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                >
+                  <Ionicons name="list-outline" size={20} color={colors.accent} />
+                </TouchableOpacity>
               </View>
-            </View>
-            <View style={styles.targetItem}>
-              <Text style={styles.targetLabel}>Target RPE</Text>
-              <Text style={styles.targetValue}>{currentExercise.rpe_target || '7-8'}</Text>
-            </View>
-          </View>
-
-          {currentExercise.progression_note && (
-            <View style={styles.progressionNote}>
-              <Ionicons name="trending-up" size={14} color="#22c55e" />
-              <Text style={styles.progressionNoteText}>{currentExercise.progression_note}</Text>
-            </View>
-          )}
-
-          {currentExercise.last_session?.weights?.length > 0 && (
-            <View style={styles.lastSession}>
-              <Text style={styles.lastSessionLabel}>Last time:</Text>
-              <Text style={styles.lastSessionValue}>
-                {currentExercise.last_session.weights[0]}lbs x{' '}
-                {currentExercise.last_session.reps?.join(', ') || '?'} reps
+              <Text style={styles.variantHint}>
+                {currentExercise.variant
+                  ? `Logging as “${currentExercise.variant}” — separate from ${currentExercise.name}.`
+                  : `Using ${currentExercise.name}. Tap the list icon to see past variants or change this.`}
               </Text>
             </View>
-          )}
-        </View>
-      )}
 
-      {/* Coaching Feedback */}
-      {lastFeedback && (
-        <View style={styles.feedbackContainer}>
-          <Ionicons name="chatbubble-ellipses" size={16} color="#8b5cf6" />
-          <Text style={styles.feedbackText}>{lastFeedback}</Text>
-        </View>
-      )}
+            <ExercisePickerModal
+              visible={showVariantPicker}
+              onClose={() => setShowVariantPicker(false)}
+              exerciseName={currentExercise.variant || currentExercise.name}
+              onSelectVariant={handlePickVariant}
+            />
 
-      {/* Quick Actions */}
-      <View style={styles.quickActions}>
-        <TouchableOpacity
-          style={[styles.actionButton, styles.lightButton]}
-          onPress={() => handleLogSet('light')}
-          disabled={isLogging}
-        >
-          <Text style={styles.actionButtonText}>Felt Light</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.actionButton, styles.doneButton]}
-          onPress={() => handleLogSet('moderate')}
-          disabled={isLogging}
-        >
-          <Text style={[styles.actionButtonText, styles.doneButtonText]}>Done</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.actionButton, styles.hardButton]}
-          onPress={() => handleLogSet('hard')}
-          disabled={isLogging}
-        >
-          <Text style={styles.actionButtonText}>Felt Hard</Text>
-        </TouchableOpacity>
-      </View>
+            {/* Weight stepper */}
+            <Stepper
+              label="WEIGHT"
+              onDec={() => adjustWeight(-5)}
+              onInc={() => adjustWeight(5)}
+              value={customWeight}
+              unit="lbs"
+              onChangeText={setCustomWeight}
+              placeholder={currentExercise.suggested_weight?.toString() || '0'}
+            />
 
-      {/* Secondary Actions */}
-      <View style={styles.secondaryActions}>
-        <TouchableOpacity style={styles.secondaryButton} onPress={skipExercise}>
-          <Ionicons name="play-skip-forward" size={16} color="#888" />
-          <Text style={styles.secondaryButtonText}>Skip Exercise</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={styles.secondaryButton}
-          onPress={() => startRestTimer(120)}
-        >
-          <Ionicons name="time" size={16} color="#888" />
-          <Text style={styles.secondaryButtonText}>Rest Timer</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.secondaryButton, styles.completeButton]}
-          onPress={completeWorkout}
-        >
-          <Ionicons name="checkmark-circle" size={16} color="#22c55e" />
-          <Text style={[styles.secondaryButtonText, { color: '#22c55e' }]}>Finish</Text>
-        </TouchableOpacity>
-      </View>
+            {/* Reps stepper */}
+            <Stepper
+              label="REPS"
+              onDec={() => adjustReps(-1)}
+              onInc={() => adjustReps(1)}
+              value={customReps}
+              onChangeText={setCustomReps}
+              placeholder={currentExercise.reps?.toString().split('-')[0] || '8'}
+            />
 
-      {/* Exercise List */}
-      <ScrollView style={styles.exerciseList} showsVerticalScrollIndicator={false}>
-        {(session.workout_snapshot?.exercises || []).map((exercise, index) => {
-          const isCurrent = index === (session.current_exercise_index || 0);
-          const isCompleted = index < (session.current_exercise_index || 0);
-          return (
-            <View
-              key={`${exercise.name}-${index}`}
-              style={[
-                styles.exerciseListItem,
-                isCurrent && styles.currentListItem,
-                isCompleted && styles.completedListItem,
-              ]}
+            {/* Log set */}
+            <TouchableOpacity
+              style={[styles.logButton, isLogging && styles.disabled]}
+              onPress={handleLogSet}
+              disabled={isLogging}
             >
-              <View style={styles.exerciseListIcon}>
-                {isCompleted ? (
-                  <Ionicons name="checkmark-circle" size={18} color="#22c55e" />
-                ) : isCurrent ? (
-                  <Ionicons name="radio-button-on" size={18} color="#3b82f6" />
+              <Ionicons name="checkmark" size={20} color={colors.background} />
+              <Text style={styles.logButtonText}>LOG SET</Text>
+            </TouchableOpacity>
+
+            {/* RPE feedback chips */}
+            <View style={styles.feelingRow}>
+              {FEELINGS.map(f => {
+                const active = feeling === f.key;
+                return (
+                  <TouchableOpacity
+                    key={f.key}
+                    style={[styles.feelingCard, active && { borderColor: f.color, backgroundColor: f.color + '22' }]}
+                    onPress={() => setFeeling(f.key)}
+                    activeOpacity={0.8}
+                  >
+                    <Text style={styles.feelingEmoji}>{f.emoji}</Text>
+                    <Text style={[styles.feelingLabel, active && { color: f.color, fontWeight: fontWeights.bold }]}>
+                      {f.label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+
+            {/* Coaching feedback */}
+            {lastFeedback && (
+              <View style={styles.feedbackContainer}>
+                <Ionicons name="chatbubble-ellipses" size={16} color={colors.accent} />
+                <Text style={styles.feedbackText}>{lastFeedback}</Text>
+              </View>
+            )}
+
+            {/* Last session + Goal */}
+            <View style={styles.infoRow}>
+              <View style={styles.infoCard}>
+                <View style={styles.infoCardHeader}>
+                  <Ionicons name="stats-chart" size={13} color={colors.textSecondary} />
+                  <Text style={styles.infoCardTitle}>LAST SESSION</Text>
+                </View>
+                {last?.weights?.length ? (
+                  last.weights.map((w, i) => (
+                    <Text key={i} style={styles.infoLine}>
+                      Set {i + 1}{'   '}
+                      <Text style={styles.infoLineValue}>{w} lbs × {last.reps?.[i] ?? '?'}</Text>
+                    </Text>
+                  ))
                 ) : (
-                  <Ionicons name="ellipse-outline" size={18} color="#555" />
+                  <Text style={styles.infoMuted}>No previous data</Text>
                 )}
               </View>
-              <View style={styles.exerciseListContent}>
-                <Text
-                  style={[
-                    styles.exerciseListName,
-                    isCompleted && styles.completedText,
-                  ]}
-                >
-                  {exercise.name}
-                </Text>
-                <Text style={styles.exerciseListSets}>
-                  {exercise.sets} x {exercise.reps}
+
+              <View style={styles.infoCard}>
+                <View style={styles.infoCardHeader}>
+                  <Ionicons name="flag" size={13} color={colors.textSecondary} />
+                  <Text style={styles.infoCardTitle}>GOAL</Text>
+                </View>
+                <Text style={styles.goalText}>
+                  {last?.weights?.length
+                    ? 'Beat at least one set today.'
+                    : `Log all ${currentExercise.sets} sets.`}
                 </Text>
               </View>
-              {exercise.suggested_weight && (
-                <Text style={styles.exerciseListWeight}>
-                  {exercise.suggested_weight} lbs
-                </Text>
-              )}
             </View>
-          );
-        })}
+
+            {/* Exercise list — tap any exercise to jump to it (do them in any
+                order; skip a busy machine and come back). */}
+            <Text style={styles.listHint}>Tap an exercise to jump to it</Text>
+            <View style={styles.exerciseList}>
+              {(session.workout_snapshot?.exercises || []).map((exercise, index) => {
+                const isCurrent = index === (session.current_exercise_index || 0);
+                const done = exercise.completed_sets ?? 0;
+                const isCompleted = done >= exercise.sets;
+                const isPartial = done > 0 && !isCompleted;
+                return (
+                  <TouchableOpacity
+                    key={`${exercise.name}-${index}`}
+                    style={[styles.listItem, isCurrent && styles.listItemCurrent]}
+                    onPress={() => selectExercise(index)}
+                    disabled={isCurrent}
+                    activeOpacity={0.7}
+                  >
+                    <View
+                      style={[
+                        styles.listNum,
+                        isCurrent && styles.listNumCurrent,
+                        isCompleted && styles.listNumDone,
+                      ]}
+                    >
+                      {isCompleted ? (
+                        <Ionicons name="checkmark" size={13} color={colors.background} />
+                      ) : (
+                        <Text style={[styles.listNumText, isCurrent && { color: colors.background }]}>
+                          {index + 1}
+                        </Text>
+                      )}
+                    </View>
+                    <View style={styles.listContent}>
+                      <Text style={[styles.listName, isCompleted && styles.listNameDone]}>
+                        {exercise.name}
+                        {exercise.variant ? <Text style={styles.listVariant}>{`  ›  ${exercise.variant}`}</Text> : null}
+                      </Text>
+                      <Text style={styles.listSets}>
+                        {exercise.sets} × {exercise.reps}
+                        {exercise.suggested_weight ? ` @ ${exercise.suggested_weight} lbs` : ''}
+                        {isPartial ? `  ·  ${done}/${exercise.sets} done` : ''}
+                      </Text>
+                    </View>
+                    <Ionicons
+                      name={isCompleted ? 'checkmark-circle' : isCurrent ? 'ellipse' : 'ellipse-outline'}
+                      size={18}
+                      color={isCompleted ? colors.success : isCurrent ? colors.primary : colors.textMuted}
+                    />
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          </>
+        )}
       </ScrollView>
+
+      {/* Bottom action bar */}
+      <View style={styles.bottomBar}>
+        <TouchableOpacity style={styles.bottomAction} onPress={() => startRestTimer(120)}>
+          <Ionicons name="timer-outline" size={20} color={colors.textSecondary} />
+          <Text style={styles.bottomActionText}>Rest Timer</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.bottomAction} onPress={skipExercise}>
+          <Ionicons name="play-skip-forward" size={20} color={colors.textSecondary} />
+          <Text style={styles.bottomActionText}>Skip Exercise</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.bottomAction} onPress={handleFinish}>
+          <Ionicons name="flag" size={20} color={colors.error} />
+          <Text style={[styles.bottomActionText, { color: colors.error }]}>Finish Workout</Text>
+        </TouchableOpacity>
+      </View>
+    </View>
+  );
+}
+
+// Reusable −/value/+ stepper row matching the mockup.
+function Stepper({
+  label,
+  value,
+  unit,
+  placeholder,
+  onDec,
+  onInc,
+  onChangeText,
+}: {
+  label: string;
+  value: string;
+  unit?: string;
+  placeholder?: string;
+  onDec: () => void;
+  onInc: () => void;
+  onChangeText: (t: string) => void;
+}) {
+  return (
+    <View style={styles.stepper}>
+      <Text style={styles.stepperLabel}>{label}</Text>
+      <View style={styles.stepperRow}>
+        <TouchableOpacity style={styles.stepperBtn} onPress={onDec}>
+          <Ionicons name="remove" size={24} color={colors.text} />
+        </TouchableOpacity>
+        <View style={styles.stepperValueWrap}>
+          <TextInput
+            style={styles.stepperValue}
+            value={value}
+            onChangeText={onChangeText}
+            keyboardType="numeric"
+            placeholder={placeholder}
+            placeholderTextColor={colors.textMuted}
+            selectTextOnFocus
+            returnKeyType="done"
+            onSubmitEditing={() => Keyboard.dismiss()}
+          />
+          {unit ? <Text style={styles.stepperUnit}>{unit}</Text> : null}
+        </View>
+        <TouchableOpacity style={styles.stepperBtn} onPress={onInc}>
+          <Ionicons name="add" size={24} color={colors.text} />
+        </TouchableOpacity>
+      </View>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
-    backgroundColor: '#1a1a1a',
-    borderRadius: 16,
-    padding: 16,
-    margin: 8,
-    maxHeight: '60%',
+    flex: 1,
+    backgroundColor: colors.background,
   },
+  // collapsed bar (chat reveal)
   collapsedPanel: {
-    backgroundColor: '#1a1a1a',
-    borderRadius: 12,
-    padding: 12,
-    margin: 8,
+    backgroundColor: colors.surface,
+    borderRadius: borderRadius.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: spacing.sm + 4,
+    margin: spacing.sm,
   },
   collapsedContent: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: spacing.sm,
   },
   collapsedText: {
-    color: '#fff',
+    color: colors.text,
+    fontSize: fontSizes.sm,
+    fontWeight: fontWeights.medium,
     flex: 1,
   },
   miniTimer: {
-    backgroundColor: '#3b82f6',
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-    borderRadius: 10,
+    backgroundColor: colors.assistant.actionSoft,
+    paddingHorizontal: spacing.sm + 2,
+    paddingVertical: 3,
+    borderRadius: borderRadius.full,
   },
   miniTimerText: {
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: '600',
+    color: colors.accent,
+    fontSize: fontSizes.xs,
+    fontWeight: fontWeights.bold,
   },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    marginBottom: 12,
+
+  setHeader: {
+    paddingHorizontal: spacing.md,
+    paddingTop: spacing.sm,
+    paddingBottom: spacing.xs,
   },
-  workoutName: {
-    color: '#fff',
-    fontSize: 18,
-    fontWeight: '700',
-  },
-  duration: {
-    color: '#888',
-    fontSize: 14,
-  },
-  headerRight: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-  },
-  progressText: {
-    color: '#888',
-    fontSize: 14,
-  },
-  collapseButton: {
-    padding: 4,
-  },
-  progressContainer: {
-    marginBottom: 16,
+  setHeaderText: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.xs,
+    fontWeight: fontWeights.semibold,
+    letterSpacing: 1,
   },
   progressBar: {
     height: 4,
-    backgroundColor: '#333',
-    borderRadius: 2,
+    backgroundColor: colors.surfaceLight,
+    marginHorizontal: spacing.md,
+    borderRadius: borderRadius.full,
     overflow: 'hidden',
   },
   progressFill: {
     height: '100%',
-    backgroundColor: '#3b82f6',
-    borderRadius: 2,
+    backgroundColor: colors.primary,
+    borderRadius: borderRadius.full,
   },
+
+  scroll: {
+    flex: 1,
+  },
+  scrollContent: {
+    padding: spacing.md,
+    paddingBottom: spacing.lg,
+    gap: spacing.md,
+  },
+
   restTimerContainer: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#1e3a5f',
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    borderRadius: 12,
-    marginBottom: 16,
-    gap: 8,
+    backgroundColor: colors.assistant.actionSoft,
+    borderWidth: 1,
+    borderColor: colors.assistant.borderStrong,
+    paddingVertical: spacing.sm + 4,
+    paddingHorizontal: spacing.md,
+    borderRadius: borderRadius.lg,
+    gap: spacing.sm,
   },
   restTimerText: {
-    color: '#3b82f6',
-    fontSize: 24,
-    fontWeight: '700',
+    color: colors.accent,
+    fontSize: fontSizes.xxl,
+    fontWeight: fontWeights.bold,
     flex: 1,
     textAlign: 'center',
   },
   skipRestButton: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    backgroundColor: '#333',
-    borderRadius: 8,
+    paddingHorizontal: spacing.sm + 4,
+    paddingVertical: spacing.xs + 2,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: borderRadius.md,
   },
   skipRestText: {
-    color: '#888',
-    fontSize: 12,
+    color: colors.text,
+    fontSize: fontSizes.xs,
+    fontWeight: fontWeights.semibold,
   },
-  currentExercise: {
-    backgroundColor: '#222',
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 12,
-  },
+
   exerciseHeader: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 12,
+    alignItems: 'flex-start',
   },
   exerciseName: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600',
-    flex: 1,
+    color: colors.text,
+    fontSize: fontSizes.xxl,
+    fontWeight: fontWeights.bold,
   },
-  setInfo: {
-    color: '#3b82f6',
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  targetInfo: {
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    marginBottom: 12,
-  },
-  targetItem: {
-    alignItems: 'center',
-  },
-  targetLabel: {
-    color: '#666',
-    fontSize: 12,
-    marginBottom: 4,
-  },
-  targetValue: {
-    color: '#fff',
-    fontSize: 18,
-    fontWeight: '600',
-  },
-  inputContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#333',
-    borderRadius: 8,
-    paddingHorizontal: 8,
-    minWidth: 80,
-  },
-  input: {
-    color: '#fff',
-    fontSize: 18,
-    fontWeight: '600',
-    textAlign: 'center',
-    paddingVertical: 6,
-    minWidth: 50,
-  },
-  inputUnit: {
-    color: '#888',
-    fontSize: 14,
-    marginLeft: 2,
-  },
-  inputRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-  },
-  adjustButton: {
-    backgroundColor: '#444',
-    paddingHorizontal: 8,
-    paddingVertical: 8,
-    borderRadius: 6,
-  },
-  adjustButtonText: {
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: '600',
+  exerciseScheme: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    marginTop: 4,
+    textTransform: 'uppercase',
+    letterSpacing: 0.3,
   },
   progressionNote: {
+    color: colors.accent,
+    fontSize: fontSizes.sm,
+    marginTop: 6,
+  },
+  exerciseNote: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    marginTop: 4,
+    fontStyle: 'italic',
+  },
+  exerciseTags: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginTop: 6,
+  },
+  exerciseTag: {
+    color: colors.text,
+    fontSize: 11,
+    fontWeight: fontWeights.semibold,
+    backgroundColor: colors.surfaceElevated || colors.surface,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+    overflow: 'hidden',
+    textTransform: 'uppercase',
+    letterSpacing: 0.3,
+  },
+  deloadBadge: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    backgroundColor: '#1a2e1a',
-    paddingVertical: 6,
+    alignSelf: 'flex-start',
+    backgroundColor: '#ffd24a',
     paddingHorizontal: 10,
+    paddingVertical: 5,
     borderRadius: 8,
-    marginBottom: 8,
+    marginBottom: 10,
   },
-  progressionNoteText: {
-    color: '#22c55e',
-    fontSize: 12,
+  deloadBadgeText: {
+    color: '#1a1408',
+    fontSize: 11,
+    fontWeight: fontWeights.bold,
+    letterSpacing: 0.3,
   },
-  lastSession: {
+  rpeTarget: {
+    alignItems: 'flex-end',
+  },
+  rpeTargetLabel: {
+    color: colors.textMuted,
+    fontSize: 10,
+    fontWeight: fontWeights.semibold,
+    letterSpacing: 0.5,
+  },
+  rpeTargetValue: {
+    color: colors.accent,
+    fontSize: fontSizes.xxl,
+    fontWeight: fontWeights.bold,
+  },
+
+  variantBox: {
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: borderRadius.xl,
+    padding: spacing.md,
+  },
+  variantLabel: {
+    color: colors.textMuted,
+    fontSize: fontSizes.xs,
+    fontWeight: fontWeights.semibold,
+    letterSpacing: 0.5,
+    marginBottom: spacing.xs,
+  },
+  variantInput: {
+    color: colors.text,
+    fontSize: fontSizes.lg,
+    fontWeight: fontWeights.semibold,
+    paddingVertical: spacing.xs,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+  },
+  variantRow: {
     flexDirection: 'row',
-    gap: 6,
+    alignItems: 'center',
+    gap: spacing.sm,
   },
-  lastSessionLabel: {
-    color: '#666',
-    fontSize: 12,
+  variantBrowseButton: {
+    padding: spacing.xs,
   },
-  lastSessionValue: {
-    color: '#888',
-    fontSize: 12,
+  variantHint: {
+    color: colors.textMuted,
+    fontSize: fontSizes.xs,
+    marginTop: spacing.xs,
   },
+  stepper: {
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: borderRadius.xl,
+    padding: spacing.md,
+  },
+  stepperLabel: {
+    color: colors.textMuted,
+    fontSize: fontSizes.xs,
+    fontWeight: fontWeights.semibold,
+    letterSpacing: 0.5,
+    marginBottom: spacing.sm,
+  },
+  stepperRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  stepperBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: colors.surfaceLight,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  stepperValueWrap: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    gap: 4,
+  },
+  stepperValue: {
+    color: colors.text,
+    fontSize: 40,
+    fontWeight: fontWeights.bold,
+    textAlign: 'center',
+    minWidth: 90,
+    padding: 0,
+  },
+  stepperUnit: {
+    color: colors.textMuted,
+    fontSize: fontSizes.md,
+    fontWeight: fontWeights.medium,
+  },
+
+  logButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.xs,
+    backgroundColor: colors.primary,
+    borderRadius: borderRadius.lg,
+    paddingVertical: spacing.md,
+  },
+  logButtonText: {
+    color: colors.background,
+    fontSize: fontSizes.md,
+    fontWeight: fontWeights.bold,
+    letterSpacing: 0.5,
+  },
+  disabled: {
+    opacity: 0.5,
+  },
+
+  feelingRow: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+  },
+  feelingCard: {
+    flex: 1,
+    alignItems: 'center',
+    paddingVertical: spacing.sm + 2,
+    borderRadius: borderRadius.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+    gap: 4,
+  },
+  feelingEmoji: {
+    fontSize: 22,
+  },
+  feelingLabel: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.xs,
+    fontWeight: fontWeights.medium,
+  },
+
   feedbackContainer: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
-    backgroundColor: '#2d1f4a',
-    padding: 12,
-    borderRadius: 10,
-    marginBottom: 12,
+    gap: spacing.sm,
+    backgroundColor: colors.assistant.passiveSoft,
+    borderWidth: 1,
+    borderColor: colors.assistant.borderStrong,
+    padding: spacing.sm + 4,
+    borderRadius: borderRadius.lg,
   },
   feedbackText: {
-    color: '#c4b5fd',
-    fontSize: 14,
+    color: colors.accent,
+    fontSize: fontSizes.sm,
     flex: 1,
   },
-  quickActions: {
+
+  infoRow: {
     flexDirection: 'row',
-    gap: 8,
-    marginBottom: 12,
+    gap: spacing.sm,
   },
-  actionButton: {
+  infoCard: {
     flex: 1,
-    paddingVertical: 14,
-    borderRadius: 10,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: borderRadius.lg,
+    padding: spacing.sm + 4,
+  },
+  infoCardHeader: {
+    flexDirection: 'row',
     alignItems: 'center',
+    gap: spacing.xs,
+    marginBottom: spacing.sm,
   },
-  lightButton: {
-    backgroundColor: '#1e3a2e',
+  infoCardTitle: {
+    color: colors.textSecondary,
+    fontSize: 10,
+    fontWeight: fontWeights.semibold,
+    letterSpacing: 0.5,
   },
-  doneButton: {
-    backgroundColor: '#3b82f6',
+  infoLine: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.xs,
+    marginBottom: 3,
   },
-  hardButton: {
-    backgroundColor: '#3a1e1e',
+  infoLineValue: {
+    color: colors.text,
+    fontWeight: fontWeights.semibold,
   },
-  actionButtonText: {
-    color: '#fff',
-    fontWeight: '600',
+  infoMuted: {
+    color: colors.textMuted,
+    fontSize: fontSizes.xs,
   },
-  doneButtonText: {
-    color: '#fff',
+  goalText: {
+    color: colors.text,
+    fontSize: fontSizes.sm,
+    lineHeight: 19,
   },
-  secondaryActions: {
+
+  listHint: {
+    color: colors.textMuted,
+    fontSize: fontSizes.xs,
+    fontWeight: fontWeights.medium,
+    marginBottom: spacing.xs,
+  },
+  exerciseList: {
+    gap: spacing.xs,
+  },
+  listItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.sm,
+    borderRadius: borderRadius.lg,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  listItemCurrent: {
+    borderColor: colors.assistant.borderStrong,
+    backgroundColor: colors.assistant.actionSoft,
+  },
+  listNum: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.surfaceLight,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  listNumCurrent: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primary,
+  },
+  listNumDone: {
+    backgroundColor: colors.success,
+    borderColor: colors.success,
+  },
+  listNumText: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.xs,
+    fontWeight: fontWeights.bold,
+  },
+  listContent: {
+    flex: 1,
+  },
+  listName: {
+    color: colors.text,
+    fontSize: fontSizes.sm,
+    fontWeight: fontWeights.semibold,
+  },
+  listNameDone: {
+    color: colors.textMuted,
+  },
+  listVariant: {
+    color: colors.accent,
+    fontWeight: fontWeights.medium,
+  },
+  listSets: {
+    color: colors.textMuted,
+    fontSize: fontSizes.xs,
+    marginTop: 1,
+  },
+
+  bottomBar: {
     flexDirection: 'row',
     justifyContent: 'space-around',
-    marginBottom: 16,
-    paddingTop: 8,
+    alignItems: 'center',
+    paddingVertical: spacing.sm + 2,
+    paddingHorizontal: spacing.sm,
     borderTopWidth: 1,
-    borderTopColor: '#333',
+    borderTopColor: colors.border,
+    backgroundColor: colors.surface,
   },
-  secondaryButton: {
+  bottomAction: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
-    paddingVertical: 8,
-    paddingHorizontal: 12,
+    gap: spacing.xs,
+    paddingVertical: spacing.xs,
+    paddingHorizontal: spacing.sm,
   },
-  secondaryButtonText: {
-    color: '#888',
-    fontSize: 12,
-  },
-  completeButton: {},
-  exerciseList: {
-    maxHeight: 150,
-  },
-  exerciseListItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 10,
-    paddingHorizontal: 8,
-    borderRadius: 8,
-    marginBottom: 4,
-  },
-  currentListItem: {
-    backgroundColor: '#1e3a5f',
-  },
-  completedListItem: {
-    opacity: 0.6,
-  },
-  exerciseListIcon: {
-    marginRight: 10,
-  },
-  exerciseListContent: {
-    flex: 1,
-  },
-  exerciseListName: {
-    color: '#fff',
-    fontSize: 14,
-  },
-  completedText: {
-    textDecorationLine: 'line-through',
-    color: '#666',
-  },
-  exerciseListSets: {
-    color: '#666',
-    fontSize: 12,
-  },
-  exerciseListWeight: {
-    color: '#888',
-    fontSize: 12,
+  bottomActionText: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.xs,
+    fontWeight: fontWeights.medium,
   },
 });

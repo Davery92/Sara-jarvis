@@ -8,7 +8,7 @@ other real-time subscribers.
 import redis.asyncio as redis
 import json
 from typing import Dict, Any, Optional, Callable, Awaitable
-from datetime import datetime
+from datetime import datetime, timezone
 import logging
 import asyncio
 
@@ -84,7 +84,7 @@ class RatingEventPublisher:
             "net_score": net_score,
             "rating_count": rating_count,
             "average_rating": average_rating,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
         if session_id:
@@ -129,7 +129,7 @@ class RatingEventPublisher:
             "old_rating": old_rating,
             "new_rating": new_rating,
             "net_score": net_score,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
         try:
@@ -165,7 +165,7 @@ class RatingEventPublisher:
             "episode_ids": episode_ids,
             "success_count": success_count,
             "error_count": error_count,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
         try:
