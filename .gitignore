@@ -86,3 +86,10 @@ photo_examples/
 
 # User-uploaded documents (should live in MinIO, not git)
 backend/uploads/
+/uploads/
+
+# Scratch/staging area and data snapshots — never commit
+.tmp/
+/*.onnx
+*_backup_*.json
+/sara_hub.db
