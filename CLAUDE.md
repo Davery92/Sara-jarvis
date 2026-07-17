@@ -29,7 +29,7 @@ docker compose build --no-cache frontend
 ```bash
 # Running in Docker (recommended for development)
 # Frontend automatically starts in Docker container on port 3000
-# Access at: http://10.185.1.180:3000
+# Access at: http://<dev-host>:3000
 
 # Local development (alternative)
 cd frontend
@@ -57,7 +57,7 @@ docker compose -f docker-compose.dev.yml up -d backend
 ### Database Operations
 ```bash
 # Connect to PostgreSQL
-psql postgresql://sara:sara123@10.185.1.180:5432/sara_hub
+psql "$DATABASE_URL"   # credentials live in .env, never in docs
 
 # Run migration scripts
 python3 backend/migrate_users.py        # Migrate from SQLite to PostgreSQL
@@ -74,7 +74,7 @@ Sara is a personal AI hub with human-like memory built as a full-stack applicati
 - **Backend**: FastAPI server with main_simple.py as primary implementation
 - **Database**: PostgreSQL 16 with pgvector extension for semantic search
 - **Storage**: MinIO for document uploads
-- **LLM**: OpenAI-compatible endpoint (gpt-oss:120b via http://100.104.68.115:11434)
+- **LLM**: any OpenAI-compatible endpoint; roles/models resolved via the model broker, endpoints set in `.env`
 
 ### Docker Container Architecture
 
@@ -95,12 +95,12 @@ docker compose ps
 **Data Layer (Containerized)**
 - **PostgreSQL (`jarvis-db-1`)**: Primary database with pgvector extension
   - Image: `pgvector/pgvector:pg16`
-  - Port: `10.185.1.180:5432`
+  - Port: `<dev-host>:5432`
   - Persistent volume: `postgres_data`
   
 - **Neo4j (`jarvis-neo4j-1`)**: Knowledge graph database
   - Image: `neo4j:5.15-community`
-  - Ports: `10.185.1.180:7474` (HTTP), `10.185.1.180:7687` (Bolt)
+  - Ports: `<dev-host>:7474` (HTTP), `<dev-host>:7687` (Bolt)
   - Persistent volumes: `neo4j_data`, `neo4j_logs`, `neo4j_import`, `neo4j_plugins`
   
 - **Redis (`jarvis-redis-1`)**: Caching layer
@@ -109,7 +109,7 @@ docker compose ps
   
 - **MinIO (`jarvis-minio-1`)**: Object storage for documents
   - Image: `quay.io/minio/minio`
-  - Ports: `10.185.1.180:9000` (API), `10.185.1.180:9001` (Console)
+  - Ports: `<dev-host>:9000` (API), `<dev-host>:9001` (Console)
   - Persistent volume: `minio_data`
 
 **Application Layer**
@@ -184,9 +184,9 @@ docker compose ps
 ### Development Environment
 
 #### Local Development
-- Frontend dev server: http://10.185.1.180:3000
-- Backend API: http://10.185.1.180:8000
-- Database: 10.185.1.180:5432
+- Frontend dev server: http://<dev-host>:3000
+- Backend API: http://<dev-host>:8000
+- Database: <dev-host>:5432
 - The frontend uses App-interactive.tsx for local development
 
 #### Production Configuration
@@ -262,8 +262,8 @@ Tools are registered in `app/tools/registry.py`:
 ### Environment Variables
 Key variables for development:
 - `DATABASE_URL`: PostgreSQL connection string
-- `OPENAI_BASE_URL`: LLM endpoint (http://100.104.68.115:11434/v1)
-- `OPENAI_MODEL`: Model name (gpt-oss:120b)
+- `OPENAI_BASE_URL`: LLM endpoint (OpenAI-compatible, set in .env)
+- `OPENAI_MODEL`: Primary model name (set in .env)
 - `EMBEDDING_MODEL`: Embedding model (bge-m3)
 - `ASSISTANT_NAME`: Branding (Sara)
 - `DOMAIN`: Target domain (sara.avery.cloud)
