@@ -350,21 +350,24 @@ async def _daemon_heartbeat_status() -> Dict[str, Any]:
     from app.db.session import get_async_session_factory
     factory = get_async_session_factory()
     async with factory() as db:
-        # acs_daemon writes a heartbeat somewhere; check the most recent agent_run_log
-        # from the daemon source as a proxy, plus any explicit heartbeat table.
         try:
-            r = (await db.execute(text(
-                "SELECT to_regclass('acs_heartbeat') IS NOT NULL AS has_tbl"))).scalar()
+            has = (await db.execute(text(
+                "SELECT to_regclass('sara_daemon_state') IS NOT NULL"))).scalar()
         except Exception:
-            r = False
-        if r:
-            row = (await db.execute(text(
-                "SELECT max(created_at) FROM acs_heartbeat"))).scalar()
-            if row:
-                age = (now_utc() - row).total_seconds()
-                return {"last_seen": row.isoformat(), "age_seconds": int(age),
-                        "fresh": age < 300}
-        return {"status": "unknown", "note": "no acs_heartbeat table"}
+            has = False
+        if not has:
+            return {"status": "unknown", "note": "no sara_daemon_state table"}
+        row = (await db.execute(text(
+            "SELECT version, last_heartbeat_at FROM sara_daemon_state WHERE id = 'singleton'"))).mappings().first()
+        if not row or not row["last_heartbeat_at"]:
+            return {"status": "unknown", "note": "no daemon heartbeat yet"}
+        hb = row["last_heartbeat_at"]
+        if hb.tzinfo is None:
+            import datetime as _dt
+            hb = hb.replace(tzinfo=_dt.timezone.utc)
+        age = (now_utc() - hb).total_seconds()
+        return {"last_seen": hb.isoformat(), "age_seconds": int(age),
+                "fresh": age < 300, "version": row["version"]}
 
 
 async def build_health_digest(max_items: int = 5) -> Optional[str]:

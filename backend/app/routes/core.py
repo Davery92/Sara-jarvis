@@ -58,6 +58,14 @@ async def health():
     return response
 
 
+@router.get("/health/version")
+async def health_version():
+    """Deployed git SHA + build time (Phase 7 version truth). Compared against the
+    daemon/fleet-reported versions by the interoception self-check to flag drift."""
+    from app.core.version import get_version
+    return get_version()
+
+
 @router.get("/api/health/llm-status")
 async def get_llm_status(current_user=Depends(get_current_user)):
     """Get LLM endpoint failover status for monitoring."""

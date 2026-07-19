@@ -124,7 +124,22 @@ async def _self_check_async():
     except Exception:
         pass
 
-    # 6. Version drift (Phase 7) — placeholder, filled once version endpoints land
+    # 6. Version drift (Phase 7): compare the daemon's deployed SHA (from its
+    #    heartbeat "<semver>+<sha8>") to the backend's own SHA.
+    try:
+        from app.core.version import get_version
+        backend_sha = get_version().get("short_sha", "unknown")
+        hbv = (hb.get("version") if isinstance(hb, dict) else None) or ""
+        if hbv and "+" not in hbv:
+            # Pre-Phase-7 daemon: no SHA suffix means it's running old code.
+            findings.append(f"daemon v{hbv} predates version-truth — redeploy the daemon")
+        else:
+            daemon_sha = hbv.split("+")[-1] if "+" in hbv else None
+            if daemon_sha and backend_sha not in ("unknown",) and daemon_sha != backend_sha:
+                findings.append(f"daemon code {daemon_sha} != backend {backend_sha} (deploy the daemon)")
+    except Exception:
+        pass
+
     # 7. Backup freshness — placeholder (11A: David builds backups separately)
     #    Reported as informational, never an alert.
 

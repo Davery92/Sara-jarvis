@@ -100,3 +100,4 @@ backend/uploads/
 # Temp screenshot/debug scripts and images that got committed by accident
 backend/_shot*.py
 backend/*.png
+backend/VERSION

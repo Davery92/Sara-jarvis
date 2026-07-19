@@ -44,6 +44,25 @@ logger = logging.getLogger("acs-daemon")
 VERSION = "0.9.0"  # Brain Alignment ACS1+ACS2: world_delta senses + adaptive sleep pressure
 
 
+def _code_sha() -> str:
+    """Deployed git SHA, written to VERSION next to the daemon by deploy/deploy.sh.
+    Lets the backend self-check detect daemon-vs-backend drift (Phase 7)."""
+    import os
+    for path in (os.path.join(os.path.dirname(__file__), "VERSION"),
+                 "/opt/acs-daemon/VERSION"):
+        try:
+            with open(path) as f:
+                return f.read().strip().split()[0][:8]
+        except Exception:
+            continue
+    return "unknown"
+
+
+# Reported to the backend heartbeat as "<semver>+<sha8>" so drift is detectable
+# without a schema change to the heartbeat payload.
+REPORTED_VERSION = f"{VERSION}+{_code_sha()}"
+
+
 class Daemon:
     def __init__(self) -> None:
         self.running = False
@@ -251,7 +270,7 @@ class Daemon:
             return {}
         try:
             return await self.backend.heartbeat(
-                state=self.state, version=VERSION, pid=self.pid, hostname=self.hostname,
+                state=self.state, version=REPORTED_VERSION, pid=self.pid, hostname=self.hostname,
                 started_at=self.started_at, last_tick_summary=summary,
                 want_delta=want_delta,
             )
