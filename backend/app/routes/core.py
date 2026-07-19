@@ -74,6 +74,24 @@ async def get_llm_status(current_user=Depends(get_current_user)):
     return llm_failover_client.get_status()
 
 
+@router.get("/api/quiet-mode")
+async def get_quiet_mode(current_user=Depends(get_current_user)):
+    """Quiet/guest mode status for the dashboard chip (Phase 11E)."""
+    from app.services.quiet_mode import status
+    return status()
+
+
+@router.post("/api/quiet-mode")
+async def set_quiet_mode(body: dict, current_user=Depends(get_current_user)):
+    """Toggle quiet/guest mode. Body: {on: bool, hours?: number, guest?: bool}."""
+    from app.services.quiet_mode import set_quiet, clear_quiet, status
+    if body.get("on"):
+        set_quiet(hours=body.get("hours"), guest=bool(body.get("guest")))
+    else:
+        clear_quiet()
+    return status()
+
+
 @router.get("/tools")
 async def list_tools():
     """List available AI tools (name and description)"""

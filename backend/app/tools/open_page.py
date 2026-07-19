@@ -54,6 +54,10 @@ class OpenPageTool(BaseTool):
 
             # Truncate text to first 500 characters for summary
             text_preview = text[:500] + "..." if len(text) > 500 else text
+            # Phase 11B: fetched web content is untrusted — frame it as data so a
+            # crafted page can't inject instructions into Sara's tool-using loop.
+            from app.core.untrusted import wrap_untrusted
+            text_preview = wrap_untrusted(text_preview, source=f"the web page {url}")
 
             compact_data = {
                 "title": title,

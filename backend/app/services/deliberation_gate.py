@@ -315,6 +315,21 @@ async def process_deliberation_result(
         "journal_written": False,
     }
 
+    # Quiet mode (Phase 11E): a HARD gate. Suppress all proactive outreach and
+    # autonomous home actions — but keep observing, journaling, and updating state
+    # (reactive chat still works; this only silences the unprompted stuff).
+    try:
+        from app.services.quiet_mode import is_quiet
+        _quiet = is_quiet()
+    except Exception:
+        _quiet = False
+    if _quiet:
+        logger.info("[DeliberationGate] Quiet mode ON — suppressing notifications + home actions")
+        summary["quiet_mode"] = True
+        result.notification_proposals = []
+        if hasattr(result, "home_actions"):
+            result.home_actions = []
+
     # 1. Process notification proposals
     total_proposed = len(result.notification_proposals)
     capped_proposals = result.notification_proposals[:2]

@@ -68,6 +68,13 @@ class GetPageDetailsTool(BaseTool):
             if "plain_text" in full_page_data and "text" not in full_page_data:
                 full_page_data["text"] = full_page_data["plain_text"]
 
+            # Phase 11B: this is arbitrary fetched web content — frame it untrusted.
+            from app.core.untrusted import wrap_untrusted
+            _src = f"the web page {full_page_data.get('url', 'a fetched URL')}"
+            for _k in ("content", "text", "plain_text"):
+                if full_page_data.get(_k):
+                    full_page_data[_k] = wrap_untrusted(full_page_data[_k], source=_src)
+
             return ToolResult(
                 success=True,
                 data=full_page_data,
