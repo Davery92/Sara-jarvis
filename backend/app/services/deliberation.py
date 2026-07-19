@@ -202,6 +202,15 @@ class DeliberationEngine:
         except Exception as _de:
             logger.debug(f"health digest injection skipped: {_de}")
 
+        # 3b2. Directives (Phase 12B) — David's standing rules, behavioral law.
+        try:
+            from app.services.directives import get_directives_for_context
+            _dir = await get_directives_for_context(user_id)
+            if _dir:
+                user_msg = f"{_dir}\n\n{user_msg}"
+        except Exception as _dre:
+            logger.debug(f"directives injection skipped: {_dre}")
+
         # 3c. Life facts (Phase 10B) — David's known routine, so the brain reasons
         # from his schedule ("normally trains 13:10") instead of guessing.
         try:

@@ -146,6 +146,7 @@ from app.tools.interests import INTEREST_TOOLS
 from app.tools.scratchpad import SCRATCHPAD_TOOLS
 from app.tools.day_type import DAY_TYPE_TOOLS
 from app.tools.quiet import QUIET_TOOLS
+from app.tools.directives import DIRECTIVE_TOOLS
 from app.tools.shell import SHELL_TOOLS
 from app.tools.recipes import RECIPE_TOOLS
 from app.tools.people import ListPeopleTool
@@ -417,6 +418,10 @@ class ToolRegistry:
         'quiet_mode': {
             'description': "Turn quiet/guest mode on or off — suspends Sara's proactive outreach and autonomous home actions. Use for 'be quiet', 'do not disturb', 'guests over'.",
             'tools': ['set_quiet_mode']
+        },
+        'directives': {
+            'description': "Standing rules David gives Sara ('never bring up X', 'always use ET', 'don't ping me before 9'). Save/list/remove. Propose saving a directive whenever David corrects a recurring behavior.",
+            'tools': ['save_directive', 'list_directives', 'remove_directive']
         },
         'vm_agents': {
             'description': "Dispatch background tasks (research, code, setup) to agents, check status, resume sessions, and propose candidate skills. Use dispatch_and_monitor for tasks where David should be notified on completion.",
@@ -702,6 +707,9 @@ class ToolRegistry:
 
             # Quiet / guest mode kill switch
             *QUIET_TOOLS,
+
+            # Directives — David's standing rules with permanent teeth
+            *DIRECTIVE_TOOLS,
 
             # Research Plan Tools (delegate research to dedicated agent)
             CreateResearchPlanTool(),

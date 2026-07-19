@@ -92,6 +92,27 @@ async def set_quiet_mode(body: dict, current_user=Depends(get_current_user)):
     return status()
 
 
+@router.get("/api/directives")
+async def get_directives(current_user=Depends(get_current_user)):
+    """David's standing rules ('Things you've told me') — Phase 12B Settings panel."""
+    from app.services.directives import list_directives
+    return {"directives": await list_directives(str(current_user.id))}
+
+
+@router.post("/api/directives")
+async def post_directive(body: dict, current_user=Depends(get_current_user)):
+    from app.services.directives import add_directive
+    r = await add_directive(body.get("text", ""), body.get("category", "general"), str(current_user.id))
+    return r
+
+
+@router.delete("/api/directives/{directive_id}")
+async def delete_directive(directive_id: int, current_user=Depends(get_current_user)):
+    from app.services.directives import remove_directive
+    n = await remove_directive(directive_id, str(current_user.id))
+    return {"removed": n}
+
+
 @router.get("/tools")
 async def list_tools():
     """List available AI tools (name and description)"""

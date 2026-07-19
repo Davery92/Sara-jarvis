@@ -9351,6 +9351,11 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
             # chat reasons from his schedule and the things he told Sara to remember.
             try:
                 _ctx_bits = []
+                # Directives first — they're behavioral law (Phase 12B).
+                from app.services.directives import get_directives_for_context
+                _dir = await get_directives_for_context(str(current_user.id))
+                if _dir:
+                    _ctx_bits.append(_dir)
                 from app.services.life_facts import get_life_facts_summary
                 _lf = await get_life_facts_summary(str(current_user.id))
                 if _lf:
