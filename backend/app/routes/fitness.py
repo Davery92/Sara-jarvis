@@ -36,6 +36,20 @@ from app.services.workout_session_service import workout_session_service
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+from app.services.event_bus import EventType
+
+
+def _emit_domain_event_safe(event_type: "EventType", user_id: str, payload: dict) -> None:
+    """Fire-and-forget domain event so Sara's cognitive system sees app activity
+    (meal logged, workout done). A Redis/pubsub hiccup must never fail the
+    underlying action, so this schedules the emit and swallows everything."""
+    try:
+        from app.services.event_bus import emit_event
+        asyncio.ensure_future(emit_event(event_type, user_id, payload=payload, source="fitness_route"))
+    except Exception as e:
+        logger.debug(f"domain event emit failed ({event_type}): {e}")
+
+
 # Simple message class for SimpleLLMClient compatibility
 class SimpleMessage:
     """Simple message object compatible with SimpleLLMClient"""
@@ -166,6 +180,11 @@ class IngredientItem(BaseModel):
     protein: Optional[float] = None
     carbs: Optional[float] = None
     fats: Optional[float] = None
+    # Provenance for live-lookup ingredients (R1). Rides the existing JSON
+    # column — old rows without these keys parse fine (all Optional).
+    food_id: Optional[str] = None  # FatSecret food id, for re-resolve/audit
+    source: Optional[str] = None  # "fatsecret" | "user" | "manual"
+    serving_description: Optional[str] = None  # e.g. "1 cup, cooked"
 
 
 
@@ -548,6 +567,13 @@ async def create_food_log(
         }
         await update_daily_log(db, user_id, date.today(), "food", nutrition_data=nutrition_data)
 
+        # Tell Sara's cognitive system David just ate (contact + domain action).
+        _emit_domain_event_safe(EventType.FOOD_LOGGED, user_id, {
+            "meal_type": log.meal_type,
+            "food": (food_items[0]["name"] if food_items else None),
+            "calories": log.calories,
+        })
+
         return {"success": True, "message": "Food logged successfully", "log_id": log_id}
     except Exception as e:
         logger.error(f"Failed to create food log: {e}")
@@ -680,6 +706,8 @@ async def delete_food_log_entry(
 
         if not deleted:
             raise HTTPException(status_code=404, detail="Food log entry not found")
+
+        _emit_domain_event_safe(EventType.FOOD_DELETED, user_id, {"log_id": log_id})
 
         return {"success": True, "message": "Food log entry deleted"}
     except HTTPException:
@@ -1444,6 +1472,12 @@ async def log_workout_set(
     response_data = result.data or {}
     if pr_result:
         response_data["pr"] = pr_result
+
+    _emit_domain_event_safe(EventType.WORKOUT_LOGGED, user_id, {
+        "type": exercise_label,
+        "set_index": log.set_index,
+        "is_pr": bool(pr_result and pr_result.get("is_pr")),
+    })
 
     return response_data
 
@@ -4513,117 +4547,23 @@ async def get_recent_recovery_logs(
 # RECIPE ROUTES
 # ============================================================================
 
-def estimate_recipe_nutrition(ingredients: List[IngredientItem], servings: int = 1) -> dict:
+async def estimate_recipe_nutrition(ingredients: List[IngredientItem], servings: int = 1) -> dict:
     """
-    Simple nutrition estimator based on common ingredients.
-    Returns per-serving macros.
+    Per-serving macros from FatSecret (services.recipe_nutrition), reusing the
+    same quantity/unit scaling meal logging uses. Explicit per-ingredient macros
+    (live-picked or manual) win; only unresolved ingredients hit FatSecret.
+
+    Returns {calories, protein, carbs, fats}. Values are None when not a single
+    ingredient could be resolved — callers store NULL rather than a fake 0.00
+    (the macaroni-salad bug, see recipe_nutrition.macros_missing).
     """
-    # Basic nutrition database (per 100g)
-    nutrition_db = {
-        # Proteins
-        'chicken breast': {'calories': 165, 'protein': 31, 'carbs': 0, 'fats': 3.6},
-        'chicken': {'calories': 165, 'protein': 31, 'carbs': 0, 'fats': 3.6},
-        'ground beef': {'calories': 250, 'protein': 26, 'carbs': 0, 'fats': 17},
-        'beef': {'calories': 250, 'protein': 26, 'carbs': 0, 'fats': 17},
-        'salmon': {'calories': 206, 'protein': 22, 'carbs': 0, 'fats': 13},
-        'tuna': {'calories': 132, 'protein': 28, 'carbs': 0, 'fats': 1.3},
-        'eggs': {'calories': 143, 'protein': 13, 'carbs': 0.7, 'fats': 9.5},
-        'egg': {'calories': 143, 'protein': 13, 'carbs': 0.7, 'fats': 9.5},
-        'tofu': {'calories': 76, 'protein': 8, 'carbs': 1.9, 'fats': 4.8},
+    from app.services.recipe_nutrition import estimate_recipe_nutrition as _estimate
 
-        # Carbs
-        'rice': {'calories': 130, 'protein': 2.7, 'carbs': 28, 'fats': 0.3},
-        'pasta': {'calories': 131, 'protein': 5, 'carbs': 25, 'fats': 1.1},
-        'bread': {'calories': 265, 'protein': 9, 'carbs': 49, 'fats': 3.2},
-        'oats': {'calories': 389, 'protein': 17, 'carbs': 66, 'fats': 6.9},
-        'quinoa': {'calories': 120, 'protein': 4.4, 'carbs': 21, 'fats': 1.9},
-        'potato': {'calories': 77, 'protein': 2, 'carbs': 17, 'fats': 0.1},
-        'sweet potato': {'calories': 86, 'protein': 1.6, 'carbs': 20, 'fats': 0.1},
-
-        # Fats
-        'olive oil': {'calories': 884, 'protein': 0, 'carbs': 0, 'fats': 100},
-        'oil': {'calories': 884, 'protein': 0, 'carbs': 0, 'fats': 100},
-        'butter': {'calories': 717, 'protein': 0.9, 'carbs': 0.1, 'fats': 81},
-        'avocado': {'calories': 160, 'protein': 2, 'carbs': 8.5, 'fats': 14.7},
-        'nuts': {'calories': 607, 'protein': 20, 'carbs': 20, 'fats': 54},
-        'peanut butter': {'calories': 588, 'protein': 25, 'carbs': 20, 'fats': 50},
-
-        # Vegetables
-        'broccoli': {'calories': 34, 'protein': 2.8, 'carbs': 7, 'fats': 0.4},
-        'spinach': {'calories': 23, 'protein': 2.9, 'carbs': 3.6, 'fats': 0.4},
-        'tomato': {'calories': 18, 'protein': 0.9, 'carbs': 3.9, 'fats': 0.2},
-        'onion': {'calories': 40, 'protein': 1.1, 'carbs': 9.3, 'fats': 0.1},
-        'pepper': {'calories': 20, 'protein': 0.9, 'carbs': 4.6, 'fats': 0.2},
-
-        # Dairy
-        'milk': {'calories': 42, 'protein': 3.4, 'carbs': 5, 'fats': 1},
-        'cheese': {'calories': 402, 'protein': 25, 'carbs': 1.3, 'fats': 33},
-        'yogurt': {'calories': 59, 'protein': 3.5, 'carbs': 3.6, 'fats': 3.3},
-    }
-
-    total_calories = 0
-    total_protein = 0
-    total_carbs = 0
-    total_fats = 0
-
-    for ingredient in ingredients:
-        # If manual nutrition is provided, use it directly
-        if ingredient.calories is not None:
-            total_calories += ingredient.calories or 0
-            total_protein += ingredient.protein or 0
-            total_carbs += ingredient.carbs or 0
-            total_fats += ingredient.fats or 0
-            continue
-
-        # Can't estimate from a quantity/unit-less freeform ingredient line
-        # (e.g. Sara couldn't parse "3/4 cup mayonnaise" into structured
-        # fields) — skip rather than crash on the None * float multiply below.
-        if ingredient.quantity is None or not ingredient.unit:
-            continue
-
-        # Otherwise, estimate from database
-        # Normalize ingredient name
-        ing_name = ingredient.name.lower().strip()
-
-        # Try to find a match in the database
-        nutrition = None
-        for key in nutrition_db:
-            if key in ing_name or ing_name in key:
-                nutrition = nutrition_db[key]
-                break
-
-        if not nutrition:
-            # Default to zero if not found (vegetables/herbs/spices)
-            nutrition = {'calories': 20, 'protein': 1, 'carbs': 4, 'fats': 0.1}
-
-        # Convert quantity to grams (simple conversion)
-        quantity_g = ingredient.quantity
-        if ingredient.unit.lower() in ['oz', 'ounce', 'ounces']:
-            quantity_g = ingredient.quantity * 28.35
-        elif ingredient.unit.lower() in ['lb', 'pound', 'pounds']:
-            quantity_g = ingredient.quantity * 453.6
-        elif ingredient.unit.lower() in ['cup', 'cups']:
-            quantity_g = ingredient.quantity * 240  # Approximate
-        elif ingredient.unit.lower() in ['tbsp', 'tablespoon', 'tablespoons']:
-            quantity_g = ingredient.quantity * 15
-        elif ingredient.unit.lower() in ['tsp', 'teaspoon', 'teaspoons']:
-            quantity_g = ingredient.quantity * 5
-        # else assume it's already in grams
-
-        # Calculate nutrition for this ingredient
-        multiplier = quantity_g / 100
-        total_calories += nutrition['calories'] * multiplier
-        total_protein += nutrition['protein'] * multiplier
-        total_carbs += nutrition['carbs'] * multiplier
-        total_fats += nutrition['fats'] * multiplier
-
-    # Return per-serving nutrition
-    return {
-        'calories': round(total_calories / servings, 1),
-        'protein': round(total_protein / servings, 1),
-        'carbs': round(total_carbs / servings, 1),
-        'fats': round(total_fats / servings, 1)
-    }
+    ing_dicts = [ing.dict() for ing in (ingredients or [])]
+    result = await _estimate(ing_dicts, servings)
+    if not result:
+        return {"calories": None, "protein": None, "carbs": None, "fats": None}
+    return result
 
 
 @router.get("/recipes", response_model=List[RecipeResponse])
@@ -4711,8 +4651,8 @@ async def create_recipe(
 
         recipe_id = str(uuid.uuid4())
 
-        # Calculate nutrition
-        nutrition = estimate_recipe_nutrition(recipe.ingredients, recipe.servings)
+        # Calculate nutrition (accurate FatSecret estimator)
+        nutrition = await estimate_recipe_nutrition(recipe.ingredients, recipe.servings)
 
         # Convert ingredients to JSON
         ingredients_json = json.dumps([ing.dict() for ing in recipe.ingredients])
@@ -4872,9 +4812,9 @@ async def update_recipe(
             params["servings"] = updates.servings
 
         if updates.ingredients is not None:
-            # Recalculate nutrition
+            # Recalculate nutrition (accurate FatSecret estimator)
             servings = updates.servings if updates.servings else 1
-            nutrition = estimate_recipe_nutrition(updates.ingredients, servings)
+            nutrition = await estimate_recipe_nutrition(updates.ingredients, servings)
 
             ingredients_json = json.dumps([ing.dict() for ing in updates.ingredients])
             update_fields.append("ingredients = :ingredients")
@@ -5266,7 +5206,6 @@ async def complete_workout_session(
     Complete a workout session
     - Updates status to 'completed'
     - Sets completed_at timestamp
-    - Aggregates exercise data to exercise_history table
     """
     try:
         # Verify session exists
@@ -5289,30 +5228,6 @@ async def complete_workout_session(
             WHERE id = :session_id AND user_id = :user_id
         """)
         db.execute(update_query, {"session_id": session_id, "user_id": user_id})
-
-        # Aggregate exercise data to exercise_history
-        aggregate_query = text("""
-            INSERT INTO exercise_history (
-                id, user_id, exercise_name, session_id,
-                avg_weight, total_sets, total_reps, avg_rpe,
-                performance_date
-            )
-            SELECT
-                gen_random_uuid(),
-                :user_id,
-                exercise_id,
-                :session_id,
-                AVG(weight),
-                COUNT(*),
-                SUM(reps),
-                AVG(rpe),
-                CURRENT_DATE
-            FROM workout_log
-            WHERE session_id = :session_id AND user_id = :user_id
-            GROUP BY exercise_id
-        """)
-        db.execute(aggregate_query, {"session_id": session_id, "user_id": user_id})
-
         db.commit()
 
         # Get completion summary
@@ -5326,11 +5241,18 @@ async def complete_workout_session(
         """)
         summary = db.execute(summary_query, {"session_id": session_id}).fetchone()
 
+        summary_dict = dict(summary._mapping) if summary else {}
+        _emit_domain_event_safe(EventType.WORKOUT_COMPLETED, user_id, {
+            "type": "workout",
+            "exercises": summary_dict.get("exercises_completed"),
+            "total_sets": summary_dict.get("total_sets"),
+        })
+
         return {
             "message": "Workout session completed successfully",
             "session_id": session_id,
             "status": "completed",
-            "summary": dict(summary._mapping) if summary else {}
+            "summary": summary_dict
         }
 
     except HTTPException:
@@ -5338,42 +5260,6 @@ async def complete_workout_session(
     except Exception as e:
         db.rollback()
         logger.error(f"Failed to complete workout session: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get("/exercises/{exercise_name}/history")
-async def get_exercise_history(
-    exercise_name: str,
-    limit: int = 10,
-    user_id: str = Depends(get_current_user_id),
-    db: Session = Depends(get_db)
-):
-    """
-    Get recent performance history for a specific exercise
-    Used for AI weight suggestions and progress tracking
-    """
-    try:
-        history_query = text("""
-            SELECT
-                performance_date, avg_weight, total_sets, total_reps, avg_rpe
-            FROM exercise_history
-            WHERE user_id = :user_id AND exercise_name = :exercise_name
-            ORDER BY performance_date DESC
-            LIMIT :limit
-        """)
-        history = db.execute(history_query, {
-            "user_id": user_id,
-            "exercise_name": exercise_name,
-            "limit": limit
-        }).fetchall()
-
-        return {
-            "exercise_name": exercise_name,
-            "history": [dict(row._mapping) for row in history]
-        }
-
-    except Exception as e:
-        logger.error(f"Failed to get exercise history: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -5642,6 +5528,12 @@ async def complete_active_workout(
     """
     try:
         result = await workout_session_service.complete_workout(user_id, db)
+
+        summary = (result or {}).get("summary") if isinstance(result, dict) else None
+        _emit_domain_event_safe(EventType.WORKOUT_COMPLETED, user_id, {
+            "type": "workout",
+            "exercises": (summary or {}).get("exercises_completed") if isinstance(summary, dict) else None,
+        })
 
         return result
     except HTTPException:

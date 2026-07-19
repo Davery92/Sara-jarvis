@@ -79,6 +79,25 @@ def _format_memory_whiteboard(memory: UnifiedContextSnapshot, off_rhythm_flags: 
         lines.append(f"Last chat topic: {memory.last_chat_topic}")
     lines.append(f"Chatted today: {'yes' if memory.has_chatted_today else 'no'}")
 
+    # App presence — contact without conversation. He's *present* if he's in the
+    # app, even when he hasn't said anything. Distinct from "radio silence".
+    if memory.app_active:
+        view = memory.app_current_view or "the app"
+        plat = memory.app_platform or "app"
+        dwell = ""
+        if memory.app_view_since:
+            try:
+                since = datetime.fromisoformat(memory.app_view_since)
+                mins = int((datetime.now(since.tzinfo) - since).total_seconds() / 60)
+                if mins >= 1:
+                    dwell = f" ({mins} min)"
+            except Exception:
+                pass
+        lines.append(f"App: active now — {plat}, {view} view{dwell}")
+    elif memory.last_app_activity_at and memory.hours_since_app_activity < 24:
+        summary = f" (today: {memory.app_views_today})" if memory.app_views_today else ""
+        lines.append(f"App: last used {memory.hours_since_app_activity:.1f}h ago{summary}")
+
     # Body state
     lines.append(f"\n## Body State")
     lines.append(f"Alertness: {memory.alertness:.0%}, Stress: {memory.stress_load:.0%}")
@@ -103,7 +122,12 @@ def _format_memory_whiteboard(memory: UnifiedContextSnapshot, off_rhythm_flags: 
     if memory.next_event_title:
         lines.append(f"Next event: {memory.next_event_title} in {memory.next_event_minutes_away} min")
     lines.append(f"Events today: {memory.events_today_count}")
-    lines.append(f"Notifications sent today: {memory.notifications_sent_today}")
+    try:
+        from app.services.tunables import get_tunable_int
+        _cap = get_tunable_int("notification.daily_soft_cap", 8)
+    except Exception:
+        _cap = 8
+    lines.append(f"Notifications sent today: {memory.notifications_sent_today}/{_cap}")
 
     # Notification engagement calibration
     engagement_stats = getattr(memory, 'notification_engagement_stats', None)
@@ -265,6 +289,31 @@ def _format_observations(observations: List[Observation]) -> str:
     return "\n".join(lines)
 
 
+def _format_daemon_awareness() -> str:
+    """ACS4: the ACS daemon's current focus + last notify attempt today,
+    sourced from sara_focus + sara_activity_log. Best-effort; empty on any miss."""
+    try:
+        from app.db.base import SessionLocal
+        db = SessionLocal()
+        try:
+            focus = db.execute(text(
+                "SELECT topic FROM sara_focus ORDER BY updated_at DESC LIMIT 1"
+            )).first()
+            pings = db.execute(text("""
+                SELECT count(*) FROM sara_activity_log
+                WHERE kind = 'notify_david' AND created_at::date = CURRENT_DATE
+            """)).scalar()
+        finally:
+            db.close()
+        topic = (focus[0] if focus and focus[0] else None)
+        if not topic and not pings:
+            return ""
+        focus_str = f"researching “{str(topic)[:80]}”" if topic else "idle"
+        return f"\n## Sara's slow mind (ACS daemon)\nCurrently {focus_str}; pinged David {int(pings or 0)}× today. Don't repeat what it's already handling."
+    except Exception:
+        return ""
+
+
 def build_deliberation_prompt(
     memory: UnifiedContextSnapshot,
     observations: List[Observation],
@@ -349,8 +398,14 @@ Respond with ONLY valid JSON in this exact format:
   the message — "How's it going?" with no referent is a banned output. Only propose a
   checkin when David's activity state is `available` (not focused_work/in_meeting/sleeping/
   exercising/winding_down). Every checkin notification is judged on whether it names something
-  real; if you can't name something real, don't propose it.
+  real; if you can't name something real, don't propose it. Never propose a checkin that just
+  confirms an expected routine, rhythm, or pattern. Deviations only. Do not use the phrases
+  "usual pattern", "learned rhythm", "% confidence", "right on schedule", or similar
+  on-schedule confirmation language.
 - Include only urgent items when quiet mode is active
+- App activity (the "App:" line) means David is present but not talking — treat it as
+  contact, NOT radio silence, and NEVER notify *because* he opened the app or narrate his
+  app usage back at him ("I see you're in Fitness"). It's context for you, not a topic.
 - Check the Notification Engagement section: if David ignores a category (<25% engagement), skip it unless urgent
 - Categories with high engagement (>70%) are safe to use when relevant
 
@@ -397,6 +452,11 @@ Respond with ONLY valid JSON in this exact format:
 - All actions must have a clear reason"""
 
     whiteboard = _format_memory_whiteboard(memory, off_rhythm_flags)
+    # ACS4 (Brain Alignment): each brain knows what the other is doing, so
+    # neither repeats it. One line about the slow mind's focus + last ping.
+    daemon_line = _format_daemon_awareness()
+    if daemon_line:
+        whiteboard = whiteboard + "\n" + daemon_line
     obs_text = _format_observations(observations)
 
     now = datetime.now(USER_TZ)

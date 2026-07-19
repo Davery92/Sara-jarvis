@@ -13,6 +13,8 @@ import NoteEditorScreen from '../screens/notes/NoteEditorScreen';
 import NutritionGoalsFormScreen from '../screens/fitness/NutritionGoalsFormScreen';
 import RecipeFormScreen from '../screens/recipes/RecipeFormScreen';
 import WorkoutModeScreen from '../screens/fitness/WorkoutModeScreen';
+import CardioScreen from '../screens/fitness/CardioScreen';
+import TabataTimerScreen from '../screens/fitness/TabataTimerScreen';
 import DailyPlanScreen from '../screens/sara/DailyPlanScreen';
 import { RootStackParamList } from '../types/navigation';
 import { colors } from '../styles/theme';
@@ -114,10 +116,24 @@ export default function RootNavigator() {
               }}
             />
             <Stack.Screen
+              name="Cardio"
+              component={CardioScreen}
+              options={{ headerShown: false }}
+            />
+            <Stack.Screen
+              name="TabataTimer"
+              component={TabataTimerScreen}
+              options={{
+                presentation: 'fullScreenModal',
+                headerShown: false,
+                gestureEnabled: false,
+              }}
+            />
+            <Stack.Screen
               name="DailyPlan"
               component={DailyPlanScreen}
               options={{
-                title: "Sara's Daily Plan",
+                title: "Sara's Focus",
                 headerStyle: { backgroundColor: colors.background },
                 headerTintColor: colors.text,
               }}

@@ -18,7 +18,6 @@ import {
   WorkoutLog,
   WorkoutSession,
   RecoveryLog,
-  HabitStreak,
   Phase,
   Program,
   WorkoutTemplate,
@@ -45,7 +44,7 @@ import Markdown from 'react-native-markdown-display';
 
 type Props = MainTabScreenProps<'Fitness'>;
 
-type ViewMode = 'dashboard' | 'plan' | 'nutrition' | 'guide' | 'workout' | 'recovery' | 'habits' | 'programs' | 'progress';
+type ViewMode = 'dashboard' | 'plan' | 'nutrition' | 'guide' | 'workout' | 'recovery' | 'programs' | 'progress';
 
 // Time-of-day greeting (matches SaraPresenceFace convention).
 function greeting(): string {
@@ -78,7 +77,6 @@ export default function FitnessScreen({ navigation }: Props) {
   const [foodLogs, setFoodLogs] = useState<FoodLog[]>([]);
   const [workoutLogs, setWorkoutLogs] = useState<WorkoutSession[]>([]);
   const [recoveryLogs, setRecoveryLogs] = useState<RecoveryLog[]>([]);
-  const [habitStreaks, setHabitStreaks] = useState<HabitStreak[]>([]);
   const [dailySummary, setDailySummary] = useState<any>(null);
   const [phases, setPhases] = useState<Phase[]>([]);
   const [templates, setTemplates] = useState<WorkoutTemplate[]>([]);
@@ -233,7 +231,6 @@ export default function FitnessScreen({ navigation }: Props) {
       const food = await fitnessService.getFoodLogs(weekAgo, today).catch(() => []);
       const workouts = await fitnessService.getWorkoutSessions(weekAgo, today).catch(() => []);
       const recovery = await fitnessService.getRecoveryLogs(weekAgo, today).catch(() => []);
-      const streaks = await fitnessService.getHabitStreaks().catch(() => []);
       const summary = await fitnessService.getDailySummary(today).catch(() => null);
       const phasesData = await fitnessService.getPhases().catch(() => ({ phases: [] }));
       const templatesData = await fitnessService.getTemplates().catch(() => ({ templates: [] }));
@@ -242,7 +239,6 @@ export default function FitnessScreen({ navigation }: Props) {
       setFoodLogs(food);
       setWorkoutLogs(workouts);
       setRecoveryLogs(recovery);
-      setHabitStreaks(streaks);
       setDailySummary(summary);
       setPhases(phasesData.phases);
       setTemplates(templatesData.templates);
@@ -661,6 +657,17 @@ export default function FitnessScreen({ navigation }: Props) {
             </>
           )}
         </View>
+
+        <TouchableOpacity style={styles.cardioEntry} onPress={() => navigation.navigate('Cardio' as any)}>
+          <View style={styles.cardioEntryIcon}>
+            <Ionicons name="pulse" size={20} color={colors.accent} />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.cardioEntryTitle}>Cardio</Text>
+            <Text style={styles.cardioEntrySub}>Weekly dose, menu quick-log & Tabata timer</Text>
+          </View>
+          <Ionicons name="chevron-forward" size={20} color={colors.textSecondary} />
+        </TouchableOpacity>
 
         <View style={styles.guidanceCard}>
           <View style={styles.guidanceHeader}>
@@ -2226,6 +2233,36 @@ const styles = StyleSheet.create({
     fontSize: fontSizes.sm,
     fontWeight: '600',
   },
+  cardioEntry: {
+    marginHorizontal: spacing.md,
+    marginBottom: spacing.md,
+    backgroundColor: colors.surface,
+    borderRadius: borderRadius.lg,
+    padding: spacing.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+  },
+  cardioEntryIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.assistant.actionSoft,
+  },
+  cardioEntryTitle: {
+    color: colors.text,
+    fontSize: fontSizes.md,
+    fontWeight: '700',
+  },
+  cardioEntrySub: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    marginTop: 2,
+  },
   guidanceCard: {
     marginHorizontal: spacing.md,
     marginBottom: spacing.md,
@@ -2326,36 +2363,6 @@ const styles = StyleSheet.create({
     fontSize: fontSizes.md,
     textAlign: 'center',
     padding: spacing.xl,
-  },
-  habitCard: {
-    backgroundColor: colors.surface,
-    borderRadius: borderRadius.md,
-    padding: spacing.md,
-    marginHorizontal: spacing.md,
-    marginBottom: spacing.sm,
-  },
-  habitName: {
-    color: colors.text,
-    fontSize: fontSizes.md,
-    fontWeight: '600',
-    marginBottom: spacing.sm,
-  },
-  habitStats: {
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-  },
-  habitStat: {
-    alignItems: 'center',
-  },
-  habitStatValue: {
-    color: colors.text,
-    fontSize: fontSizes.lg,
-    fontWeight: '600',
-    marginBottom: spacing.xs,
-  },
-  habitStatLabel: {
-    color: colors.textSecondary,
-    fontSize: fontSizes.xs,
   },
   calorieDisplay: {
     alignItems: 'center',

@@ -40,6 +40,18 @@ class ManagedHost(Base):
     last_status = Column(String(32), nullable=True)  # connected | unreachable | auth_failed | error
     last_seen_at = Column(DateTime(timezone=True), nullable=True)
 
+    # --- Fleet agent transport (see FLEET_DESIGN.md §6.1) --------------------
+    # A ManagedHost may be reached over SSH ("ssh"), the push agent ("agent"),
+    # or both. All columns are nullable so pre-existing SSH-only rows are valid.
+    transport = Column(String(16), nullable=False, default="ssh")   # ssh | agent | both
+    machine_id = Column(String(64), nullable=True, index=True)      # /etc/machine-id — joins agent → row
+    agent_token_hash = Column(String(64), nullable=True)            # sha256 of the per-host bearer token
+    agent_version = Column(String(16), nullable=True)
+    agent_enrolled_at = Column(DateTime(timezone=True), nullable=True)
+    agent_last_report_at = Column(DateTime(timezone=True), nullable=True)  # freshness / offline detection
+    agent_snapshot = Column(JSONB, nullable=True)                   # latest full telemetry payload
+    agent_alert_state = Column(JSONB, nullable=True)                # per-rule edge state (see alerts.py)
+
     active = Column(Boolean, nullable=False, default=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())

@@ -62,7 +62,9 @@ class ImagePickerService {
 
       const result = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ImagePicker.MediaTypeOptions.Images,
-        allowsEditing: true,
+        // No allowsEditing: iOS's built-in editor forces a 1:1 square crop with no
+        // free-form option, so we skip it and upload the whole image as-is.
+        allowsEditing: false,
         quality: 0.8,
         base64: true,
       });
@@ -103,7 +105,8 @@ class ImagePickerService {
       }
 
       const result = await ImagePicker.launchCameraAsync({
-        allowsEditing: true,
+        // Whole photo, no forced square crop (see pickFromGallery).
+        allowsEditing: false,
         quality: 0.8,
         base64: true,
       });

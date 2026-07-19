@@ -4,6 +4,7 @@ export type AppView =
   | 'chat'
   | 'notes'
   | 'documents'
+  | 'artifacts'
   | 'calendar'
   | 'email'
   | 'fitness'
@@ -23,6 +24,7 @@ export type AppView =
   | 'acs'
   | 'system-status'
   | 'system'
+  | 'machines'
 
 interface AppViewConfig {
   view: AppView
@@ -39,6 +41,7 @@ export const APP_VIEWS: AppViewConfig[] = [
   { view: 'chat', path: '/chat', title: 'Chat', icon: 'chat', keywords: ['chat', 'talk', 'conversation'] },
   { view: 'notes', path: '/notes', title: 'Notes', icon: 'edit_note', keywords: ['notes', 'knowledge', 'write'] },
   { view: 'documents', path: '/documents', title: 'Documents', icon: 'description', keywords: ['documents', 'files', 'uploads'] },
+  { view: 'artifacts', path: '/artifacts', title: 'Studio', icon: 'auto_awesome', keywords: ['artifact', 'artifacts', 'studio', 'docs', 'files', 'canvas', 'built'] },
   { view: 'tasks', path: '/tasks', title: 'Tasks', icon: 'check_circle', keywords: ['tasks', 'todo', 'daily', 'checklist'] },
   { view: 'calendar', path: '/calendar', title: 'Calendar', icon: 'calendar_today', keywords: ['calendar', 'events', 'schedule'] },
   { view: 'email', path: '/email', title: 'Email', icon: 'mail', keywords: ['email', 'mail', 'inbox', 'messages'] },
@@ -58,6 +61,7 @@ export const APP_VIEWS: AppViewConfig[] = [
   { view: 'acs', path: '/acs', title: 'ACS', icon: 'smart_toy', keywords: ['acs', 'mind', 'thoughts', 'autonomous', 'cognition', 'sara', 'inner', 'queue', 'inbox'] },
   { view: 'system-status', path: '/system-status', title: 'System Status', icon: 'monitoring', keywords: ['system', 'status', 'health', 'metrics', 'monitoring'] },
   { view: 'system', path: '/system', title: 'The System', icon: 'hub', keywords: ['system', 'awareness', 'world', 'mind', 'god view', 'attention', 'balance', 'thoughts'] },
+  { view: 'machines', path: '/machines', title: 'Machines', icon: 'dns', keywords: ['machines', 'fleet', 'servers', 'hosts', 'infrastructure', 'boxes', 'health', 'disk', 'agent'] },
 ]
 
 const VIEW_ALIASES: Record<string, AppView> = {

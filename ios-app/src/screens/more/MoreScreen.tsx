@@ -121,6 +121,13 @@ const menuSections: MenuSection[] = [
         description: 'Uploaded files, previews, and search.',
       },
       {
+        name: 'Studio',
+        icon: 'sparkles-outline',
+        label: 'Studio',
+        screen: 'Studio',
+        description: 'Everything Sara has built — docs, code, diagrams — with downloads.',
+      },
+      {
         name: 'Knowledge',
         icon: 'library-outline',
         label: 'Knowledge',
@@ -139,6 +146,13 @@ const menuSections: MenuSection[] = [
         label: 'The System',
         screen: 'System',
         description: 'What Sara sees, thinks, and surfaces — world state, attention balance, thoughts.',
+      },
+      {
+        name: 'Machines',
+        icon: 'server-outline',
+        label: 'Machines',
+        screen: 'Machines',
+        description: 'Fleet health for every box David owns — CPU, memory, disk, alerts, and the enroll command.',
       },
       {
         name: 'Health',

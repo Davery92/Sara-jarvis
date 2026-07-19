@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -10,74 +10,63 @@ import { useNavigation } from '@react-navigation/native';
 import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
 import apiClient from '../../services/api';
 
-interface ACSDirective {
+interface ActivityEntry {
   id: string;
-  directive_type: string;
-  content: string;
-  priority: string;
-  status: string;
-  source: string;
-  response?: string;
   created_at: string;
+  kind: string;
+  summary: string;
+  body?: string | null;
+  tags: string[];
+  metadata: Record<string, any>;
+}
+
+interface DaemonStatus {
+  state: string;
+  version: string;
+  pid: number | null;
+  hostname: string | null;
+  started_at: string | null;
+  last_heartbeat_at: string | null;
+  last_tick_summary: string | null;
+  is_alive: boolean;
+  seconds_since_heartbeat: number | null;
+}
+
+interface Focus {
+  topic: string | null;
+  why: string | null;
+  set_at: string | null;
+  updated_at: string | null;
 }
 
 interface ACSSnapshot {
-  state: string;
-  emotional_state?: string;
-  daily_plan?: string;
-  directives?: ACSDirective[];
-  latest_note?: {
-    title: string;
-    preview: string;
-    created_at: string;
-    folder?: string;
-  };
-  latest_journal?: {
-    snippet: string;
-    updated_at: string;
-  };
-  last_session?: {
-    mode: string;
-    turns: number;
-    notes_created: number;
-    started_at: string;
-    ended_at: string;
-    end_reason: string;
-  };
-  live_session?: {
-    id: string;
-    mode: string;
-    turns: number;
-    notes_created: number;
-    elapsed_minutes: number;
-  };
+  daemon_status: DaemonStatus;
+  focus: Focus;
+  recent_activity: ActivityEntry[];
 }
 
-interface LiveEvent {
-  type: string;
-  mode?: string;
-  turn?: number;
-  tool?: string;
-  notes_created?: number;
-  summary?: string;
-  [key: string]: any;
-}
-
-const MODE_EMOJI: Record<string, string> = {
-  exploration: '\uD83D\uDD2D',
-  consolidation: '\uD83D\uDD17',
-  reflection: '\uD83E\uDE9E',
-  research: '\uD83D\uDCDA',
-  learning: '\uD83C\uDF93',
+const KIND_EMOJI: Record<string, string> = {
+  thought: '💭',
+  reflection: '🪞',
+  focus_set: '🎯',
+  focus_clear: '⏹',
+  notify_david: '📣',
+  inbox_pickup: '📥',
+  inbox_complete: '✅',
+  inbox_dismiss: '🗑',
+  tool_call: '🔧',
+  tool_result: '📦',
+  external_event: '🌐',
+  error: '⚠️',
 };
 
 const STATE_CONFIG: Record<string, { label: string; color: string; emoji: string }> = {
-  autonomous: { label: 'Active', color: colors.success, emoji: '\u26A1' },
-  cooldown: { label: 'Resting', color: colors.textMuted, emoji: '\uD83D\uDCA4' },
-  conversational: { label: 'Chatting', color: colors.info, emoji: '\uD83D\uDCAC' },
-  idle: { label: 'Idle', color: colors.textMuted, emoji: '\u23F8\uFE0F' },
-  pausing: { label: 'Pausing', color: colors.warning, emoji: '\u23F8\uFE0F' },
-  paused: { label: 'Paused', color: colors.warning, emoji: '\u23F8\uFE0F' },
+  boot: { label: 'Starting', color: colors.warning, emoji: '🚀' },
+  idle: { label: 'Idle', color: colors.textMuted, emoji: '⏸️' },
+  working: { label: 'Active', color: colors.success, emoji: '⚡' },
+  sleeping: { label: 'Resting', color: colors.textMuted, emoji: '💤' },
+  error: { label: 'Error', color: colors.warning, emoji: '⚠️' },
+  never_started: { label: 'Not started', color: colors.textMuted, emoji: '⏸️' },
 };
 
 function timeAgo(dateStr: string | null | undefined): string {
@@ -95,21 +84,25 @@ function timeAgo(dateStr: string | null | undefined): string {
 
 function truncate(text: string, max: number): string {
   if (text.length <= max) return text;
-  return text.slice(0, max).trimEnd() + '\u2026';
+  return text.slice(0, max).trimEnd() + '…';
+}
+
+function formatActivity(entry: ActivityEntry): string {
+  const emoji = KIND_EMOJI[entry.kind] || '•';
+  return `${emoji} ${entry.summary || entry.kind}`;
 }
 
 export default function ACSStatusCard() {
   const [snapshot, setSnapshot] = useState<ACSSnapshot | null>(null);
-  const [liveEvents, setLiveEvents] = useState<LiveEvent[]>([]);
+  const [liveActivity, setLiveActivity] = useState<ActivityEntry[]>([]);
   const [latestThought, setLatestThought] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
   const navigation = useNavigation<any>();
   const [loading, setLoading] = useState(true);
-  const eventSourceRef = useRef<any>(null);
 
   const fetchSnapshot = useCallback(async () => {
     try {
-      const data = await apiClient.get<ACSSnapshot>('/api/acs/snapshot');
+      const data = await apiClient.get<ACSSnapshot>('/api/acs/v2/snapshot');
       setSnapshot(data as ACSSnapshot);
     } catch {
       // graceful degradation
@@ -125,11 +118,18 @@ export default function ACSStatusCard() {
     return () => clearInterval(interval);
   }, [fetchSnapshot]);
 
-  // SSE for live session
+  // Seed the live feed + latest thought from the snapshot's recent activity
+  // so the card isn't empty until the first SSE tick lands.
   useEffect(() => {
-    if (!snapshot?.live_session) {
-      setLiveEvents([]);
-      setLatestThought(null);
+    if (!snapshot?.recent_activity?.length) return;
+    setLiveActivity(prev => (prev.length ? prev : snapshot.recent_activity.slice(0, 10)));
+    const lastThought = snapshot.recent_activity.find(a => a.kind === 'thought');
+    if (lastThought) setLatestThought(lastThought.summary);
+  }, [snapshot?.recent_activity]);
+
+  // SSE: only worth holding open while the daemon is actually alive.
+  useEffect(() => {
+    if (!snapshot?.daemon_status?.is_alive) {
       return;
     }
 
@@ -140,9 +140,9 @@ export default function ACSStatusCard() {
       if (!token || cancelled) return;
 
       try {
-        const url = `${apiClient.baseURL}/api/acs/live?token=${encodeURIComponent(token)}`;
+        const url = `${apiClient.baseURL}/api/acs/v2/stream`;
         const response = await fetch(url, {
-          headers: { Accept: 'text/event-stream' },
+          headers: { Accept: 'text/event-stream', Authorization: `Bearer ${token}` },
         });
 
         if (!response.ok || !response.body) return;
@@ -162,12 +162,12 @@ export default function ACSStatusCard() {
           for (const line of lines) {
             if (line.startsWith('data: ')) {
               try {
-                const event = JSON.parse(line.slice(6)) as LiveEvent;
-                if (event.type === 'thought' && event.text) {
-                  setLatestThought(event.text as string);
-                } else if (event.type && event.type !== 'status' && event.type !== 'thought') {
-                  setLiveEvents(prev => [event, ...prev].slice(0, 10));
+                const entry = JSON.parse(line.slice(6)) as Partial<ActivityEntry>;
+                if (!entry.kind) continue; // "hello" ping frame, no activity payload
+                if (entry.kind === 'thought' && entry.summary) {
+                  setLatestThought(entry.summary);
                 }
+                setLiveActivity(prev => [entry as ActivityEntry, ...prev].slice(0, 10));
               } catch {
                 // ignore parse errors
               }
@@ -181,7 +181,7 @@ export default function ACSStatusCard() {
 
     connectSSE();
     return () => { cancelled = true; };
-  }, [snapshot?.live_session?.id]);
+  }, [snapshot?.daemon_status?.is_alive]);
 
   if (loading) {
     return (
@@ -193,8 +193,10 @@ export default function ACSStatusCard() {
 
   if (!snapshot) return null;
 
-  const stateConfig = STATE_CONFIG[snapshot.state] || STATE_CONFIG.idle;
-  const isLive = !!snapshot.live_session;
+  const status = snapshot.daemon_status;
+  const stateConfig = STATE_CONFIG[status.state] || STATE_CONFIG.idle;
+  const isLive = status.is_alive;
+  const focus = snapshot.focus;
 
   return (
     <TouchableOpacity
@@ -209,131 +211,71 @@ export default function ACSStatusCard() {
           <Text style={[styles.stateLabel, { color: stateConfig.color }]}>
             {stateConfig.label}
           </Text>
-          {isLive && snapshot.live_session && (
+          {isLive ? (
             <View style={styles.liveBadge}>
               <View style={styles.liveDot} />
-              <Text style={styles.liveText}>
-                {MODE_EMOJI[snapshot.live_session.mode] || ''}{' '}
-                {snapshot.live_session.mode} — turn {snapshot.live_session.turns},{' '}
-                {Math.round(snapshot.live_session.elapsed_minutes)}m
-              </Text>
+              <Text style={styles.liveText}>online</Text>
             </View>
-          )}
-          {!isLive && snapshot.last_session && (
+          ) : (
             <Text style={styles.lastSession}>
-              {MODE_EMOJI[snapshot.last_session.mode] || ''}{' '}
-              {snapshot.last_session.mode} {timeAgo(snapshot.last_session.ended_at)}
+              {status.last_heartbeat_at ? `last seen ${timeAgo(status.last_heartbeat_at)}` : 'never connected'}
             </Text>
           )}
         </View>
-        <Text style={styles.chevron}>{expanded ? '\u25B2' : '\u25BC'}</Text>
+        <Text style={styles.chevron}>{expanded ? '▲' : '▼'}</Text>
       </View>
 
       {/* Latest thought — always visible when live */}
       {isLive && latestThought ? (
         <Text style={styles.thoughtText} numberOfLines={2}>
-          {'\uD83D\uDCAD'} {latestThought}
+          {'💭'} {latestThought}
         </Text>
       ) : null}
 
-      {/* Latest note preview (always visible) */}
-      {snapshot.latest_note && (
-        <View style={styles.noteRow}>
-          <Text style={styles.noteIcon}>{'\uD83D\uDDD2'}</Text>
-          <View style={styles.noteContent}>
-            <Text style={styles.noteTitle} numberOfLines={1}>
-              {snapshot.latest_note.title}
-            </Text>
-            <Text style={styles.noteMeta}>
-              {snapshot.latest_note.folder ? `${snapshot.latest_note.folder} \u00B7 ` : ''}
-              {timeAgo(snapshot.latest_note.created_at)}
-            </Text>
-          </View>
-        </View>
-      )}
-
-      {/* Daily Plan */}
-      {snapshot.daily_plan ? (
+      {/* Current focus (always visible) */}
+      {focus?.topic && (
         <TouchableOpacity
           style={styles.planButton}
           activeOpacity={0.6}
           onPress={() => navigation.navigate('DailyPlan')}
         >
-          <Text style={styles.planButtonText}>{'\uD83D\uDCCB'} Today's Plan</Text>
-          <Text style={styles.planChevron}>{'\u203A'}</Text>
+          <Text style={styles.planButtonText} numberOfLines={1}>
+            {'🎯'} {focus.topic}
+          </Text>
+          <Text style={styles.planChevron}>{'›'}</Text>
         </TouchableOpacity>
-      ) : null}
+      )}
 
       {/* Expanded section */}
       {expanded && (
         <View style={styles.expandedSection}>
-          {/* Note preview text */}
-          {snapshot.latest_note?.preview ? (
-            <Text style={styles.previewText}>
-              {truncate(snapshot.latest_note.preview, 200)}
-            </Text>
+          {/* Focus reason */}
+          {focus?.why ? (
+            <Text style={styles.previewText}>{truncate(focus.why, 200)}</Text>
           ) : null}
 
-          {/* Latest journal */}
-          {snapshot.latest_journal && (
-            <View style={styles.journalSection}>
-              <Text style={styles.sectionLabel}>{'\uD83D\uDCD6'} Latest Journal</Text>
-              <Text style={styles.journalText}>
-                {truncate(snapshot.latest_journal.snippet, 250)}
-              </Text>
-              <Text style={styles.journalTime}>
-                {timeAgo(snapshot.latest_journal.updated_at)}
-              </Text>
-            </View>
-          )}
-
-          {/* Live events feed */}
-          {isLive && liveEvents.length > 0 && (
+          {/* Recent activity feed */}
+          {liveActivity.length > 0 && (
             <View style={styles.liveSection}>
-              <Text style={styles.sectionLabel}>{'\u26A1'} Live Activity</Text>
-              {liveEvents.slice(0, 5).map((event, i) => (
-                <Text key={i} style={styles.liveEventText}>
-                  {formatLiveEvent(event)}
+              <Text style={styles.sectionLabel}>{'⚡'} Recent Activity</Text>
+              {liveActivity.slice(0, 5).map((entry, i) => (
+                <Text key={entry.id || i} style={styles.liveEventText} numberOfLines={1}>
+                  {formatActivity(entry)}
                 </Text>
               ))}
             </View>
           )}
 
-          {/* Last session summary */}
-          {!isLive && snapshot.last_session && (
+          {!isLive && status.last_tick_summary && (
             <View style={styles.sessionSection}>
-              <Text style={styles.sectionLabel}>Last Session</Text>
-              <Text style={styles.sessionDetail}>
-                {snapshot.last_session.mode} \u00B7{' '}
-                {snapshot.last_session.turns} turns \u00B7{' '}
-                {snapshot.last_session.notes_created} notes \u00B7{' '}
-                {snapshot.last_session.end_reason}
-              </Text>
+              <Text style={styles.sectionLabel}>Last Tick</Text>
+              <Text style={styles.sessionDetail}>{status.last_tick_summary}</Text>
             </View>
           )}
         </View>
       )}
     </TouchableOpacity>
   );
-}
-
-function formatLiveEvent(event: LiveEvent): string {
-  switch (event.type) {
-    case 'turn_starting':
-      return `\u25B6 Starting turn ${event.turn || '?'}`;
-    case 'turn_completed':
-      return `\u2705 Turn ${event.turn || '?'} done${event.notes_created ? ` (${event.notes_created} notes)` : ''}`;
-    case 'tool_call':
-      return `\uD83D\uDD27 Using ${event.tool || 'tool'}`;
-    case 'mode_selected':
-      return `${MODE_EMOJI[event.mode || ''] || '\uD83C\uDFAF'} Mode: ${event.mode}`;
-    case 'session_ended':
-      return `\u23F9 Session ended: ${event.summary || event.end_reason || ''}`;
-    case 'human_input_requested':
-      return '\uD83D\uDE4B Waiting for your input';
-    default:
-      return `${event.type}`;
-  }
 }
 
 const styles = StyleSheet.create({
@@ -405,28 +347,6 @@ const styles = StyleSheet.create({
     lineHeight: 18,
     marginTop: spacing.sm,
   },
-  noteRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginTop: spacing.sm,
-    gap: 8,
-  },
-  noteIcon: {
-    fontSize: 14,
-  },
-  noteContent: {
-    flex: 1,
-  },
-  noteTitle: {
-    fontSize: fontSizes.sm,
-    color: colors.text,
-    fontWeight: '600',
-  },
-  noteMeta: {
-    fontSize: 11,
-    color: colors.textMuted,
-    marginTop: 1,
-  },
   planButton: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -455,9 +375,6 @@ const styles = StyleSheet.create({
     lineHeight: 18,
     marginBottom: spacing.md,
   },
-  journalSection: {
-    marginBottom: spacing.md,
-  },
   sectionLabel: {
     fontSize: 12,
     fontWeight: '700',
@@ -465,17 +382,6 @@ const styles = StyleSheet.create({
     marginBottom: 4,
     textTransform: 'uppercase',
     letterSpacing: 0.5,
-  },
-  journalText: {
-    fontSize: 13,
-    color: colors.textSecondary,
-    lineHeight: 18,
-    fontStyle: 'italic',
-  },
-  journalTime: {
-    fontSize: 11,
-    color: colors.textMuted,
-    marginTop: 2,
   },
   liveSection: {
     marginBottom: spacing.md,

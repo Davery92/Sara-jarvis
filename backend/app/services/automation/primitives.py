@@ -200,7 +200,7 @@ class PrimitiveExecutor:
         step_state: Dict[str, Any]
     ) -> ExecutionResult:
         """Send mobile push notification."""
-        from app.main_simple import send_push_notification_async
+        from app.services.unified_notification import send_notification
 
         message = action.get("message", "")
         title = action.get("title", "Sara Automation")
@@ -220,14 +220,18 @@ class PrimitiveExecutor:
         data["automation_type"] = "automation_alert"
 
         try:
-            success = await send_push_notification_async(
+            result = await send_notification(
                 user_id=user_id,
                 title=title,
-                body=message,
-                data=data
+                message=message,
+                priority=priority,
+                category="automation",
+                topic=f"automation:{task_id}",
+                source="automation_primitives",
+                extra_push_data=data,
             )
 
-            if success:
+            if result.get("sent"):
                 logger.info(f"[Automation {task_id}] Sent notification: {title}")
                 return ExecutionResult(
                     status=PrimitiveResult.SUCCESS,
@@ -236,7 +240,7 @@ class PrimitiveExecutor:
             else:
                 return ExecutionResult(
                     status=PrimitiveResult.FAILED,
-                    error="Failed to send push notification (no tokens or API error)"
+                    error=f"Failed to send push notification: {result.get('reason', 'unknown')}"
                 )
 
         except Exception as e:

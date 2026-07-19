@@ -38,6 +38,7 @@ class ContextSource:
     priority: int  # 1=critical, 5=optional
     tokens: int = 0
     truncatable: bool = True  # Can this source be truncated?
+    non_evictable: bool = False  # Always kept, never dropped or truncated
 
     def __post_init__(self):
         self.tokens = estimate_tokens(self.content)
@@ -68,8 +69,14 @@ class ContextBudget:
         content: Optional[str],
         priority: int = 3,
         truncatable: bool = True,
+        non_evictable: bool = False,
     ) -> None:
-        """Add a context source. Skips empty content."""
+        """Add a context source. Skips empty content.
+
+        non_evictable sources (H5 recency floor) are always kept in full, even
+        when they push the budget over — the router may add more context, never
+        less than the last few minutes of conversation.
+        """
         if not content or not content.strip():
             return
         self.sources.append(ContextSource(
@@ -77,6 +84,7 @@ class ContextBudget:
             content=content.strip(),
             priority=priority,
             truncatable=truncatable,
+            non_evictable=non_evictable,
         ))
 
     def allocate(self) -> List[ContextSource]:
@@ -88,11 +96,20 @@ class ContextBudget:
         3. For the source that crosses the boundary, truncate if allowed
         4. Drop remaining sources
         """
-        # Sort: priority ascending (1 first), then by token count ascending
-        sorted_sources = sorted(self.sources, key=lambda s: (s.priority, s.tokens))
-
+        # Non-evictable sources (H5 recency floor) are kept in full up front,
+        # regardless of budget. Everything else competes for the remainder.
         result = []
         used = 0
+        for source in self.sources:
+            if source.non_evictable:
+                result.append(source)
+                used += source.tokens
+
+        # Sort: priority ascending (1 first), then by token count ascending
+        sorted_sources = sorted(
+            (s for s in self.sources if not s.non_evictable),
+            key=lambda s: (s.priority, s.tokens),
+        )
 
         for source in sorted_sources:
             if used + source.tokens <= self.max_tokens:

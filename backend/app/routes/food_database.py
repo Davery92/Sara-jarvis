@@ -313,6 +313,11 @@ async def get_food_details(
             fatsecret_id = food_id[3:]  # Remove 'fs-' prefix
             return await get_fatsecret_food_details(fatsecret_id, db)
 
+        # Check if this is a recipe (Phase U.6 recipe search results are prefixed "recipe-<uuid>")
+        if food_id.startswith("recipe-"):
+            recipe_id = food_id[len("recipe-"):]
+            return await get_recipe_food_details(recipe_id, db)
+
         # Otherwise, look up custom food
         query = text("SELECT * FROM food_database WHERE id = :id")
         result = db.execute(query, {"id": food_id}).fetchone()
@@ -349,6 +354,45 @@ async def get_food_details(
     except Exception as e:
         logger.error(f"Failed to get food details: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+async def get_recipe_food_details(recipe_id: str, db: Session) -> FoodDetailResponse:
+    """Get detailed food info for a recipe, expressed as macros per serving."""
+    query = text("""
+        SELECT id, name, servings, calories, protein, carbs, fats
+        FROM recipe
+        WHERE id = :recipe_id
+    """)
+    result = db.execute(query, {"recipe_id": recipe_id}).fetchone()
+
+    if not result:
+        raise HTTPException(status_code=404, detail="Recipe not found")
+
+    servings = result.servings or 1
+
+    def per_serving(total):
+        return float(total) / servings if total is not None else 0.0
+
+    return FoodDetailResponse(
+        id=f"recipe-{result.id}",
+        name=result.name,
+        brand=None,
+        food_type="Recipe",
+        servings=[
+            FoodServing(
+                serving_id="1",
+                serving_description="1 serving",
+                metric_serving_amount=1,
+                metric_serving_unit="serving",
+                calories=per_serving(result.calories),
+                protein=per_serving(result.protein),
+                carbs=per_serving(result.carbs),
+                fat=per_serving(result.fats),
+            )
+        ],
+        is_custom=True,
+        source="recipe"
+    )
 
 
 async def get_fatsecret_food_details(fatsecret_id: str, db: Session) -> FoodDetailResponse:
@@ -420,7 +464,7 @@ async def get_fatsecret_food_details(fatsecret_id: str, db: Session) -> FoodDeta
 
         update_query = text("""
             UPDATE fatsecret_food_cache
-            SET servings_json = :servings_json::jsonb, updated_at = NOW()
+            SET servings_json = CAST(:servings_json AS jsonb), updated_at = NOW()
             WHERE fatsecret_id = :fatsecret_id
         """)
         db.execute(update_query, {

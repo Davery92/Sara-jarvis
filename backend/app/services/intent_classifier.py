@@ -371,11 +371,15 @@ class ToolIntentClassifier:
     inherit tools from recent turns to maintain continuity.
     """
 
-    # Base tools always available (essential for most interactions)
-    BASE_TOOLS = ['memory', 'notes', 'time', 'acs']
+    # Base tools always available (essential for most interactions).
+    # 'fleet' is here because David refers to his machines by name in short,
+    # keyword-less messages ("check nyx", "how's nyx") that classify as
+    # CONVERSATIONAL — without it in the base set, Sara wouldn't see fleet_status/
+    # fleet_diag and would wrongly claim she can't check his servers.
+    BASE_TOOLS = ['memory', 'notes', 'time', 'agents', 'fleet']
 
     # Extended default tools for general/unclear intent
-    DEFAULT_TOOLS = ['memory', 'notes', 'time', 'web', 'fitness', 'learning', 'home']
+    DEFAULT_TOOLS = ['memory', 'notes', 'time', 'web', 'fitness', 'learning', 'home', 'fleet']
 
     # Intent patterns - more specific patterns checked first
     INTENT_PATTERNS = {
@@ -417,6 +421,17 @@ class ToolIntentClassifier:
             'goal done', 'complete that goal', 'complete this goal', 'my goals',
             'persistent goal', 'goal progress', 'stalled goal',
         ],
+        # FLEET — health + read-only diagnostics for David's machines (the fleet
+        # agents). Host names can't be enumerated here, so this catches the
+        # generic phrasings; short host-named messages ("check nyx") are covered
+        # by 'fleet' being in BASE_TOOLS.
+        'FLEET': [
+            'the fleet', 'my fleet', 'fleet status', 'fleet health', "how's the fleet",
+            'my servers', 'my machines', 'my boxes', 'server health', 'server status',
+            'are my servers', 'is my server', 'anything wrong with my',
+            'disk space on', 'disk usage on', 'why is the server', 'why is the box',
+            'check the server', 'check my server', 'check the box', 'health of my',
+        ],
         'FITNESS': [
             'log', 'food', 'calories', 'workout', 'exercise', 'meal', 'weight',
             'protein', 'carbs', 'fat', 'macros', 'ate', 'eating', 'breakfast',
@@ -425,6 +440,34 @@ class ToolIntentClassifier:
             'program', 'training program', 'phase', 'training phase', 'template',
             'workout template', 'mesocycle', 'block', 'hypertrophy', 'strength program',
             'deload', 'periodization', 'training block'
+        ],
+        # Interactive surfaces — explicit construction language only (B3 layer 2).
+        'SURFACES': [
+            'checklist', 'check list',
+            'cook mode', 'cook-mode', 'cooking mode', 'recipe mode',
+            'enter cook', 'enter cooking', 'start cook', 'start cooking',
+            'cook along', 'cooking along', 'follow along', 'cook-along',
+            'walk me through the recipe', 'step me through', 'guide me through the recipe',
+            'interactive checklist', 'live checklist', 'shopping list surface',
+            'step by step surface', 'step-by-step', 'pickup window', 'pick-up window',
+            'make a form', 'quick form', 'build a surface', 'interactive surface',
+            'tick off', 'check off as i',
+            # Workspace-job phrasing (workspace_job_run lives in this category)
+            'pull the attachments', 'pull attachments', 'grab the attachments',
+            'grab those files', 'collect the attachments', 'collect the files',
+            'gather the attachments', 'gather the files', 'attachments to a folder',
+            'pull those files', 'pull the files',
+        ],
+        # Before NOTES: NOTES owns the bare word 'document', so explicit
+        # file-generation phrasing must be matched first (SURFACES_DESIGN §A).
+        'AUTHORING': [
+            'word doc', 'word document', 'docx', '.docx', 'pdf', '.pdf',
+            'as a pdf', 'as a word', 'as a doc', 'to pdf', 'into a pdf',
+            'export as', 'export this', 'export it', 'download as',
+            'generate a document', 'generate a pdf', 'generate a report',
+            'make a pdf', 'make me a doc', 'make me a word', 'make a word',
+            'create a pdf', 'create a document', 'write it up as', 'write that up as',
+            'turn it into a doc', 'turn this into a doc', 'formatted document',
         ],
         'NOTES': [
             'note', 'notes', 'write down', 'save this', 'folder', 'jot down',
@@ -587,15 +630,18 @@ class ToolIntentClassifier:
         'PEOPLE': ['people'],
         'GOALS': ['goals'],
         'FITNESS': ['fitness'],
+        'FLEET': ['fleet'],
         'NOTES': ['notes'],
+        'AUTHORING': ['authoring', 'canvas'],
+        'SURFACES': ['surfaces'],
         'TIME': ['time'],
         'WEB': ['web'],
         'MEMORY': ['memory', 'knowledge_graph'],
-        'HOME': ['home', 'automation'],
+        'HOME': ['home', 'standing_orders'],
         'CHESS': ['chess'],
         'LEARNING': ['learning', 'web'],
         'PROJECTS': ['projects'],
-        'MORNING_BRIEF': ['morning_brief', 'time'],
+        'MORNING_BRIEF': ['daily', 'time'],
         'AGENTS': ['agents', 'web'],
         'NOTIFICATIONS': ['notifications'],  # Badge / "what's the notification?"
         'DEVICES': ['devices'],  # Cross-device commands
@@ -782,8 +828,33 @@ class ToolIntentClassifier:
             else:
                 tools = list(set(explicit_tools + self.BASE_TOOLS))
 
+        # Authoring is ADDITIVE, not a competing intent. "Create a PDF of my
+        # nutrition" classifies as FITNESS (so the data tools load), but the
+        # user also wants a file — so whenever explicit file-generation phrasing
+        # is present, make document_generate available alongside the primary
+        # intent's tools. Without this, single-intent routing hides the tool and
+        # the model falls back to hand-building files via the VM agent.
+        if self._has_authoring_signal(message) and 'authoring' not in tools:
+            tools = tools + ['authoring']
+
+        # Surfaces are likewise additive + progressive-disclosure: only merged in
+        # on explicit construction language ("make a checklist of…"), never in the
+        # default schema (B3 layer 2).
+        if self._has_surface_signal(message) and 'surfaces' not in tools:
+            tools = tools + ['surfaces']
+
         logger.info(f"[ToolIntent] '{message[:50]}...' -> {explicit_intent}, tools={tools}")
         return explicit_intent, tools
+
+    def _has_authoring_signal(self, message: str) -> bool:
+        """True if the message explicitly asks for a generated file (doc/pdf)."""
+        message_lower = message.lower()
+        return any(kw in message_lower for kw in self.INTENT_PATTERNS.get('AUTHORING', []))
+
+    def _has_surface_signal(self, message: str) -> bool:
+        """True if the message explicitly asks to build an interactive surface."""
+        message_lower = message.lower()
+        return any(kw in message_lower for kw in self.INTENT_PATTERNS.get('SURFACES', []))
 
     def classify_multi(self, message: str, max_intents: int = 3) -> List[Tuple[str, float]]:
         """

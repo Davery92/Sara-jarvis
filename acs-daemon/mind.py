@@ -29,6 +29,14 @@ logger = logging.getLogger("acs-daemon.mind")
 # Hard caps — protect against runaway behavior.
 MAX_TOOL_ITERATIONS = 8         # max LLM round-trips chained per turn
 MAX_TOOL_CALLS_PER_BATCH = 4    # max parallel tool calls in one LLM response
+# ACS4 (Brain Alignment — one mind, two speeds): the slow mind must NOT grow
+# its own senses. It may reason, research, and act on artifacts, but it must
+# NEVER gain a tool that reads a live feed the backend already ingests (email,
+# Home Assistant, calendar, presence, health). Those reach her only through the
+# heartbeat's world_delta (ACS1). Adding such a tool here recreates the
+# "second brain fighting the first" that UNLEASHED Phase A eliminated. If you
+# add a tool below, it must be inert cognition, research, or her own goals/
+# interests — never a poller of David's world.
 ALLOWED_TOOLS = {
     # research / knowledge
     "web_search", "web_fetch", "write_note", "search_notes", "search_memory",
@@ -49,7 +57,7 @@ class Mind:
         self.started_at = started_at
 
     # ── think ──
-    async def think(self) -> Optional[dict]:
+    async def think(self, world_delta: Optional[list[str]] = None) -> Optional[dict]:
         """Run one short thinking turn. Returns the parsed action dict or None."""
         activity = await self.backend.list_activity(limit=20)
         focus = await self.backend.get_focus()
@@ -61,7 +69,7 @@ class Mind:
 
         system, user = build_think_prompt(
             activity=activity, focus=focus, inbox=inbox, interests=interests,
-            goals=goals, recall=recall, boot_age=boot_age,
+            goals=goals, recall=recall, boot_age=boot_age, world_delta=world_delta,
         )
         logger.debug("think prompt assembled (%d activity, %d inbox, %d interests, %d goals, %d recall)",
                      len(activity), len(inbox), len(interests), len(goals), len(recall))
@@ -92,7 +100,7 @@ class Mind:
         return parsed
 
     # ── reflect ──
-    async def reflect(self) -> Optional[dict]:
+    async def reflect(self, world_delta: Optional[list[str]] = None) -> Optional[dict]:
         """Run one reflection turn. Returns parsed action dict or None."""
         activity = await self.backend.list_activity(limit=30)
         focus = await self.backend.get_focus()
@@ -104,7 +112,7 @@ class Mind:
 
         system, user = build_reflect_prompt(
             activity=activity, focus=focus, inbox=inbox, interests=interests,
-            goals=goals, recall=recall, boot_age=boot_age,
+            goals=goals, recall=recall, boot_age=boot_age, world_delta=world_delta,
         )
         logger.debug("reflect prompt assembled (%d activity, %d inbox, %d interests, %d goals, %d recall)",
                      len(activity), len(inbox), len(interests), len(goals), len(recall))

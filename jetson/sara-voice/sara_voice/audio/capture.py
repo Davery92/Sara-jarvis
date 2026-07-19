@@ -21,6 +21,10 @@ class AudioCapture:
         audio_cfg = config.get("audio", {})
         self._device_name = audio_cfg.get("input_device", "AIRHUG")
         self._fallback_name = audio_cfg.get("fallback_device", "OBSBOT")
+        # On a cold boot the system service can start before the user PipeWire
+        # session publishes its "pulse" device — wait for it rather than falling
+        # back to a silent APE loopback (the "deaf on restart" race).
+        self._device_wait_seconds = audio_cfg.get("device_wait_seconds", 30)
         self._native_rate = audio_cfg.get("sample_rate", 48000)
         self._target_rate = audio_cfg.get("target_rate", 16000)
         self._channels = audio_cfg.get("channels", 1)
@@ -42,28 +46,71 @@ class AudioCapture:
         # Resample ratio
         self._resample_ratio = self._target_rate / self._native_rate
 
-    def _find_device(self) -> int:
-        """Find the audio input device by substring match."""
+    def _find_named_device(self) -> int | None:
+        """Return the index of the configured primary (or fallback) input
+        device by substring match, or None if neither is present yet."""
         import sounddevice as sd
 
         devices = sd.query_devices()
         for i, dev in enumerate(devices):
-            if dev["max_input_channels"] > 0:
-                if self._device_name.lower() in dev["name"].lower():
-                    logger.info("Found audio device: %s (index %d)", dev["name"], i)
-                    return i
+            if dev["max_input_channels"] > 0 and self._device_name.lower() in dev["name"].lower():
+                logger.info("Found audio device: %s (index %d)", dev["name"], i)
+                return i
 
-        # Fallback device
         for i, dev in enumerate(devices):
-            if dev["max_input_channels"] > 0:
-                if self._fallback_name.lower() in dev["name"].lower():
-                    logger.warning("Primary device not found, using fallback: %s", dev["name"])
-                    return i
+            if dev["max_input_channels"] > 0 and self._fallback_name.lower() in dev["name"].lower():
+                logger.warning("Primary device not found, using fallback: %s", dev["name"])
+                return i
 
-        # Last resort: default input
+        return None
+
+    def _find_device(self) -> int:
+        """Find the audio input device, waiting for the named device to appear.
+
+        PortAudio caches its device list at initialization, so a device that
+        the user PipeWire session publishes *after* this service starts (the
+        cold-boot race) never shows up without a re-init. Poll — re-initializing
+        PortAudio each round — until the named device appears or we time out,
+        and only then fall back. Falling back to the system default here means
+        the silent Tegra APE loopback, so we try hard to avoid it.
+        """
+        import time
+        import sounddevice as sd
+
+        deadline = time.monotonic() + self._device_wait_seconds
+        attempt = 0
+        while True:
+            idx = self._find_named_device()
+            if idx is not None:
+                return idx
+
+            if time.monotonic() >= deadline:
+                break
+
+            attempt += 1
+            logger.warning(
+                "Input device '%s' not found yet (attempt %d) — waiting for the "
+                "PipeWire/pulse session to publish it...",
+                self._device_name, attempt,
+            )
+            time.sleep(1.0)
+            # Refresh PortAudio's cached device list so a newly-published
+            # device becomes visible on the next pass.
+            try:
+                sd._terminate()
+                sd._initialize()
+            except Exception:
+                logger.debug("PortAudio re-init failed during device wait", exc_info=True)
+
+        # Last resort: default input (likely a silent APE loopback — warn loudly).
         default = sd.default.device[0]
         if default is not None and default >= 0:
-            logger.warning("No named device found, using system default input (index %d)", default)
+            logger.error(
+                "Named input device '%s' never appeared after %ds — falling back to "
+                "system default input (index %d). Sara may be DEAF if this is an APE "
+                "loopback; check XDG_RUNTIME_DIR and the PipeWire session.",
+                self._device_name, self._device_wait_seconds, default,
+            )
             return int(default)
 
         raise RuntimeError("No audio input device found")

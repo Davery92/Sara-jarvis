@@ -6,14 +6,19 @@ These tools return structured data that the frontend interprets to
 open, update, or close the canvas with specific content types.
 """
 
+import uuid
+import logging
 from typing import Dict, Any, Optional
 from app.tools.base import BaseTool, ToolResult
 from app.models.note import Note
+from app.models.artifact import Artifact
 from app.services.embeddings import get_embedding
 from app.db.session import get_db
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from datetime import datetime, timezone
+
+logger = logging.getLogger(__name__)
 
 
 class CanvasOpenTool(BaseTool):
@@ -114,15 +119,45 @@ documents, mindmaps, or diagrams to the user. The canvas appears as a side panel
             if "type" not in content:
                 content["type"] = "mermaid"
 
-        # Return canvas command for frontend to handle
+        # Persist the artifact row first so everything Sara builds lands in the
+        # Studio library by construction, then emit the command including its id.
+        # A failure to persist must not break the in-conversation canvas, so we
+        # fall back to an unsaved (id-less) command on any DB error.
+        artifact_id: Optional[str] = None
+        db_gen = get_db()
+        db: Session = next(db_gen)
+        try:
+            artifact = Artifact(
+                id=str(uuid.uuid4()),
+                user_id=user_id,
+                artifact_type=artifact_type,
+                title=title,
+                content=content,
+                artifact_metadata={"source": "canvas_open"},
+                is_pinned=False,
+            )
+            db.add(artifact)
+            db.commit()
+            db.refresh(artifact)
+            artifact_id = artifact.id
+        except Exception as e:
+            db.rollback()
+            logger.warning(f"canvas_open: failed to persist artifact row: {e}")
+        finally:
+            db.close()
+
+        data = {
+            "canvas_command": "open",
+            "artifact_type": artifact_type,
+            "title": title,
+            "content": content,
+        }
+        if artifact_id:
+            data["artifact_id"] = artifact_id
+
         return ToolResult(
             success=True,
-            data={
-                "canvas_command": "open",
-                "artifact_type": artifact_type,
-                "title": title,
-                "content": content
-            },
+            data=data,
             message=f"Opening {artifact_type} canvas: {title}"
         )
 

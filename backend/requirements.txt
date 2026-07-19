@@ -17,6 +17,9 @@ minio==7.2.0
 apscheduler==3.10.4
 pypdf==3.17.1
 python-docx==1.1.0
+markdown==3.7
+weasyprint==62.3
+pydyf==0.10.0  # WeasyPrint 62.3 breaks on pydyf >=0.11 ('super' has no 'transform')
 python-pptx==0.6.23
 readability-lxml==0.8.1
 lxml_html_clean==0.1.1

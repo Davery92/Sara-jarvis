@@ -1,0 +1,39 @@
+[Unit]
+Description=Sara fleet health agent
+Documentation=https://sara.avery.cloud
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/bin/sara-fleet-agent
+User=sara-agent
+Group=sara-agent
+Restart=always
+RestartSec=10
+
+# --- Read-only by construction, not by promise (FLEET_DESIGN.md §4.3) -------
+# Even a whitelist bug cannot mutate the system: the kernel makes the whole
+# filesystem read-only to this process except its spool, blocks privilege
+# escalation, and strips all capabilities.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/spool/sara-agent
+ProtectHome=read-only
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+MemoryMax=128M
+CPUQuota=10%
+
+[Install]
+WantedBy=multi-user.target

@@ -156,11 +156,16 @@ async def _handle_chat_message(event: Event):
 
 
 async def _handle_food_logged(event: Event):
+    # A logged meal is contact with the app even without a heartbeat (Siri /
+    # chat-tool logging), so bump last_app_activity_at too.
+    now = datetime.now(USER_TZ)
     await update_memory(
         event.user_id,
         source="food",
         hours_since_last_meal=0.0,
         last_meal_type=event.payload.get("meal_type", "meal"),
+        last_app_activity_at=now.isoformat(),
+        hours_since_app_activity=0.0,
     )
 
 
@@ -253,7 +258,14 @@ async def _handle_note_event(event: Event):
 
 
 async def _handle_workout(event: Event):
-    pass  # Informational for salience; body state updated by DerivedSignalRefresher
+    # Logging/finishing a workout is app activity even without a heartbeat.
+    now = datetime.now(USER_TZ)
+    await update_memory(
+        event.user_id,
+        source="workout",
+        last_app_activity_at=now.isoformat(),
+        hours_since_app_activity=0.0,
+    )
 
 
 async def _handle_health_synced(event: Event):
@@ -422,6 +434,16 @@ async def refresh_derived_signals(user_id: str = DAVID_USER_ID) -> dict:
             updated["activity_state"] = True
     except Exception as e:
         logger.warning(f"[DerivedRefresh] Activity state failed: {e}")
+
+    # 2b. App-presence reaper + freshness (Redis-only, no DB). Flips app_active
+    # off when all client TTLs expire and recomputes hours_since_app_activity.
+    try:
+        from app.routes.presence import reap_app_presence
+        app_result = await reap_app_presence(user_id)
+        if app_result:
+            updated["app_presence"] = app_result
+    except Exception as e:
+        logger.warning(f"[DerivedRefresh] App presence reaper failed: {e}")
 
     # DB-dependent signals — each in its own session to prevent cascade failures
     try:

@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react'
-import { X, Plus, Trash2, Save, ChevronDown, ChevronRight } from 'lucide-react'
+import { X, Plus, Save } from 'lucide-react'
 import { APP_CONFIG } from '../../config'
 import type { Recipe } from './RecipesSection'
+import IngredientSearchInput, { IngredientRowValue } from './IngredientSearchInput'
 
 interface RecipeEditorProps {
   recipe: Recipe | null
@@ -9,17 +10,7 @@ interface RecipeEditorProps {
   onSave: () => void
 }
 
-interface IngredientRow {
-  name: string
-  quantity: string
-  unit: string
-  // Optional manual nutrition (per ingredient total quantity)
-  calories?: string
-  protein?: string
-  carbs?: string
-  fats?: string
-  showNutrition?: boolean  // UI state for collapsible section
-}
+type IngredientRow = IngredientRowValue
 
 export default function RecipeEditor({ recipe, onClose, onSave }: RecipeEditorProps) {
   const [name, setName] = useState('')
@@ -42,14 +33,17 @@ export default function RecipeEditor({ recipe, onClose, onSave }: RecipeEditorPr
       setName(recipe.name)
       setDescription(recipe.description || '')
       setCategory(recipe.category || '')
-      setIngredients(recipe.ingredients.map(ing => ({
+      setIngredients(recipe.ingredients.map((ing: any) => ({
         name: ing.name,
-        quantity: ing.quantity.toString(),
-        unit: ing.unit,
+        quantity: ing.quantity?.toString() ?? '',
+        unit: ing.unit || 'g',
         calories: ing.calories?.toString() || '',
         protein: ing.protein?.toString() || '',
         carbs: ing.carbs?.toString() || '',
         fats: ing.fats?.toString() || '',
+        food_id: ing.food_id || undefined,
+        source: ing.source || undefined,
+        serving_description: ing.serving_description || undefined,
         showNutrition: false
       })))
       setInstructions(recipe.instructions)
@@ -68,21 +62,29 @@ export default function RecipeEditor({ recipe, onClose, onSave }: RecipeEditorPr
     }
   }
 
-  const handleIngredientChange = (
-    index: number,
-    field: Exclude<keyof IngredientRow, 'showNutrition'>,
-    value: string,
-  ) => {
+  const handleRowChange = (index: number, next: IngredientRow) => {
     const updated = [...ingredients]
-    updated[index][field] = value
+    updated[index] = next
     setIngredients(updated)
   }
 
-  const toggleNutritionSection = (index: number) => {
-    const updated = [...ingredients]
-    updated[index].showNutrition = !updated[index].showNutrition
-    setIngredients(updated)
-  }
+  // Live running totals from resolved ingredients (per-recipe + per-serving).
+  const resolvedRows = ingredients.filter(
+    ing => ing.name.trim() && ing.calories !== undefined && ing.calories !== '',
+  )
+  const unresolvedCount = ingredients.filter(
+    ing => ing.name.trim() && (ing.calories === undefined || ing.calories === ''),
+  ).length
+  const totals = resolvedRows.reduce(
+    (acc, ing) => ({
+      calories: acc.calories + (parseFloat(ing.calories || '0') || 0),
+      protein: acc.protein + (parseFloat(ing.protein || '0') || 0),
+      carbs: acc.carbs + (parseFloat(ing.carbs || '0') || 0),
+      fats: acc.fats + (parseFloat(ing.fats || '0') || 0),
+    }),
+    { calories: 0, protein: 0, carbs: 0, fats: 0 },
+  )
+  const servingsNum = Math.max(1, parseInt(servings) || 1)
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -120,13 +122,17 @@ export default function RecipeEditor({ recipe, onClose, onSave }: RecipeEditorPr
         category: category || undefined,
         ingredients: validIngredients.map(ing => ({
           name: ing.name.trim(),
-          quantity: parseFloat(ing.quantity),
+          quantity: ing.quantity ? parseFloat(ing.quantity) : undefined,
           unit: ing.unit,
-          // Include optional manual nutrition if provided
+          // Per-ingredient macros (from a live FatSecret pick or manual entry).
+          // Present values win server-side; unresolved rows are estimated on save.
           calories: ing.calories ? parseFloat(ing.calories) : undefined,
           protein: ing.protein ? parseFloat(ing.protein) : undefined,
           carbs: ing.carbs ? parseFloat(ing.carbs) : undefined,
-          fats: ing.fats ? parseFloat(ing.fats) : undefined
+          fats: ing.fats ? parseFloat(ing.fats) : undefined,
+          food_id: ing.food_id,
+          source: ing.source,
+          serving_description: ing.serving_description,
         })),
         instructions: instructions.trim(),
         prep_time_minutes: prepTime ? parseInt(prepTime) : undefined,
@@ -261,115 +267,50 @@ export default function RecipeEditor({ recipe, onClose, onSave }: RecipeEditorPr
 
             <div className="space-y-3">
               {ingredients.map((ing, idx) => (
-                <div key={idx} className="border border-gray-600 rounded-lg p-3 bg-gray-750">
-                  <div className="flex gap-2">
-                    <input
-                      type="text"
-                      value={ing.name}
-                      onChange={(e) => handleIngredientChange(idx, 'name', e.target.value)}
-                      placeholder="Ingredient name"
-                      className="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-teal-500"
-                    />
-                    <input
-                      type="number"
-                      value={ing.quantity}
-                      onChange={(e) => handleIngredientChange(idx, 'quantity', e.target.value)}
-                      placeholder="Qty"
-                      step="0.01"
-                      min="0"
-                      className="w-24 px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-teal-500"
-                    />
-                    <select
-                      value={ing.unit}
-                      onChange={(e) => handleIngredientChange(idx, 'unit', e.target.value)}
-                      className="w-24 px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-teal-500"
-                    >
-                      {units.map(unit => (
-                        <option key={unit} value={unit}>{unit}</option>
-                      ))}
-                    </select>
-                    <button
-                      type="button"
-                      onClick={() => toggleNutritionSection(idx)}
-                      className="px-3 py-2 bg-gray-600 hover:bg-gray-500 text-white rounded transition-colors"
-                      title="Toggle nutrition info"
-                    >
-                      {ing.showNutrition ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleRemoveIngredient(idx)}
-                      disabled={ingredients.length === 1}
-                      className="px-3 py-2 bg-red-600 hover:bg-red-700 disabled:bg-gray-700 disabled:cursor-not-allowed text-white rounded transition-colors"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  </div>
-
-                  {/* Collapsible Nutrition Section */}
-                  {ing.showNutrition && (
-                    <div className="mt-3 pt-3 border-t border-gray-600 grid grid-cols-2 md:grid-cols-4 gap-2">
-                      <div>
-                        <label className="block text-xs text-gray-400 mb-1">Calories</label>
-                        <input
-                          type="number"
-                          value={ing.calories || ''}
-                          onChange={(e) => handleIngredientChange(idx, 'calories', e.target.value)}
-                          placeholder="Optional"
-                          step="0.1"
-                          min="0"
-                          className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-sm placeholder-gray-500 focus:outline-none focus:border-teal-500"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-xs text-gray-400 mb-1">Protein (g)</label>
-                        <input
-                          type="number"
-                          value={ing.protein || ''}
-                          onChange={(e) => handleIngredientChange(idx, 'protein', e.target.value)}
-                          placeholder="Optional"
-                          step="0.1"
-                          min="0"
-                          className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-sm placeholder-gray-500 focus:outline-none focus:border-teal-500"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-xs text-gray-400 mb-1">Carbs (g)</label>
-                        <input
-                          type="number"
-                          value={ing.carbs || ''}
-                          onChange={(e) => handleIngredientChange(idx, 'carbs', e.target.value)}
-                          placeholder="Optional"
-                          step="0.1"
-                          min="0"
-                          className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-sm placeholder-gray-500 focus:outline-none focus:border-teal-500"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-xs text-gray-400 mb-1">Fats (g)</label>
-                        <input
-                          type="number"
-                          value={ing.fats || ''}
-                          onChange={(e) => handleIngredientChange(idx, 'fats', e.target.value)}
-                          placeholder="Optional"
-                          step="0.1"
-                          min="0"
-                          className="w-full px-2 py-1 bg-gray-700 border border-gray-600 rounded text-white text-sm placeholder-gray-500 focus:outline-none focus:border-teal-500"
-                        />
-                      </div>
-                      <div className="col-span-2 md:col-span-4">
-                        <p className="text-xs text-gray-500 italic">
-                          Leave blank to auto-calculate from database. Enter values if you know the exact nutrition for this ingredient.
-                        </p>
-                      </div>
-                    </div>
-                  )}
-                </div>
+                <IngredientSearchInput
+                  key={idx}
+                  value={ing}
+                  onChange={(next) => handleRowChange(idx, next)}
+                  onRemove={() => handleRemoveIngredient(idx)}
+                  canRemove={ingredients.length > 1}
+                  units={units}
+                />
               ))}
             </div>
             <p className="text-xs text-gray-400 mt-2">
-              Click the arrow button to add manual nutrition info, or leave blank for auto-calculation
+              Search to pull accurate macros from FatSecret, or type a freeform line
+              (e.g. “2 cups flour”) — unresolved ingredients are estimated on save.
             </p>
+
+            {/* Live running totals */}
+            {(resolvedRows.length > 0 || unresolvedCount > 0) && (
+              <div className="mt-3 bg-teal-900/20 border border-teal-500/30 rounded-lg p-3">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-sm font-medium text-teal-300">Running Totals</span>
+                  {unresolvedCount > 0 && (
+                    <span className="text-xs text-amber-300">
+                      {unresolvedCount} unresolved ingredient{unresolvedCount === 1 ? '' : 's'} will be estimated on save
+                    </span>
+                  )}
+                </div>
+                <div className="grid grid-cols-4 gap-2 text-center">
+                  {[
+                    { label: 'Calories', total: totals.calories, unit: '' },
+                    { label: 'Protein', total: totals.protein, unit: 'g' },
+                    { label: 'Carbs', total: totals.carbs, unit: 'g' },
+                    { label: 'Fats', total: totals.fats, unit: 'g' },
+                  ].map((m) => (
+                    <div key={m.label}>
+                      <div className="text-xs text-gray-400">{m.label}</div>
+                      <div className="text-white font-bold">{Math.round(m.total)}{m.unit}</div>
+                      <div className="text-[11px] text-gray-500">
+                        {Math.round(m.total / servingsNum)}{m.unit}/serving
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Instructions */}

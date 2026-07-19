@@ -19,6 +19,14 @@ _soul_cache_time: float = 0.0
 _SOUL_CACHE_TTL = 300  # 5 minutes
 
 
+def bust_soul_cache() -> None:
+    """Force the next load_soul_for_prompt to re-read from DB (H7.2: an approved
+    soul change must take effect immediately, not after the 5-min TTL)."""
+    global _soul_cache, _soul_cache_time
+    _soul_cache = None
+    _soul_cache_time = 0.0
+
+
 def load_soul_for_prompt(db: Session) -> Optional[str]:
     """
     Load Sara's soul sections from DB and format for system prompt injection.

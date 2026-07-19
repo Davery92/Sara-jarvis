@@ -57,23 +57,6 @@ export interface RecoveryLog {
   readiness_color?: 'success' | 'primary' | 'warning' | 'error';
 }
 
-export interface HabitLog {
-  id: number;
-  user_id: number;
-  habit_name: string;
-  logged_at: string;
-  completed: boolean;
-  notes?: string;
-}
-
-export interface HabitStreak {
-  habit_name: string;
-  current_streak: number;
-  longest_streak: number;
-  total_completions: number;
-  completion_rate: number;
-}
-
 export interface CreateFoodLogParams {
   meal_type: string;
   food_items: Array<{ name: string; quantity: number; unit: string }>;
@@ -117,12 +100,6 @@ export interface CreateRecoveryLogParams {
   soreness_level?: number;  // 1-10 scale
   body_weight?: number;
   weight_unit?: string;  // 'lbs' or 'kg'
-  notes?: string;
-}
-
-export interface LogHabitParams {
-  habit_name: string;
-  completed: boolean;
   notes?: string;
 }
 
@@ -631,22 +608,6 @@ class FitnessService {
 
   async deleteRecoveryLog(id: string | number): Promise<void> {
     await apiClient.delete(`/api/fitness/recovery/${id}`);
-  }
-
-  // Habits
-  async getHabitLogs(startDate?: string, endDate?: string): Promise<HabitLog[]> {
-    // No habits endpoint in backend yet
-    return [];
-  }
-
-  async logHabit(params: LogHabitParams): Promise<HabitLog> {
-    // No habits endpoint in backend yet
-    throw new Error('Habits feature not implemented yet');
-  }
-
-  async getHabitStreaks(): Promise<HabitStreak[]> {
-    // No habits endpoint in backend yet
-    return [];
   }
 
   // Summary/Stats

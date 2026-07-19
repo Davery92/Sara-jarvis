@@ -2,7 +2,9 @@
 Artifacts API Routes
 CRUD operations for canvas artifacts
 """
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import Response
+from urllib.parse import quote
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 from datetime import datetime
@@ -105,6 +107,68 @@ async def create_artifact(
         logger.error(f"Error creating artifact: {e}")
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{artifact_id}/download")
+async def download_artifact(
+    artifact_id: str,
+    request: Request,
+    token: Optional[str] = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    """Stream a file artifact's bytes from object storage as an attachment.
+
+    Auth accepts, in order: the standard session cookie, an `Authorization:
+    Bearer` header, or a `?token=` query param. The query-param path lets a
+    plain `Linking.openURL(...)` on mobile download the file without needing a
+    native fetch+share module — useful before the app is rebuilt with
+    expo-sharing. Ownership is always enforced.
+    """
+    from app.core.auth import verify_token
+
+    access_token = request.cookies.get("access_token")
+    if not access_token:
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            access_token = auth_header[7:]
+    if not access_token and token:
+        access_token = token
+
+    payload = verify_token(access_token) if access_token else None
+    user_id = payload.get("sub") if payload else None
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    artifact = db.query(Artifact).filter(
+        Artifact.id == artifact_id,
+        Artifact.user_id == user_id
+    ).first()
+
+    if not artifact:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+
+    content = artifact.content or {}
+    storage_key = content.get("storage_key")
+    if artifact.artifact_type != "file" or not storage_key:
+        raise HTTPException(status_code=400, detail="Artifact is not a downloadable file")
+
+    filename = content.get("filename") or f"{artifact.title or 'document'}"
+    mime = content.get("mime") or "application/octet-stream"
+
+    try:
+        from app.services.docs_ingest import DocumentProcessor
+        file_bytes = DocumentProcessor().get_file(storage_key)
+    except Exception as e:
+        logger.error(f"Failed to fetch artifact file {artifact_id}: {e}")
+        raise HTTPException(status_code=502, detail="Failed to retrieve file from storage")
+
+    # RFC 5987 filename* so non-ASCII titles survive the round trip.
+    disposition = f"attachment; filename*=UTF-8''{quote(filename)}"
+    return Response(
+        content=file_bytes,
+        media_type=mime,
+        headers={"Content-Disposition": disposition},
+    )
 
 
 @router.get("/{artifact_id}", response_model=ArtifactResponse)

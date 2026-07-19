@@ -90,6 +90,17 @@ class VoiceVisionService:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._audio_state_lock = asyncio.Lock()
         self._speech_end_in_flight = False
+        # Whether Silero VAD saw any SPEECH during the current LISTENING turn —
+        # lets the timeout guard finalize a real (but VAD-stuck) utterance
+        # while still discarding pure silence.
+        self._listening_saw_speech = False
+        # Metadata from the most recent accepted wake detection, captured off
+        # WakeWordDetector.last_detection. Feeds the first-turn-after-wake
+        # speaker-verification override (a strong "hey sara" is itself
+        # evidence the first turn is David).
+        self._last_wake_monotonic = 0.0
+        self._last_wake_score = 0.0
+        self._last_wake_rms = 0.0
         self._barge_audio_buffer: list = []
         self._desktop_media_playing = False
         self._ambient_db_floor = self.config.get("noise_gate", {}).get("ambient_db_floor", -35.0)
@@ -215,6 +226,10 @@ class VoiceVisionService:
             async with self._audio_state_lock:
                 state = self.conversation.state
 
+                # Keep an untouched copy for wake-word scoring; the noise gate
+                # can over-suppress far-field speech and cost us a wake.
+                wake_audio = audio
+
                 # Apply noise gate
                 audio = self.noise_gate.process(audio)
 
@@ -227,13 +242,15 @@ class VoiceVisionService:
                         self.bridge.is_listening_enabled
                         and not self.echo_state.should_suppress_wake_word
                     ):
-                        detected = self.wake_word.process(audio)
+                        detected = self.wake_word.process(wake_audio)
                         if detected:
                             await self._handle_wake_word()
 
                 # ── LISTENING: run VAD ──
                 elif state == ConversationState.LISTENING:
                     vad_state = self.vad.process(audio)
+                    if vad_state == VADState.SPEECH:
+                        self._listening_saw_speech = True
                     if vad_state == VADState.SPEECH_END and not self._speech_end_in_flight:
                         # Grab speech audio once and process on a separate task.
                         speech_audio = self.vad.get_speech_audio()
@@ -286,13 +303,121 @@ class VoiceVisionService:
         finally:
             self._speech_end_in_flight = False
 
+    async def _maybe_force_speech_end_before_timeout(self) -> bool:
+        """Force-finalize a stuck utterance just before listen timeout.
+
+        Silero VAD occasionally never emits SPEECH_END (trailing breath,
+        far-field tail), which would otherwise let the LISTENING timeout
+        drop a real command. Just before the timeout fires, force the VAD
+        to finalize, or fall back to whatever recent audio we captured —
+        but only when there's genuine energy or we actually observed speech
+        this turn, so pure silence still times out cleanly.
+        """
+        if self._speech_end_in_flight:
+            return False
+        if self.conversation.state != ConversationState.LISTENING:
+            return False
+
+        listen_timeout = float(
+            self.config.get("conversation", {}).get("listen_timeout_seconds", 30)
+        )
+        remaining = listen_timeout - self.conversation.state_duration
+        if remaining > 0.6:
+            return False
+
+        if self.vad.state == VADState.SPEECH:
+            forced = self.vad.force_speech_end("listen-timeout-guard")
+            speech_audio = self.vad.get_speech_audio()
+
+            if forced and len(speech_audio) > 0:
+                logger.info(
+                    "Forcing speech finalization with %.2fs buffered audio (remaining=%.2fs)",
+                    len(speech_audio) / self.audio_capture.sample_rate,
+                    remaining,
+                )
+                self._speech_end_in_flight = True
+                self._listening_saw_speech = False
+                asyncio.ensure_future(self._handle_speech_end_guarded(speech_audio))
+                return True
+
+            if forced and len(speech_audio) == 0:
+                logger.warning("Forced speech-end produced empty audio; falling back to recent capture")
+
+            if not forced:
+                logger.debug(
+                    "Force speech-end not applied (remaining=%.2fs); attempting buffered fallback",
+                    remaining,
+                )
+
+        # Fallback: VAD may no longer be in SPEECH state but still have buffered audio.
+        speech_audio = self.vad.get_speech_audio()
+        if len(speech_audio) == 0:
+            # Last resort: take a short recent slice from capture ring buffer.
+            recent_seconds = min(2.5, max(1.0, listen_timeout * 0.2))
+            recent_audio = self.audio_capture.get_recent_audio(recent_seconds)
+            if len(recent_audio) == 0:
+                return False
+
+            recent_rms = float(np.sqrt(np.mean(recent_audio ** 2) + 1e-10))
+            if recent_rms < 0.0005 and not self._listening_saw_speech:
+                logger.debug(
+                    "Skipping recent-audio fallback (too quiet: rms=%.4f, remaining=%.2fs)",
+                    recent_rms,
+                    remaining,
+                )
+                return False
+            if recent_rms < 0.0005 and self._listening_saw_speech:
+                logger.info(
+                    "Using low-RMS recent-audio fallback because speech was observed (rms=%.4f, remaining=%.2fs)",
+                    recent_rms,
+                    remaining,
+                )
+
+            speech_audio = recent_audio
+            logger.info(
+                "Timeout fallback using %.2fs recent audio (rms=%.4f, remaining=%.2fs)",
+                len(speech_audio) / self.audio_capture.sample_rate,
+                recent_rms,
+                remaining,
+            )
+
+        duration = len(speech_audio) / self.audio_capture.sample_rate
+        if duration < 0.20:
+            logger.debug(
+                "Discarding timeout fallback audio (too short: %.2fs, remaining=%.2fs)",
+                duration,
+                remaining,
+            )
+            self.vad.activate()
+            return False
+
+        logger.info(
+            "Timeout fallback finalization with %.2fs buffered audio (remaining=%.2fs, vad_state=%s)",
+            duration,
+            remaining,
+            self.vad.state.value,
+        )
+        self._speech_end_in_flight = True
+        self._listening_saw_speech = False
+        asyncio.ensure_future(self._handle_speech_end_guarded(speech_audio))
+        return True
+
     # ──────────────────────────────────────────────────────────────────
     # Event handlers
     # ──────────────────────────────────────────────────────────────────
 
     async def _handle_wake_word(self):
         """Handle wake word detection."""
-        logger.info("Wake word detected!")
+        wake_meta = self.wake_word.last_detection
+        self._last_wake_monotonic = time.monotonic()
+        self._last_wake_score = float(wake_meta.get("score", 0.0) or 0.0)
+        self._last_wake_rms = float(wake_meta.get("rms", 0.0) or 0.0)
+        logger.info(
+            "Wake word detected! (score=%.3f, rms=%.4f)",
+            self._last_wake_score,
+            self._last_wake_rms,
+        )
+        self._listening_saw_speech = False
 
         # Suppress further detections
         self.wake_word.suppress()
@@ -332,6 +457,14 @@ class VoiceVisionService:
             self.vad.activate()
             return
 
+        duration = len(speech_audio) / self.audio_capture.sample_rate
+        speech_rms = float(np.sqrt(np.mean(speech_audio ** 2) + 1e-10))
+        wake_age_at_speech_end = (
+            time.monotonic() - self._last_wake_monotonic
+            if self._last_wake_monotonic > 0
+            else float("inf")
+        )
+
         # Transcribe
         self.watchdog.notify_status("Transcribing...")
         transcript = await self.stt.transcribe(speech_audio)
@@ -340,7 +473,10 @@ class VoiceVisionService:
             self.vad.activate()  # Re-activate VAD for another try
             return
 
-        logger.info("Transcript: '%s'", transcript)
+        logger.info(
+            "Transcript: '%s' (duration=%.2fs, rms=%.4f)",
+            transcript, duration, speech_rms,
+        )
 
         # B2.5 interim escape hatch: a bare "stop"/"stop sara" utterance in
         # LISTENING aborts immediately instead of round-tripping to the
@@ -352,8 +488,117 @@ class VoiceVisionService:
             await self._on_remote_stop_request()
             return
 
-        duration = len(speech_audio) / self.audio_capture.sample_rate
-        speaker, diarization = await self._infer_speaker_metadata(speech_audio, duration)
+        speaker, diarization = await self._infer_speaker_metadata(
+            speech_audio, duration, speech_rms,
+        )
+
+        verification = diarization.get("verification", {}) if isinstance(diarization, dict) else {}
+        verification_confidence = float(verification.get("confidence", 0.0))
+        verification_is_match = bool(verification.get("is_match", False))
+        short_override = bool(verification.get("short_utterance_override", False))
+        verification_error = verification.get("error")
+        wake_age_seconds = wake_age_at_speech_end
+        logger.info(
+            "Speaker attribution: speaker=%s match=%s conf=%.3f short_override=%s wake_age=%.2fs error=%s",
+            speaker,
+            verification_is_match,
+            verification_confidence,
+            short_override,
+            wake_age_seconds,
+            verification_error if verification_error else "none",
+        )
+
+        target_speaker = str(
+            self.config.get("conversation", {}).get("target_speaker", "david")
+        )
+        require_target_speaker = bool(
+            self.config.get("conversation", {}).get("require_target_speaker", False)
+        )
+
+        verify_cfg = self.config.get("speaker_verification", {})
+        first_turn_after_wake_override_enabled = bool(
+            verify_cfg.get("first_turn_after_wake_override_enabled", True)
+        )
+        first_turn_after_wake_max_age_seconds = float(
+            verify_cfg.get("first_turn_after_wake_max_age_seconds", 8.0)
+        )
+        first_turn_after_wake_min_rms = float(
+            verify_cfg.get("first_turn_after_wake_min_rms", 0.03)
+        )
+        first_turn_after_wake_min_confidence = float(
+            verify_cfg.get("first_turn_after_wake_min_confidence", 0.02)
+        )
+        first_turn_after_wake_min_wake_score = float(
+            verify_cfg.get("first_turn_after_wake_min_wake_score", 0.96)
+        )
+        first_turn_after_wake_min_wake_rms = float(
+            verify_cfg.get("first_turn_after_wake_min_wake_rms", 0.05)
+        )
+
+        # A strong "hey sara" immediately followed by a real utterance is
+        # itself strong evidence the first turn is David — accept it even if
+        # the (short, cold-start) verification just missed threshold.
+        first_turn_after_wake_override = (
+            require_target_speaker
+            and first_turn_after_wake_override_enabled
+            and speaker != target_speaker
+            and self.conversation.turn_count == 0
+            and not verification_error
+            and wake_age_seconds <= first_turn_after_wake_max_age_seconds
+            and speech_rms >= first_turn_after_wake_min_rms
+            and verification_confidence >= first_turn_after_wake_min_confidence
+            and self._last_wake_score >= first_turn_after_wake_min_wake_score
+            and self._last_wake_rms >= first_turn_after_wake_min_wake_rms
+        )
+        if first_turn_after_wake_override:
+            logger.info(
+                "Applying first-turn wake override (wake_age=%.2fs, speech_rms=%.4f, conf=%.3f, wake_score=%.3f, wake_rms=%.4f)",
+                wake_age_seconds,
+                speech_rms,
+                verification_confidence,
+                self._last_wake_score,
+                self._last_wake_rms,
+            )
+            speaker = target_speaker
+            if isinstance(diarization, dict):
+                diarization["speaker_labels"] = [speaker]
+                segments = diarization.get("segments")
+                if isinstance(segments, list) and segments and isinstance(segments[0], dict):
+                    segments[0]["speaker_id"] = speaker
+                verification_meta = diarization.setdefault("verification", {})
+                verification_meta["first_turn_after_wake_override"] = True
+                verification_meta["first_turn_after_wake_max_age_seconds"] = first_turn_after_wake_max_age_seconds
+                verification_meta["first_turn_after_wake_min_rms"] = first_turn_after_wake_min_rms
+                verification_meta["first_turn_after_wake_min_confidence"] = first_turn_after_wake_min_confidence
+                verification_meta["first_turn_after_wake_min_wake_score"] = first_turn_after_wake_min_wake_score
+                verification_meta["first_turn_after_wake_min_wake_rms"] = first_turn_after_wake_min_wake_rms
+                verification_meta["wake_age_seconds"] = round(wake_age_seconds, 3)
+                verification_meta["wake_score"] = round(self._last_wake_score, 3)
+                verification_meta["wake_rms"] = round(self._last_wake_rms, 4)
+
+        elif require_target_speaker and speaker != target_speaker:
+            logger.info(
+                "Ignoring non-target speaker=%s (target=%s, conf=%.3f, short_override=%s, wake_age=%.2fs, speech_rms=%.4f, wake_score=%.3f, wake_rms=%.4f): %s",
+                speaker,
+                target_speaker,
+                verification_confidence,
+                short_override,
+                wake_age_seconds,
+                speech_rms,
+                self._last_wake_score,
+                self._last_wake_rms,
+                transcript[:120],
+            )
+            asyncio.ensure_future(
+                self.raw_buffer.push_transcript(
+                    transcript,
+                    speaker=speaker,
+                    diarization=diarization,
+                    duration_seconds=duration,
+                )
+            )
+            await self.conversation.force_idle("non_target_speaker")
+            return
 
         if await self._check_conversation_watchdog(speaker == "david"):
             return
@@ -378,19 +623,43 @@ class VoiceVisionService:
         self,
         speech_audio: np.ndarray,
         duration_seconds: float,
+        speech_rms: float,
     ) -> tuple[str, dict]:
         """Infer primary speaker + diarization metadata for an utterance."""
-        default_speaker = "david"
+        verify_cfg = self.config.get("speaker_verification", {})
+        target_speaker = str(verify_cfg.get("speaker_id", "david"))
+        match_threshold = float(verify_cfg.get("threshold", 0.60))
+        short_max_seconds = float(verify_cfg.get("short_utterance_max_seconds", 1.8))
+        short_min_confidence = float(
+            verify_cfg.get(
+                "short_utterance_min_confidence",
+                max(0.0, match_threshold - 0.05),
+            )
+        )
+        short_min_rms = float(verify_cfg.get("short_utterance_min_rms", 0.015))
+
         if len(speech_audio) == 0:
-            return default_speaker, {}
+            return "unknown", {}
 
         verification = await self.speaker_verifier.verify(speech_audio)
         confidence = float(verification.get("confidence", 0.0))
         is_match = bool(verification.get("is_match", False))
+        short_override = False
         if verification.get("error"):
-            speaker = default_speaker
+            # Fail closed to avoid ambient/TV speech driving autonomous replies.
+            speaker = "unknown"
+        elif is_match:
+            speaker = target_speaker
+        elif (
+            duration_seconds <= short_max_seconds
+            and confidence >= short_min_confidence
+            and speech_rms >= short_min_rms
+        ):
+            # Short near-field utterances can miss strict threshold; allow a narrow override.
+            short_override = True
+            speaker = target_speaker
         else:
-            speaker = default_speaker if is_match else "unknown"
+            speaker = "unknown"
 
         diarization = {
             "num_speakers": 1,
@@ -404,11 +673,17 @@ class VoiceVisionService:
                 }
             ],
             "verification": {
-                "target_speaker": verification.get("speaker_id", "david"),
+                "target_speaker": verification.get("speaker_id", target_speaker),
                 "is_match": is_match,
                 "confidence": confidence,
                 "latency_seconds": verification.get("latency_seconds", 0.0),
                 "error": verification.get("error"),
+                "match_threshold": match_threshold,
+                "short_utterance_override": short_override,
+                "short_utterance_max_seconds": short_max_seconds,
+                "short_utterance_min_confidence": short_min_confidence,
+                "short_utterance_min_rms": short_min_rms,
+                "speech_rms": speech_rms,
             },
         }
         return speaker, diarization
@@ -604,6 +879,7 @@ class VoiceVisionService:
         elif new == ConversationState.LISTENING:
             await self.bridge.send_event({"event": "listening", "timestamp": time.time()})
         elif new == ConversationState.IDLE:
+            self._listening_saw_speech = False
             if old != ConversationState.IDLE:
                 await self.bridge.send_event({"event": "idle", "timestamp": time.time()})
                 await self._end_conversation()
@@ -755,7 +1031,16 @@ class VoiceVisionService:
         tick = 0
         while True:
             try:
-                await self.conversation.check_timeouts()
+                # While speech-end handling is in flight, hold LISTENING timeouts
+                # so STT/network latency cannot force an idle transition mid-turn.
+                if self._speech_end_in_flight and self.conversation.state == ConversationState.LISTENING:
+                    await asyncio.sleep(0.5)
+                    continue
+
+                forced = await self._maybe_force_speech_end_before_timeout()
+                if not forced:
+                    await self.conversation.check_timeouts()
+
                 # Re-check the local noise floor every ~2s (B2.4) — media_state
                 # pushes update immediately on change, this catches ambient
                 # noise the desktop doesn't know about (TV in the room, etc.)

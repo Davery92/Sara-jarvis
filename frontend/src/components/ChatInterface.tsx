@@ -11,7 +11,9 @@ import { useArtifacts } from './canvas/hooks/useArtifacts'
 import { NoteSelectorModal } from './canvas/NoteSelectorModal'
 import { Code, FileText, GitBranch, Maximize2, StickyNote, Ghost, ChevronDown, History, Plus } from 'lucide-react'
 import ConversationHistoryDrawer from './ConversationHistoryDrawer'
-import { ArtifactType, NoteContent, CanvasCommand } from './canvas/types'
+import { Artifact, ArtifactType, NoteContent, CanvasCommand } from './canvas/types'
+import { SurfaceModel, SurfaceCommand } from './surfaces/types'
+import { SurfacePanel } from './surfaces/SurfacePanel'
 
 interface Conversation {
   id: string
@@ -192,6 +194,11 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
   const [pendingArtifact, setPendingArtifact] = useState<ParsedArtifact | null>(null)
   const [showNoteSelector, setShowNoteSelector] = useState(false)
   const [canvasNoteContent, setCanvasNoteContent] = useState<NoteContent | null>(null)
+  // Full artifact opened via SSE canvas_open — carries the persisted artifact_id
+  // so the panel can render immediately and "Open in Studio" can deep-link.
+  const [canvasDirectArtifact, setCanvasDirectArtifact] = useState<Artifact | null>(null)
+  // Active interactive surface (checklist / cook-mode / form), driven by SSE.
+  const [activeSurface, setActiveSurface] = useState<SurfaceModel | null>(null)
   const [canvasWidth, setCanvasWidth] = useState(50) // percentage
   const [isResizing, setIsResizing] = useState(false)
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>([])
@@ -402,6 +409,33 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
 
     saveActiveConversation()
   }, [currentConversationId])
+
+  // Re-show an active surface (checklist / cook-mode) for this conversation on
+  // load, so a page reload or returning to chat doesn't lose it. Surfaces are
+  // persistent DB rows; the live SSE panel is only in-memory otherwise.
+  useEffect(() => {
+    if (!currentConversationId || activeSurface) return
+    let cancelled = false
+    const loadActiveSurface = async () => {
+      try {
+        const res = await fetch(
+          `${APP_CONFIG.apiUrl}/api/surfaces?status=active&conversation_id=${currentConversationId}`,
+          { credentials: 'include' },
+        )
+        if (!res.ok) return
+        const surfaces = (await res.json()) as SurfaceModel[]
+        if (!cancelled && surfaces.length > 0) {
+          setActiveSurface(surfaces[0]) // most recent (list is updated_at desc)
+        }
+      } catch {
+        // non-critical
+      }
+    }
+    loadActiveSurface()
+    return () => {
+      cancelled = true
+    }
+  }, [currentConversationId, activeSurface])
 
   // Check if mobile on mount and window resize
   useEffect(() => {
@@ -843,17 +877,30 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                       if (canvasData.artifact_type === 'note' && canvasData.content) {
                         // Opening a note - use the note content directly
                         setCanvasNoteContent(canvasData.content as NoteContent)
+                        setCanvasDirectArtifact(null)
                         setSelectedArtifactId(null)
                         setPendingArtifact(null)
                         setCanvasPanelOpen(true)
                       } else if (canvasData.artifact_type && canvasData.content) {
-                        // Opening other content types - create as pending artifact
-                        const artifactContent = {
-                          type: canvasData.artifact_type,
+                        // Opening other content types. The backend now persists the
+                        // artifact row and returns artifact_id — render it directly
+                        // and keep the real id so it lives in the Studio library.
+                        const nowIso = new Date().toISOString()
+                        const direct: Artifact = {
+                          id: canvasData.artifact_id || `pending-${Date.now()}`,
+                          user_id: '',
+                          artifact_type: canvasData.artifact_type,
                           title: canvasData.title || 'Canvas',
-                          content: canvasData.content
+                          content: canvasData.content,
+                          metadata: null,
+                          conversation_id: null,
+                          episode_id: null,
+                          is_pinned: false,
+                          created_at: nowIso,
+                          updated_at: nowIso,
                         }
-                        setPendingArtifact(artifactContent as any)
+                        setCanvasDirectArtifact(direct)
+                        setPendingArtifact(null)
                         setCanvasNoteContent(null)
                         setCanvasPanelOpen(true)
                       }
@@ -861,14 +908,43 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                       // Update current canvas content
                       if (canvasNoteContent && canvasData.content) {
                         setCanvasNoteContent(prev => prev ? { ...prev, ...canvasData.content as NoteContent } : null)
+                      } else {
+                        setCanvasDirectArtifact(prev =>
+                          prev
+                            ? {
+                                ...prev,
+                                content: canvasData.content ?? prev.content,
+                                title: canvasData.title ?? prev.title,
+                                updated_at: new Date().toISOString(),
+                              }
+                            : prev
+                        )
                       }
                     } else if (canvasData.canvas_command === 'close') {
                       setCanvasPanelOpen(false)
                       setSelectedArtifactId(null)
                       setPendingArtifact(null)
                       setCanvasNoteContent(null)
+                      setCanvasDirectArtifact(null)
                     }
                     break
+
+                  case 'surface_command': {
+                    console.log('🧩 SURFACE_COMMAND event received:', eventData.data)
+                    const surfaceData = eventData.data as SurfaceCommand
+                    if (
+                      (surfaceData.surface_command === 'open' ||
+                        surfaceData.surface_command === 'update') &&
+                      surfaceData.surface
+                    ) {
+                      setActiveSurface(surfaceData.surface)
+                    } else if (surfaceData.surface_command === 'close') {
+                      setActiveSurface((prev) =>
+                        prev && prev.id === surfaceData.surface_id ? null : prev,
+                      )
+                    }
+                    break
+                  }
                 }
               } catch (e) {
                 console.warn('Failed to parse SSE data:', dataLine)
@@ -1715,11 +1791,17 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
           setSelectedArtifactId(null)
           setPendingArtifact(null)
           setCanvasNoteContent(null)
+          setCanvasDirectArtifact(null)
         }}
         artifactId={selectedArtifactId}
         conversationId={currentConversationId || undefined}
         width={canvasWidth}
         isResizing={isResizing}
+        onOpenInStudio={(artifactId) => {
+          window.dispatchEvent(new CustomEvent('navigate', {
+            detail: { view: 'artifacts', params: artifactId ? { id: artifactId } : undefined }
+          }))
+        }}
         directArtifact={canvasNoteContent ? {
           id: `note-${canvasNoteContent.note_id}`,
           user_id: '',
@@ -1732,8 +1814,11 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
           is_pinned: false,
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString()
-        } : null}
+        } : canvasDirectArtifact}
       />
+
+      {/* Interactive Surface overlay */}
+      <SurfacePanel surface={activeSurface} onClose={() => setActiveSurface(null)} />
 
       {/* Note Selector Modal */}
       <NoteSelectorModal

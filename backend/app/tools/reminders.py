@@ -5,7 +5,10 @@ from app.db.session import get_db
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
 from datetime import datetime, timezone, date
+import logging
 import uuid
+
+logger = logging.getLogger(__name__)
 
 
 class RemindersCreateTool(BaseTool):
@@ -35,6 +38,10 @@ class RemindersCreateTool(BaseTool):
                 "reminder_time": {
                     "type": "string",
                     "description": "When the reminder should trigger (ISO 8601 datetime format, e.g., '2024-01-15T14:30:00Z')"
+                },
+                "confirm_time": {
+                    "type": "boolean",
+                    "description": "Set true only when David explicitly asked for this exact time, to override a schedule-conflict warning."
                 }
             },
             "required": ["title", "reminder_time"]
@@ -73,6 +80,34 @@ class RemindersCreateTool(BaseTool):
                     success=False,
                     message="Invalid reminder_time format. Please use ISO 8601 format (e.g., '2024-01-15T14:30:00Z')"
                 )
+
+            # H3 (Brain Alignment): consult David's stated life facts before
+            # committing a time on his behalf. A reminder that lands after he's
+            # left for work or inside his gym block is flagged so the LLM
+            # re-picks — unless it explicitly passes confirm_time=true (David
+            # asked for that exact time).
+            if not kwargs.get("confirm_time"):
+                try:
+                    from app.core.timezone import to_local
+                    from app.services.life_facts import check_schedule_conflict, describe_day
+                    from app.db.session import get_async_session_factory
+                    local_when = to_local(reminder_time)
+                    async with get_async_session_factory()() as _lf_db:
+                        conflict = await check_schedule_conflict(_lf_db, str(user_id), local_when)
+                        day_note = await describe_day(_lf_db, str(user_id), local_when.date()) if conflict else None
+                    if conflict:
+                        return ToolResult(
+                            success=False,
+                            data={"schedule_conflict": conflict, "day": day_note},
+                            message=(
+                                f"That time conflicts with a fixed part of David's day: {conflict} "
+                                f"{('(' + day_note + ') ') if day_note else ''}"
+                                "Pick a time that avoids it. If David explicitly asked for this exact "
+                                "time, call again with confirm_time=true."
+                            ),
+                        )
+                except Exception as e:
+                    logger.debug(f"life_fact conflict check skipped: {e}")
 
             reminder = Reminder(
                 user_id=user_id,

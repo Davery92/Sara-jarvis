@@ -7,6 +7,7 @@ Reports progress via an async callback for SSE streaming.
 """
 
 import logging
+import uuid
 from typing import Any, Callable, Coroutine, Dict, List, Optional
 
 from app.services.multi_step_detector import MultiStepPlan, TaskStep
@@ -18,7 +19,6 @@ logger = logging.getLogger(__name__)
 async def execute_plan(
     plan: MultiStepPlan,
     user_id: str,
-    db_session,
     on_progress: Optional[Callable[[int, str, str], Coroutine]] = None,
 ) -> Dict[str, Any]:
     """
@@ -27,7 +27,6 @@ async def execute_plan(
     Args:
         plan: MultiStepPlan from detect_multi_step()
         user_id: User ID for tool context
-        db_session: SQLAlchemy session for tool execution
         on_progress: async callback(step_index, status, message) for SSE updates
 
     Returns:
@@ -35,6 +34,7 @@ async def execute_plan(
     """
     step_results: List[Dict[str, Any]] = []
     step_summaries: Dict[int, str] = {}  # index -> summary for dependency injection
+    mission_id = str(uuid.uuid4())  # not backed by a real Mission row; mission-step bookkeeping no-ops
 
     for i, step in enumerate(plan.steps):
         # Notify progress
@@ -52,10 +52,10 @@ async def execute_plan(
 
         try:
             agent = InternalToolAgent(
-                db=db_session,
+                task_id=str(uuid.uuid4()),
+                mission_id=mission_id,
                 user_id=user_id,
-                active_categories=categories,
-                max_iterations=8,
+                categories=categories,
             )
             result = await agent.run(task_desc)
 

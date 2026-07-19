@@ -15,6 +15,7 @@ import {
   Trash2,
   Copy,
   Download,
+  LibraryBig,
 } from 'lucide-react';
 import { Artifact, CanvasPanelMode } from './types';
 import { ArtifactRenderer } from './ArtifactRenderer';
@@ -33,6 +34,8 @@ interface CanvasPanelProps {
   width?: number;
   /** Whether the panel is currently being resized */
   isResizing?: boolean;
+  /** Deep-link the current artifact into the Studio view. */
+  onOpenInStudio?: (artifactId?: string) => void;
 }
 
 export const CanvasPanel: React.FC<CanvasPanelProps> = ({
@@ -45,6 +48,7 @@ export const CanvasPanel: React.FC<CanvasPanelProps> = ({
   directArtifact,
   width = 50,
   isResizing = false,
+  onOpenInStudio,
 }) => {
   const { artifacts, updateArtifact, deleteArtifact, getArtifact } = useArtifacts({
     conversationId,
@@ -139,6 +143,13 @@ export const CanvasPanel: React.FC<CanvasPanelProps> = ({
   // Check if this is a note artifact (has its own toolbar)
   const isNoteArtifact = artifact?.artifact_type === 'note';
 
+  // A real Studio-backed artifact has a persisted id (notes and not-yet-saved
+  // canvas content use synthetic id prefixes and don't belong in the library).
+  const studioId =
+    artifact && !artifact.id.startsWith('note-') && !artifact.id.startsWith('pending-')
+      ? artifact.id
+      : undefined;
+
   if (!isOpen) return null;
 
   // Compute inline style for docked mode width
@@ -189,6 +200,16 @@ export const CanvasPanel: React.FC<CanvasPanelProps> = ({
           >
             {currentMode === 'fullscreen' ? <Minimize2 size={18} /> : <Maximize2 size={18} />}
           </button>
+
+          {onOpenInStudio && artifact && studioId && (
+            <button
+              onClick={() => onOpenInStudio(studioId)}
+              className="p-2 hover:bg-gray-800 rounded text-gray-400 hover:text-white"
+              title="Open in Studio"
+            >
+              <LibraryBig size={18} />
+            </button>
+          )}
 
           <div className="w-px h-6 bg-gray-700" />
 

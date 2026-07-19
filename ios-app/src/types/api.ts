@@ -175,6 +175,10 @@ export interface IngredientItem {
   protein?: number;
   carbs?: number;
   fats?: number;
+  // Provenance for live-lookup ingredients (R1/R3)
+  food_id?: string;
+  source?: 'fatsecret' | 'user' | 'manual';
+  serving_description?: string;
 }
 
 export interface Recipe {

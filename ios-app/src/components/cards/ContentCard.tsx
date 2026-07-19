@@ -11,6 +11,8 @@ import EmailCard from './EmailCard';
 import HealthCard from './HealthCard';
 import LearningCard from './LearningCard';
 import HomeCard from './HomeCard';
+import FileCard from './FileCard';
+import SurfaceCard from './SurfaceCard';
 import GenericCard from './GenericCard';
 
 interface ContentCardProps {
@@ -30,6 +32,8 @@ const CARD_COMPONENTS: Record<string, React.FC<any>> = {
   health_card: HealthCard,
   learning_card: LearningCard,
   home_card: HomeCard,
+  file_card: FileCard,
+  surface_card: SurfaceCard,
 };
 
 export default function ContentCard({ card, onAction, index = 0 }: ContentCardProps) {

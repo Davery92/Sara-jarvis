@@ -22,6 +22,8 @@ import LearningScreen from '../screens/learning/LearningScreen';
 import NotificationsScreen from '../screens/notifications/NotificationsScreen';
 import ACSScreen from '../screens/acs/ACSScreen';
 import SystemScreen from '../screens/system/SystemScreen';
+import MachinesScreen from '../screens/machines/MachinesScreen';
+import StudioScreen from '../screens/studio/StudioScreen';
 import ChatScreen from '../screens/chat/ChatScreen';
 import { ChatScreenParams } from '../types/navigation';
 import { colors, fontSizes } from '../styles/theme';
@@ -31,6 +33,7 @@ export type AppStackParamList = {
   Notes: undefined;
   Recipes: undefined;
   Documents: undefined;
+  Studio: { id?: string } | undefined;
   Calendar: undefined;
   Briefings: undefined;
   Health: undefined;
@@ -50,6 +53,7 @@ export type AppStackParamList = {
   Notifications: { notificationId?: number } | undefined;
   ACS: undefined;
   System: undefined;
+  Machines: undefined;
 };
 
 const Stack = createNativeStackNavigator<AppStackParamList>();
@@ -79,6 +83,11 @@ export default function AppNavigator() {
         options={{ title: 'The System' }}
       />
       <Stack.Screen
+        name="Machines"
+        component={MachinesScreen}
+        options={{ title: 'Machines' }}
+      />
+      <Stack.Screen
         name="Notes"
         component={NotesListScreen}
         options={{ title: 'Notes' }}
@@ -92,6 +101,11 @@ export default function AppNavigator() {
         name="Documents"
         component={DocumentsScreen}
         options={{ title: 'Documents' }}
+      />
+      <Stack.Screen
+        name="Studio"
+        component={StudioScreen}
+        options={{ title: 'Studio' }}
       />
       <Stack.Screen
         name="Calendar"

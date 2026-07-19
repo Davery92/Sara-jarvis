@@ -1561,6 +1561,104 @@ class PersonalKnowledgeGraph:
             _PKG_EMBEDDING_TRACKER.note("no_event_loop")
             logger.debug(f"PKG: No event loop for embedding of {pkg_id}, will backfill later")
 
+    def store_life_fact_embedding(self, pkg_id: str, content_text: str, confidence: float = 0.9) -> None:
+        """Fire-and-forget embedding write for a Brain-Alignment life_fact
+        (node_type='life_fact'). The life_fact table is authoritative; this
+        only makes the fact semantically retrievable alongside other PKG nodes."""
+        async def _write():
+            try:
+                from app.services.embedding_service import EmbeddingService
+                svc = EmbeddingService()
+                embedding = await svc.generate_embedding(content_text)
+                if not embedding:
+                    return
+                from sqlalchemy import text as sa_text, create_engine
+                from sqlalchemy.orm import sessionmaker as sync_sm
+                engine = create_engine(_to_psycopg3_url(os.getenv("DATABASE_URL", "")), echo=False)
+                Session = sync_sm(bind=engine)
+                session = Session()
+                try:
+                    session.execute(sa_text("""
+                        INSERT INTO pkg_embedding (pkg_id, node_type, content_text, embedding, confidence, updated_at)
+                        VALUES (:pkg_id, 'life_fact', :content_text, :embedding, :confidence, NOW())
+                        ON CONFLICT (pkg_id) DO UPDATE SET
+                            content_text = EXCLUDED.content_text,
+                            embedding = EXCLUDED.embedding,
+                            confidence = EXCLUDED.confidence,
+                            updated_at = NOW()
+                    """), {"pkg_id": pkg_id, "content_text": content_text,
+                           "embedding": str(embedding), "confidence": confidence})
+                    session.commit()
+                finally:
+                    session.close()
+                    engine.dispose()
+            except Exception as e:
+                _PKG_EMBEDDING_TRACKER.note(f"life_fact:{type(e).__name__}")
+                logger.debug(f"PKG: life_fact embedding write failed: {e}")
+
+        try:
+            import asyncio
+            asyncio.get_running_loop().create_task(_write())
+        except RuntimeError:
+            _PKG_EMBEDDING_TRACKER.note("life_fact_no_event_loop")
+
+    def get_graduation_candidates(
+        self, min_confirmed: int = 5, min_age_days: int = 21, limit: int = 20
+    ) -> List[Dict]:
+        """H7.2: PKG preferences/routines confirmed enough, over a long enough
+        span, not yet internalized or flagged for review — candidates to become
+        standing soul directives."""
+        if not self._ensure_driver():
+            return []
+        from datetime import datetime, timezone, timedelta
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=min_age_days)).isoformat()
+        out: List[Dict] = []
+        try:
+            with self.driver.session() as session:
+                result = session.run(f"""
+                    MATCH (n)
+                    WHERE (n:PKG_Preference OR n:PKG_Routine)
+                      AND n.superseded_by IS NULL
+                      AND coalesce(n.times_confirmed, 1) >= $min_confirmed
+                      AND n.first_learned <= $cutoff
+                      AND coalesce(n.internalized, false) = false
+                      AND coalesce(n.needs_review, false) = false
+                      AND coalesce(n.confidence, 0) >= 0.7
+                    RETURN n.pkg_id AS pkg_id, labels(n) AS labels,
+                           properties(n) AS props, coalesce(n.times_confirmed,1) AS ev
+                    ORDER BY ev DESC
+                    LIMIT $limit
+                """, {"min_confirmed": min_confirmed, "cutoff": cutoff, "limit": limit})
+                for row in result:
+                    label = self._extract_pkg_label(row["labels"])
+                    out.append({
+                        "pkg_id": row["pkg_id"],
+                        "label": label,
+                        "natural": self._format_fact_natural(label, row["props"] or {}),
+                        "evidence_count": row["ev"],
+                    })
+        except Exception as e:
+            _PKG_NEO4J_TRACKER.note(f"graduation:{type(e).__name__}")
+            logger.debug(f"PKG graduation query failed: {e}")
+        return out
+
+    def mark_internalized(self, pkg_id: str) -> bool:
+        """H7.2: mark a fact as inherent — retrieval stops spending context
+        budget re-fetching what is now standing prompt."""
+        if not self._ensure_driver() or not pkg_id:
+            return False
+        try:
+            with self.driver.session() as session:
+                session.run(
+                    "MATCH (n {pkg_id: $pkg_id}) SET n.internalized = true, "
+                    "n.internalized_at = $now",
+                    {"pkg_id": pkg_id, "now": datetime.now(timezone.utc).isoformat()},
+                )
+            return True
+        except Exception as e:
+            logger.debug(f"PKG mark_internalized failed: {e}")
+            return False
+
     # --- Semantic search via pgvector shadow table ---
 
     def _node_to_text(self, fact_type: str, properties: Dict) -> str:

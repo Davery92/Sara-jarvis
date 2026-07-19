@@ -50,6 +50,24 @@ def recompute_daily_rhythm():
         except Exception as e:
             logger.warning(f"recompute_daily_rhythm: snapshot push failed: {e}")
 
+    # H3 (Brain Alignment): seed/refresh inferred life facts from the freshly
+    # computed rhythm. Idempotent and never overwrites facts David has stated —
+    # this is the "weekly re-check of inferred facts" running nightly.
+    try:
+        from app.services.life_facts import seed_from_rhythm
+        from app.db.session import get_async_session_factory
+
+        async def _seed():
+            async with get_async_session_factory()() as adb:
+                n = await seed_from_rhythm(adb, SOLO_USER_ID)
+                await adb.commit()
+                return n
+
+        seeded = _run_async(_seed())
+        logger.info(f"recompute_daily_rhythm: seeded {seeded} inferred life facts")
+    except Exception as e:
+        logger.warning(f"recompute_daily_rhythm: life_fact seed failed: {e}")
+
     logger.info(
         f"recompute_daily_rhythm: {len(summary['updated'])} updated, {len(summary['skipped'])} skipped"
     )

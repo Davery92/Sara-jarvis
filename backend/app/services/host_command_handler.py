@@ -41,6 +41,14 @@ _NL_PATTERNS = [
     re.compile(r"\bhow'?s\s+(?:the\s+)?([a-z0-9][\w.-]*)\s+(?:doing|looking)", re.I),
 ]
 
+# Fleet-wide questions (no specific host) → the fleet digest.
+_FLEET_NL_PATTERNS = [
+    re.compile(r"\bhow'?s\s+(?:the\s+|my\s+)?fleet\b", re.I),
+    re.compile(r"\b(?:are|is)\s+(?:my|the)\s+(?:servers?|machines?|boxes?)\s+(?:ok|okay|alright|healthy|fine|up)\b", re.I),
+    re.compile(r"\banything\s+wrong\s+with\s+(?:my|the)\s+(?:servers?|machines?|fleet|boxes?)\b", re.I),
+    re.compile(r"\bfleet\s+(?:status|health|overview)\b", re.I),
+]
+
 
 def parse_host_command(message: str, db: Session, user_id: str) -> Optional[dict]:
     """Return a parsed command dict, or None if this isn't a host command.
@@ -52,8 +60,19 @@ def parse_host_command(message: str, db: Session, user_id: str) -> Optional[dict
     text = message.strip()
     low = text.lower()
 
+    # Fleet digest: `/fleet` or `/host fleet`.
+    if low == "/fleet" or low.startswith("/fleet "):
+        return {"action": "fleet"}
+    if low == "/host fleet":
+        return {"action": "fleet"}
+
     if low == "/host" or low.startswith("/host "):
         return _parse_slash(text[len("/host"):].strip())
+
+    # Fleet natural language — "how's the fleet", "are my servers ok", etc.
+    for pat in _FLEET_NL_PATTERNS:
+        if pat.search(text):
+            return {"action": "fleet"}
 
     # Natural language — only intercept when the candidate resolves to a host.
     for pat in _NL_PATTERNS:
@@ -74,6 +93,8 @@ def _parse_slash(rest: str) -> dict:
 
     if sub in ("list", "ls"):
         return {"action": "list"}
+    if sub in ("fleet", "status"):
+        return {"action": "fleet"}
     if sub in ("help", "?"):
         return {"action": "help"}
     if sub in ("remove", "rm", "delete"):
@@ -146,6 +167,8 @@ async def run_host_command(db: Session, user_id: str, cmd: dict) -> AsyncIterato
     elif action == "check":
         async for ev in _run_check(db, user_id, cmd.get("name"), chunk):
             yield ev
+    elif action == "fleet":
+        yield chunk(_render_fleet(db, user_id))
     else:
         yield chunk("Unknown host command. Try `/host help`.")
 
@@ -183,17 +206,50 @@ async def _run_check(db, user_id, name, chunk) -> AsyncIterator[dict]:
     yield chunk(host_inspector.render_report(host, spec))
 
 
+def _agent_health_badge(h) -> str:
+    """Live badge for a host: ● online (with worst-disk warn) / ○ offline / ◌ ssh-only."""
+    from datetime import datetime, timezone
+    if h.transport not in ("agent", "both"):
+        return "◌ ssh-only"
+    last = h.agent_last_report_at
+    online = False
+    if last is not None:
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        online = (datetime.now(timezone.utc) - last).total_seconds() < 900  # 15 min
+    if not online:
+        return "○ offline"
+    snap = h.agent_snapshot or {}
+    disks = snap.get("disks") or []
+    disk_max = max((d.get("used_pct") or 0 for d in disks), default=0)
+    warn = " ⚠" if disk_max >= 85 else ""
+    return f"● online · disk {disk_max}%{warn}"
+
+
 def _render_list(db: Session, user_id: str) -> str:
     hosts = host_inspector.list_hosts(db, user_id)
     if not hosts:
         return (
             "No machines registered yet. Add one with "
-            "`/host add <name> <user>@<hostname>` — then I can check it out for you."
+            "`/host add <name> <user>@<hostname>` — or say *add a machine* to enroll a "
+            "fleet agent (open Machines → Add machine)."
         )
     lines = ["**Registered machines:**"]
     for h in hosts:
-        status = f" · _{h.last_status}_" if h.last_status else ""
+        badge = _agent_health_badge(h)
         desc = f" — {h.description}" if h.description else ""
-        lines.append(f"- **{h.name}** `{h.username}@{h.hostname}:{h.port}`{status}{desc}")
-    lines.append("\n_Say \"check out <name>\" to inspect one._")
+        lines.append(f"- **{h.name}** `{h.username}@{h.hostname}` · {badge}{desc}")
+    lines.append("\n_Say \"check out <name>\" to inspect one, or \"how's the fleet\" for a digest._")
     return "\n".join(lines)
+
+
+def _render_fleet(db: Session, user_id: str) -> str:
+    from app.services import fleet_context
+    digest = fleet_context.fleet_digest(db, user_id)
+    if not digest:
+        return (
+            "No fleet agents are enrolled yet. Say *add a machine* or open "
+            "**Machines → Add machine** to install the agent on a box — the one-liner "
+            "is always there behind the Add-machine button."
+        )
+    return digest + "\n\n_Ask \"why is <host> slow\" and I'll dig in with read-only diagnostics._"

@@ -6,9 +6,8 @@ import asyncio
 import logging
 import hashlib
 from datetime import datetime
-from typing import Dict, List, Any, Optional
+from typing import Dict, Any, Optional
 from enum import Enum
-import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -29,70 +28,6 @@ class NotificationService:
     def __init__(self):
         self.enabled = True
         logger.info("📱 NotificationService initialized")
-
-    async def _get_push_tokens(self, user_id: str) -> List[str]:
-        """Get active push tokens for a user from the database"""
-        from sqlalchemy import create_engine, text
-        from sqlalchemy.orm import sessionmaker
-        from app.core.config import settings
-
-        engine = create_engine(settings.database_url)
-        Session = sessionmaker(bind=engine)
-        db = Session()
-
-        try:
-            result = db.execute(text("""
-                SELECT token FROM push_token
-                WHERE user_id = :user_id AND is_active = true
-            """), {"user_id": user_id}).fetchall()
-
-            return [row.token for row in result]
-        finally:
-            db.close()
-
-    async def _send_push(
-        self,
-        tokens: List[str],
-        title: str,
-        body: str,
-        data: Optional[Dict[str, Any]] = None,
-        priority: str = "default"
-    ) -> bool:
-        """Send push notification to the supplied device tokens."""
-        if not tokens:
-            logger.warning("No push tokens provided")
-            return False
-
-        messages = []
-        for token in tokens:
-            messages.append({
-                "to": token,
-                "sound": "default",
-                "title": title,
-                "body": body,
-                "data": data or {},
-                "priority": priority,
-            })
-
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    "https://exp.host/--/api/v2/push/send",
-                    json=messages,
-                    headers={
-                        "Accept": "application/json",
-                        "Content-Type": "application/json",
-                    }
-                )
-                if response.status_code == 200:
-                    logger.info(f"📱 Push sent: {title}")
-                    return True
-                else:
-                    logger.error(f"Push failed: {response.status_code} - {response.text}")
-                    return False
-        except Exception as e:
-            logger.error(f"Push error: {e}")
-            return False
 
     async def send_notification(
         self,

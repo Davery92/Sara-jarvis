@@ -369,7 +369,6 @@ class CrossDomainAnalyzer:
 
             # Approximate p-value using normal distribution for large n
             # For small n, this is an approximation
-            import math
             z = abs(t) / math.sqrt(1 + t * t / (2 * (n - 2)))
             p = 2 * (1 - self._normal_cdf(z))
             return max(0.0001, min(1.0, p))

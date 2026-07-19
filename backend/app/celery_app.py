@@ -82,6 +82,8 @@ celery_app = Celery(
         "app.tasks.system_wiring_check",
         "app.tasks.ml",
         "app.tasks.assistant_verbs",
+        "app.tasks.workspace_jobs",
+        "app.tasks.fleet",
     ]
 )
 
@@ -146,6 +148,7 @@ celery_app.conf.task_routes = {
     "app.tasks.sara_self_queue.*": {"queue": "cognitive"},
     "app.tasks.ml.*": {"queue": "cognitive"},
     "app.tasks.assistant_verbs.*": {"queue": "cognitive"},
+    "app.tasks.workspace_jobs.*": {"queue": "cognitive"},
 }
 
 # Define queues with priorities

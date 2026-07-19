@@ -40,6 +40,10 @@ export function useSaraChat(options?: UseSaraChatOptions) {
   const messagesRef = useRef<Message[]>([]);
   const streamingMessageRef = useRef('');
   const hasLoadedHistory = useRef(false);
+  // Mirror of pendingCards so the streaming onComplete closure (captured at
+  // request start, when pendingCards was just cleared) reads cards that arrived
+  // mid-stream. Without this, content cards never attach to the message.
+  const pendingCardsRef = useRef<ContentCardType[]>([]);
 
   useEffect(() => {
     messagesRef.current = messages;
@@ -104,6 +108,7 @@ export function useSaraChat(options?: UseSaraChatOptions) {
     async (messageText: string, images?: ImageAttachment[], inboxItemId?: string) => {
       setSuggestedActions([]);
       setPendingCards([]);
+      pendingCardsRef.current = [];
       setActiveToolStatus(null);
 
       try { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); } catch {}
@@ -133,6 +138,7 @@ export function useSaraChat(options?: UseSaraChatOptions) {
           source: options?.source || 'ios_overlay',
           currentScreen: options?.currentScreen,
           onContentCard: (card: any) => {
+            pendingCardsRef.current = [...pendingCardsRef.current, card];
             setPendingCards((prev) => [...prev, card]);
           },
           onToolStatus: (status: ToolStatus) => {
@@ -162,7 +168,7 @@ export function useSaraChat(options?: UseSaraChatOptions) {
             content: streamingMessageRef.current,
             created_at: new Date().toISOString(),
             episode_id: episodeId,
-            cards: [...pendingCards],
+            cards: [...pendingCardsRef.current],
           };
 
           setMessages((prev) => [...prev, assistantMessage]);
@@ -170,6 +176,7 @@ export function useSaraChat(options?: UseSaraChatOptions) {
           streamingMessageRef.current = '';
           setIsStreaming(false);
           setPendingCards([]);
+          pendingCardsRef.current = [];
           setActiveToolStatus(null);
 
           if (newConversationId && newConversationId !== conversationId) {

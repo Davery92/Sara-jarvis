@@ -3,13 +3,22 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system dependencies (including Stockfish for chess, ffmpeg for audio)
+# Install system dependencies (including Stockfish for chess, ffmpeg for audio,
+# and the libpango/cairo/gdk-pixbuf set WeasyPrint needs for PDF generation).
 RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
     stockfish \
     ffmpeg \
     openssh-client \
+    libpango-1.0-0 \
+    libpangocairo-1.0-0 \
+    libpangoft2-1.0-0 \
+    libgdk-pixbuf-2.0-0 \
+    libcairo2 \
+    libffi-dev \
+    shared-mime-info \
+    fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for better caching
