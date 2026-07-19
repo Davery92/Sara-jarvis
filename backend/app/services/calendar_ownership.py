@@ -29,6 +29,8 @@ DEFAULT_CONFIG = {
     # Family member name -> relation. Used both for calendar names and for
     # detecting whose appointment a per-event calendar entry is.
     "family_members": {"Amanda": "partner", "Everett": "son"},
+    # Nickname / inside-language -> family member ("Shitballz" -> "Amanda").
+    "aliases": {},
     # Calendar name (lowercased) -> owner:
     #   "self"      David's own events
     #   "<name>"    that family member's events
@@ -70,6 +72,9 @@ def get_config(force_reload: bool = False) -> dict:
         "self_name": DEFAULT_CONFIG["self_name"],
         "family_members": dict(DEFAULT_CONFIG["family_members"]),
         "calendar_owners": dict(DEFAULT_CONFIG["calendar_owners"]),
+        # nickname / inside-language -> family member name (e.g. "Shitballz" -> "Amanda")
+        "aliases": dict(DEFAULT_CONFIG.get("aliases", {})),
+        "acknowledged_unmapped": list(DEFAULT_CONFIG.get("acknowledged_unmapped", [])),
     }
     try:
         from sqlalchemy import text
@@ -90,6 +95,10 @@ def get_config(force_reload: bool = False) -> dict:
                 config["calendar_owners"].update(
                     {str(k).lower(): v for k, v in stored["calendar_owners"].items()}
                 )
+            if isinstance(stored.get("aliases"), dict):
+                config["aliases"].update(stored["aliases"])
+            if isinstance(stored.get("acknowledged_unmapped"), list):
+                config["acknowledged_unmapped"] = [str(c) for c in stored["acknowledged_unmapped"]]
     except Exception as e:
         logger.warning(f"calendar_ownership: falling back to defaults ({e})")
 
@@ -118,21 +127,43 @@ def save_config(overrides: dict) -> dict:
     return get_config(force_reload=True)
 
 
-def _member_in_title(title: str, family_members: dict) -> Optional[str]:
+def _member_in_title(title: str, family_members: dict, aliases: Optional[dict] = None) -> Optional[str]:
+    """Return the family member named (or nicknamed) in the title, if any.
+
+    Checks real names first, then aliases/nicknames ("Lashes with Shitballz" →
+    Amanda). Aliases map nickname -> family member name.
+    """
     for name in family_members:
         if re.search(rf"\b{re.escape(name)}\b", title, re.IGNORECASE):
             return name
+    for alias, member in (aliases or {}).items():
+        if re.search(rf"\b{re.escape(alias)}\b", title, re.IGNORECASE):
+            return member
     return None
+
+
+# Sources whose unmapped/untitled events are genuinely David's (he created them
+# or they were extracted from his email). iOS-synced calendars are NOT here — an
+# unmapped iOS calendar is someone else's phone calendar, owner unknown.
+_SELF_DEFAULT_SOURCES = {"sara", "sara_created", "chat", "email", "email_extracted", None}
 
 
 def classify_event(
     title: Optional[str],
     calendar_name: Optional[str],
     config: Optional[dict] = None,
+    source: Optional[str] = None,
 ) -> EventOwnership:
-    """Classify a calendar event's owner from its source calendar and title."""
+    """Classify a calendar event's owner from its source calendar and title.
+
+    ``source`` gates the final fallback: for iOS-synced events an unmapped
+    calendar with no family name in the title resolves to ``unknown`` (surfaced
+    for labeling), not silently to David. Sara-created / email-extracted events
+    still default to self.
+    """
     config = config or get_config()
     family = config["family_members"]
+    aliases = config.get("aliases", {})
     title = title or ""
 
     owner: Optional[str] = None
@@ -146,22 +177,29 @@ def classify_event(
                     break
 
     if owner in ("per_event", "family", None):
-        titled = _member_in_title(title, family)
+        titled = _member_in_title(title, family, aliases)
         if titled:
-            # A family member named in the title owns the event, even on a
-            # shared calendar ("Everett soccer" on Family Calendar → Everett)
+            # A family member named (or nicknamed) in the title owns the event,
+            # even on a shared calendar ("Everett soccer" on Family → Everett;
+            # "Lashes with Shitballz" on Fun! → Amanda)
             owner = titled
         elif owner in ("per_event", "family"):
             # Shared calendar, no name in the title — household, not David's
             owner = "family"
-        else:
-            # Unmapped calendar / Sara-created / email-extracted: David's
+        elif source in _SELF_DEFAULT_SOURCES:
+            # Sara-created / email-extracted: David's
             owner = "self"
+        else:
+            # Unmapped iOS calendar (someone else's phone calendar) — owner
+            # genuinely unknown; do NOT silently attribute to David.
+            owner = "unknown"
 
     if owner == "self":
         return EventOwnership(owner="self", is_self=True, relation="", label="")
     if owner == "family":
         return EventOwnership(owner="family", is_self=False, relation="household", label="Family")
+    if owner == "unknown":
+        return EventOwnership(owner="unknown", is_self=False, relation="unknown", label="")
     return EventOwnership(
         owner=owner,
         is_self=False,
@@ -171,8 +209,55 @@ def classify_event(
 
 
 def ownership_prefix(ownership: EventOwnership) -> str:
-    """Display prefix for event listings: 'Everett: ' or ''."""
-    return f"{ownership.label}: " if not ownership.is_self else ""
+    """Display prefix for event listings: 'Everett: ' or ''.
+
+    Self and owner-unclear (empty label) events get no prefix.
+    """
+    if ownership.is_self or not ownership.label:
+        return ""
+    return f"{ownership.label}: "
+
+
+def find_unmapped_calendars(user_id: Optional[str] = None) -> list:
+    """iOS calendars that have events but no owner mapping, excluding ones David
+    has already acknowledged leaving unmapped. Used by the interoception digest
+    to ask "who owns calendar X?" once, without nagging about deliberate choices.
+    """
+    from sqlalchemy import text
+    from app.db.session import SessionLocal
+    config = get_config()
+    mapped = set(config["calendar_owners"].keys())
+    family_lower = {n.lower() for n in config["family_members"]}
+    acknowledged = {str(c).lower() for c in config.get("acknowledged_unmapped", [])}
+    out = []
+    try:
+        with SessionLocal() as db:
+            q = ("SELECT ios_calendar_name, count(*) FROM calendar_event "
+                 "WHERE ios_calendar_name IS NOT NULL AND source = 'ios_calendar' "
+                 "GROUP BY ios_calendar_name")
+            for name, n in db.execute(text(q)).fetchall():
+                low = (name or "").strip().lower()
+                if not low or low in mapped or low in family_lower or low in acknowledged:
+                    continue
+                out.append({"calendar": name, "events": int(n)})
+    except Exception as e:
+        logger.debug(f"find_unmapped_calendars failed: {e}")
+    return out
+
+
+def owner_annotation(ownership: EventOwnership) -> str:
+    """Explicit bracketed owner marker for LLM context (chat tool, day replay).
+
+    "" for David's own events; "[Amanda's] ", "[family] ", "[not David's] "
+    otherwise — so the model can never narrate someone else's event as David's.
+    """
+    if ownership.is_self:
+        return ""
+    if ownership.owner == "family":
+        return "[family] "
+    if ownership.owner == "unknown":
+        return "[owner unclear] "
+    return f"[{ownership.label}'s] "
 
 
 @dataclass

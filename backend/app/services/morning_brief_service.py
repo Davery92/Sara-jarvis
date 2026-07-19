@@ -715,7 +715,7 @@ Synthesized summary:"""
             # doesn't belong in the morning brief schedule. Workouts get
             # surfaced through the dedicated fitness section instead.
             result = db.execute(text("""
-                SELECT title, start_time, end_time, location, all_day, ios_calendar_name, attendees, organizer
+                SELECT title, start_time, end_time, location, all_day, ios_calendar_name, attendees, organizer, owner, owner_relation, source
                 FROM calendar_event
                 WHERE user_id = :user_id
                   AND start_time >= :start_of_day
@@ -734,7 +734,9 @@ Synthesized summary:"""
                 "end_of_day": end_of_day
             })
 
-            from app.services.calendar_ownership import classify_event, ownership_prefix, attendance_role
+            from app.services.calendar_ownership import (
+                classify_event, ownership_prefix, attendance_role, EventOwnership,
+            )
 
             events = []
             for row in result.fetchall():
@@ -743,7 +745,19 @@ Synthesized summary:"""
                 if role.declined:
                     continue
 
-                ownership = classify_event(row.title, row.ios_calendar_name)
+                # Prefer the ownership computed + stored at sync time; fall back to
+                # classifying with the source when the row predates the backfill.
+                stored_owner = getattr(row, "owner", None)
+                if stored_owner:
+                    ownership = EventOwnership(
+                        owner=stored_owner, is_self=(stored_owner == "self"),
+                        relation=getattr(row, "owner_relation", "") or "",
+                        label="" if stored_owner in ("self", "unknown")
+                              else ("Family" if stored_owner == "family" else stored_owner),
+                    )
+                else:
+                    ownership = classify_event(row.title, row.ios_calendar_name,
+                                               source=getattr(row, "source", None))
                 title = f"{ownership_prefix(ownership)}{row.title}"
                 if role.is_broadcast:
                     title += " (FYI)"

@@ -31,5 +31,8 @@ class CalendarEvent(Base):
     # by iOS EventKit sync going forward. attendees: [{name, email, status}]
     attendees = Column(JSONB, nullable=False, default=list)
     organizer = Column(String(255), nullable=True)
+    # Ownership computed at sync time (Phase 3): 'self' | family member | 'family' | 'unknown'
+    owner = Column(String(64), nullable=True)
+    owner_relation = Column(String(32), nullable=True)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now())

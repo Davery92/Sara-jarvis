@@ -114,8 +114,18 @@ async def _self_check_async():
     except Exception:
         pass
 
-    # 5. Version drift (Phase 7) — placeholder, filled once version endpoints land
-    # 6. Backup freshness — placeholder (11A: David builds backups separately)
+    # 5. Unmapped calendars — surface once (Phase 3.2), respecting acknowledged ones
+    try:
+        from app.services.calendar_ownership import find_unmapped_calendars
+        unmapped = find_unmapped_calendars()
+        if unmapped:
+            names = ", ".join(f"{u['calendar']} ({u['events']})" for u in unmapped[:3])
+            findings.append(f"unmapped calendars: {names} — who owns them?")
+    except Exception:
+        pass
+
+    # 6. Version drift (Phase 7) — placeholder, filled once version endpoints land
+    # 7. Backup freshness — placeholder (11A: David builds backups separately)
     #    Reported as informational, never an alert.
 
     status = "healthy" if not findings else "degraded"

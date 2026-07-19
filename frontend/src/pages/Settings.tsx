@@ -13,6 +13,7 @@ import SchedulesSection from '../components/SchedulesSection'
 import TunablesSection from '../components/TunablesSection'
 import PlacesSection from '../components/PlacesSection'
 import RhythmSection from '../components/RhythmSection'
+import CalendarOwnershipSection from '../components/CalendarOwnershipSection'
 import { PatternsContent } from '../components/overlay/OverlayContent'
 
 interface MorningBriefSummary {
@@ -1172,6 +1173,9 @@ export default function Settings() {
         <section className="mt-12">
           <PlacesSection />
         </section>
+
+        {/* Calendar ownership — who each synced calendar belongs to */}
+        <CalendarOwnershipSection />
 
         {/* Daily Rhythm Engine — learned model of David's typical day */}
         <section className="mt-12">

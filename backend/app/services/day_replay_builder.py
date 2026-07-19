@@ -499,7 +499,8 @@ class DayReplayBuilder:
             result = db.execute(
                 text("""
                     SELECT id, title, description, location,
-                           start_time, end_time, source, ios_calendar_name
+                           start_time, end_time, source, ios_calendar_name,
+                           owner, owner_relation
                     FROM calendar_event
                     WHERE user_id = :user_id
                       AND start_time BETWEEN :day_start AND :day_end
@@ -510,20 +511,38 @@ class DayReplayBuilder:
 
             for row in result:
                 duration = (row.end_time - row.start_time).seconds // 60 if row.end_time else 0
+                owner = row.owner or "self"
+                is_self = owner == "self"
+                # Annotate non-self events so the journal never narrates someone
+                # else's appointment as something David did. Lower importance so
+                # they don't crowd out David's actual day.
+                if is_self:
+                    summary = f"{row.title} ({duration} min)"
+                    importance = 0.6
+                elif owner == "unknown":
+                    summary = f"[owner unclear] {row.title} ({duration} min) — ownership unclear, don't assume it's David's"
+                    importance = 0.3
+                else:
+                    who = "the family" if owner == "family" else owner
+                    marker = "[family]" if owner == "family" else f"[{owner}'s]"
+                    summary = f"{marker} {row.title} ({duration} min) — {who}'s event, not David's"
+                    importance = 0.3
                 events.append(DayReplayEvent(
                     timestamp=row.start_time,
                     source=DataSource.CALENDAR,
                     event_type="calendar_event",
-                    summary=f"{row.title} ({duration} min)",
+                    summary=summary,
                     details={
                         "title": row.title,
                         "description": row.description,
                         "location": row.location,
                         "duration_minutes": duration,
                         "event_source": row.source,
-                        "calendar_name": row.ios_calendar_name
+                        "calendar_name": row.ios_calendar_name,
+                        "owner": owner,
+                        "is_davids": is_self,
                     },
-                    importance=0.6
+                    importance=importance
                 ))
 
         except Exception as e:

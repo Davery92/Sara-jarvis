@@ -90,12 +90,64 @@ async def update_calendar_ownership(
     Shape: {"self_name": str, "family_members": {name: relation},
             "calendar_owners": {calendar_name: "self"|"family"|"per_event"|<member name>}}
     """
-    from app.services.calendar_ownership import save_config
-    allowed = {"self_name", "family_members", "calendar_owners"}
+    from app.services.calendar_ownership import save_config, SETTINGS_KEY
+    allowed = {"self_name", "family_members", "calendar_owners", "aliases", "acknowledged_unmapped"}
     unknown = set(overrides) - allowed
     if unknown:
         raise HTTPException(status_code=422, detail=f"Unknown keys: {sorted(unknown)}")
-    return save_config(overrides)
+
+    # Merge over the currently-stored overrides so a partial PUT (e.g. only
+    # calendar_owners from the Settings panel) doesn't wipe aliases /
+    # acknowledged_unmapped. save_config replaces the whole app_settings value.
+    import json as _json
+    from sqlalchemy import text
+    from app.db.session import SessionLocal
+    stored = {}
+    try:
+        with SessionLocal() as _db:
+            row = _db.execute(text("SELECT value FROM app_settings WHERE key = :k"),
+                              {"k": SETTINGS_KEY}).fetchone()
+            if row and row[0]:
+                stored = _json.loads(row[0])
+    except Exception:
+        stored = {}
+    merged = {**stored, **overrides}
+    return save_config(merged)
+
+
+@router.get("/calendars")
+async def list_synced_calendars(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Synced iOS calendars with their event counts and current owner mapping —
+    powers the ownership Settings panel (a dropdown per calendar)."""
+    from sqlalchemy import text
+    from app.services.calendar_ownership import get_config, classify_event
+    cfg = get_config(force_reload=True)
+    rows = db.execute(text("""
+        SELECT ios_calendar_name AS name, count(*) AS n,
+               max(owner) AS sample_owner
+        FROM calendar_event
+        WHERE ios_calendar_name IS NOT NULL AND source = 'ios_calendar'
+        GROUP BY ios_calendar_name ORDER BY count(*) DESC
+    """)).fetchall()
+    out = []
+    for r in rows:
+        low = (r.name or "").strip().lower()
+        mapped = cfg["calendar_owners"].get(low)
+        out.append({
+            "calendar": r.name,
+            "events": int(r.n),
+            "mapped_owner": mapped,  # None => unmapped
+            "acknowledged": low in {str(c).lower() for c in cfg.get("acknowledged_unmapped", [])},
+        })
+    return {
+        "calendars": out,
+        "self_name": cfg["self_name"],
+        "family_members": cfg["family_members"],
+        "aliases": cfg.get("aliases", {}),
+    }
 
 
 @router.get("/events", response_model=List[CalendarEventResponse])
@@ -382,6 +434,16 @@ async def sync_ios_calendar_events(
 
             attendees_list = [a.dict() for a in (event_data.attendees or [])]
 
+            # Classify ownership once, at sync time, so every downstream consumer
+            # (brief, day-replay, monitors, PKG, chat tool) gets it for free.
+            try:
+                from app.services.calendar_ownership import classify_event
+                _own = classify_event(event_data.title, event_data.ios_calendar_name,
+                                      source="ios_calendar")
+                _owner, _owner_rel = _own.owner, _own.relation
+            except Exception:
+                _owner, _owner_rel = None, None
+
             if existing_event:
                 existing_event.title = event_data.title
                 existing_event.description = event_data.description or ""
@@ -392,6 +454,8 @@ async def sync_ios_calendar_events(
                 existing_event.ios_calendar_name = event_data.ios_calendar_name
                 existing_event.attendees = attendees_list
                 existing_event.organizer = event_data.organizer
+                existing_event.owner = _owner
+                existing_event.owner_relation = _owner_rel
                 existing_event.updated_at = naive_local_now()
                 db.flush()
                 event_for_linkage = existing_event
@@ -411,6 +475,8 @@ async def sync_ios_calendar_events(
                     ios_calendar_name=event_data.ios_calendar_name,
                     attendees=attendees_list,
                     organizer=event_data.organizer,
+                    owner=_owner,
+                    owner_relation=_owner_rel,
                     read_only=True,
                     is_completed=False
                 )

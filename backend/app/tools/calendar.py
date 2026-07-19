@@ -186,8 +186,37 @@ class CalendarListTool(BaseTool):
                     event_data["ios_calendar_name"] = cal_name
                 else:
                     event_data["calendar_name"] = "Sara"
+
+                # Ownership — computed at sync time (Phase 3). Emit it explicitly so
+                # the model NEVER narrates someone else's event as David's ("you got
+                # your lashes done" came from raw calendar_name with no ownership).
+                owner = getattr(event, 'owner', None)
+                if not owner:
+                    try:
+                        from app.services.calendar_ownership import classify_event
+                        owner = classify_event(event.title, event_data.get("calendar_name"),
+                                               source=getattr(event, 'source', None)).owner
+                    except Exception:
+                        owner = "self"
+                event_data["owner"] = owner
+                event_data["is_davids"] = owner == "self"
+                if owner == "unknown":
+                    event_data["owner_note"] = "ownership unclear — do not assume this is David's event"
+                    event_data["title"] = f"[owner unclear] {event.title}"
+                elif owner != "self":
+                    label = "the family" if owner == "family" else owner
+                    marker = "[family]" if owner == "family" else f"[{owner}'s]"
+                    event_data["owner_note"] = f"NOT David's event — belongs to {label}"
+                    event_data["title"] = f"{marker} {event.title}"
                 event_list.append(event_data)
             
+            non_self = [e for e in event_list if not e.get("is_davids", True)]
+            msg = f"Found {len(event_list)} events from {start_date} to {end_date}"
+            if non_self:
+                msg += (f". NOTE: {len(non_self)} of these may not be David's — they belong to "
+                        "family members or have unclear ownership (see each event's `owner`). "
+                        "Never narrate another person's event as something David did, and don't "
+                        "assume an owner-unclear event is his.")
             return ToolResult(
                 success=True,
                 data={
@@ -196,7 +225,7 @@ class CalendarListTool(BaseTool):
                     "end_date": end_date.isoformat(),
                     "total_found": len(event_list)
                 },
-                message=f"Found {len(event_list)} events from {start_date} to {end_date}"
+                message=msg
             )
             
         except Exception as e:
