@@ -137,6 +137,20 @@ async def ambient_turn(
             if not await salience_scorer.should_deliberate(user_id):
                 return {"skipped": "below_threshold", "state": KernelState.AMBIENT.value}
 
+            # Reflex/ponder split (Phase 5.5): for event-driven wakes, a 2-3s A3B
+            # triage decides whether this deserves the minute-long full deliberation.
+            # Routine home events get DROPped here instead of spinning up the 27B.
+            if wake_reason == WakeReason.PROMOTED_EVENT and not deep:
+                try:
+                    from app.services.reflex import reflex_triage
+                    verdict = await reflex_triage(user_id)
+                    if verdict == "drop":
+                        # finally releases the coordinator.
+                        return {"skipped": "reflex_drop", "state": KernelState.AMBIENT.value,
+                                "wake_reason": wake_reason.value}
+                except Exception as _re:
+                    pass  # fail-open: fall through to full deliberation
+
         await set_state(user_id, KernelState.AMBIENT, wake_reason,
                         detail=f"thinking ({wake_reason.value})")
 

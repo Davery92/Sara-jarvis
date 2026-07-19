@@ -189,6 +189,13 @@ def selftest(should_fail: bool = True):
     return {"status": "ok", "selftest": "recovered"}
 
 
+@celery_app.task(name="app.tasks.interoception.tool_call_eval", queue="maintenance")
+def tool_call_eval():
+    """Weekly tool-call reliability eval (Phase 5.6/9.4). Pass-rate -> ledger."""
+    from app.services.eval_harness import run_eval
+    return _run(run_eval())
+
+
 @celery_app.task(name="app.tasks.interoception.purge_events", queue="maintenance")
 def purge_events(days: int = 30):
     return _run(_purge_async(days))

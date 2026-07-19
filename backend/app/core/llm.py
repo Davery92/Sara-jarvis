@@ -795,6 +795,13 @@ class BackgroundLLMClient:
         self._total_requests = 0
         self._total_failures = 0
         self._failover_events = 0
+        # Reachability-gated emergency failover state (Phase 5). We fail over ONLY
+        # when the primary is unreachable, and re-probe to fail back.
+        self._primary_unreachable = getattr(self, "_primary_unreachable", False)
+        self._primary_unreachable_since: Optional[float] = getattr(self, "_primary_unreachable_since", None)
+        self._last_primary_probe: float = getattr(self, "_last_primary_probe", 0.0)
+        self._primary_reprobe_interval = 60.0
+        self._primary_retries_on_reachable_error = 2
 
     @staticmethod
     def _estimate_tokens(text: str) -> int:
@@ -972,6 +979,35 @@ class BackgroundLLMClient:
             f"timeouts(connect={self.connect_timeout}s, request={self.request_timeout}s)"
         )
 
+    async def _probe_reachable(self, url: str, connect_timeout: float = 2.0) -> bool:
+        """Is the endpoint reachable at the TCP/HTTP level? Any HTTP response —
+        even 4xx/5xx — counts as reachable; only a connect/DNS/route failure (or
+        connect-timeout) counts as unreachable. This is what gates emergency
+        failover: a slow or erroring-but-reachable primary must NOT fail over."""
+        base = url[:-3] if url.endswith("/v1") else url
+        probe_url = base.rstrip("/") + "/v1/models" if not base.endswith("/v1") else base + "/models"
+        # normalize: ensure we hit .../v1/models
+        if url.endswith("/v1"):
+            probe_url = url + "/models"
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(5.0, connect=connect_timeout)) as c:
+                await c.get(probe_url)
+            return True
+        except (httpx.ConnectError, httpx.ConnectTimeout):
+            return False
+        except Exception:
+            # Any HTTP-level response (or read timeout after connecting) = reachable.
+            return True
+
+    async def _ledger(self, message: str, meta: dict = None, level: str = "WARNING"):
+        """Best-effort interoception ledger event (Phase 2) for failover/failback."""
+        try:
+            from app.services.diagnostics_service import record_system_event
+            await record_system_event(category="llm_failover", service="bg_llm_client",
+                                      level=level, message=message, meta=meta or {})
+        except Exception:
+            pass
+
     async def _reset_clients(self):
         """Tear down and recreate HTTP clients to recover from stale connections."""
         try:
@@ -1030,71 +1066,81 @@ class BackgroundLLMClient:
             payload.update(extra_body)
 
         self._total_requests += 1
-
-        # Circuit breaker: check if primary is degraded
         import time as _time
+
+        # --- Reachability-gated emergency failover (Phase 5) --------------------
+        # If we're currently failed over, periodically re-probe the primary and
+        # fail back the moment it answers.
         _skip_primary = False
-        if self._primary_degraded and self._primary_degraded_until:
-            if _time.time() < self._primary_degraded_until:
-                _skip_primary = True
-            else:
-                # Recovery window — try primary again
-                self._primary_degraded = False
-                self._primary_degraded_until = None
-                self._consecutive_primary_failures = 0
-                logger.info("Background LLM: primary recovery window, attempting primary again")
+        if self._primary_unreachable:
+            now = _time.time()
+            if now - self._last_primary_probe >= self._primary_reprobe_interval:
+                self._last_primary_probe = now
+                if await self._probe_reachable(self.primary_url):
+                    down_secs = int(now - (self._primary_unreachable_since or now))
+                    self._primary_unreachable = False
+                    self._primary_unreachable_since = None
+                    logger.info(f"Background LLM: primary reachable again after {down_secs}s — failing back")
+                    await self._ledger(
+                        f"Primary LLM ({self.primary_url}) reachable again after {down_secs}s — failed back",
+                        {"primary_url": self.primary_url, "down_seconds": down_secs}, level="INFO")
+            _skip_primary = self._primary_unreachable and allow_fallback
 
         if not _skip_primary:
-            try:
-                logger.debug(f"Background LLM request to {self.primary_url} with model {use_model}")
-                result = await self._request_chat_with_compat(
-                    client=self._primary_client,
-                    payload=payload,
-                    endpoint_url=self.primary_url,
-                    request_timeout=req_timeout,
-                )
-                # Success — reset failure counter
-                self._consecutive_primary_failures = 0
-                if self._primary_degraded:
-                    self._primary_degraded = False
-                    logger.info("Background LLM: primary recovered")
-                return result
-
-            except (httpx.TimeoutException, httpx.HTTPStatusError, httpx.ConnectError) as e:
-                self._consecutive_primary_failures += 1
-                self._total_failures += 1
-
-                if isinstance(e, httpx.ConnectError):
-                    logger.warning(f"Connection error on primary, resetting HTTP clients: {e}")
-                    await self._reset_clients()
-
-                # Trip circuit breaker after 3 consecutive failures
-                if self._consecutive_primary_failures >= 3 and not self._primary_degraded:
-                    self._primary_degraded = True
-                    self._primary_degraded_until = _time.time() + 300  # 5 min cooldown
-                    self._failover_events += 1
-                    logger.warning(
-                        f"Background LLM: primary degraded after {self._consecutive_primary_failures} "
-                        f"failures, routing to fallback for 5 min"
+            # Try the primary. Slow / 5xx / read-timeout from a REACHABLE primary
+            # are retried against the primary — they must NOT trigger failover. Only
+            # a genuine connect failure (probe confirms unreachable) fails over.
+            last_err = None
+            for attempt in range(self._primary_retries_on_reachable_error + 1):
+                try:
+                    logger.debug(f"Background LLM request to {self.primary_url} with model {use_model}")
+                    result = await self._request_chat_with_compat(
+                        client=self._primary_client,
+                        payload=payload,
+                        endpoint_url=self.primary_url,
+                        request_timeout=req_timeout,
                     )
-
-                if not allow_fallback:
-                    logger.warning(f"Background LLM primary failed with fallback disabled ({type(e).__name__}): {e}")
+                    self._consecutive_primary_failures = 0
+                    return result
+                except httpx.ConnectError as e:
+                    last_err = e
+                    self._total_failures += 1
+                    # Confirm with a fast probe before failing over.
+                    reachable = await self._probe_reachable(self.primary_url)
+                    if reachable:
+                        logger.warning(f"Transient connect blip but primary reachable, resetting clients & retrying: {e}")
+                        await self._reset_clients()
+                        continue
+                    # Genuinely unreachable — emergency failover.
+                    self._primary_unreachable = True
+                    self._primary_unreachable_since = _time.time()
+                    self._last_primary_probe = _time.time()
+                    self._failover_events += 1
+                    logger.warning(f"Background LLM: primary UNREACHABLE ({e}) — emergency failover to {self.fallback_url}")
+                    await self._ledger(
+                        f"Primary LLM ({self.primary_url}) unreachable — emergency failover to {self.fallback_url}",
+                        {"primary_url": self.primary_url, "fallback_url": self.fallback_url, "error": str(e)})
+                    if not allow_fallback:
+                        raise
+                    break  # go to fallback
+                except (httpx.TimeoutException, httpx.HTTPStatusError) as e:
+                    # Reachable but slow / erroring — retry the PRIMARY, never fail over.
+                    last_err = e
+                    self._total_failures += 1
+                    if attempt < self._primary_retries_on_reachable_error:
+                        logger.warning(f"Background LLM primary {type(e).__name__} (reachable) — retry {attempt+1} on primary")
+                        continue
+                    logger.warning(f"Background LLM primary {type(e).__name__} after retries — surfacing, NOT failing over")
                     raise
-
-                logger.warning(f"Background LLM primary failed ({type(e).__name__}): {e}, trying fallback")
+            else:
+                # loop exhausted without return/break (all reachable-connect blips)
+                if last_err:
+                    raise last_err
         else:
-            # Circuit breaker is open — primary is degraded. If the caller has
-            # opted out of fallback, refuse the request entirely rather than
-            # silently redirecting to the smaller model.
             if not allow_fallback:
-                logger.warning(
-                    "Background LLM: primary degraded and fallback disabled — refusing request"
-                )
-                raise RuntimeError(
-                    "Background LLM primary is degraded and fallback is disabled"
-                )
-            logger.debug("Background LLM: skipping degraded primary, going straight to fallback")
+                logger.warning("Background LLM: primary unreachable and fallback disabled — refusing request")
+                raise RuntimeError("Background LLM primary is unreachable and fallback is disabled")
+            logger.debug("Background LLM: primary unreachable, using emergency backup")
 
         # Try fallback — truncate messages to fit smaller context window
         try:

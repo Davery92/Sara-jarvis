@@ -899,6 +899,20 @@ async def _dispatch_llm_loop(
                     "[dispatch] Salvaged %d text-format tool call(s) the server "
                     "didn't parse (round %d)", len(salvaged), rounds,
                 )
+                # Log every salvage to the interoception ledger so tool-call dialect
+                # drift is *seen*, not silently absorbed (Phase 5.2). If salvages
+                # start spiking, the constrained-decoding/grammar work is overdue.
+                try:
+                    from app.services.diagnostics_service import record_system_event
+                    await record_system_event(
+                        category="qwen_tool_salvage", service="agent_dispatch",
+                        level="WARNING",
+                        message=f"Salvaged {len(salvaged)} text-format tool call(s) qwen emitted as plain text",
+                        meta={"count": len(salvaged), "round": rounds,
+                              "tool_names": [s.get("function", {}).get("name") for s in salvaged]},
+                    )
+                except Exception:
+                    pass
                 msg["content"] = _strip_text_tool_calls(msg.get("content") or "")
                 tool_calls = salvaged
 

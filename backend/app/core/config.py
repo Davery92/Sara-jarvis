@@ -33,12 +33,21 @@ class Settings(BaseSettings):
     # Background LLM Configuration (separate from chat - always uses local models)
     bg_llm_primary_url: str = "http://100.104.68.115:8081/v1"
     bg_llm_primary_model: str = "qwen3.6-27b"
-    bg_llm_fallback_url: str = "http://100.104.68.115:8081/v1"
-    bg_llm_fallback_model: str = "qwen3.6-27b"
+    # Emergency backup ONLY (Phase 5): the 35B-A3B on the GPU host. Used strictly
+    # when the primary endpoint is unreachable (connection refused / DNS / route
+    # failure), NOT on a slow or 5xx-but-reachable primary.
+    bg_llm_fallback_url: str = "http://10.185.1.8:8686/v1"
+    bg_llm_fallback_model: str = "qwen3.6-35b-a3b"
     bg_llm_request_timeout: float = 600.0  # 10min — 27B reasoning model on ~10k-token ACS payloads needs the headroom
     bg_llm_connect_timeout: float = 6.0
     bg_llm_num_ctx: int = 32768
     bg_llm_fallback_max_tokens: int = 24000  # Max input tokens for fallback model (leave headroom from 32k window)
+
+    # Phase 5 — reflex/ponder split. A fast 2-3s triage on the A3B decides whether a
+    # trivial promotion (a light turned on) deserves the minute-long full deliberation.
+    reflex_enabled: bool = True
+    reflex_model_url: str = "http://10.185.1.8:8686/v1"
+    reflex_model: str = "qwen3.6-35b-a3b"
 
     # Phase 4 — run agent dispatch in the Celery `dispatch` worker (durable across
     # backend restarts) instead of in-process asyncio. Falls back to in-process if
