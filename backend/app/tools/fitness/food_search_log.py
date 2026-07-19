@@ -158,6 +158,22 @@ class FoodSearchAndLogTool(BaseTool):
                       f"📊 Totals: {round(total_calories)} cal | "
                       f"P: {round(total_protein)}g | C: {round(total_carbs)}g | F: {round(total_fats)}g")
 
+            # Emit FOOD_LOGGED so chat/Siri-driven logging counts as app activity
+            # too (bumps last_app_activity_at via the working-memory subscriber).
+            try:
+                from app.services.event_bus import emit_event, EventType
+                await emit_event(
+                    EventType.FOOD_LOGGED, user_id,
+                    payload={
+                        "meal_type": meal_type,
+                        "food": (detailed_items[0]["name"] if detailed_items else None),
+                        "calories": round(total_calories, 1),
+                    },
+                    source="food_search_and_log",
+                )
+            except Exception as _e:
+                logger.debug(f"FOOD_LOGGED emit failed: {_e}")
+
             return ToolResult(
                 success=True,
                 data={

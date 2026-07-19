@@ -20,6 +20,7 @@ from app.tools.knowledge_graph import (
     KnowledgeGapAnalysisTool
 )
 from app.tools.web_search import WebSearchTool
+from app.tools.fleet import FleetStatusTool, FleetDiagTool
 from app.tools.get_web_search_details import GetWebSearchDetailsTool
 from app.tools.open_page import OpenPageTool
 from app.tools.get_page_details import GetPageDetailsTool
@@ -122,6 +123,9 @@ from app.tools.canvas import (
     CanvasOpenNoteTool,
     CanvasSaveAsNoteTool
 )
+from app.tools.authoring import AUTHORING_TOOLS
+from app.tools.surfaces import SURFACE_TOOLS
+from app.tools.workspace_jobs import WORKSPACE_JOB_TOOLS
 from app.tools.patterns import PATTERN_TOOLS
 from app.tools.device_commands import DEVICE_TOOLS
 from app.tools.workspace import WORKSPACE_TOOLS
@@ -282,11 +286,26 @@ class ToolRegistry:
                 'create_research_plan', 'research_plan_status',
             ]
         },
+        'fleet': {
+            'description': "Check the health of David's machines (his fleet) and run read-only diagnostics on any agent-equipped box — CPU/memory/disk/temp, open alerts, and safe commands like df/journalctl/top",
+            'tools': [
+                'fleet_status',
+                'fleet_diag',
+            ]
+        },
         'health': {
             'description': 'Access health metrics, trends, insights, and alerts from HealthKit data',
             'tools': [
                 'health_status', 'health_trend'
             ]
+        },
+        'authoring': {
+            'description': 'Generate real downloadable Word/PDF files from markdown, and read artifacts to revise them. Only on explicit request.',
+            'tools': ['document_generate', 'artifact_read']
+        },
+        'surfaces': {
+            'description': 'Build ephemeral interactive UI — live checklists, recipe cook-mode with steps/timers, file-pickup windows, quick forms. Only on explicit request.',
+            'tools': ['surface_create', 'surface_update', 'surface_teardown', 'workspace_job_run']
         },
         'canvas': {
             'description': 'Control the canvas panel to show code, documents, mindmaps, diagrams, or notes alongside the chat',
@@ -584,6 +603,15 @@ class ToolRegistry:
             CanvasOpenNoteTool(),
             CanvasSaveAsNoteTool(),
 
+            # Authoring Tools (Sara-built downloadable Word/PDF files)
+            *AUTHORING_TOOLS,
+
+            # Surface Tools (ephemeral interactive UI — checklists, cook-mode)
+            *SURFACE_TOOLS,
+
+            # Workspace Job Tools (bounded pipelines → file_list surfaces)
+            *WORKSPACE_JOB_TOOLS,
+
             # Pattern Correlation Tools
             *PATTERN_TOOLS,
 
@@ -650,6 +678,10 @@ class ToolRegistry:
 
             # Goals ("let's make X a goal") — sara_goal, Phase 3
             ManageGoalTool(),
+
+            # Fleet ("how's the fleet", "why is the sara VM's disk full") — read-only
+            FleetStatusTool(),
+            FleetDiagTool(),
         ]
 
         for tool in tools:
@@ -755,6 +787,28 @@ class ToolRegistry:
         logger.info(f"Loaded {len(schemas)} tools from categories: {categories}")
         return schemas
 
+    def _context_kwargs_for(self, name: str, tool: BaseTool):
+        """Which injected context kwargs this tool's execute() can accept.
+
+        Returns "**" if execute() takes **kwargs (accepts anything), else the
+        set of explicitly declared parameter names. Cached per tool name.
+        """
+        cache = getattr(self, "_ctx_kwargs_cache", None)
+        if cache is None:
+            cache = self._ctx_kwargs_cache = {}
+        if name not in cache:
+            import inspect
+            try:
+                sig = inspect.signature(tool.execute)
+                if any(p.kind == inspect.Parameter.VAR_KEYWORD
+                       for p in sig.parameters.values()):
+                    cache[name] = "**"
+                else:
+                    cache[name] = set(sig.parameters.keys())
+            except (TypeError, ValueError):
+                cache[name] = "**"  # can't introspect — preserve old behavior
+        return cache[name]
+
     async def execute_tool(
         self, name: str, user_id: str, parameters: Dict[str, Any],
         context: Dict[str, Any] = None,
@@ -799,9 +853,23 @@ class ToolRegistry:
                 ),
             )
 
-        # Inject context into parameters for tools that need it (e.g. shell tools)
-        if context and context.get("task_id"):
-            parameters = {**parameters, "_task_id": context["task_id"]}
+        # Inject context into parameters for tools that need it (e.g. shell tools).
+        # Surface/workspace tools scope their rows to the conversation so the
+        # client can re-inject them when the chat reloads. Only tools whose
+        # execute() declares the kwarg (or takes **kwargs) receive it — most
+        # tools have rigid signatures and would raise TypeError otherwise.
+        if context:
+            injectable = {}
+            if context.get("task_id"):
+                injectable["_task_id"] = context["task_id"]
+            if context.get("conversation_id"):
+                injectable["_conversation_id"] = context["conversation_id"]
+            if injectable:
+                accepted = self._context_kwargs_for(name, tool)
+                extras = {k: v for k, v in injectable.items()
+                          if accepted == "**" or k in accepted}
+                if extras:
+                    parameters = {**parameters, **extras}
 
         try:
             result = await tool.execute(user_id, **parameters)

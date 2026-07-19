@@ -401,10 +401,19 @@ class BackgroundTaskService:
             await self._fallback_push_notify(task_data)
 
     async def _fallback_push_notify(self, task_data: Dict[str, Any]):
-        """Last-resort push notification when smart delivery fails."""
+        """Last-resort push notification when smart delivery fails.
+
+        Still goes through the unified pipeline (dedup, cooldown, notification_log)
+        on a fresh session, in case the original `deliver_task_result` failure was
+        caused by a broken db session rather than the push itself.
+        """
+        logger.error(
+            f"Smart delivery failed for task {task_data.get('id')}; "
+            "falling back to unified_notification directly"
+        )
         try:
-            from ..main_simple import PushToken, SessionLocal
-            import httpx
+            from ..main_simple import SessionLocal
+            from app.services.unified_notification import send_notification
 
             user_id = task_data["user_id"]
             query_preview = task_data["original_query"][:50]
@@ -413,37 +422,26 @@ class BackgroundTaskService:
 
             db = SessionLocal()
             try:
-                push_tokens = db.query(PushToken).filter(
-                    PushToken.user_id == user_id,
-                    PushToken.is_active == True,
-                ).all()
-                if not push_tokens:
-                    return
-                messages = [
-                    {
-                        "to": t.token,
-                        "sound": "default",
-                        "title": "Background task complete",
-                        "body": f"Your agents finished: {query_preview}",
-                        "data": {
-                            "type": "background_task",
-                            "task_id": task_data["id"],
-                            "status": task_data.get("status", "completed"),
-                            "note_id": task_data.get("result_note_id"),
-                        },
-                    }
-                    for t in push_tokens
-                ]
-                async with httpx.AsyncClient(timeout=10.0) as client:
-                    await client.post(
-                        "https://exp.host/--/api/v2/push/send",
-                        json=messages,
-                        headers={"Accept": "application/json", "Content-Type": "application/json"},
-                    )
+                await send_notification(
+                    user_id=user_id,
+                    title="Background task complete",
+                    message=f"Your agents finished: {query_preview}",
+                    category="background_task",
+                    topic=f"agent_task:{task_data['id']}",
+                    source="background_task_service_fallback",
+                    priority="normal",
+                    extra_push_data={
+                        "type": "background_task",
+                        "task_id": task_data["id"],
+                        "status": task_data.get("status", "completed"),
+                        "note_id": task_data.get("result_note_id"),
+                    },
+                    db=db,
+                )
             finally:
                 db.close()
         except Exception as e:
-            logger.warning(f"Fallback push also failed: {e}")
+            logger.error(f"Fallback push also failed: {e}")
 
     async def get_active_tasks(self, db: Session, user_id: str) -> List["BackgroundTask"]:
         """Get all active (pending/running) tasks for a user.

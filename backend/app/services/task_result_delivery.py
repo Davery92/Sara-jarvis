@@ -14,8 +14,9 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-import httpx
 from sqlalchemy.orm import Session
+
+from app.services.unified_notification import send_notification
 
 logger = logging.getLogger(__name__)
 
@@ -63,8 +64,6 @@ async def deliver_task_result(
         from app.services.command_router import command_router
 
         if command_router.get_connected_devices(user_id):
-            from app.services.unified_notification import send_notification
-
             await send_notification(
                 user_id=user_id,
                 title="Background task complete",
@@ -133,32 +132,62 @@ async def deliver_task_result(
                 _persist_task_result_episode(
                     user_id, conversation_id, chat_message, result_note_id, db
                 )
-            await _send_push(user_id, {
-                "type": "task_chat_inject",
-                "task_id": task_id,
-                "note_id": result_note_id,
-                "conversation_id": conversation_id,
-            }, "Background task complete", _short_summary(task_query), db)
+            await send_notification(
+                user_id=user_id,
+                title="Background task complete",
+                message=_short_summary(task_query),
+                category="background_task",
+                topic=f"agent_task:{task_id}",
+                source="task_result_delivery",
+                priority="normal",
+                extra_push_data={
+                    "type": "task_chat_inject",
+                    "task_id": task_id,
+                    "note_id": result_note_id,
+                    "conversation_id": conversation_id,
+                },
+                db=db,
+            )
             logger.info(f"Delivered task {task_id} via iOS push task_chat_inject")
         else:
-            await _send_push(user_id, {
-                "type": note_push_type,
-                "task_id": task_id,
-                "status": "completed",
-                "note_id": result_note_id,
-                "result_note_id": result_note_id,
-            }, "Background task complete", _short_summary(task_query), db)
+            await send_notification(
+                user_id=user_id,
+                title="Background task complete",
+                message=_short_summary(task_query),
+                category="background_task",
+                topic=f"agent_task:{task_id}",
+                source="task_result_delivery",
+                priority="normal",
+                extra_push_data={
+                    "type": note_push_type,
+                    "task_id": task_id,
+                    "status": "completed",
+                    "note_id": result_note_id,
+                    "result_note_id": result_note_id,
+                },
+                db=db,
+            )
             logger.info(f"Delivered task {task_id} via iOS push {note_push_type}")
         return
 
     # --- Path 5: Nobody's home — standard push ---
-    await _send_push(user_id, {
-        "type": note_push_type,
-        "task_id": task_id,
-        "status": "completed",
-        "note_id": result_note_id,
-        "result_note_id": result_note_id,
-    }, "Background task complete", _short_summary(task_query), db)
+    await send_notification(
+        user_id=user_id,
+        title="Background task complete",
+        message=_short_summary(task_query),
+        category="background_task",
+        topic=f"agent_task:{task_id}",
+        source="task_result_delivery",
+        priority="normal",
+        extra_push_data={
+            "type": note_push_type,
+            "task_id": task_id,
+            "status": "completed",
+            "note_id": result_note_id,
+            "result_note_id": result_note_id,
+        },
+        db=db,
+    )
     logger.info(f"Delivered task {task_id} via fallback push notification ({note_push_type})")
 
 
@@ -334,52 +363,3 @@ def _persist_task_result_episode(
             pass
 
 
-async def _send_push(
-    user_id: str,
-    data: dict,
-    title: str,
-    body: str,
-    db: Session,
-):
-    """Send push notification to all of the user's devices."""
-    try:
-        from app.main_simple import PushToken, SessionLocal
-
-        push_db = SessionLocal()
-        try:
-            push_tokens = push_db.query(PushToken).filter(
-                PushToken.user_id == user_id,
-                PushToken.is_active == True,
-            ).all()
-
-            if not push_tokens:
-                return
-
-            messages = [
-                {
-                    "to": token.token,
-                    "sound": "default",
-                    "title": title,
-                    "body": body,
-                    "data": data,
-                }
-                for token in push_tokens
-            ]
-
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.post(
-                    "https://exp.host/--/api/v2/push/send",
-                    json=messages,
-                    headers={
-                        "Accept": "application/json",
-                        "Content-Type": "application/json",
-                    },
-                )
-                if response.status_code == 200:
-                    logger.info(f"Sent push to {len(push_tokens)} devices")
-                else:
-                    logger.warning(f"Push returned {response.status_code}: {response.text}")
-        finally:
-            push_db.close()
-    except Exception as e:
-        logger.warning(f"Failed to send push: {e}")

@@ -10,6 +10,7 @@ import { DiagramArtifact } from './artifacts/DiagramArtifact';
 import { DocumentArtifact } from './artifacts/DocumentArtifact';
 import { MindmapArtifact } from './artifacts/MindmapArtifact';
 import { NoteArtifact } from './artifacts/NoteArtifact';
+import { FileArtifact } from './artifacts/FileArtifact';
 
 interface ArtifactRendererProps {
   artifact: Artifact;
@@ -67,6 +68,9 @@ export const ArtifactRenderer: React.FC<ArtifactRendererProps> = ({
           onUpdate={onUpdate}
         />
       );
+
+    case 'file':
+      return <FileArtifact artifact={artifact} />;
 
     case 'canvas':
       // Canvas artifact (freeform drawing) - placeholder

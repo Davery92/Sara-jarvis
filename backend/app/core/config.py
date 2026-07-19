@@ -207,6 +207,11 @@ class Settings(BaseSettings):
     code_mode_llm_url: str = ""                        # optional LLM endpoint override; empty = use bg llm
     code_mode_max_rounds: int = 60                    # max tool-call rounds per turn
 
+    # Sara Fleet — health agents + read-only diagnostics (FLEET_DESIGN.md)
+    fleet_enroll_secret: str = ""                     # from .env: shared secret to enroll a new agent
+    fleet_report_interval: int = 300                  # default agent report cadence (seconds)
+    fleet_public_url: str = "https://sara-api.avery.cloud"  # API domain the installer/agent points at (NOT the SPA host)
+
     class Config:
         env_file = ".env"
         extra = "ignore"

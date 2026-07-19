@@ -33,6 +33,11 @@ export type RootStackParamList = {
   WorkoutMode: {
     templateId?: string;  // If provided, starts workout with this template
   } | undefined;
+  Cardio: undefined;
+  TabataTimer: {
+    // A saved TabataPreset OR an ad-hoc config from the editor's "Start now".
+    preset: import('../services/cardio').TabataPreset;
+  };
   DailyPlan: undefined;
 };
 
@@ -40,7 +45,6 @@ export type RootStackParamList = {
 export type AuthStackParamList = {
   Login: undefined;
   Signup: undefined;
-  ForgotPassword: undefined;
 };
 
 // Health Alert data passed when opening chat from notification

@@ -1,0 +1,26 @@
+# GPU build of the bge-m3 embedding service (FLEET/embeddings capacity fix).
+# Runs on the GPU host (10.185.1.8) so embedding requests are ~50ms instead of
+# 1-3.5s on CPU — eliminates the saturation that made Sara's "semantic memory"
+# go dark. Pascal (GTX 1070, sm_61) is supported by the cu121 wheels.
+# torch >= 2.6 is required by current transformers (torch.load safety gate), and
+# cu124 is compatible with the host's 555 driver (CUDA 12.5). Pascal (sm_61) is
+# covered by these wheels.
+FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir \
+    "sentence-transformers>=2.7,<3" \
+    fastapi \
+    "uvicorn[standard]" \
+    numpy
+
+# Pre-download the model at build time so startup is instant.
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-m3')"
+
+COPY server.py .
+
+ENV EMBEDDING_DEVICE=cuda
+EXPOSE 8100
+
+CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8100"]

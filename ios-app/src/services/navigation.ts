@@ -10,6 +10,76 @@ import { RootStackParamList } from '../types/navigation';
 
 export const navigationRef = createNavigationContainerRef<RootStackParamList>();
 
+/**
+ * Maps native route names (tabs + stack screens) to the web canonical view
+ * vocabulary (frontend/src/navigation/views.ts) so Sara's app_current_view
+ * means the same thing regardless of platform. New screens are a one-line add.
+ */
+export const ROUTE_TO_VIEW: Record<string, string> = {
+  // Bottom tabs
+  Sara: 'chat',
+  AssistantInboxTab: 'inbox',
+  Fitness: 'fitness',
+  More: 'dashboard',
+  // Chat
+  Chat: 'chat',
+  // Notes
+  Notes: 'notes',
+  NoteEditor: 'notes',
+  // Recipes
+  Recipes: 'recipes',
+  RecipeForm: 'recipes',
+  // Fitness-adjacent
+  Health: 'fitness',
+  RecoveryForm: 'fitness',
+  NutritionGoalsForm: 'fitness',
+  WorkoutMode: 'fitness',
+  Cardio: 'fitness',
+  TabataTimer: 'fitness',
+  // Content / knowledge
+  Documents: 'documents',
+  Studio: 'artifacts',
+  Knowledge: 'knowledge',
+  Learning: 'learn',
+  // Schedule
+  Calendar: 'calendar',
+  EventForm: 'calendar',
+  ReminderForm: 'calendar',
+  Briefings: 'briefings',
+  // Work
+  Projects: 'projects',
+  Automations: 'automations',
+  AgentTasks: 'automations',
+  DailyTasks: 'tasks',
+  // Comms / inbox
+  Email: 'email',
+  EmailDetail: 'email',
+  Inbox: 'inbox',
+  AssistantInbox: 'inbox',
+  Notifications: 'inbox',
+  // System
+  ACS: 'acs',
+  System: 'system',
+  Settings: 'settings',
+  AssistantAnalytics: 'dashboard',
+  DailyPlan: 'dashboard',
+};
+
+/**
+ * Resolve the deepest active route to a canonical web view name. Falls back to
+ * 'dashboard' for unmapped/unknown screens.
+ */
+export function getCurrentViewName(): string {
+  try {
+    if (!navigationRef.isReady()) return 'dashboard';
+    const route = navigationRef.getCurrentRoute();
+    if (!route?.name) return 'dashboard';
+    return ROUTE_TO_VIEW[route.name] ?? 'dashboard';
+  } catch {
+    return 'dashboard';
+  }
+}
+
 // Queue for pending navigations when navigator isn't ready
 type PendingNavigation =
   | { kind: 'tab'; name: string; params?: object }

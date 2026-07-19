@@ -42,17 +42,6 @@ class AuthService {
     return await apiClient.get<User>('/auth/me');
   }
 
-  async requestPasswordReset(email: string): Promise<void> {
-    await apiClient.post('/auth/forgot-password', { email });
-  }
-
-  async resetPassword(token: string, newPassword: string): Promise<void> {
-    await apiClient.post('/auth/reset-password', {
-      token,
-      password: newPassword,
-    });
-  }
-
   async isAuthenticated(): Promise<boolean> {
     const token = await apiClient.getAuthToken();
     if (!token) return false;

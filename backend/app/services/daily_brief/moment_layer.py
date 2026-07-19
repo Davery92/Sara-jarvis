@@ -146,7 +146,10 @@ class MomentLayer:
 
             time_gap = None
             if last_episode:
-                time_gap = datetime.now(timezone.utc) - last_episode.created_at
+                last_created_at = last_episode.created_at
+                if last_created_at.tzinfo is None:
+                    last_created_at = last_created_at.replace(tzinfo=timezone.utc)
+                time_gap = datetime.now(timezone.utc) - last_created_at
 
             # Extract keywords from message
             keywords = self._extract_keywords(current_message)

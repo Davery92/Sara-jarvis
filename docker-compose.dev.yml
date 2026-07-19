@@ -157,6 +157,8 @@ services:
     volumes:
       # Mount source code for live editing
       - ./backend:/app
+      # Mount fleet-agent deploy files so /api/fleet/install.sh can serve them
+      - ./deploy:/app/deploy:ro
       # Mount shadow-agent for installer downloads
       - ./shadow-agent:/shadow-agent
       # Mount data directory for audio files (morning briefs, etc.)

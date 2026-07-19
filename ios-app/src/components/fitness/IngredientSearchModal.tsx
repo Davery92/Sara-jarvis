@@ -130,6 +130,22 @@ export default function IngredientSearchModal({
     setManualFats('');
   };
 
+  // Macros scaled to the chosen quantity (shown in the preview + used on add).
+  const scaled = (() => {
+    const qty = parseFloat(quantity);
+    if (!selectedFood || isNaN(qty) || qty <= 0) {
+      return { calories: undefined, protein: undefined, carbs: undefined, fats: undefined } as {
+        calories?: number; protein?: number; carbs?: number; fats?: number;
+      };
+    }
+    return {
+      calories: selectedFood.calories != null ? Math.round(selectedFood.calories * qty) : undefined,
+      protein: selectedFood.protein != null ? parseFloat((selectedFood.protein * qty).toFixed(1)) : undefined,
+      carbs: selectedFood.carbs != null ? parseFloat((selectedFood.carbs * qty).toFixed(1)) : undefined,
+      fats: selectedFood.fats != null ? parseFloat((selectedFood.fats * qty).toFixed(1)) : undefined,
+    };
+  })();
+
   const handleAddFromSearch = () => {
     if (!selectedFood) {
       Alert.alert('Error', 'Please select a food item');
@@ -142,15 +158,18 @@ export default function IngredientSearchModal({
       return;
     }
 
-    // Calculate scaled nutrition
     const ingredient: IngredientItem = {
       name: selectedFood.name,
       quantity: qty,
       unit: unit,
-      calories: selectedFood.calories ? Math.round(selectedFood.calories * qty) : undefined,
-      protein: selectedFood.protein ? parseFloat((selectedFood.protein * qty).toFixed(1)) : undefined,
-      carbs: selectedFood.carbs ? parseFloat((selectedFood.carbs * qty).toFixed(1)) : undefined,
-      fats: selectedFood.fats ? parseFloat((selectedFood.fats * qty).toFixed(1)) : undefined,
+      calories: scaled.calories,
+      protein: scaled.protein,
+      carbs: scaled.carbs,
+      fats: scaled.fats,
+      // Provenance so macros can be re-resolved/audited server-side (R1/R3)
+      food_id: selectedFood.id,
+      source: selectedFood.source === 'user' ? 'user' : 'fatsecret',
+      serving_description: selectedFood.serving_unit,
     };
 
     onAddIngredient(ingredient);
@@ -169,6 +188,7 @@ export default function IngredientSearchModal({
       return;
     }
 
+    const hasManualMacros = !!(manualCalories || manualProtein || manualCarbs || manualFats);
     const ingredient: IngredientItem = {
       name: manualName.trim(),
       quantity: qty,
@@ -177,6 +197,9 @@ export default function IngredientSearchModal({
       protein: manualProtein ? parseFloat(manualProtein) : undefined,
       carbs: manualCarbs ? parseFloat(manualCarbs) : undefined,
       fats: manualFats ? parseFloat(manualFats) : undefined,
+      // Manual macros are provenance 'manual'; a name-only entry stays
+      // unresolved so the backend estimates it against FatSecret on save.
+      source: hasManualMacros ? 'manual' : undefined,
     };
 
     onAddIngredient(ingredient);
@@ -290,29 +313,25 @@ export default function IngredientSearchModal({
                     )}
                   </View>
 
+                  {/* Macros scaled to the chosen quantity, shown before adding */}
+                  <Text style={styles.scaledHint}>
+                    For {parseFloat(quantity) || 0} {unit}:
+                  </Text>
                   <View style={styles.nutritionGrid}>
                     <View style={styles.nutritionItem}>
-                      <Text style={styles.nutritionValue}>
-                        {selectedFood.calories || '?'}
-                      </Text>
+                      <Text style={styles.nutritionValue}>{scaled.calories ?? '?'}</Text>
                       <Text style={styles.nutritionLabel}>Calories</Text>
                     </View>
                     <View style={styles.nutritionItem}>
-                      <Text style={styles.nutritionValue}>
-                        {selectedFood.protein || '?'}g
-                      </Text>
+                      <Text style={styles.nutritionValue}>{scaled.protein ?? '?'}g</Text>
                       <Text style={styles.nutritionLabel}>Protein</Text>
                     </View>
                     <View style={styles.nutritionItem}>
-                      <Text style={styles.nutritionValue}>
-                        {selectedFood.carbs || '?'}g
-                      </Text>
+                      <Text style={styles.nutritionValue}>{scaled.carbs ?? '?'}g</Text>
                       <Text style={styles.nutritionLabel}>Carbs</Text>
                     </View>
                     <View style={styles.nutritionItem}>
-                      <Text style={styles.nutritionValue}>
-                        {selectedFood.fats || '?'}g
-                      </Text>
+                      <Text style={styles.nutritionValue}>{scaled.fats ?? '?'}g</Text>
                       <Text style={styles.nutritionLabel}>Fat</Text>
                     </View>
                   </View>
@@ -609,6 +628,11 @@ const styles = StyleSheet.create({
   selectedFoodBrand: {
     fontSize: fontSizes.sm,
     color: colors.textSecondary,
+  },
+  scaledHint: {
+    fontSize: fontSizes.xs,
+    color: colors.textSecondary,
+    fontWeight: fontWeights.semibold,
   },
   nutritionGrid: {
     flexDirection: 'row',

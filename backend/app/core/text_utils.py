@@ -71,9 +71,47 @@ def safe_parse_iso_datetime(value: str) -> Optional[datetime]:
         return None
 
 
+# A legal tool name is a bare identifier — anything else (markup fragments like
+# "<function=calendar_list>") means the dialect parse went wrong and the "call"
+# must be dropped, never sent to the registry.
+_TOOL_NAME_RE = re.compile(r'^[A-Za-z_][\w\-\.]*$')
+
+
+def _coerce_param_value(raw: str):
+    """Best-effort typing for text-dialect parameter values: 'true' -> True,
+    '3' -> 3, valid JSON -> parsed; anything else stays a string."""
+    val = raw.strip()
+    try:
+        return json.loads(val)
+    except (json.JSONDecodeError, ValueError):
+        return val
+
+
+def strip_tool_markup(content: str) -> str:
+    """Remove any residual tool-call markup from user-visible text.
+
+    Leak guard: models on the text-dialect path occasionally emit raw
+    <tool_call>/<function=...>/<parameter=...> blocks that were not salvaged
+    into real tool calls. Those must never reach the user."""
+    if not content or '<' not in content:
+        return content
+    cleaned = re.sub(r'<tool_call>.*?(?:</tool_call>|$)', '', content, flags=re.DOTALL)
+    cleaned = re.sub(r'<function=[^>]*>.*?(?:</function>|$)', '', cleaned, flags=re.DOTALL)
+    cleaned = re.sub(r'<parameter=[^>]*>|</parameter>|</function>|</tool_call>', '', cleaned)
+    return cleaned.strip()
+
+
 def parse_glm45_tool_calls(content: str) -> tuple[str, list]:
-    """Parse GLM-4.5 XML-formatted tool calls and convert to OpenAI JSON format."""
-    tool_call_pattern = r'<tool_call>(.*?)</tool_call>'
+    """Parse XML-text tool calls (GLM-4.5 and Qwen3.x dialects) into OpenAI JSON format.
+
+    GLM-4.5:  <tool_call>name <arg_key>k</arg_key><arg_value>v</arg_value></tool_call>
+    Qwen3.x:  <tool_call> <function=name> <parameter=k> v </parameter> </function> </tool_call>
+
+    The Qwen form is tolerant of missing </parameter>/</function> close tags —
+    a parameter value runs until the next parameter, the function close, or the
+    end of the block.
+    """
+    tool_call_pattern = r'<tool_call>(.*?)(?:</tool_call>|$)'
     matches = re.findall(tool_call_pattern, content, re.DOTALL)
 
     if not matches:
@@ -82,19 +120,38 @@ def parse_glm45_tool_calls(content: str) -> tuple[str, list]:
     tool_calls = []
     for match in matches:
         match = match.strip()
-        parts = match.split()
-        if not parts:
+        if not match:
             logger.warning("Empty tool_call block found")
             continue
 
-        function_name = parts[0]
-        arguments = {}
-        arg_key_pattern = r'<arg_key>(.*?)</arg_key>'
-        arg_value_pattern = r'<arg_value>(.*?)</arg_value>'
-        keys = re.findall(arg_key_pattern, match)
-        values = re.findall(arg_value_pattern, match)
-        for key, value in zip(keys, values):
-            arguments[key.strip()] = value.strip()
+        # Qwen3.x dialect: <function=name> ... <parameter=key> value </parameter> ...
+        fn_tag = re.search(r'<function=([^>\s]+)\s*>', match)
+        if fn_tag:
+            function_name = fn_tag.group(1).strip()
+            arguments = {}
+            param_pattern = (
+                r'<parameter=([^>\s]+)\s*>'          # key
+                r'(.*?)'                              # value (lazy)
+                r'(?=</parameter>|<parameter=|</function>|</tool_call>|$)'
+            )
+            for key, value in re.findall(param_pattern, match, re.DOTALL):
+                arguments[key.strip()] = _coerce_param_value(value)
+        else:
+            # GLM-4.5 dialect: first token is the bare tool name
+            parts = match.split()
+            function_name = parts[0]
+            arguments = {}
+            keys = re.findall(r'<arg_key>(.*?)</arg_key>', match)
+            values = re.findall(r'<arg_value>(.*?)</arg_value>', match)
+            for key, value in zip(keys, values):
+                arguments[key.strip()] = value.strip()
+
+        if not _TOOL_NAME_RE.match(function_name):
+            logger.warning(
+                f"Dropping text tool call with malformed name {function_name!r} "
+                f"(block: {match[:120]!r})"
+            )
+            continue
 
         tool_call = {
             "id": f"call_{str(uuid.uuid4())[:8]}",
@@ -105,15 +162,16 @@ def parse_glm45_tool_calls(content: str) -> tuple[str, list]:
             }
         }
         tool_calls.append(tool_call)
-        logger.info(f"Parsed GLM-4.5 tool call: {function_name} with args: {arguments}")
+        logger.info(f"Parsed text-dialect tool call: {function_name} with args: {arguments}")
 
     cleaned_content = re.sub(tool_call_pattern, '', content, flags=re.DOTALL).strip()
     think_pattern = r'<think>(.*?)</think>'
     think_matches = re.findall(think_pattern, cleaned_content, re.DOTALL)
     if think_matches:
         reasoning = " ".join([m.strip() for m in think_matches])
-        logger.debug(f"GLM-4.5 reasoning: {reasoning[:100]}...")
+        logger.debug(f"Model reasoning: {reasoning[:100]}...")
         cleaned_content = re.sub(think_pattern, '', cleaned_content, flags=re.DOTALL).strip()
+    cleaned_content = strip_tool_markup(cleaned_content)
 
     return cleaned_content, tool_calls
 

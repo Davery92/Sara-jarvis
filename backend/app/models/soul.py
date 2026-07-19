@@ -52,6 +52,12 @@ class SoulChangeProposal(Base):
     proposed_at = Column(DateTime(timezone=True), server_default=func.now())
     resolved_at = Column(DateTime(timezone=True))
     resolved_by = Column(String(50))  # david (manual) or system (auto-approved)
+    # H7.2 graduation ladder: link back to the PKG fact that generated this
+    # proposal (marked internalized on approval), style-vs-identity kind, and
+    # the evidence count that justified graduation.
+    source_ref = Column(String(128))
+    kind = Column(String(20), default='identity')  # 'style' (auto-approvable) | 'identity'
+    evidence_count = Column(Integer)
 
     def __repr__(self):
         return f"<SoulChangeProposal(section='{self.section}', status='{self.status}')>"

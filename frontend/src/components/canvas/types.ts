@@ -2,7 +2,7 @@
  * Canvas/Artifacts Type Definitions
  */
 
-export type ArtifactType = 'code' | 'diagram' | 'document' | 'canvas' | 'table' | 'mindmap' | 'note';
+export type ArtifactType = 'code' | 'diagram' | 'document' | 'canvas' | 'table' | 'mindmap' | 'note' | 'file';
 
 export interface Artifact {
   id: string;
@@ -25,7 +25,19 @@ export type ArtifactContent =
   | CanvasContent
   | TableContent
   | MindmapContent
-  | NoteContent;
+  | NoteContent
+  | FileContent;
+
+// Generated downloadable file (Word/PDF) — see document_generate tool.
+export interface FileContent {
+  storage_key?: string;
+  filename: string;
+  mime: string;
+  size_bytes: number;
+  format: 'docx' | 'pdf';
+  source_markdown?: string;
+  artifact_id?: string;
+}
 
 export interface CodeContent {
   code: string;
@@ -124,4 +136,6 @@ export interface CanvasCommand {
   title?: string;
   content?: ArtifactContent;
   note_id?: string;
+  /** Set when the backend persisted the artifact row (canvas_open now does). */
+  artifact_id?: string;
 }

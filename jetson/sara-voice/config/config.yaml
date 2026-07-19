@@ -14,6 +14,10 @@ audio:
   # alsa_input.usb-Generic_AIRHUG_21_AIRHUG_21-00.analog-stereo` (already
   # set on david-jetson / 10.185.1.84) so "pulse" resolves to the AIRHUG mic.
   input_device: "pulse"
+  # Wait this long for the "pulse" device to appear before falling back. Right
+  # after a service restart the user PipeWire/pulse session can be briefly
+  # unreachable; 30s wasn't always enough, so give it a minute.
+  device_wait_seconds: 60
   fallback_device: "OBSBOT"      # Camera mic fallback
   # AIRHUG reports 0 output channels on this hardware (capture-only in
   # practice) — local playback isn't possible until/unless that's confirmed
@@ -36,10 +40,18 @@ noise_gate:
 
 wake_word:
   model_path: "models/hey_sara.onnx"
-  threshold: 0.5                 # Base detection threshold
+  # Tuned live on the Jetson 2026-02-23 to stop TV/music/keyboard false wakes
+  # while keeping fast response. Do NOT drop threshold to the 0.5 default —
+  # it will false-wake with ambient audio.
+  threshold: 0.86                # Base detection threshold (field-tuned)
   ambient_threshold_boost: 0.15  # Added when music/TV detected
   refractory_seconds: 2.0        # Minimum gap between triggers
   chunk_size: 1280               # 80ms at 16kHz
+  consecutive_hits_required: 1   # Maintain fast wake response
+  min_chunk_rms: 0.010           # Keep click/keyboard false-wake filter
+  min_rms_hits_required: 1       # Require energy on detection chunk
+  allowed_model_names:
+    - "hey_sara"
 
 vad:
   model_path: "models/silero_vad.onnx"
@@ -59,12 +71,26 @@ stt:
   use_local_fallback: true       # Fall back to local on remote failure
 
 speaker_verification:
-  enabled: true
+  enabled: true                  # NeMo/speechbrain verify service verified healthy 2026-07-18
   url: "http://10.185.1.8:8002"
   endpoint: "/verify-upload"
   speaker_id: "david"
   threshold: 0.60
   timeout_seconds: 6
+  # Short near-field utterances often miss the strict threshold — allow a
+  # narrow override when the clip is short, loud, and near a match.
+  short_utterance_max_seconds: 1.8
+  short_utterance_min_confidence: 0.55
+  short_utterance_min_rms: 0.015
+  # First-turn-after-wake override: a strong "hey sara" is itself evidence the
+  # first turn is David, so accept the first turn even if the (short, cold)
+  # verification just missed. Only consulted when require_target_speaker: true.
+  first_turn_after_wake_override_enabled: true
+  first_turn_after_wake_max_age_seconds: 20.0
+  first_turn_after_wake_min_rms: 0.03
+  first_turn_after_wake_min_confidence: -1.0
+  first_turn_after_wake_min_wake_score: 0.96
+  first_turn_after_wake_min_wake_rms: 0.05
 
 conversation:
   wake_confirmation_ms: 300      # Ding/flash duration
@@ -72,6 +98,11 @@ conversation:
   processing_timeout_seconds: 30 # Max wait for backend response
   cooldown_seconds: 5            # Pause between turns
   max_turns: 20                  # Max turns before forced idle
+  allow_followup_without_wake_word: true  # Follow-up turns don't need re-wake
+  # Start permissive: attribute-but-don't-gate on speaker identity. Flip to
+  # true once the verifier is trusted to stop non-David voices driving replies.
+  require_target_speaker: false
+  target_speaker: "david"        # Expected speaker label
   goodbye_phrases:
     - "goodbye"
     - "bye sara"
@@ -131,7 +162,10 @@ desktop_bridge:
     dtype: "int16"
 
 vision:
-  enabled: true
+  # Disabled for the desk-voice phase — vision drags in InsightFace/TensorRT
+  # and the OBSBOT camera as extra failure modes. Re-enable as its own
+  # follow-up once voice is solid.
+  enabled: false
   camera_device: 0               # /dev/video0
   camera_name: "OBSBOT"          # Substring match for V4L2
   resolution: [1280, 720]        # 720p

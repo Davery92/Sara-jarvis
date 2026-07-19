@@ -1,5 +1,5 @@
 import * as Speech from 'expo-speech';
-import { Audio } from 'expo-av';
+import { Audio, InterruptionModeIOS, InterruptionModeAndroid } from 'expo-av';
 import { apiClient } from './api';
 
 class VoiceService {
@@ -11,6 +11,13 @@ class VoiceService {
   private readonly SILENCE_THRESHOLD_MS = 1500; // Stop after 1.5 seconds of silence
   private onSilenceDetected: (() => void) | null = null;
   private lastMeteringLog: number | null = null;
+  // Set true by stopSpeaking() to abort the chunk loop in speak() so it never
+  // plays chunk i+1 after a stop. Reset at the start of each speak().
+  private speakCancelled: boolean = false;
+  // Settle callback for the chunk currently playing — lets stopSpeaking()
+  // resolve the in-flight playChunkAudio() promise immediately instead of
+  // waiting for a `didJustFinish` that may never come.
+  private currentChunkSettle: (() => void) | null = null;
 
   /**
    * Initialize audio permissions for recording
@@ -32,8 +39,11 @@ class VoiceService {
         staysActiveInBackground: false,
         shouldDuckAndroid: true,
         playThroughEarpieceAndroid: false,
-        interruptionModeIOS: 1, // Mix with others
-        interruptionModeAndroid: 1,
+        // Duck other audio (music/podcasts) while Sara records rather than
+        // taking exclusive control — the old `1` was labelled "mix" but 1 is
+        // actually DoNotMix, so intent and value disagreed.
+        interruptionModeIOS: InterruptionModeIOS.DuckOthers,
+        interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
       });
 
       console.log('[Voice] Initialized successfully');
@@ -347,98 +357,128 @@ class VoiceService {
   }
 
   /**
-   * Speak a single chunk of text
+   * Fetch TTS audio for one chunk and return it as a base64 data URI.
+   * Kept separate from playback so speak() can prefetch chunk i+1 while
+   * chunk i is still playing (no dead air between chunks).
    */
-  private async speakChunk(text: string): Promise<void> {
-    try {
-      console.log('[Voice] Fetching TTS audio from backend...');
-      const token = await apiClient.getToken();
-      const headers: Record<string, string> = {
-        'Content-Type': 'application/json',
-      };
-      if (token) {
-        headers.Authorization = `Bearer ${token}`;
-      }
-
-      const response = await fetch(`${apiClient.baseURL}/api/voice-agent/speak`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ text }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`TTS failed: ${response.status}`);
-      }
-
-      console.log('[Voice] Got TTS response, creating audio blob...');
-      // Get the audio blob
-      const audioBlob = await response.blob();
-      console.log('[Voice] Audio blob size:', audioBlob.size, 'type:', audioBlob.type);
-
-      // Create a temporary file URI
-      const reader = new FileReader();
-      reader.readAsDataURL(audioBlob);
-
-      await new Promise((resolve, reject) => {
-        reader.onloadend = async () => {
-          try {
-            const base64Audio = reader.result as string;
-            console.log('[Voice] Converted to base64, length:', base64Audio.length);
-
-            // Create sound object and play
-            console.log('[Voice] Creating Audio.Sound object...');
-            const { sound } = await Audio.Sound.createAsync(
-              { uri: base64Audio },
-              { shouldPlay: true }
-            );
-            this.currentSound = sound;
-
-            console.log('[Voice] Audio sound created, starting playback...');
-
-            // Wait for playback to finish
-            sound.setOnPlaybackStatusUpdate(async (status) => {
-              if (status.isLoaded && status.didJustFinish) {
-                console.log('[Voice] Playback finished');
-                await sound.unloadAsync();
-                this.currentSound = null;
-                resolve(true);
-              }
-              if (status.isLoaded === false && 'error' in status) {
-                console.error('[Voice] Audio playback error:', status.error);
-                this.currentSound = null;
-                reject(new Error(status.error));
-              }
-            });
-          } catch (error) {
-            console.error('[Voice] Chunk playback error:', error);
-            this.currentSound = null;
-            reject(error);
-          }
-        };
-        reader.onerror = (error) => {
-          console.error('[Voice] FileReader error:', error);
-          reject(error);
-        };
-      });
-    } catch (error) {
-      console.error('[Voice] speakChunk error:', error);
-      throw error;
+  private async fetchChunkAudio(text: string): Promise<string> {
+    const token = await apiClient.getToken();
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
     }
+
+    const response = await fetch(`${apiClient.baseURL}/api/voice-agent/speak`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ text }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`TTS failed: ${response.status}`);
+    }
+
+    const audioBlob = await response.blob();
+    return await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(reader.result as string);
+      reader.onerror = () => reject(reader.error ?? new Error('FileReader error'));
+      reader.readAsDataURL(audioBlob);
+    });
   }
 
   /**
-   * Speak text using backend TTS (Orpheus)
-   * Automatically chunks long text to avoid timeouts
+   * Play one already-fetched chunk of audio and resolve when it finishes.
+   *
+   * The promise ALWAYS settles: on natural finish, on playback error, on a
+   * watchdog timeout (2x expected duration + 10s), or when stopSpeaking()
+   * calls currentChunkSettle(). This is what keeps the hands-free loop from
+   * wedging when `didJustFinish` never fires (interruption, route change,
+   * mid-chunk unload).
+   */
+  private async playChunkAudio(base64Audio: string): Promise<void> {
+    if (this.speakCancelled) return;
+
+    return await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      let timeoutHandle: NodeJS.Timeout | null = null;
+
+      const settle = (err?: Error) => {
+        if (settled) return;
+        settled = true;
+        if (timeoutHandle) {
+          clearTimeout(timeoutHandle);
+          timeoutHandle = null;
+        }
+        this.currentChunkSettle = null;
+        const sound = this.currentSound;
+        this.currentSound = null;
+        if (sound) {
+          sound.setOnPlaybackStatusUpdate(null);
+          sound.unloadAsync().catch(() => {});
+        }
+        if (err) reject(err);
+        else resolve();
+      };
+
+      // Let stopSpeaking() end this chunk immediately.
+      this.currentChunkSettle = () => settle();
+
+      Audio.Sound.createAsync({ uri: base64Audio }, { shouldPlay: true })
+        .then(({ sound, status }) => {
+          // Cancelled while the sound was being created — stop what we just started.
+          if (settled || this.speakCancelled) {
+            sound.setOnPlaybackStatusUpdate(null);
+            sound.stopAsync().catch(() => {});
+            sound.unloadAsync().catch(() => {});
+            settle();
+            return;
+          }
+
+          this.currentSound = sound;
+
+          const durationMs =
+            status && status.isLoaded && status.durationMillis ? status.durationMillis : 0;
+          // Fall back to a generous fixed budget when duration is unknown.
+          const expectedMs = durationMs > 0 ? durationMs : 15000;
+          const timeoutMs = expectedMs * 2 + 10000;
+          timeoutHandle = setTimeout(() => {
+            console.warn('[Voice] Chunk playback timed out after', timeoutMs, 'ms — forcing settle');
+            settle();
+          }, timeoutMs);
+
+          sound.setOnPlaybackStatusUpdate((s) => {
+            if (s.isLoaded && s.didJustFinish) {
+              settle();
+            } else if (s.isLoaded === false && 'error' in s && s.error) {
+              console.error('[Voice] Audio playback error:', s.error);
+              settle(new Error(String(s.error)));
+            }
+          });
+        })
+        .catch((err) => settle(err instanceof Error ? err : new Error(String(err))));
+    });
+  }
+
+  /**
+   * Speak text using backend TTS (Kokoro).
+   * Chunks long text to avoid timeouts and prefetches the next chunk while
+   * the current one plays. Always resolves (never hangs) so callers can
+   * reliably resume listening in the `finally` of their await.
    */
   async speak(text: string): Promise<void> {
+    this.speakCancelled = false;
     try {
       // Strip emojis from text before sending to TTS
       const cleanText = this.stripEmojis(text);
-      console.log('[Voice] Speaking via Orpheus TTS (emojis stripped):', cleanText);
+      console.log('[Voice] Speaking via Kokoro TTS (emojis stripped):', cleanText);
 
       // Split into chunks to avoid timeout
       const chunks = this.splitTextIntoChunks(cleanText);
       console.log(`[Voice] Split into ${chunks.length} chunks for TTS`);
+      if (chunks.length === 0) return;
 
       // Set audio to use speaker (once at the start)
       await Audio.setAudioModeAsync({
@@ -449,37 +489,71 @@ class VoiceService {
         playThroughEarpieceAndroid: false,
       });
 
-      // Process each chunk sequentially
+      // Prefetch pipeline: kick off the fetch for chunk i+1 before blocking
+      // on the playback of chunk i. `.catch(noop)` keeps an abandoned prefetch
+      // (after a stop) from surfacing as an unhandled rejection.
+      const startFetch = (t: string): Promise<string> => {
+        const p = this.fetchChunkAudio(t);
+        p.catch(() => {});
+        return p;
+      };
+
+      let nextAudioPromise: Promise<string> | null = startFetch(chunks[0]);
       for (let i = 0; i < chunks.length; i++) {
-        console.log(`[Voice] Processing chunk ${i + 1}/${chunks.length}: "${chunks[i].substring(0, 50)}..."`);
-        await this.speakChunk(chunks[i]);
+        if (this.speakCancelled) break;
+
+        const currentAudioPromise = nextAudioPromise as Promise<string>;
+        nextAudioPromise = i + 1 < chunks.length ? startFetch(chunks[i + 1]) : null;
+
+        let base64Audio: string;
+        try {
+          base64Audio = await currentAudioPromise;
+        } catch (fetchErr) {
+          console.error(`[Voice] TTS fetch failed for chunk ${i + 1}:`, fetchErr);
+          continue; // skip this chunk, keep going
+        }
+
+        if (this.speakCancelled) break;
+        console.log(`[Voice] Playing chunk ${i + 1}/${chunks.length}`);
+        await this.playChunkAudio(base64Audio);
       }
 
-      console.log('[Voice] All chunks finished, resetting audio mode for recording');
-
-      // Reset audio mode to allow recording again
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: true,
-        playsInSilentModeIOS: true,
-        staysActiveInBackground: false,
-        shouldDuckAndroid: true,
-        playThroughEarpieceAndroid: false,
-        interruptionModeIOS: 1,
-        interruptionModeAndroid: 1,
-      });
-
-      console.log('[Voice] Audio mode reset, ready for recording');
-
+      console.log('[Voice] All chunks finished');
     } catch (error) {
       console.error('[Voice] Failed to speak:', error);
-      throw error;
+    } finally {
+      // ALWAYS restore recording audio mode so continuous listening can resume,
+      // even on error or cancellation.
+      try {
+        await Audio.setAudioModeAsync({
+          allowsRecordingIOS: true,
+          playsInSilentModeIOS: true,
+          staysActiveInBackground: false,
+          shouldDuckAndroid: true,
+          playThroughEarpieceAndroid: false,
+          interruptionModeIOS: InterruptionModeIOS.DuckOthers,
+          interruptionModeAndroid: InterruptionModeAndroid.DuckOthers,
+        });
+        console.log('[Voice] Audio mode reset, ready for recording');
+      } catch (resetErr) {
+        console.error('[Voice] Failed to reset audio mode:', resetErr);
+      }
     }
   }
 
   /**
-   * Stop speaking
+   * Stop speaking. Aborts the speak() chunk loop and settles the in-flight
+   * chunk immediately so the caller's await returns promptly (and continuous
+   * listening can resume) instead of hanging on a playback callback.
    */
   async stopSpeaking(): Promise<void> {
+    this.speakCancelled = true;
+
+    // Resolve the currently-playing chunk's promise (also unloads its sound).
+    if (this.currentChunkSettle) {
+      this.currentChunkSettle();
+    }
+
     try {
       if (this.currentSound) {
         try {

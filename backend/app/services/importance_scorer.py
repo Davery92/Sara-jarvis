@@ -17,6 +17,13 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _ensure_aware(dt: datetime) -> datetime:
+    """Treat naive timestamps (from timestamp-without-timezone columns) as UTC."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 class ImportanceScore(BaseModel):
     """Calculated importance score with components"""
     episode_id: str
@@ -35,13 +42,19 @@ class ImportanceScorer:
     def __init__(self, db: Session):
         self.db = db
 
-        # Scoring weights (sum to 1.0)
+        # Scoring weights (sum to 1.0). H4 (Brain Alignment): emotion and
+        # novelty now carry weight so intense/surprising memories resist the
+        # decay-to-floor that made importance flat (avg 0.11). Recency weight
+        # is reduced to make room — an emotionally charged memory should stay
+        # important even when it's no longer recent.
         self.weights = {
-            "base": 0.3,        # Original importance
-            "recency": 0.25,     # How recent
-            "frequency": 0.20,   # Access frequency
-            "popularity": 0.15,  # Cross-reference count
-            "user_rating": 0.10  # User explicit rating
+            "base": 0.28,        # Original importance
+            "recency": 0.17,     # How recent
+            "frequency": 0.15,   # Access frequency
+            "popularity": 0.10,  # Cross-reference count
+            "user_rating": 0.10, # User explicit rating
+            "emotion": 0.10,     # Emotional intensity at encoding
+            "novelty": 0.10,     # Novelty (surprise) at encoding
         }
 
         # Decay parameters - unified 14-day baseline
@@ -60,7 +73,7 @@ class ImportanceScorer:
         Returns:
             Factor from 0.0 to 1.0 (1.0 = today, decays over time)
         """
-        days_ago = (datetime.now(timezone.utc) - created_at).days
+        days_ago = (datetime.now(timezone.utc) - _ensure_aware(created_at)).days
 
         # Exponential decay: score = e^(-λt)
         # Where λ = ln(2) / halflife
@@ -90,7 +103,7 @@ class ImportanceScorer:
 
         # Apply recency decay to frequency
         if last_accessed:
-            days_since_access = (datetime.now(timezone.utc) - last_accessed).days
+            days_since_access = (datetime.now(timezone.utc) - _ensure_aware(last_accessed)).days
             recency_weight = max(0.1, 1.0 - (days_since_access / self.frequency_decay_days))
         else:
             recency_weight = 0.5  # Default if no access data
@@ -134,6 +147,31 @@ class ImportanceScorer:
         # Normalize 1-10 scale to 0-1
         return (user_rating - 1) / 9.0
 
+    def _emotion_novelty_from_meta(self, meta: Any, emotional_tone: Any) -> tuple:
+        """Extract (emotional_intensity, novelty) from an episode's stored
+        meta/emotion fields. Defaults to neutral (0.0 emotion, 0.5 novelty)."""
+        import json as _json
+        emotion = None
+        novelty = None
+        try:
+            m = meta if isinstance(meta, dict) else (_json.loads(meta) if meta else {})
+            if isinstance(m, dict):
+                emotion = m.get("emotional_intensity")
+                novelty = m.get("novelty")
+        except Exception:
+            pass
+        if emotion is None and emotional_tone:
+            try:
+                et = emotional_tone if isinstance(emotional_tone, dict) else _json.loads(emotional_tone)
+                if isinstance(et, dict):
+                    emotion = et.get("intensity")
+            except Exception:
+                pass
+        return (
+            max(0.0, min(1.0, float(emotion))) if emotion is not None else 0.0,
+            max(0.0, min(1.0, float(novelty))) if novelty is not None else 0.5,
+        )
+
     async def calculate_importance(
         self,
         episode_id: str,
@@ -141,7 +179,9 @@ class ImportanceScorer:
         created_at: datetime,
         access_count: int,
         last_accessed: Optional[datetime],
-        user_rating: Optional[float] = None
+        user_rating: Optional[float] = None,
+        emotional_intensity: float = 0.0,
+        novelty: float = 0.5,
     ) -> ImportanceScore:
         """
         Calculate complete importance score
@@ -163,13 +203,18 @@ class ImportanceScorer:
         popularity_factor = await self.calculate_popularity_factor(episode_id)
         user_rating_factor = self.calculate_user_rating_factor(user_rating)
 
+        emotion_factor = max(0.0, min(1.0, emotional_intensity))
+        novelty_factor = max(0.0, min(1.0, novelty))
+
         # Weighted combination
         final_score = (
             self.weights["base"] * base_importance +
             self.weights["recency"] * recency_factor +
             self.weights["frequency"] * frequency_factor +
             self.weights["popularity"] * popularity_factor +
-            self.weights["user_rating"] * user_rating_factor
+            self.weights["user_rating"] * user_rating_factor +
+            self.weights["emotion"] * emotion_factor +
+            self.weights["novelty"] * novelty_factor
         )
 
         # Ensure score is in valid range
@@ -206,7 +251,9 @@ class ImportanceScorer:
                     created_at,
                     access_count,
                     last_accessed,
-                    user_rating
+                    user_rating,
+                    meta,
+                    emotional_tone
                 FROM episode
                 WHERE id = :episode_id
             """)
@@ -220,6 +267,7 @@ class ImportanceScorer:
 
             # Use current importance as base if no base_importance
             base_importance = episode.base_importance if episode.base_importance is not None else episode.importance
+            emo, nov = self._emotion_novelty_from_meta(episode.meta, episode.emotional_tone)
 
             # Calculate new score
             score = await self.calculate_importance(
@@ -228,7 +276,9 @@ class ImportanceScorer:
                 created_at=episode.created_at,
                 access_count=episode.access_count or 0,
                 last_accessed=episode.last_accessed,
-                user_rating=episode.user_rating
+                user_rating=episode.user_rating,
+                emotional_intensity=emo,
+                novelty=nov,
             )
 
             # Update episode
@@ -305,7 +355,9 @@ class ImportanceScorer:
                         created_at,
                         access_count,
                         last_accessed,
-                        user_rating
+                        user_rating,
+                        meta,
+                        emotional_tone
                     FROM episode
                     {user_filter}
                     ORDER BY id
@@ -327,6 +379,7 @@ class ImportanceScorer:
                 for episode in episodes:
                     try:
                         base_importance = episode.base_importance if episode.base_importance is not None else episode.importance
+                        emo, nov = self._emotion_novelty_from_meta(episode.meta, episode.emotional_tone)
 
                         score = await self.calculate_importance(
                             episode_id=episode.id,
@@ -334,7 +387,9 @@ class ImportanceScorer:
                             created_at=episode.created_at,
                             access_count=episode.access_count or 0,
                             last_accessed=episode.last_accessed,
-                            user_rating=episode.user_rating
+                            user_rating=episode.user_rating,
+                            emotional_intensity=emo,
+                            novelty=nov,
                         )
 
                         # Batch update

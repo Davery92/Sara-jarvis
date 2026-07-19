@@ -9,10 +9,11 @@ import RecoveryTrendChart from './RecoveryTrendChart'
 import PlanView from './PlanView'
 import NutritionGuide from './NutritionGuide'
 import PlanImporter from './PlanImporter'
+import CardioSection from './CardioSection'
 import { Upload } from 'lucide-react'
 import { APP_CONFIG } from '../../config'
 
-type FitnessView = 'dashboard' | 'food' | 'workout' | 'notes' | 'templates' | 'recovery' | 'programs' | 'plan' | 'nutrition'
+type FitnessView = 'dashboard' | 'food' | 'workout' | 'notes' | 'templates' | 'recovery' | 'programs' | 'plan' | 'nutrition' | 'cardio'
 
 export default function FitnessSection() {
   const [currentView, setCurrentView] = useState<FitnessView>('dashboard')
@@ -41,6 +42,7 @@ export default function FitnessSection() {
     { id: 'programs' as FitnessView, label: 'Programs' },
     { id: 'templates' as FitnessView, label: 'Templates' },
     { id: 'recovery' as FitnessView, label: 'Recovery' },
+    { id: 'cardio' as FitnessView, label: 'Cardio' },
     { id: 'nutrition' as FitnessView, label: 'Nutrition' },
     { id: 'food' as FitnessView, label: 'Food Log' },
     { id: 'workout' as FitnessView, label: 'Workouts' },
@@ -101,6 +103,7 @@ export default function FitnessSection() {
             <RecoveryTrendChart days={30} />
           </div>
         )}
+        {currentView === 'cardio' && <CardioSection />}
         {currentView === 'food' && <FoodLog />}
         {currentView === 'workout' && <WorkoutLog />}
         {currentView === 'notes' && <FitnessNotes />}

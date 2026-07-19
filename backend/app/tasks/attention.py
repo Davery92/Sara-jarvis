@@ -43,7 +43,15 @@ _DEFAULT_ESCALATION_COOLDOWN_HOURS = 6.0
 
 # Categories that should never escalate to a push. They live in the
 # attention queue but David reads them in the webapp, not on his phone.
-_NO_ESCALATE_CATEGORIES: set[str] = set()
+#
+# calendar_prep is time-relative: its body is frozen at creation time
+# ("starts in 36 minutes") from a 35-55 min pre-event window. Escalation only
+# fires after ESCALATION_HOURS (2h) of no reads, which is always *longer* than
+# that window — so an escalated calendar prep is guaranteed to land after the
+# event has already started/ended, pushing stale "starts in N minutes" text
+# ("it's already over"). Never escalate it; a prep reminder is worthless once
+# the event has passed. (Timely delivery happens at creation, not here.)
+_NO_ESCALATE_CATEGORIES: set[str] = {"calendar_prep"}
 
 
 @celery_app.task(
@@ -64,12 +72,23 @@ async def _escalate_unread_attention_async() -> dict:
 
     db = SessionLocal()
     try:
+        archived_confirmations = db.execute(text("""
+            UPDATE autonomy_attention_item
+            SET status = 'archived', archived_at = NOW(), updated_at = NOW()
+            WHERE status = 'new'
+              AND payload->>'prediction_grade' = 'confirmation'
+            RETURNING id
+        """)).fetchall()
+        if archived_confirmations:
+            db.commit()
+
         # Pull every still-new item older than the threshold across all users.
         rows = db.execute(text("""
             SELECT id::text, user_id, title, body, category, priority, source,
-                   dedupe_key, created_at
+                   dedupe_key, created_at, payload
             FROM autonomy_attention_item
             WHERE status = 'new'
+              AND COALESCE(payload->>'prediction_grade', '') != 'confirmation'
               AND created_at < NOW() - MAKE_INTERVAL(secs => :age_secs)
             ORDER BY user_id,
                      CASE priority
@@ -83,7 +102,11 @@ async def _escalate_unread_attention_async() -> dict:
         """), {"age_secs": int(ESCALATION_HOURS * 3600)}).fetchall()
 
         if not rows:
-            return {"checked_at": local_now().isoformat(), "escalated": 0}
+            return {
+                "checked_at": local_now().isoformat(),
+                "archived_confirmations": len(archived_confirmations),
+                "escalated": 0,
+            }
 
         per_user_count: dict[str, int] = {}
         escalated_ids: list[str] = []
@@ -186,6 +209,7 @@ async def _escalate_unread_attention_async() -> dict:
 
         return {
             "checked_at": local_now().isoformat(),
+            "archived_confirmations": len(archived_confirmations),
             "candidates": len(rows),
             "push_attempts": push_attempts,
             "push_successes": push_successes,

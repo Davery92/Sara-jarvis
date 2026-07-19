@@ -32,6 +32,18 @@ async def estimate_recipe_nutrition(
         if not name:
             continue
 
+        # R1: explicit per-ingredient macros win — from a live FatSecret pick
+        # (already scaled to the chosen quantity/serving) or manual entry. Only
+        # ingredients WITHOUT explicit macros fall through to a fresh lookup.
+        explicit_cals = ing.get("calories")
+        if explicit_cals is not None:
+            total["calories"] += float(explicit_cals or 0)
+            total["protein"] += float(ing.get("protein") or 0)
+            total["carbs"] += float(ing.get("carbs") or 0)
+            total["fats"] += float(ing.get("fats") or 0)
+            resolved_any = True
+            continue
+
         quantity = ing.get("quantity")
         unit = ing.get("unit")
         if quantity is None:

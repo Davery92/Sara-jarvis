@@ -31,17 +31,30 @@ class BackendClient:
     async def heartbeat(
         self, *, state: str, version: str, pid: int, hostname: str,
         started_at: datetime, last_tick_summary: Optional[str],
-    ) -> None:
+        want_delta: bool = False,
+    ) -> dict:
+        """Post a heartbeat. Returns the parsed response (incl. ACS1 world_delta
+        when want_delta=True). Empty dict on any error — heartbeats survive
+        backend blips."""
         payload = {
             "state": state, "version": version, "pid": pid, "hostname": hostname,
             "started_at": started_at.isoformat(),
             "last_tick_summary": last_tick_summary,
+            "want_delta": want_delta,
         }
-        r = await self._client.post("/api/acs/v2/heartbeat", json=payload)
+        try:
+            r = await self._client.post("/api/acs/v2/heartbeat", json=payload)
+        except httpx.HTTPError as e:
+            logger.warning("heartbeat network error: %s", e)
+            return {}
         if r.status_code >= 400:
             logger.warning("heartbeat rejected: %s %s", r.status_code, r.text[:200])
-        else:
-            logger.debug("heartbeat ok")
+            return {}
+        logger.debug("heartbeat ok")
+        try:
+            return r.json() or {}
+        except Exception:
+            return {}
 
     # ── activity log ──
     async def append_activity(

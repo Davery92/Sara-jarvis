@@ -11,6 +11,10 @@ class IngredientItem(BaseModel):
     protein: Optional[float] = None
     carbs: Optional[float] = None
     fats: Optional[float] = None
+    # Provenance for live-lookup ingredients (R1)
+    food_id: Optional[str] = None  # FatSecret food id
+    source: Optional[str] = None  # "fatsecret" | "user" | "manual"
+    serving_description: Optional[str] = None  # e.g. "1 cup, cooked"
 
 
 class RecipeCreate(BaseModel):

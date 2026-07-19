@@ -19,6 +19,16 @@ from app.services.unified_context import UnifiedContextSnapshot
 logger = logging.getLogger(__name__)
 
 
+def _silence_hours(snapshot: UnifiedContextSnapshot) -> float:
+    """Hours of true silence — the smaller of 'since last chat' and 'since last
+    app activity'. Being in the app (logging food, workouts) is contact, so an
+    ambient 'you've been quiet' check-in shouldn't fire just because he hasn't
+    *talked*. Conversation-recency (hours_since_last_chat) stays separate."""
+    chat = snapshot.hours_since_last_chat or 0.0
+    app = snapshot.hours_since_app_activity if snapshot.hours_since_app_activity is not None else 999.0
+    return min(chat, app)
+
+
 def build_checkin(
     snapshot: UnifiedContextSnapshot,
     changes: List[str],
@@ -32,8 +42,10 @@ def build_checkin(
         Dict with {title, message, priority, topic} or None if no check-in needed.
     """
     # ── Gate checks ──
-    if snapshot.hours_since_last_chat < 2.0:
-        return None  # Too recent
+    # Silence, not conversation-recency: if he's been active in the app in the
+    # last 2h he isn't "quiet" — don't fire an ambient check-in at him.
+    if _silence_hours(snapshot) < 2.0:
+        return None  # Too recent (talked or in-app)
 
     if snapshot.activity_state == "SLEEPING":
         return None
@@ -101,7 +113,7 @@ def build_checkin(
     # Active project reference (makes it personal)
     if snapshot.active_projects and not has_upcoming:
         project = snapshot.active_projects[0]
-        hours = snapshot.hours_since_last_chat
+        hours = _silence_hours(snapshot)
         if hours > 4:
             parts.append(f"You've been heads-down for {hours:.0f} hours. How's {project} going?")
 
@@ -132,7 +144,7 @@ def _build_title(
     if snapshot.activity_state == "FOCUSED_WORK":
         return "Quick update"
 
-    hours = snapshot.hours_since_last_chat
+    hours = _silence_hours(snapshot)
     if hours > 6:
         return "Checking in"
 

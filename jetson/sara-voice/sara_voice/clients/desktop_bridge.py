@@ -34,15 +34,17 @@ class DesktopBridge:
 
         self._server = None
         self._clients: set = set()
+        self._client_keys: dict = {}
         self._running = False
 
         # State
         self._desktop_playing = False
         self._last_echo_report: float = 0
         self._listening_enabled = True
+        self._active_utterance_id: str | None = None
 
         # Callbacks
-        self._on_playback_complete: list[asyncio.Future] = []
+        self._on_playback_complete: list[tuple[asyncio.Future, str | None]] = []
         self._on_barge_in_callback = None
         self._on_echo_state_callback = None
         self._on_listening_change_callback = None
@@ -62,11 +64,35 @@ class DesktopBridge:
         )
         logger.info("Desktop bridge WebSocket server started on %s:%d", self._host, self._port)
 
+    @staticmethod
+    def _remote_host(remote_address) -> str:
+        """Extract host key from websocket remote_address."""
+        if isinstance(remote_address, (tuple, list)) and remote_address:
+            return str(remote_address[0])
+        return str(remote_address)
+
     async def _handle_client(self, websocket, path=None):
         """Handle a connected desktop client."""
-        self._clients.add(websocket)
         client_addr = websocket.remote_address
-        logger.info("Desktop client connected: %s", client_addr)
+        client_key = str(client_addr)
+
+        # Enforce one active desktop bridge connection per host.
+        replaced = 0
+        for existing in list(self._clients):
+            if self._client_keys.get(existing) == client_key and existing is not websocket:
+                replaced += 1
+                try:
+                    await existing.close(code=4001, reason="replaced_by_new_connection")
+                except Exception:
+                    pass
+                self._clients.discard(existing)
+                self._client_keys.pop(existing, None)
+        if replaced:
+            logger.info("Closed %d stale desktop client(s) for host %s", replaced, client_key)
+
+        self._clients.add(websocket)
+        self._client_keys[websocket] = client_key
+        logger.info("Desktop client connected: %s (active=%d)", client_addr, len(self._clients))
         await self._send_listening_status(websocket)
 
         try:
@@ -76,7 +102,23 @@ class DesktopBridge:
             logger.debug("Desktop client disconnected: %s (%s)", client_addr, e)
         finally:
             self._clients.discard(websocket)
-            logger.info("Desktop client removed: %s", client_addr)
+            self._client_keys.pop(websocket, None)
+            logger.info("Desktop client removed: %s (active=%d)", client_addr, len(self._clients))
+
+    async def _resolve_playback_futures(self, utterance_id: str | None):
+        """Resolve playback waiters matching this utterance (or all if unscoped)."""
+        pending: list[tuple[asyncio.Future, str | None]] = []
+        for fut, expected_utterance in self._on_playback_complete:
+            if fut.done():
+                continue
+
+            if utterance_id and expected_utterance and expected_utterance != utterance_id:
+                pending.append((fut, expected_utterance))
+                continue
+
+            fut.set_result(True)
+
+        self._on_playback_complete = pending
 
     async def _handle_message(self, websocket, message: str | bytes):
         """Process incoming message from desktop."""
@@ -91,14 +133,59 @@ class DesktopBridge:
 
         event_type = data.get("event", data.get("type", ""))
 
-        if event_type == "playback_complete":
-            logger.debug("Desktop: playback complete")
+        if event_type == "playback_started":
+            utterance_id = data.get("utterance_id")
+            backend = data.get("backend")
+            self._desktop_playing = True
+            if utterance_id:
+                self._active_utterance_id = utterance_id
+            logger.info(
+                "Desktop playback started from %s utterance=%s backend=%s",
+                websocket.remote_address,
+                utterance_id or "unknown",
+                backend or "unknown",
+            )
+
+        elif event_type == "chunk_received":
+            # Verbose but useful while troubleshooting no-audio cases.
+            logger.debug(
+                "Desktop chunk received: utterance=%s idx=%s bytes=%s depth=%s",
+                data.get("utterance_id") or self._active_utterance_id,
+                data.get("chunk_index"),
+                data.get("chunk_bytes"),
+                data.get("queue_depth"),
+            )
+
+        elif event_type == "playback_error":
+            logger.warning(
+                "Desktop playback error: utterance=%s reason=%s error=%s backend=%s",
+                data.get("utterance_id") or self._active_utterance_id,
+                data.get("reason"),
+                data.get("error"),
+                data.get("backend"),
+            )
+
+        elif event_type == "playback_complete":
+            utterance_id = data.get("utterance_id")
+            reason = data.get("reason", "")
+            chunk_count = data.get("chunk_count")
+            total_bytes = data.get("total_bytes")
+            duration_ms = data.get("duration_ms")
+            backend = data.get("backend")
+
+            logger.info(
+                "Desktop playback complete from %s utterance=%s reason=%s chunks=%s bytes=%s duration_ms=%s backend=%s",
+                websocket.remote_address,
+                utterance_id or self._active_utterance_id or "unknown",
+                reason,
+                chunk_count,
+                total_bytes,
+                duration_ms,
+                backend,
+            )
             self._desktop_playing = False
-            # Resolve waiting futures
-            for fut in self._on_playback_complete:
-                if not fut.done():
-                    fut.set_result(True)
-            self._on_playback_complete.clear()
+            self._active_utterance_id = None
+            await self._resolve_playback_futures(utterance_id)
             if self._on_echo_state_callback:
                 await self._on_echo_state_callback(False)
 
@@ -111,6 +198,7 @@ class DesktopBridge:
         elif event_type == "stop_confirmed":
             logger.debug("Desktop: stop confirmed")
             self._desktop_playing = False
+            self._active_utterance_id = None
 
         elif event_type == "set_listening":
             enabled = bool(data.get("enabled", True))
@@ -151,11 +239,21 @@ class DesktopBridge:
         else:
             logger.debug("Desktop event: %s", event_type)
 
-    async def send_audio(self, audio: np.ndarray):
+    async def send_audio(self, audio: np.ndarray, utterance_id: str | None = None):
         """Send PCM audio chunk to desktop for playback."""
         if not self._clients:
             logger.debug("No desktop clients connected, dropping audio")
             return
+
+        if utterance_id and utterance_id != self._active_utterance_id:
+            self._active_utterance_id = utterance_id
+            await self.send_event({
+                "event": "playback_session",
+                "utterance_id": utterance_id,
+                "sample_rate": self._sample_rate,
+                "channels": self._channels,
+                "dtype": self._dtype,
+            })
 
         # Send as binary (int16 PCM bytes)
         audio_bytes = audio.astype(np.int16).tobytes()
@@ -169,6 +267,8 @@ class DesktopBridge:
                 disconnected.add(ws)
 
         self._clients -= disconnected
+        for ws in disconnected:
+            self._client_keys.pop(ws, None)
         self._desktop_playing = True
 
     async def _send_listening_status(self, websocket):
@@ -194,6 +294,8 @@ class DesktopBridge:
             except Exception:
                 disconnected.add(ws)
         self._clients -= disconnected
+        for ws in disconnected:
+            self._client_keys.pop(ws, None)
 
     async def send_event(self, event: dict):
         """Send a JSON event to all connected desktop clients."""
@@ -205,6 +307,8 @@ class DesktopBridge:
             except Exception:
                 disconnected.add(ws)
         self._clients -= disconnected
+        for ws in disconnected:
+            self._client_keys.pop(ws, None)
 
     async def send_conversation_start(self):
         """Notify desktop that a voice conversation has started."""
@@ -222,8 +326,9 @@ class DesktopBridge:
         """Tell desktop to immediately stop audio playback (barge-in)."""
         await self.send_event({"event": "stop_playback"})
         self._desktop_playing = False
+        self._active_utterance_id = None
 
-    async def wait_for_playback_complete(self, timeout: float = 60.0) -> bool:
+    async def wait_for_playback_complete(self, timeout: float = 60.0, utterance_id: str | None = None) -> bool:
         """Wait for desktop to report playback complete."""
         if not self._clients:
             return True  # No clients, nothing to wait for
@@ -232,13 +337,24 @@ class DesktopBridge:
             return True
 
         fut = asyncio.get_event_loop().create_future()
-        self._on_playback_complete.append(fut)
+        self._on_playback_complete.append((fut, utterance_id))
         try:
             await asyncio.wait_for(fut, timeout=timeout)
             return True
         except asyncio.TimeoutError:
-            logger.warning("Playback complete timeout after %.1fs", timeout)
+            logger.warning(
+                "Playback complete timeout after %.1fs (utterance=%s active=%s)",
+                timeout,
+                utterance_id,
+                self._active_utterance_id,
+            )
             return False
+        finally:
+            self._on_playback_complete = [
+                (pending_fut, pending_id)
+                for pending_fut, pending_id in self._on_playback_complete
+                if pending_fut is not fut
+            ]
 
     def set_echo_state_callback(self, callback):
         """Set callback for echo state changes: async def callback(is_playing: bool)."""
@@ -279,6 +395,7 @@ class DesktopBridge:
             except Exception:
                 pass
         self._clients.clear()
+        self._client_keys.clear()
         logger.info("Desktop bridge stopped")
 
     @property

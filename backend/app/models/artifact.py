@@ -30,7 +30,7 @@ class Artifact(Base):
     __tablename__ = 'artifacts'
 
     id = Column(String(36), primary_key=True)
-    user_id = Column(String(36), ForeignKey('users.id'), nullable=False)
+    user_id = Column(String(36), ForeignKey('app_user.id'), nullable=False)
     conversation_id = Column(String(36), nullable=True)  # Optional link to conversation
     episode_id = Column(String(36), nullable=True)  # Optional link to specific message
     artifact_type = Column(String(50), nullable=False)

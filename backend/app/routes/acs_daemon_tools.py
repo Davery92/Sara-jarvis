@@ -1059,6 +1059,26 @@ class UpdateGoalIn(BaseModel):
                                    description="Required when closing: what came of it")
 
 
+async def _resolve_goal_id(db, id_or_prefix: str) -> str:
+    """Resolve a full goal UUID or a shortened (e.g. 8-char) prefix to a full UUID.
+
+    The daemon sometimes echoes back shortened goal IDs it saw in a prompt, so
+    a bare `id = :id` lookup 500s on anything shorter than a full UUID.
+    """
+    matches = (await db.execute(
+        text("SELECT id FROM sara_goal WHERE id::text LIKE :prefix || '%'"),
+        {"prefix": id_or_prefix},
+    )).scalars().all()
+    if not matches:
+        raise HTTPException(status_code=404, detail=f"goal {id_or_prefix} not found")
+    if len(matches) > 1:
+        raise HTTPException(
+            status_code=409,
+            detail=f"goal id prefix {id_or_prefix} is ambiguous ({len(matches)} matches)",
+        )
+    return str(matches[0])
+
+
 @router.post("/update_goal", response_model=GoalRow,
              dependencies=[Depends(verify_daemon_token)])
 async def update_goal_tool(payload: UpdateGoalIn) -> GoalRow:
@@ -1067,9 +1087,10 @@ async def update_goal_tool(payload: UpdateGoalIn) -> GoalRow:
     import json as _json
     async_session = get_async_session_factory()
     async with async_session() as db:
+        goal_id = await _resolve_goal_id(db, payload.id)
         row = (await db.execute(
             text(f"SELECT {_GOAL_COLS} FROM sara_goal WHERE id = :id"),
-            {"id": payload.id},
+            {"id": goal_id},
         )).mappings().first()
         if not row:
             raise HTTPException(status_code=404, detail=f"goal {payload.id} not found")
@@ -1109,7 +1130,7 @@ async def update_goal_tool(payload: UpdateGoalIn) -> GoalRow:
                 RETURNING {_GOAL_COLS}
             """),
             {
-                "id": payload.id,
+                "id": goal_id,
                 "progress": _json.dumps(progress),
                 "artifacts": _json.dumps(artifacts),
                 "plan": _json.dumps(plan),

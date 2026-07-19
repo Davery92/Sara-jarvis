@@ -9,10 +9,33 @@ Runs as a Celery task every 30 minutes during waking hours.
 
 import logging
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from typing import List, Dict, Any
 
 logger = logging.getLogger(__name__)
+
+
+async def _should_generate(db, generator: str, stimulus_key: str) -> bool:
+    try:
+        from app.services.habituation import should_generate
+        return await should_generate(db, generator, stimulus_key)
+    except Exception as e:
+        logger.debug(f"habituation check skipped for {generator}:{stimulus_key}: {e}")
+        return True
+
+
+async def _write_silent_confirmation(user_id: str, count: int) -> None:
+    if count <= 0:
+        return
+    try:
+        from app.services.context_writer import update_fields
+        await update_fields(
+            user_id,
+            source="predictive_engine",
+            last_anticipation_note=f"{count} routine prediction confirmation(s) suppressed; only deviations surface.",
+        )
+    except Exception as e:
+        logger.debug(f"silent prediction confirmation write skipped: {e}")
 
 
 async def generate_predictions(user_id: str) -> List[Dict[str, Any]]:
@@ -27,7 +50,9 @@ async def generate_predictions(user_id: str) -> List[Dict[str, Any]]:
 
     async_session = get_async_session_factory()
     predictions = []
+    silent_confirmations = 0
     now = local_now()
+    now_local_naive = now.replace(tzinfo=None)
     today_name = now.strftime("%A").lower()
     current_hour = now.hour
 
@@ -49,14 +74,8 @@ async def generate_predictions(user_id: str) -> List[Dict[str, Any]]:
         if next_block:
             label, confidence, version = next_block
             if confidence >= 0.65:
-                predictions.append({
-                    "type": "next_block_prediction",
-                    "title": "Coming up",
-                    "message": f"You're likely to be doing: {label}",
-                    "confidence": confidence,
-                    "priority": "low",
-                    "source": f"ml:next_block@{version}",
-                })
+                # Confirmation of an expected next block is ambient context, not a candidate.
+                silent_confirmations += 1
     except Exception as e:
         logger.debug(f"next_block prediction skipped: {e}")
 
@@ -83,14 +102,8 @@ async def generate_predictions(user_id: str) -> List[Dict[str, Any]]:
                 event_hour = start_time.hour if start_time else 0
                 # Only predict if the event hasn't happened yet today
                 if event_hour > current_hour:
-                    predictions.append({
-                        "type": "routine_prediction",
-                        "title": f"Usual {today_name} activity",
-                        "message": f"You typically have \"{title}\" on {today_name}s around {event_hour}:00 ({count} times in 90 days).",
-                        "confidence": min(0.9, 0.4 + count * 0.1),
-                        "priority": "low",
-                        "predicted_time": f"{event_hour}:00",
-                    })
+                    # On-schedule recurring calendar activity is a confirmation. Keep it silent.
+                    silent_confirmations += 1
         except Exception as e:
             logger.debug(f"Calendar pattern prediction failed: {e}")
 
@@ -109,14 +122,20 @@ async def generate_predictions(user_id: str) -> List[Dict[str, Any]]:
 
             for row in upcoming:
                 event_id, title, start_time, desc = row
-                hours_until = (start_time.replace(tzinfo=None) - datetime.now(timezone.utc)).total_seconds() / 3600
+                hours_until = (start_time.replace(tzinfo=None) - now_local_naive).total_seconds() / 3600
                 if desc and len(desc) > 20:
+                    stimulus_key = f"prep:{event_id}"
+                    if not await _should_generate(db, "predictive_engine", stimulus_key):
+                        continue
                     predictions.append({
                         "type": "preparation_needed",
                         "title": f"Prepare for: {title}",
                         "message": f"\"{title}\" is in {hours_until:.0f} hours. You might want to review your notes or prep.",
                         "confidence": 0.7,
                         "priority": "normal",
+                        "prediction_grade": "novel",
+                        "stimulus_key": stimulus_key,
+                        "generator": "predictive_engine",
                     })
         except Exception as e:
             logger.debug(f"Event prep prediction failed: {e}")
@@ -144,20 +163,32 @@ async def generate_predictions(user_id: str) -> List[Dict[str, Any]]:
                         weather = wm.get("weather_condition", "")
                         temp_outside = wm.get("temperature_outside")
                         if weather and any(w in weather.lower() for w in ["rain", "storm", "snow", "thunder"]):
+                            stimulus_key = f"weather:{title}:{start_time.date() if start_time else 'unknown'}"
+                            if not await _should_generate(db, "predictive_engine", stimulus_key):
+                                continue
                             predictions.append({
                                 "type": "weather_alert",
                                 "title": f"Weather alert for: {title}",
                                 "message": f"Weather is \"{weather}\" — you have \"{title}\" coming up. Consider an indoor alternative or bring gear.",
                                 "confidence": 0.8,
                                 "priority": "normal",
+                                "prediction_grade": "deviation",
+                                "stimulus_key": stimulus_key,
+                                "generator": "predictive_engine",
                             })
                         elif temp_outside is not None and (temp_outside > 95 or temp_outside < 25):
+                            stimulus_key = f"temperature:{title}:{start_time.date() if start_time else 'unknown'}"
+                            if not await _should_generate(db, "predictive_engine", stimulus_key):
+                                continue
                             predictions.append({
                                 "type": "weather_alert",
                                 "title": f"Temperature alert for: {title}",
                                 "message": f"It's {temp_outside}°F outside — dress accordingly for \"{title}\".",
                                 "confidence": 0.7,
                                 "priority": "low",
+                                "prediction_grade": "deviation",
+                                "stimulus_key": stimulus_key,
+                                "generator": "predictive_engine",
                             })
                     except Exception:
                         pass
@@ -180,14 +211,20 @@ async def generate_predictions(user_id: str) -> List[Dict[str, Any]]:
 
             for row in travel_events:
                 title, start_time, location = row
-                hours_until = (start_time.replace(tzinfo=None) - datetime.now(timezone.utc)).total_seconds() / 3600
+                hours_until = (start_time.replace(tzinfo=None) - now_local_naive).total_seconds() / 3600
                 if hours_until < 1.5:
+                    stimulus_key = f"travel:{title}:{start_time.isoformat() if start_time else 'unknown'}"
+                    if not await _should_generate(db, "predictive_engine", stimulus_key):
+                        continue
                     predictions.append({
                         "type": "travel_reminder",
                         "title": f"Time to leave for: {title}",
                         "message": f"\"{title}\" at {location} starts in {hours_until:.0f}h. You may want to start heading out.",
                         "confidence": 0.65,
                         "priority": "normal",
+                        "prediction_grade": "novel",
+                        "stimulus_key": stimulus_key,
+                        "generator": "predictive_engine",
                     })
         except Exception as e:
             logger.debug(f"Travel prediction failed: {e}")
@@ -223,14 +260,8 @@ async def generate_predictions(user_id: str) -> List[Dict[str, Any]]:
                     best = (minutes_until, description, confidence)
 
             if best:
-                minutes_until, description, confidence = best
-                predictions.append({
-                    "type": "learned_pattern",
-                    "title": "Usual pattern coming up",
-                    "message": f"{description} — usually around this time (learned pattern, {confidence:.0%} confidence).",
-                    "confidence": min(0.85, confidence),
-                    "priority": "low",
-                })
+                # The plan's predictive-coding flip: a pattern happening on time is a confirmation.
+                silent_confirmations += 1
         except Exception as e:
             logger.debug(f"Behavioral pattern prediction failed: {e}")
 
@@ -249,19 +280,12 @@ async def generate_predictions(user_id: str) -> List[Dict[str, Any]]:
 
             upcoming = await asyncio.to_thread(_fetch_sync)
             if upcoming:
-                predictions.append({
-                    "type": "rhythm_window",
-                    "title": "Rhythm window opening",
-                    "message": (
-                        f"Your {upcoming['label']} is usually in about {upcoming['minutes_until']} min "
-                        f"({upcoming['confidence']:.0%} confidence, learned rhythm)."
-                    ),
-                    "confidence": min(0.75, upcoming["confidence"]),
-                    "priority": "low",
-                })
+                # Rhythm windows opening as expected are ambient context, not notifications.
+                silent_confirmations += 1
         except Exception as e:
             logger.debug(f"Rhythm window prediction failed: {e}")
 
+    await _write_silent_confirmation(user_id, silent_confirmations)
     return predictions[:6]  # Max 6 predictions per check
 
 
@@ -281,6 +305,11 @@ async def send_predictions(user_id: str):
                 category="checkin",
                 topic=f"prediction:{hash(pred['title']) % 100000}",
                 source=pred.get("source", "predictive_engine"),
+                payload={
+                    "prediction_grade": pred.get("prediction_grade", "novel"),
+                    "stimulus_key": pred.get("stimulus_key") or f"prediction:{pred.get('type', 'unknown')}:{pred.get('title', '')}",
+                    "generator": pred.get("generator", "predictive_engine"),
+                },
             )
 
     # Inject predictions into daily brief context layer

@@ -39,6 +39,7 @@ class PersonalityContext:
     emotional_state: str = ""  # Sara's current emotional tone + intensity
     memory_nudges: List[str] = field(default_factory=list)
     calibration_directives: List[str] = field(default_factory=list)
+    relationship_directive: str = ""  # H7.3: familiarity from relationship phase
 
     def render(self) -> str:
         """Render the full personality context block for system prompt injection."""
@@ -52,6 +53,9 @@ class PersonalityContext:
 
         if self.emotional_modulation:
             lines.append(f"Emotional awareness: {self.emotional_modulation}")
+
+        if self.relationship_directive:
+            lines.append(f"Familiarity: {self.relationship_directive}")
 
         verbosity_map = {
             "ultra_brief": "Keep responses very short (1-2 sentences max). Only essential info.",
@@ -220,6 +224,9 @@ def build_personality_context(
     # Sara's emotional state (from working memory)
     sara_emotional_tone: Optional[str] = None,
     sara_emotional_intensity: Optional[float] = None,
+    # H7.3: relationship phase (early → developing → established → deep)
+    relationship_phase: Optional[str] = None,
+    relationship_duration: Optional[str] = None,
 ) -> PersonalityContext:
     """
     Build the full adaptive personality context.
@@ -257,7 +264,28 @@ def build_personality_context(
     if memory_nudges:
         ctx.memory_nudges = memory_nudges[:3]
 
+    # 7. RELATIONSHIP PHASE (H7.3) — familiarity deepens voice over months:
+    # more shorthand, more teasing license, less self-explanation.
+    ctx.relationship_directive = _build_relationship_directive(relationship_phase, relationship_duration)
+
     return ctx
+
+
+_RELATIONSHIP_DIRECTIVES = {
+    "early": "Still getting to know David — explain your reasoning, avoid presumptuous shorthand, earn trust.",
+    "developing": "You know David reasonably well — some shorthand on familiar topics, light warmth, less over-explaining.",
+    "established": "You know David well — use shorthand freely on known topics, gentle teasing is welcome, don't re-explain what he already knows.",
+    "deep": "You and David go way back — deep shorthand, easy teasing, assume shared context, act on initiative without over-justifying.",
+}
+
+
+def _build_relationship_directive(phase: Optional[str], duration: Optional[str]) -> str:
+    if not phase:
+        return ""
+    base = _RELATIONSHIP_DIRECTIVES.get(phase, "")
+    if base and duration:
+        return f"{base} (You've known each other {duration}.)"
+    return base
 
 
 def _build_emotional_modulation(

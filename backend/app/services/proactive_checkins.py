@@ -94,7 +94,7 @@ async def _checkins_sent_today(db, user_id: str) -> int:
 
 
 async def _send(user_id: str, *, title: str, message: str, category: str,
-                topic: str, priority: str = "normal") -> dict:
+                topic: str, priority: str = "normal", stimulus_key: str | None = None) -> dict:
     from app.services.unified_notification import send_notification
     # No priority floor here (SARA_UNLEASHED Phase A.3): whether this actually
     # buzzes the phone is decided once, centrally, by
@@ -110,6 +110,11 @@ async def _send(user_id: str, *, title: str, message: str, category: str,
         category=category,
         source="proactive_checkin",
         extra_push_data={"target": "chat"},
+        payload={
+            "prediction_grade": "novel",
+            "stimulus_key": stimulus_key or topic,
+            "generator": "proactive_checkins",
+        },
     )
 
 
@@ -141,6 +146,13 @@ async def run_followup_sweep(user_id: str) -> dict:
 
         t = threads[0]
         message = (t.get("suggested_followup") or "").strip() or f"Wanted to follow up on {t['topic']}."
+        stimulus_key = f"followup:{t['id']}"
+        try:
+            from app.services.habituation import should_generate
+            if not await should_generate(db, "proactive_checkins", stimulus_key):
+                return {"skipped": "habituated", "stimulus_key": stimulus_key}
+        except Exception as e:
+            logger.debug(f"[checkin] habituation check skipped: {e}")
         res = await _send(
             user_id,
             title="Hey David",
@@ -148,6 +160,7 @@ async def run_followup_sweep(user_id: str) -> dict:
             category="followup",
             topic=f"followup:{t['id'][:12]}",
             priority="normal",
+            stimulus_key=stimulus_key,
         )
         if res.get("sent"):
             await record_mention(t["id"], db)

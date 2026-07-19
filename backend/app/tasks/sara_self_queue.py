@@ -125,7 +125,54 @@ async def _promote_async() -> dict:
         )).mappings().first()
 
         if not row:
-            return {"status": "skip", "reason": "no_stale_interest"}
+            # ACS3 (Brain Alignment): no stale interest — fall back to a stalled
+            # goal so idle compute still becomes progress, not self-narration.
+            goal = (await db.execute(
+                text(
+                    """
+                    SELECT id, title, last_progress_at
+                    FROM sara_goal
+                    WHERE status = 'open'
+                      AND (last_progress_at IS NULL
+                           OR last_progress_at < NOW() - INTERVAL '3 days')
+                      AND NOT EXISTS (
+                          SELECT 1 FROM sara_inbox b
+                          WHERE b.created_by = 'sara_self'
+                            AND b.created_at > NOW() - make_interval(hours => :cooldown_hours)
+                            AND b.prompt LIKE '%[from_goal:' || id::text || ']%'
+                      )
+                    ORDER BY last_progress_at ASC NULLS FIRST
+                    LIMIT 1
+                    """
+                ),
+                {"cooldown_hours": SAME_INTEREST_COOLDOWN_HOURS},
+            )).mappings().first()
+            if not goal:
+                return {"status": "skip", "reason": "no_stale_interest_or_goal"}
+
+            goal_id = str(goal["id"])
+            last = goal["last_progress_at"]
+            prompt_body = (
+                f"One of your goals has stalled: “{goal['title']}”.\n\n"
+                f"It last moved {('at ' + last.isoformat()) if last else 'never'}. "
+                "Take ONE concrete step now — research a piece of it and write a short "
+                "note, or re-plan it — then update_goal with an honest progress_note. "
+                "If it no longer matters, abandon it with a reason."
+                f"\n\n[from_goal:{goal_id}]"
+            )
+            await db.execute(
+                text(
+                    """
+                    INSERT INTO sara_inbox (created_by, urgency, prompt, context, status)
+                    VALUES ('sara_self', 'low', :prompt, :ctx, 'queued')
+                    """
+                ),
+                {"prompt": prompt_body,
+                 "ctx": f"Auto-promoted from a stalled goal (last progress {last or 'never'})."},
+            )
+            await db.commit()
+            logger.info("self-queue: promoted stalled goal %s (%r) to inbox", goal_id, goal["title"])
+            return {"status": "promoted_goal", "goal_id": goal_id, "title": goal["title"]}
 
         interest_id = str(row["id"])
         why = (row["why"] or "").strip() or (

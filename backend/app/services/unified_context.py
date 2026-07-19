@@ -39,6 +39,15 @@ class UnifiedContextSnapshot:
     has_chatted_today: bool = False
     is_past_bedtime: bool = False
 
+    # ── App Activity (contact, not conversation) ──
+    app_active: bool = False              # any client heartbeating with visible=true
+    app_platform: Optional[str] = None    # "web" | "ios" (most recent visible client)
+    app_current_view: Optional[str] = None  # canonical view name, e.g. "fitness"
+    app_view_since: Optional[str] = None  # ISO — when the current view was entered
+    last_app_activity_at: Optional[str] = None  # ISO — last visible heartbeat OR domain action
+    hours_since_app_activity: float = 999.0     # derived, refreshed like hours_since_last_chat
+    app_views_today: Optional[str] = None       # rollup: "fitness 41m, recipes 12m, chat 8m"
+
     # ── Body State ──
     alertness: float = 0.5
     stress_load: float = 0.3

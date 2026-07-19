@@ -8,23 +8,48 @@ import {
   RefreshControl,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import Markdown from 'react-native-markdown-display';
 import { colors, spacing, fontSizes } from '../../styles/theme';
 import apiClient from '../../services/api';
 
+interface ActivityEntry {
+  id: string;
+  created_at: string;
+  kind: string;
+  summary: string;
+  body?: string | null;
+}
+
+interface Focus {
+  topic: string | null;
+  why: string | null;
+  set_at: string | null;
+  updated_at: string | null;
+}
+
 interface ACSSnapshot {
-  daily_plan?: string;
+  focus: Focus;
+  recent_activity: ActivityEntry[];
+}
+
+function timeAgo(dateStr: string | null | undefined): string {
+  if (!dateStr) return '';
+  const diffMins = Math.floor((Date.now() - new Date(dateStr).getTime()) / 60000);
+  if (diffMins < 1) return 'just now';
+  if (diffMins < 60) return `${diffMins}m ago`;
+  const diffHours = Math.floor(diffMins / 60);
+  if (diffHours < 24) return `${diffHours}h ago`;
+  return `${Math.floor(diffHours / 24)}d ago`;
 }
 
 export default function DailyPlanScreen() {
-  const [plan, setPlan] = useState<string | null>(null);
+  const [snapshot, setSnapshot] = useState<ACSSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
-  const fetchPlan = useCallback(async () => {
+  const fetchSnapshot = useCallback(async () => {
     try {
-      const data = await apiClient.get<ACSSnapshot>('/api/acs/snapshot');
-      setPlan((data as ACSSnapshot).daily_plan || null);
+      const data = await apiClient.get<ACSSnapshot>('/api/acs/v2/snapshot');
+      setSnapshot(data as ACSSnapshot);
     } catch {
       // graceful degradation
     } finally {
@@ -34,12 +59,12 @@ export default function DailyPlanScreen() {
   }, []);
 
   useEffect(() => {
-    fetchPlan();
-  }, [fetchPlan]);
+    fetchSnapshot();
+  }, [fetchSnapshot]);
 
   const onRefresh = () => {
     setRefreshing(true);
-    fetchPlan();
+    fetchSnapshot();
   };
 
   if (loading) {
@@ -49,6 +74,9 @@ export default function DailyPlanScreen() {
       </View>
     );
   }
+
+  const focus = snapshot?.focus;
+  const activity = snapshot?.recent_activity || [];
 
   return (
     <SafeAreaView style={styles.container} edges={['bottom']}>
@@ -63,15 +91,34 @@ export default function DailyPlanScreen() {
           />
         }
       >
-        {plan ? (
-          <Markdown style={markdownStyles}>{plan}</Markdown>
+        {focus?.topic ? (
+          <View style={styles.focusCard}>
+            <Text style={styles.focusLabel}>{'🎯'} Currently Focused On</Text>
+            <Text style={styles.focusTopic}>{focus.topic}</Text>
+            {focus.why ? <Text style={styles.focusWhy}>{focus.why}</Text> : null}
+            {focus.set_at ? (
+              <Text style={styles.focusTime}>since {timeAgo(focus.set_at)}</Text>
+            ) : null}
+          </View>
         ) : (
           <View style={styles.emptyContainer}>
-            <Text style={styles.emptyEmoji}>{'\uD83D\uDCCB'}</Text>
-            <Text style={styles.emptyTitle}>No Plan Yet</Text>
+            <Text style={styles.emptyEmoji}>{'🎯'}</Text>
+            <Text style={styles.emptyTitle}>No Active Focus</Text>
             <Text style={styles.emptySubtitle}>
-              Sara generates a new plan each morning at 7 AM.
+              Sara hasn't set a focus for herself right now.
             </Text>
+          </View>
+        )}
+
+        {activity.length > 0 && (
+          <View style={styles.activitySection}>
+            <Text style={styles.sectionLabel}>Recent Activity</Text>
+            {activity.map(entry => (
+              <View key={entry.id} style={styles.activityRow}>
+                <Text style={styles.activitySummary}>{entry.summary || entry.kind}</Text>
+                <Text style={styles.activityTime}>{timeAgo(entry.created_at)}</Text>
+              </View>
+            ))}
           </View>
         )}
       </ScrollView>
@@ -97,11 +144,43 @@ const styles = StyleSheet.create({
     padding: spacing.lg,
     paddingBottom: spacing.xl * 2,
   },
+  focusCard: {
+    backgroundColor: colors.surface,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: spacing.md,
+    marginBottom: spacing.lg,
+  },
+  focusLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.textMuted,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginBottom: spacing.sm,
+  },
+  focusTopic: {
+    fontSize: fontSizes.lg,
+    fontWeight: '600',
+    color: colors.text,
+    marginBottom: spacing.xs,
+  },
+  focusWhy: {
+    fontSize: 14,
+    color: colors.textSecondary,
+    lineHeight: 20,
+  },
+  focusTime: {
+    fontSize: 12,
+    color: colors.textMuted,
+    marginTop: spacing.sm,
+  },
   emptyContainer: {
-    flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    paddingTop: 100,
+    paddingTop: 60,
+    paddingBottom: spacing.lg,
   },
   emptyEmoji: {
     fontSize: 48,
@@ -118,64 +197,33 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     textAlign: 'center',
   },
+  activitySection: {
+    marginTop: spacing.md,
+  },
+  sectionLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.textMuted,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginBottom: spacing.sm,
+  },
+  activityRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: spacing.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+  },
+  activitySummary: {
+    flex: 1,
+    fontSize: 13,
+    color: colors.text,
+    marginRight: spacing.sm,
+  },
+  activityTime: {
+    fontSize: 11,
+    color: colors.textMuted,
+  },
 });
-
-const markdownStyles = {
-  body: {
-    color: colors.text,
-    fontSize: 15,
-    lineHeight: 24,
-  },
-  heading2: {
-    fontSize: fontSizes.xl,
-    fontWeight: '600' as const,
-    color: colors.text,
-    marginTop: spacing.md,
-    marginBottom: spacing.sm,
-  },
-  heading3: {
-    fontSize: fontSizes.lg,
-    fontWeight: '600' as const,
-    color: colors.text,
-    marginTop: spacing.md,
-    marginBottom: spacing.xs,
-  },
-  paragraph: {
-    marginBottom: spacing.sm,
-    color: colors.text,
-  },
-  strong: {
-    fontWeight: 'bold' as const,
-    color: colors.text,
-  },
-  listItem: {
-    color: colors.text,
-  },
-  code_inline: {
-    color: colors.primary,
-    backgroundColor: 'transparent',
-    fontSize: 14,
-    fontFamily: undefined,
-  },
-  code_block: {
-    color: colors.text,
-    backgroundColor: 'rgba(255,255,255,0.06)',
-    borderColor: 'rgba(255,255,255,0.1)',
-    borderRadius: 8,
-    padding: spacing.sm,
-    fontSize: 13,
-  },
-  fence: {
-    color: colors.text,
-    backgroundColor: 'rgba(255,255,255,0.06)',
-    borderColor: 'rgba(255,255,255,0.1)',
-    borderRadius: 8,
-    padding: spacing.sm,
-    fontSize: 13,
-  },
-  hr: {
-    backgroundColor: colors.border,
-    height: 1,
-    marginVertical: spacing.md,
-  },
-};

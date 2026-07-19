@@ -169,7 +169,7 @@ AVAILABLE_MODELS = _app_state.available_models
 from app.core.text_utils import extract_text_content as _extract_text_content
 from app.core.text_utils import is_local_base_url as _is_local_base_url
 from app.core.text_utils import safe_parse_iso_datetime as _safe_parse_iso_datetime
-from app.core.text_utils import parse_glm45_tool_calls, parse_json_text_tool_calls
+from app.core.text_utils import parse_glm45_tool_calls, parse_json_text_tool_calls, strip_tool_markup
 from app.core.text_utils import claude_rejects_sampling_params, claude_thinking_always_on
 
 
@@ -448,6 +448,10 @@ class SimpleLLMClient:
         self.event_queue = None
         self._citations = set()
         self._token_usage_callback = None
+        # H5 (Brain Alignment): per-tool malformed-argument counts within this
+        # client's lifetime, so a second failure degrades in-voice instead of
+        # looping forever or leaking a raw parse error.
+        self._tool_parse_failures: Dict[str, int] = {}
 
     def _get_anthropic_headers(self):
         """Get headers for Anthropic API requests with prompt caching enabled"""
@@ -1804,13 +1808,38 @@ class SimpleLLMClient:
                         logger.debug(f"JSON fix attempt (regex extraction) failed: {e}")
 
                 if not fixed:
-                    logger.error(f"❌ Could not fix malformed arguments for {function_name}")
+                    # H5 (Brain Alignment): never surface a raw parse error. Feed
+                    # the model an in-voice retry instruction the first time;
+                    # degrade gracefully the second time. Log it so the funnel
+                    # sees it instead of David.
+                    logger.error(f"❌ Could not fix malformed arguments for {function_name}: {e}")
+                    try:
+                        from app.services.silent_failure_tracker import Tracker
+                        Tracker("chat.tool_arg_parse").note(f"{function_name}")
+                    except Exception:
+                        pass
+                    self._tool_parse_failures[function_name] = self._tool_parse_failures.get(function_name, 0) + 1
+                    if self._tool_parse_failures[function_name] >= 2:
+                        # Second failure: stop retrying, tell Sara to recover in-voice.
+                        retry_instruction = (
+                            f"The {function_name} action failed twice because the arguments "
+                            "couldn't be formed. Do NOT call it again this turn. Tell David "
+                            "briefly and naturally that you hit a snag doing that and will try "
+                            "again shortly (or ask him to rephrase) — never show error text."
+                        )
+                    else:
+                        retry_instruction = (
+                            f"The arguments for {function_name} were malformed and couldn't be "
+                            "parsed. Re-issue the call ONCE with corrected, minimal, valid JSON "
+                            "arguments. If you can't, tell David in-voice that you fumbled it and "
+                            "are retrying — never expose the raw error."
+                        )
                     return {
                         "role": "tool",
                         "tool_call_id": tool_call["id"],
                         "content": json.dumps({
                             "success": False,
-                            "message": f"Invalid tool arguments: {str(e)}",
+                            "message": retry_instruction,
                             "data": None
                         })
                     }
@@ -1861,13 +1890,28 @@ class SimpleLLMClient:
         elif function_name == "search_memory":
             result = await self.search_memory_tool(arguments["query"], user_id)
         else:
+            # H6 (Brain Alignment): body schema. If the model calls a tool that
+            # isn't actually wired, say so plainly instead of guessing — Sara
+            # should have an accurate self-model of her own capabilities.
+            if not tool_registry.get_tool(function_name):
+                from app.services.capability_manifest import not_wired_result
+                logger.warning(f"🦾 Model called unwired tool '{function_name}'")
+                return {
+                    "role": "tool",
+                    "tool_call_id": tool_call["id"],
+                    "content": json.dumps({
+                        "success": False,
+                        "message": not_wired_result(function_name),
+                        "data": None,
+                    }),
+                }
             # Fallback to global tool registry (e.g., web_search, open_page, knowledge_graph, etc.)
             try:
                 reg_result = await tool_registry.execute_tool(
                     name=function_name,
                     user_id=str(user_id),
                     parameters=arguments,
-                    context={"origin": "chat"},
+                    context={"origin": "chat", "conversation_id": conversation_id},
                 )
                 # Collect citations if available
                 try:
@@ -1884,6 +1928,20 @@ class SimpleLLMClient:
                     if canvas_command:
                         await self.emit_event("canvas_command", reg_result.data)
                         logger.info(f"📐 Emitted canvas_command: {canvas_command}")
+
+                    # Surface commands (ephemeral interactive UI) — same forwarding
+                    # pattern; the web `custom` view + Redis mirror consume these.
+                    surface_command = reg_result.data.get("surface_command")
+                    if surface_command:
+                        await self.emit_event("surface_command", reg_result.data)
+                        logger.info(f"🧩 Emitted surface_command: {surface_command}")
+                        try:
+                            from redis import Redis
+                            redis_conn = Redis.from_url(config.settings.redis_url, decode_responses=True)
+                            redis_conn.lpush(f"surface_commands:{user_id}", json.dumps(reg_result.data))
+                            redis_conn.expire(f"surface_commands:{user_id}", 60)
+                        except Exception as e:
+                            logger.warning(f"Failed to mirror surface_command to Redis: {e}")
 
                     # Emit workspace_command SSE event for workbench-canvas
                     workspace_commands = []
@@ -3016,7 +3074,10 @@ class SimpleLLMClient:
             if not last_episode:
                 return False, None
 
-            time_gap = (datetime.now(timezone.utc) - last_episode.created_at).total_seconds()
+            last_created_at = last_episode.created_at
+            if last_created_at.tzinfo is None:
+                last_created_at = last_created_at.replace(tzinfo=timezone.utc)
+            time_gap = (datetime.now(timezone.utc) - last_created_at).total_seconds()
             has_gap = time_gap > 2700  # 45 minutes in seconds
 
             return has_gap, last_episode.created_at
@@ -4365,12 +4426,17 @@ class ContextWindowManager:
                 episode_data.append(episode_dict)
                 episode_ids.append(row.id)
 
-            # Update access tracking for retrieved episodes
+            # Update access tracking for retrieved episodes.
+            # H4 (Brain Alignment): retrieval strengthening / reconsolidation —
+            # a memory that keeps getting used earns a small, capped bump to its
+            # intrinsic (base) importance, which survives nightly rescoring. This
+            # is the explicit form of what frequency_factor only did implicitly.
             if episode_ids:
                 db.execute(sql_text("""
                     UPDATE episode
                     SET access_count = COALESCE(access_count, 0) + 1,
-                        last_accessed = NOW()
+                        last_accessed = NOW(),
+                        base_importance = LEAST(0.95, COALESCE(base_importance, importance, 0.3) + 0.01)
                     WHERE id = ANY(:ids)
                 """), {"ids": episode_ids})
                 db.commit()
@@ -4420,7 +4486,8 @@ class IntelligentMemoryService:
 
         # Fast heuristic scoring (no LLM call, <1ms)
         scores = memory_scorer.score_sync({"content": content, "role": role})
-        importance = scores["importance_score"]
+        base_score = scores["importance_score"]
+        emotional_intensity = abs(scores["affect_score"])  # 0..1
 
         # Quick keyword topics as placeholder (overwritten by batch LLM later)
         topics = await self._extract_topics(content)
@@ -4428,7 +4495,7 @@ class IntelligentMemoryService:
         # Heuristic emotional placeholder (overwritten by batch LLM later)
         emotional_analysis = {
             "primary_emotion": "neutral",
-            "intensity": abs(scores["affect_score"]),
+            "intensity": emotional_intensity,
             "sub_emotions": [],
             "energy_level": "medium",
             "sentiment": "positive" if scores["affect_score"] > 0.2 else ("negative" if scores["affect_score"] < -0.2 else "neutral"),
@@ -4441,6 +4508,30 @@ class IntelligentMemoryService:
         # Store episode
         db = SessionLocal()
         try:
+            # H4 (Brain Alignment): emotional encoding + novelty. The amygdala
+            # tags intense moments and the cortex tags surprising ones for
+            # stronger encoding. novelty = 1 − max cosine similarity to the last
+            # 30 days; the fifth light-toggle is not novel, the first plumber
+            # problem is. Blend both into importance so memory stops being flat.
+            novelty = 0.5
+            try:
+                if embedding and isinstance(embedding, list) and PGVECTOR_AVAILABLE:
+                    row = db.execute(text("""
+                        SELECT MAX(1 - (embedding <=> CAST(:qvec AS vector))) AS max_sim
+                        FROM episode
+                        WHERE user_id = :uid AND embedding IS NOT NULL
+                          AND created_at > NOW() - INTERVAL '30 days'
+                    """), {"qvec": str(embedding), "uid": user_id}).fetchone()
+                    if row and row.max_sim is not None:
+                        novelty = max(0.0, min(1.0, 1.0 - float(row.max_sim)))
+            except Exception as _e:
+                logger.debug(f"novelty computation skipped: {_e}")
+
+            # base carries most of the weight; emotion and novelty lift the
+            # memorable exchanges above the undifferentiated floor.
+            importance = max(0.0, min(1.0,
+                base_score * 0.6 + emotional_intensity * 0.25 + novelty * 0.15))
+
             episode = Episode(
                 conversation_id=conversation_id,
                 user_id=user_id,
@@ -4453,6 +4544,7 @@ class IntelligentMemoryService:
                 context_tags=json.dumps([]),
                 memory_type=memory_type,
                 source=source,
+                meta={"novelty": round(novelty, 4), "emotional_intensity": round(emotional_intensity, 4)},
                 embedding=json.dumps(embedding) if embedding and not PGVECTOR_AVAILABLE else embedding
             )
             
@@ -5421,6 +5513,14 @@ try:
 except Exception as e:
     logger.warning(f"Assistant inbox routes not available from module: {e}")
 
+# Soul-change proposals (Brain Alignment H7.2 — one-tap approve/reject)
+try:
+    from app.routes.soul_proposals import router as soul_proposals_router
+    app.include_router(soul_proposals_router, tags=["Soul"])
+    logger.info("✅ Soul proposal routes loaded from app.routes.soul_proposals")
+except Exception as e:
+    logger.warning(f"Soul proposal routes not available from module: {e}")
+
 # Overlay data endpoints (standalone /overlay/:kind webapp routes)
 try:
     from app.routes.overlay import router as overlay_router
@@ -5508,6 +5608,14 @@ try:
     logger.info("✅ Fitness routes loaded successfully")
 except Exception as e:
     logger.error(f"❌ Fitness routes failed to load: {e}")
+
+# Include Cardio routes (cardio tracker + Tabata interval timer)
+try:
+    from app.routes.cardio import router as cardio_router
+    app.include_router(cardio_router, prefix="/api/fitness/cardio", tags=["Cardio"])
+    logger.info("✅ Cardio routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Cardio routes failed to load: {e}")
 
 # Include Learning routes
 try:
@@ -5647,6 +5755,13 @@ except Exception as e:
     logger.error(f"❌ Managed hosts routes failed to load: {e}")
 
 try:
+    from app.routes.fleet import router as fleet_router
+    app.include_router(fleet_router, prefix="/api/fleet", tags=["Fleet"])
+    logger.info("✅ Fleet routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Fleet routes failed to load: {e}")
+
+try:
     from app.routes.browse_shots import router as browse_shots_router
     app.include_router(browse_shots_router, prefix="/api", tags=["Browse Screenshots"])
     logger.info("✅ Browse screenshot routes loaded successfully")
@@ -5660,6 +5775,22 @@ try:
     logger.info("✅ Artifacts routes loaded successfully")
 except Exception as e:
     logger.error(f"❌ Artifacts routes failed to load: {e}")
+
+# Include Surfaces routes (ephemeral interactive UI)
+try:
+    from app.routes.surfaces import router as surfaces_router
+    app.include_router(surfaces_router, prefix="/api/surfaces", tags=["Surfaces"])
+    logger.info("✅ Surfaces routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Surfaces routes failed to load: {e}")
+
+# Include Workspace Job routes (job status + collected-file downloads)
+try:
+    from app.routes.workspace_jobs import router as workspace_jobs_router
+    app.include_router(workspace_jobs_router, tags=["Workspace Jobs"])
+    logger.info("✅ Workspace Job routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Workspace Job routes failed to load: {e}")
 
 # Include Token Usage routes
 try:
@@ -6183,6 +6314,36 @@ Then fill in gaps and correct any misconceptions. Keep it natural and brief — 
         return None
 
 
+_relationship_phase_cache: dict = {"phase": None, "duration": None, "ts": 0.0}
+
+
+def _get_relationship_phase_cached():
+    """H7.3: read relationship phase (10-min cache) for personality modulation."""
+    import time as _t
+    now = _t.time()
+    if _relationship_phase_cache["phase"] is not None and now - _relationship_phase_cache["ts"] < 600:
+        return _relationship_phase_cache["phase"], _relationship_phase_cache["duration"]
+    try:
+        from app.models.cognitive import RelationshipState
+        db = SessionLocal()
+        try:
+            state = db.query(RelationshipState).first()
+            if state:
+                phase = state.phase
+                duration = None
+                if state.first_interaction:
+                    days = (datetime.now(timezone.utc) - state.first_interaction.replace(tzinfo=timezone.utc)).days
+                    duration = f"{days // 30} months" if days >= 45 else f"{days} days"
+                _relationship_phase_cache.update({"phase": phase, "duration": duration, "ts": now})
+                return phase, duration
+        finally:
+            db.close()
+    except Exception as e:
+        logger.debug(f"relationship phase read failed: {e}")
+    _relationship_phase_cache["ts"] = now
+    return None, None
+
+
 def _build_activity_context(
     activity_state: str,
     confidence: float = 0.5,
@@ -6208,6 +6369,9 @@ def _build_activity_context(
     try:
         from app.services.personality_engine import build_personality_context
 
+        # H7.3 (Brain Alignment): let relationship phase modulate familiarity.
+        rel_phase, rel_duration = _get_relationship_phase_cached()
+
         ctx = build_personality_context(
             activity_state=activity_state,
             activity_confidence=confidence,
@@ -6219,6 +6383,8 @@ def _build_activity_context(
             calibration_data=calibration_data,
             sara_emotional_tone=sara_emotional_tone,
             sara_emotional_intensity=sara_emotional_intensity,
+            relationship_phase=rel_phase,
+            relationship_duration=rel_duration,
         )
         return ctx.render()
     except Exception as e:
@@ -7442,6 +7608,20 @@ async def startup_event():
         # Don't continue if database is unavailable - nothing will work
         raise RuntimeError(f"Database connection failed: {db_err}")
 
+    # 1a. H6 (Brain Alignment): verify the prompt's tool prose matches what's
+    # actually callable — catches capability drift (prose claims a tool that
+    # isn't wired) at startup instead of mid-conversation.
+    try:
+        from app.services.capability_manifest import verify_prompt_tool_references
+        _prose = get_system_prompt(ASSISTANT_NAME, "startup@check")
+        _missing = verify_prompt_tool_references(_prose)
+        if _missing:
+            logger.warning(f"🦾 Capability manifest drift: {len(_missing)} prose tools not wired: {_missing}")
+        else:
+            logger.info("✅ Capability manifest: all prompt tool references are wired")
+    except Exception as e:
+        logger.debug(f"capability manifest check skipped: {e}")
+
     # 1b. Recover orphaned agent dispatch tasks (non-critical)
     try:
         from app.services.agent_dispatch import agent_dispatch_service
@@ -7720,13 +7900,13 @@ Being efficient doesn't override being yourself. Even a quick factual answer can
 - Shorthand: 2 minutes = 2, 1 hour = 60, 30 seconds = 1
 - ONLY use when David asks for a timer
 
-**create_calendar_event** — Add a calendar event
+**calendar_create** — Add a calendar event
 - ONLY use when David asks to add something to calendar
 
-**log_food** — Log a meal with macros
+**food_log_create** — Log a meal with macros (or **food_search_and_log** to look up + log in one step)
 - ONLY use when David asks to log food
 
-**log_workout** — Log exercise with sets/reps/weight
+**workout_log_create** — Log exercise with sets/reps/weight
 - ONLY use when David asks to log a workout
 
 ### Home Control Tools
@@ -8455,7 +8635,6 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     plan_result = await execute_plan(
                         plan=multi_step_plan,
                         user_id=str(current_user.id),
-                        db_session=db,
                         on_progress=_on_step_progress,
                     )
 
@@ -8532,6 +8711,17 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                                 f"({implicit_feedback.strength.value}, confidence={implicit_feedback.confidence:.2f}) "
                                 f"trigger='{implicit_feedback.trigger_phrase}'"
                             )
+
+                            # H7.4 (Brain Alignment): a style/tone correction
+                            # becomes a durable style rule (auto-approvable) so
+                            # David doesn't have to correct the same thing twice.
+                            try:
+                                from app.services.persona_evolution import record_style_correction
+                                _rule = record_style_correction(db, last_user_message)
+                                if _rule:
+                                    logger.info(f"🎭 Recorded style correction: {_rule}")
+                            except Exception as _e:
+                                logger.debug(f"style correction record skipped: {_e}")
 
                             # Flag related PKG facts for review on negative feedback
                             if implicit_feedback.signal_type.value == "negative":
@@ -9071,6 +9261,73 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     f"{len(budget.sources)} sources → {len(budget.allocate())} kept"
                 )
 
+            # H3 (Brain Alignment): one-shot correction encoding. If David just
+            # stated a durable schedule fact ("I leave at 7", "gym's at 1"),
+            # encode it as a stated life_fact *before* the reply and instruct the
+            # reply to confirm the durable fact in-voice.
+            try:
+                from app.services.life_facts import detect_and_apply_correction, confirmation_line
+                from app.db.session import get_async_session_factory
+                async with get_async_session_factory()() as _lf_db:
+                    _corrected = await detect_and_apply_correction(
+                        _lf_db, str(current_user.id), last_user_message
+                    )
+                    await _lf_db.commit()
+                if _corrected:
+                    lf_ctx = (
+                        "\n\n## Durable fact just recorded\n"
+                        f"David stated a fixed part of his schedule: {_corrected['label']} "
+                        f"at {_corrected['friendly']}. This is now a permanent fact you know. "
+                        f"Acknowledge it briefly and naturally (e.g. \"{confirmation_line(_corrected)}\"). "
+                        "Never ask him to repeat it and never schedule anything into that window."
+                    )
+                    system_message = ChatMessage(role="system", content=system_message.content + lf_ctx)
+                    logger.info(f"🧠 Encoded stated life_fact: {_corrected['predicate']}={_corrected['value_text']}")
+            except Exception as e:
+                logger.debug(f"life_fact correction detection skipped: {e}")
+
+            # H5 (Brain Alignment): recency floor + repeat detection. The last
+            # ~2h of turns are always present (so pronouns and just-tried actions
+            # resolve), and a near-duplicate of a recent question is flagged so
+            # Sara acknowledges the repeat instead of re-answering verbatim.
+            try:
+                from app.services.recency_buffer import (
+                    build_recency_floor, detect_repeat_question, repeat_note,
+                )
+                from app.db.session import get_async_session_factory
+                async with get_async_session_factory()() as _rb_db:
+                    _recency = await build_recency_floor(_rb_db, str(current_user.id))
+                    _repeat = await detect_repeat_question(
+                        _rb_db, str(current_user.id), last_user_message,
+                        conversation_id=request.conversation_id,
+                    )
+                extra = []
+                if _recency:
+                    extra.append(_recency)
+                if _repeat:
+                    extra.append(repeat_note(_repeat))
+                    logger.info(f"🔁 Repeat question detected ({_repeat['minutes_ago']}m ago, sim={_repeat['similarity']})")
+                if extra:
+                    system_message = ChatMessage(
+                        role="system", content=system_message.content + "\n\n" + "\n\n".join(extra)
+                    )
+            except Exception as e:
+                logger.debug(f"recency/repeat injection skipped: {e}")
+
+            # H6 (Brain Alignment): internal clock + interoception header. One
+            # generated, single-sourced line so Sara never infers the time,
+            # David's availability, her own emotional state, or her notification
+            # budget from evidence.
+            try:
+                from app.services.interoception import build_interoception_header
+                _header = await build_interoception_header(str(current_user.id))
+                if _header:
+                    system_message = ChatMessage(
+                        role="system", content=_header + "\n\n" + system_message.content
+                    )
+            except Exception as e:
+                logger.debug(f"interoception header skipped: {e}")
+
             # CONTENT INBOX: Inject inbox item content when discussing a shared item
             if request.inbox_item_id:
                 try:
@@ -9338,6 +9595,20 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                 f"(1 system + {len(conversation_history)} history + {len(merged_request_messages)} new)"
             )
 
+            # Context assembly is done with the request-scoped session. End its
+            # transaction now: the LLM tool loop below can run for many minutes,
+            # and an open transaction gets the connection killed by Postgres's
+            # idle_in_transaction_session_timeout (the stream then dies with no
+            # final response). Any later db use starts a fresh transaction.
+            try:
+                db.commit()
+            except Exception as _tx_end_err:
+                logger.warning(f"⚠️ Pre-LLM transaction end failed (non-critical): {_tx_end_err}")
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+
             # Start the LLM processing in a background task
             async def process_chat():
                 try:
@@ -9381,6 +9652,15 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                         model=request.model, ephemeral=request.ephemeral or False
                     )
                     logger.info(f"✅ chat_with_tools completed, response length: {len(response_content)}")
+
+                    # Leak guard: raw <tool_call>/<function=...> markup that wasn't
+                    # salvaged into a real tool call must never reach the user.
+                    _stripped = strip_tool_markup(response_content)
+                    if _stripped != response_content:
+                        logger.warning("🧹 Stripped tool-call markup from final response")
+                        response_content = _stripped or (
+                            "I hit a snag executing that — mind asking again?"
+                        )
 
                     # Send final response and done IMMEDIATELY to close the stream
                     final_conv_id = streaming_client.current_conversation_id if hasattr(streaming_client, 'current_conversation_id') else request.conversation_id

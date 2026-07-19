@@ -335,7 +335,7 @@ def _now_local_string() -> str:
 THINK_USER = """\
 ## Where you are right now
 {now}.  You've been running since {boot_age}.
-
+{world_delta_block}
 ## What David has queued for you
 {inbox}
 
@@ -435,6 +435,7 @@ def build_think_prompt(
     goals: list[dict] | None = None,
     recall: list[dict] | None = None,
     boot_age: str, max_activity: int = 20,
+    world_delta: list[str] | None = None,
 ) -> tuple[str, str]:
     user = THINK_USER.format(
         now=_now_local_string(),
@@ -446,8 +447,17 @@ def build_think_prompt(
         interests=_format_interests(interests or []),
         goals=_format_goals(goals or []),
         recall_block=_recall_block(recall or []),
+        world_delta_block=_world_delta_block(world_delta or []),
     )
     return IDENTITY, user
+
+
+def _world_delta_block(world_delta: list[str]) -> str:
+    """ACS1: 'what changed while you were idle.' Empty string when nothing did."""
+    if not world_delta:
+        return ""
+    lines = "\n".join(f"- {d}" for d in world_delta[:12])
+    return f"\n## What changed while you were idle\n{lines}\n"
 
 
 # ── reflect ──────────────────────────────────────────────────────────────────
@@ -455,7 +465,7 @@ def build_think_prompt(
 REFLECT_USER = """\
 ## Where you are right now
 {now}.  You've been running since {boot_age}.
-
+{world_delta_block}
 ## What David has queued for you
 {inbox}
 
@@ -528,6 +538,7 @@ def build_reflect_prompt(
     goals: list[dict] | None = None,
     recall: list[dict] | None = None,
     boot_age: str, max_activity: int = 30,
+    world_delta: list[str] | None = None,
 ) -> tuple[str, str]:
     user = REFLECT_USER.format(
         now=_now_local_string(),
@@ -539,6 +550,7 @@ def build_reflect_prompt(
         interests=_format_interests(interests or []),
         goals=_format_goals(goals or []),
         recall_block=_recall_block(recall or []),
+        world_delta_block=_world_delta_block(world_delta or []),
     )
     return IDENTITY, user
 

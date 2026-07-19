@@ -58,6 +58,27 @@ _TUNABLE_COOLDOWN_KEYS = {
     "wellness": "notification.cooldown.health_hours",
 }
 
+# Canonical spelling for every category this pipeline knows about, keyed by
+# the category string with underscores/dashes stripped. Every cooldown/cap/
+# tunable in this module keys on the canonical spelling below — an alias
+# (e.g. "check_in") silently bypassed all of it because it never matched any
+# lookup. Normalize once at ingestion instead of trusting every caller.
+_CANONICAL_CATEGORIES = (
+    "checkin", "general", "calendar", "calendar_prep", "email", "health",
+    "fitness", "wellness", "weather", "security", "home", "reminder", "timer",
+    "acs_discovery", "system_health", "deferred_action", "background_task",
+    "thread_followup", "automation",
+)
+_CATEGORY_ALIAS_MAP = {c.lower().replace("_", "").replace("-", ""): c for c in _CANONICAL_CATEGORIES}
+
+
+def _normalize_category(category: str) -> str:
+    """Map a category alias (e.g. "check_in") to its canonical spelling ("checkin")."""
+    if not category:
+        return category
+    stripped = category.lower().replace("_", "").replace("-", "")
+    return _CATEGORY_ALIAS_MAP.get(stripped, category)
+
 
 def _cooldown_for(category: str) -> float:
     """Return effective cooldown (hours) for a category, honoring tunables."""
@@ -194,6 +215,7 @@ async def send_notification(
     _attention_item_id: Optional[str] = None,
     extra_push_data: Optional[Dict[str, Any]] = None,
     overlay: Optional[Dict[str, Any]] = None,
+    payload: Optional[Dict[str, Any]] = None,
     _skip_phrasing: bool = False,
 ) -> Dict[str, Any]:
     """
@@ -219,6 +241,7 @@ async def send_notification(
         Dict with {sent: bool, reason: str, ...}
     """
     priority = _normalize_priority(priority)
+    category = _normalize_category(category)
 
     # Ensure we always have a session. Without this, callers that forget
     # the db kwarg silently skip dedup AND logging — which is how the
@@ -261,6 +284,7 @@ async def send_notification(
             _skip_phrasing=_skip_phrasing,
             extra_push_data=extra_push_data,
             overlay=overlay,
+            payload=payload,
         )
         # AsyncSession does not auto-commit — if we opened this session
         # ourselves, the caller isn't going to commit for us, so the
@@ -298,6 +322,7 @@ async def _send_notification_impl(
     _attention_item_id: Optional[str] = None,
     extra_push_data: Optional[Dict[str, Any]] = None,
     overlay: Optional[Dict[str, Any]] = None,
+    payload: Optional[Dict[str, Any]] = None,
     _skip_phrasing: bool = False,
 ) -> Dict[str, Any]:
     # SARA_UNLEASHED Phase T.3: the inline engagement-priority-adjuster that
@@ -368,7 +393,7 @@ async def _send_notification_impl(
                 return await route_through_attention_queue(
                     user_id=user_id, title=title, message=message,
                     priority=priority, category=category, source=source,
-                    dedupe_key=topic, db=db,
+                    dedupe_key=topic, payload=payload, db=db,
                 )
         except Exception as e:
             logger.debug(f"Attention queue routing failed, falling through: {e}")
@@ -379,6 +404,15 @@ async def _send_notification_impl(
     # Dedup check:
     # - normal path: category cooldown window
     # - fallback safety net: short exact-topic window even when category cooldown is 0
+    if db and payload:
+        grade = str(payload.get("prediction_grade") or "").lower()
+        if grade == "confirmation":
+            logger.info(
+                f"Notification suppressed: prediction confirmation source={source} "
+                f"category={category} title={title[:60]}"
+            )
+            return {"sent": False, "reason": "prediction_confirmation", "category": category}
+
     if db:
         dedup_window = effective_cooldown if effective_cooldown > 0 else MIN_EXACT_DEDUP_HOURS
         include_category_limits = effective_cooldown > 0
@@ -399,6 +433,16 @@ async def _send_notification_impl(
                 attention_item_id=_attention_item_id,
             )
             return {"sent": False, "reason": "dedup", "topic": effective_topic}
+
+    if db and payload:
+        stimulus_key = payload.get("stimulus_key")
+        generator = payload.get("generator") or source
+        if stimulus_key:
+            try:
+                from app.services.habituation import note_delivery
+                await note_delivery(db, generator, stimulus_key)
+            except Exception as e:
+                logger.debug(f"Habituation delivery note skipped: {e}")
 
     # Try desktop delivery via WebSocket first (real-time, no phone buzz).
     # Callers that have their own custom desktop fanout pass _bypass_desktop=True
@@ -909,6 +953,13 @@ async def route_through_attention_queue(
 
     priority = _normalize_priority(priority)
 
+    if payload and str(payload.get("prediction_grade") or "").lower() == "confirmation":
+        logger.info(
+            f"Attention item suppressed: prediction confirmation source={source} "
+            f"category={category} title={title[:60]}"
+        )
+        return {"sent": False, "reason": "prediction_confirmation", "routed_through_attention": False}
+
     if not attention_enabled or not db:
         # Feature off — send directly (bypass attention to avoid recursion).
         # title/message already passed through the phrasing stage in the
@@ -916,7 +967,7 @@ async def route_through_attention_queue(
         return await send_notification(
             user_id=user_id, title=title, message=message,
             priority=priority, topic=dedupe_key, category=category, source=source, db=db,
-            _bypass_attention=True, _skip_phrasing=True,
+            _bypass_attention=True, _skip_phrasing=True, payload=payload,
         )
 
     # Time-based cooldown against recycled attention items. The DB unique
@@ -980,6 +1031,16 @@ async def route_through_attention_queue(
             _bypass_attention=True, _skip_phrasing=True,
         )
 
+    if payload:
+        stimulus_key = payload.get("stimulus_key")
+        generator = payload.get("generator") or source
+        if stimulus_key:
+            try:
+                from app.services.habituation import note_delivery
+                await note_delivery(db, generator, stimulus_key)
+            except Exception as e:
+                logger.debug(f"Habituation delivery note skipped: {e}")
+
     # High priority and above always pushes. Normal/low pushes too, iff the
     # learned buzz decision says this category has earned it right now
     # (Phase A.3) — otherwise it's inbox-only, same as before.
@@ -991,7 +1052,7 @@ async def route_through_attention_queue(
         result = await send_notification(
             user_id=user_id, title=title, message=message,
             priority=priority, topic=dedupe_key, category=category, source=source, db=db,
-            _bypass_attention=True, _skip_phrasing=True,
+            _bypass_attention=True, _skip_phrasing=True, payload=payload,
             _attention_item_id=item_id,
         )
         result["attention_item_id"] = item_id

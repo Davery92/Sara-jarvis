@@ -50,6 +50,10 @@ class HeartbeatIn(BaseModel):
     hostname: str
     started_at: datetime
     last_tick_summary: Optional[str] = None
+    want_delta: bool = Field(
+        False,
+        description="ACS1: set true on a think tick to receive (and consume) the "
+                    "world_delta since the last one served.")
 
 
 class HeartbeatOut(BaseModel):
@@ -57,6 +61,8 @@ class HeartbeatOut(BaseModel):
     accepted: bool = True
     # Reserved for Phase 4 (control channel). Empty list for now.
     pending_directives: list[dict] = Field(default_factory=list)
+    # ACS1: compact "what changed while you were idle" since the last delta.
+    world_delta: list[str] = Field(default_factory=list)
 
 
 class DaemonStatusOut(BaseModel):
@@ -105,9 +111,76 @@ async def daemon_heartbeat(payload: HeartbeatIn) -> HeartbeatOut:
                 "summary": payload.last_tick_summary,
             },
         )
+
+        world_delta: list[str] = []
+        if payload.want_delta:
+            world_delta = await _compute_world_delta(db)
         await db.commit()
 
-    return HeartbeatOut(server_time=datetime.now(timezone.utc))
+    return HeartbeatOut(server_time=datetime.now(timezone.utc), world_delta=world_delta)
+
+
+async def _compute_world_delta(db) -> list[str]:
+    """ACS1: compact list of what changed in David's world since the daemon last
+    consumed a delta. Advances the watermark so each change is served once.
+
+    The daemon must NOT grow its own pollers (ACS4): this is the single channel
+    by which backend-computed world state reaches the slow mind.
+    """
+    row = (await db.execute(text(
+        "SELECT last_delta_served_at FROM sara_daemon_state WHERE id='singleton'"
+    ))).first()
+    since = (row[0] if row and row[0] else None)
+    # Bound the first-ever window so we don't dump hours of history.
+    since_clause = "COALESCE(:since, NOW() - INTERVAL '2 hours')"
+    params = {"since": since}
+    delta: list[str] = []
+
+    async def _safe(coro):
+        try:
+            return await coro
+        except Exception as e:
+            logger.debug("world_delta source failed: %s", e)
+            return []
+
+    # 1. What the backend already told David (ACS4 cross-awareness — so the two
+    #    brains never repeat each other).
+    rows = await _safe(db.execute(text(f"""
+        SELECT title, sent_at FROM notification_log
+        WHERE sent = true AND source <> 'acs_daemon'
+          AND sent_at > {since_clause}
+        ORDER BY sent_at DESC LIMIT 6
+    """), params))
+    for r in (rows or []):
+        delta.append(f"Backend told David: {r[0]}")
+
+    # 2. Backend deliberation handoff notes (what the fast mind is watching).
+    rows = await _safe(db.execute(text(f"""
+        SELECT handoff_note FROM agent_run_log
+        WHERE handoff_note IS NOT NULL AND handoff_note <> ''
+          AND created_at > {since_clause}
+        ORDER BY created_at DESC LIMIT 3
+    """), params))
+    for r in (rows or []):
+        delta.append(f"Backend deliberation: {str(r[0])[:200]}")
+
+    # 3. David was active (his own turns) — a strong "the world moved" signal
+    #    the slow mind would otherwise be blind to.
+    rows = await _safe(db.execute(text(f"""
+        SELECT count(*) FROM episode
+        WHERE role = 'user' AND created_at > {since_clause}
+    """), params))
+    try:
+        n = int(rows[0][0]) if rows else 0
+    except Exception:
+        n = 0
+    if n:
+        delta.append(f"David was active — {n} new message(s) since you last checked.")
+
+    await db.execute(text(
+        "UPDATE sara_daemon_state SET last_delta_served_at = NOW() WHERE id='singleton'"
+    ))
+    return delta[:12]
 
 
 @router.get("/daemon-status", response_model=DaemonStatusOut)
@@ -418,6 +491,32 @@ async def get_focus(
     )
 
 
+class ACSSnapshotOut(BaseModel):
+    daemon_status: DaemonStatusOut
+    focus: FocusOut
+    recent_activity: list[ActivityOut]
+
+
+@router.get("/snapshot", response_model=ACSSnapshotOut)
+async def acs_snapshot(current_user: User = Depends(get_current_user)) -> ACSSnapshotOut:
+    """Aggregate daemon-status + focus + recent activity in one round-trip.
+
+    The iOS status card polls this every 30s. It used to hit the
+    never-implemented `/api/acs/snapshot` (only `/api/acs/v2/*` exists),
+    404 silently, and render blank forever.
+    """
+    status_out = await daemon_status(current_user=current_user)
+    focus_out = await get_focus(x_daemon_token=None, current_user=current_user)
+    activity_out = await list_activity(
+        limit=10, kind=None, x_daemon_token=None, current_user=current_user
+    )
+    return ACSSnapshotOut(
+        daemon_status=status_out,
+        focus=focus_out,
+        recent_activity=activity_out,
+    )
+
+
 @router.post("/focus", response_model=FocusOut, dependencies=[Depends(verify_daemon_token)])
 async def set_focus(payload: FocusIn) -> FocusOut:
     """Daemon-only: declare what she's working on. Upsert singleton row."""
@@ -474,6 +573,10 @@ class NotifyIn(BaseModel):
                                    description="If set, included in push payload so iOS deep-links to the note.")
     why: Optional[str] = Field(None, max_length=500,
                                description="Sara's reason for sending — recorded on her activity log")
+    deadline_within_24h: bool = Field(
+        False,
+        description="ACS4: the slow mind's work is not urgent by nature. Only set true "
+                    "when this cites a deadline inside 24h — otherwise it's a silent inbox item.")
 
 
 class NotifyOut(BaseModel):
@@ -537,19 +640,29 @@ async def notify_david(payload: NotifyIn) -> NotifyOut:
                         reason=f"already_told_david_recently (matches: {old_title[:80]!r}) — don't re-send; move on",
                     )
 
+        # ACS4 (Brain Alignment — one mouth): the daemon does NOT push directly.
+        # It routes through the same attention queue, learned buzz decision,
+        # category cooldowns, and H2 habituation as every other generator. Its
+        # work is by nature not urgent, so priority is clamped to normal (silent
+        # inbox) unless it explicitly cites a deadline within 24h.
+        effective_priority = payload.priority if payload.deadline_within_24h else "normal"
         result = await send_notification(
             user_id=user_id,
             title=payload.title,
             message=payload.body,
-            priority=payload.priority,
+            priority=effective_priority,
             topic=topic,
             category="general",
             source="acs_daemon",
             cooldown_hours=cooldown,
             db=db,
-            _bypass_attention=True,     # don't route through attention queue
             _bypass_ban=False,          # legal/regulated bans still apply
             extra_push_data=extra_data or None,
+            payload={
+                "prediction_grade": "novel",
+                "stimulus_key": f"acs_daemon:{topic}",
+                "generator": "acs_daemon",
+            },
         )
         await db.commit()
 

@@ -123,6 +123,7 @@ class SileroVAD:
         self._speech_start_time = None
         self._last_speech_time = None
         self._speech_audio.clear()
+        self._pre_speech_buffer.clear()
         self._chunk_buffer = np.array([], dtype=np.float32)
         self._reset_hidden()
         logger.debug("VAD activated")
@@ -132,6 +133,7 @@ class SileroVAD:
         self._active = False
         self._state = VADState.SILENCE
         self._speech_audio.clear()
+        self._pre_speech_buffer.clear()
         self._chunk_buffer = np.array([], dtype=np.float32)
         logger.debug("VAD deactivated")
 
@@ -208,6 +210,21 @@ class SileroVAD:
                         self._speech_audio.clear()
 
         return self._state
+
+    def force_speech_end(self, reason: str = "forced") -> bool:
+        """Force finalization when a speech segment appears stuck."""
+        if self._state != VADState.SPEECH:
+            return False
+
+        now = time.monotonic()
+        speech_ms = ((self._last_speech_time or now) - (self._speech_start_time or now)) * 1000
+        if speech_ms < self._min_speech_ms:
+            logger.debug("Skipping forced speech end (too short: %.0fms)", speech_ms)
+            return False
+
+        logger.info("Speech force-ended: duration=%.0fms (%s)", speech_ms, reason)
+        self._state = VADState.SPEECH_END
+        return True
 
     def get_speech_audio(self) -> np.ndarray:
         """Get the captured speech audio after SPEECH_END."""

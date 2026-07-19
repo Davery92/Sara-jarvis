@@ -53,6 +53,12 @@ TOOL_TO_CARD_TYPE: Dict[str, str] = {
     "home_status": "home_card",
     "get_home_status": "home_card",
     "list_home_devices": "home_card",
+    # Authoring (generated Word/PDF files)
+    "document_generate": "file_card",
+    # Interactive surfaces
+    "surface_create": "surface_card",
+    "surface_update": "surface_card",
+    "workspace_job_run": "surface_card",
 }
 
 
@@ -455,7 +461,54 @@ def _build_home_card(tool_name: str, data: Any) -> Optional[Dict]:
 
 
 # Map card types to builder functions
+def _build_file_card(tool_name: str, data: Any) -> Optional[Dict]:
+    """Build a file card for a generated Word/PDF document."""
+    payload = data.get("data") if isinstance(data, dict) else None
+    if not isinstance(payload, dict):
+        return None
+    content = payload.get("content") or {}
+    artifact_id = payload.get("artifact_id") or content.get("artifact_id")
+    filename = content.get("filename")
+    if not artifact_id or not filename:
+        return None
+
+    fmt = (content.get("format") or "").upper()
+    return {
+        "title": payload.get("title") or filename,
+        "items": [{
+            "artifact_id": artifact_id,
+            "filename": filename,
+            "format": content.get("format"),
+            "mime": content.get("mime"),
+            "size_bytes": content.get("size_bytes"),
+        }],
+        "summary": f"{fmt} · ready to download",
+        # Download/share is handled inside the FileCard itself (needs the app's
+        # Bearer token + share sheet); the row action just jumps to the Studio.
+        "actions": [
+            {"label": "Open in Studio", "action": "navigate", "target": "Studio",
+             "params": {"id": artifact_id}},
+        ],
+    }
+
+
+def _build_surface_card(tool_name: str, data: Any) -> Optional[Dict]:
+    """Carry a surface payload to the iOS app for interactive rendering."""
+    payload = data.get("data") if isinstance(data, dict) else None
+    if not isinstance(payload, dict):
+        return None
+    surface = payload.get("surface")
+    if not isinstance(surface, dict) or not surface.get("id"):
+        return None
+    return {
+        "title": surface.get("title"),
+        "surface": surface,
+    }
+
+
 CARD_BUILDERS: Dict[str, Any] = {
+    "file_card": _build_file_card,
+    "surface_card": _build_surface_card,
     "calendar_card": _build_calendar_card,
     "reminder_card": _build_reminder_card,
     "timer_card": _build_timer_card,

@@ -34,7 +34,11 @@ export function useShellNavigation({
     window.open(APP_CONFIG.workbenchUrl, '_blank', 'noopener,noreferrer')
   }, [])
 
-  const navigateToView = useCallback((nextView: string, closeMobileMenu = false) => {
+  const navigateToView = useCallback((
+    nextView: string,
+    closeMobileMenu = false,
+    params?: Record<string, string>,
+  ) => {
     const resolved = resolveViewAlias(nextView)
     if (!resolved) return
 
@@ -47,16 +51,22 @@ export function useShellNavigation({
       return
     }
 
-    const targetPath = pathForView(resolved)
-    if (locationPathname !== targetPath) {
+    const basePath = pathForView(resolved)
+    const query = params ? new URLSearchParams(params).toString() : ''
+    const targetPath = query ? `${basePath}?${query}` : basePath
+    // Always navigate when a query is present (deep-link may target the same
+    // view with a different id); otherwise skip redundant same-path pushes.
+    if (query || locationPathname !== basePath) {
       navigate(targetPath, { replace: resolved === 'login' })
     }
   }, [locationPathname, navigate, openWorkspaceCanvas])
 
   useEffect(() => {
-    const handleNavigate = (e: CustomEvent<{ view: string }>) => {
+    const handleNavigate = (
+      e: CustomEvent<{ view: string; params?: Record<string, string> }>,
+    ) => {
       if (e.detail?.view) {
-        navigateToView(e.detail.view)
+        navigateToView(e.detail.view, false, e.detail.params)
       }
     }
 

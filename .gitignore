@@ -93,3 +93,10 @@ backend/uploads/
 /*.onnx
 *_backup_*.json
 /sara_hub.db
+
+# Claude Code scheduled-task runtime lock (generated, not source)
+.claude/scheduled_tasks.lock
+
+# Temp screenshot/debug scripts and images that got committed by accident
+backend/_shot*.py
+backend/*.png

@@ -34,6 +34,8 @@ DEFAULT_USER_ID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
 # Hard-banned notification topics (from HEARTBEAT.md)
 # Comprehensive list — covers health, fitness, biometrics, nutrition, and body-state topics.
 _BANNED_PHRASES = [
+    # Predictive-coding flip: user-facing notifications report deviations, not confirmations.
+    "usual pattern", "learned rhythm", "% confidence", "right on schedule",
     # Nutrition / eating (original)
     "blood sugar", "nutrition", "hungry", "meal timing", "eating",
     "haven't eaten", "should eat", "food intake", "calorie",
@@ -854,9 +856,17 @@ async def _nudge_commitment(user_id: str) -> bool:
             return False
         thread = commitments[0]
         message = thread.get("suggested_followup") or f"You mentioned: {thread['topic']}"
+        stimulus_key = f"commitment_nudge:{thread['id']}"
+        try:
+            from app.services.habituation import should_generate
+            if not await should_generate(db, "deliberation", stimulus_key):
+                return False
+        except Exception as e:
+            logger.debug(f"[DeliberationGate] commitment habituation check skipped: {e}")
         await send_notification(
             user_id=user_id, title="Following up on a commitment", message=message,
-            topic=f"commitment_nudge:{thread['id']}", priority="normal", source="deliberation",
+            topic=stimulus_key, priority="normal", source="deliberation", db=db,
+            payload={"prediction_grade": "novel", "stimulus_key": stimulus_key, "generator": "deliberation"},
         )
         await record_mention(thread["id"], db)
         await db.commit()
@@ -989,8 +999,17 @@ async def _deliver_notification(user_id: str, proposal: NotificationProposal) ->
     content_hash = hashlib.md5(f"{proposal.title}:{proposal.message[:100]}".encode()).hexdigest()[:12]
     effective_topic = f"{proposal.category}:{content_hash}"
 
+    stimulus_key = f"{proposal.category}:{content_hash}"
     AsyncSession = get_async_session_factory()
     async with AsyncSession() as db:
+        try:
+            from app.services.habituation import should_generate
+            if not await should_generate(db, "deliberation", stimulus_key):
+                logger.info(f"[DeliberationGate] Notification habituated: {proposal.title}")
+                return
+        except Exception as e:
+            logger.debug(f"[DeliberationGate] habituation check skipped: {e}")
+
         result = await send_notification(
             user_id=user_id,
             title=proposal.title,
@@ -1000,6 +1019,11 @@ async def _deliver_notification(user_id: str, proposal: NotificationProposal) ->
             priority=ntfy_priority,
             source="deliberation",
             db=db,
+            payload={
+                "prediction_grade": "deviation" if proposal.category in ("home", "security") else "novel",
+                "stimulus_key": stimulus_key,
+                "generator": "deliberation",
+            },
         )
         await db.commit()
         if result.get("sent"):

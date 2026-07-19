@@ -263,7 +263,15 @@ export default function RecipeFormScreen({ route, navigation }: Props) {
                   </View>
                   {servings && parseInt(servings) > 0 && (
                     <Text style={styles.perServingText}>
-                      Per serving ({servings} servings): {Math.round(ingredients.reduce((sum, i) => sum + (i.calories || 0), 0) / parseInt(servings))} cal
+                      Per serving ({servings}): {Math.round(ingredients.reduce((sum, i) => sum + (i.calories || 0), 0) / parseInt(servings))} cal
+                      {' • '}{Math.round(ingredients.reduce((sum, i) => sum + (i.protein || 0), 0) / parseInt(servings))}g P
+                      {' • '}{Math.round(ingredients.reduce((sum, i) => sum + (i.carbs || 0), 0) / parseInt(servings))}g C
+                      {' • '}{Math.round(ingredients.reduce((sum, i) => sum + (i.fats || 0), 0) / parseInt(servings))}g F
+                    </Text>
+                  )}
+                  {ingredients.some(i => !(i.calories || i.protein || i.carbs || i.fats)) && (
+                    <Text style={styles.unresolvedText}>
+                      {ingredients.filter(i => !(i.calories || i.protein || i.carbs || i.fats)).length} unresolved ingredient(s) will be estimated on save
                     </Text>
                   )}
                 </View>
@@ -465,6 +473,12 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginTop: spacing.sm,
     fontStyle: 'italic',
+  },
+  unresolvedText: {
+    color: colors.warning,
+    fontSize: fontSizes.xs,
+    textAlign: 'center',
+    marginTop: spacing.xs,
   },
   removeText: {
     color: colors.error,

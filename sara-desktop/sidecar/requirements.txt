@@ -29,8 +29,10 @@ pyobjc-framework-ApplicationServices>=10.1; sys_platform == "darwin"
 pyobjc-framework-AVFoundation>=10.1; sys_platform == "darwin"
 
 # Windows media-session detection (A6/B2.4) — "is music/video playing" for
-# the Jetson's ambient wake-threshold boost
-winsdk>=1.0.0; sys_platform == "win32"
+# the Jetson's ambient wake-threshold boost. winsdk has no stable 1.0.0 (only
+# 1.0.0bN pre-releases exist), and `>=1.0.0` excludes pre-releases — so pin to
+# the beta explicitly, which also opts pip into pre-releases for this package.
+winsdk>=1.0.0b10; sys_platform == "win32"
 
 # For packaging
 pyinstaller>=6.0.0

@@ -52,6 +52,9 @@ from .tunable_setting import TunableSetting
 from .external_workout import ExternalWorkout
 from .code_session import CodeSession
 from .managed_host import ManagedHost
+from .host_metric import HostMetric
+from .host_alert import HostAlert
+from .host_diag_command import HostDiagCommand
 from .progress_photo import ProgressPhoto
 from .person import Person
 from .location import KnownPlace, LocationTrigger, LocationEvent

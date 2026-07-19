@@ -84,6 +84,10 @@ async def check_and_send_preps(user_id: str):
             FROM calendar_event
             WHERE user_id = :uid
               AND start_time BETWEEN :start AND :end
+              -- All-day events (Pay Day, birthdays) have start_time at midnight;
+              -- a "starts in ~45 min" push ~40 min before midnight is just noise.
+              -- They belong in the morning brief, not a pre-event buzz.
+              AND COALESCE(all_day, FALSE) = FALSE
             ORDER BY start_time ASC
             LIMIT 3
         """), {"uid": user_id, "start": window_start, "end": window_end})
@@ -205,14 +209,32 @@ async def _prep_for_event(
     if context_parts:
         message += "\n" + "\n".join(context_parts)
 
+    stimulus_key = f"calendar_prep:{event_id}"
+    try:
+        from app.services.habituation import should_generate
+        if not await should_generate(db, "calendar_prep", stimulus_key):
+            logger.info(f"Calendar prep habituated for '{display_title}'")
+            return
+    except Exception as e:
+        logger.debug(f"Calendar prep habituation check skipped: {e}")
+
     await send_notification(
         user_id=user_id,
         title=f"Upcoming: {display_title}",
         message=message[:500],
-        priority="normal" if minutes_until > 15 else "important",
+        # Push at creation — we're already 35-55 min out, which is exactly when
+        # the reminder is useful. "high" is what actually leaves as a push
+        # (normal/important stay inbox-only and would only ever reach the phone
+        # via the 2h escalation, which is always too late for a timed event).
+        priority="high",
         category="calendar_prep",
         topic=topic,
         source="calendar_prep",
+        payload={
+            "prediction_grade": "novel",
+            "stimulus_key": stimulus_key,
+            "generator": "calendar_prep",
+        },
     )
     logger.info(f"Calendar prep sent for '{display_title}' ({time_str})")
 

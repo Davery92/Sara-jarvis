@@ -16,7 +16,7 @@ import { healthSyncService } from '../services/healthSync';
 import { registerBackgroundHealthSync, triggerManualSync } from '../services/backgroundHealthSync';
 import { isLocationTrackingEnabled, startTracking as startLocationTracking, resyncGeofences } from '../services/locationTracking';
 import { iosCalendarSyncService } from '../services/iosCalendarSync';
-import { navigateToChat } from '../services/navigation';
+import { navigateToChat, navigationRef, getCurrentViewName } from '../services/navigation';
 import apiClient from '../services/api';
 import { consumeSiriPrompt } from '../services/siriDeepLink';
 import { refreshWidgetData } from '../services/widgetBridge';
@@ -163,21 +163,32 @@ export const AuthenticatedOverlays: React.FC = () => {
       } catch {}
     };
 
-    // Heartbeat — reports current screen every 30s for smart delivery routing
+    // Heartbeat — reports the REAL current screen (mapped to the web canonical
+    // view vocabulary) every 30s + on view change, so Sara knows where David is.
     const clientId = `ios_${Math.random().toString(36).slice(2, 10)}`;
-    let currentScreen = 'sara'; // default tab
-    const sendHeartbeat = async () => {
+    let lastReportedView = getCurrentViewName();
+    const sendHeartbeat = async (visibleOverride?: boolean) => {
       try {
         await apiClient.post('/api/presence/heartbeat', {
           platform: 'ios',
           client_id: clientId,
-          current_view: currentScreen,
-          visible: true,
+          current_view: getCurrentViewName(),
+          visible: visibleOverride ?? (AppState.currentState === 'active'),
         });
       } catch {}
     };
     sendHeartbeat();
     const heartbeatInterval = setInterval(sendHeartbeat, 30_000);
+
+    // Fire an immediate heartbeat when the active screen changes, so
+    // app_current_view tracks within seconds rather than up to 30s late.
+    const navStateSub = navigationRef.addListener('state', () => {
+      const view = getCurrentViewName();
+      if (view !== lastReportedView) {
+        lastReportedView = view;
+        sendHeartbeat();
+      }
+    });
 
     // Sync the icon badge to the server's unread notification count, so the
     // number on the icon always matches the Notifications screen (and clears
@@ -218,7 +229,7 @@ export const AuthenticatedOverlays: React.FC = () => {
     const appStateSubscription = AppState.addEventListener('change', (nextState: AppStateStatus) => {
       if (nextState === 'active') {
         logPresence('app_resume');
-        sendHeartbeat();
+        sendHeartbeat(true);
         refreshWidgetData();
         // The App Intent foregrounds the app via openAppWhenRun → pick up the prompt.
         consumeSiriPrompt();
@@ -226,6 +237,10 @@ export const AuthenticatedOverlays: React.FC = () => {
         syncBadge();
         // Keep native geofence regions current with armed triggers/places
         resyncGeofences();
+      } else if (nextState === 'background' || nextState === 'inactive') {
+        // Final hidden heartbeat so the backend reaper ends the session
+        // promptly instead of waiting a full TTL.
+        sendHeartbeat(false);
       }
     });
 
@@ -241,6 +256,7 @@ export const AuthenticatedOverlays: React.FC = () => {
       pushNotificationService.cleanup();
       appStateSubscription.remove();
       clearInterval(heartbeatInterval);
+      navStateSub();
       badgeRefreshSub.remove();
     };
   }, [isAuthenticated]);

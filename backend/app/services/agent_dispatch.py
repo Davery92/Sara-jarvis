@@ -1009,7 +1009,14 @@ async def _dispatch_llm_loop(
             try:
                 tool_args = json.loads(fn.get("arguments", "{}"))
             except json.JSONDecodeError:
+                # H5 (Brain Alignment): degrade to empty args (never leak the raw
+                # parse error) but make the failure observable in the funnel.
                 tool_args = {}
+                try:
+                    from app.services.silent_failure_tracker import Tracker
+                    Tracker("dispatch.tool_arg_parse").note(tool_name or "unknown")
+                except Exception:
+                    pass
 
             logger.info(f"[dispatch] Tool call: {tool_name}({json.dumps(tool_args)[:200]})")
 

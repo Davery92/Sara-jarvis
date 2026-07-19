@@ -30,7 +30,7 @@ class NotificationProposal:
     title: str
     message: str
     priority: str = "normal"  # normal, high, critical
-    category: str = "general"  # schedule, security, social, health, check_in, home
+    category: str = "general"  # schedule, security, social, health, checkin, home
     reason: str = ""
 
 

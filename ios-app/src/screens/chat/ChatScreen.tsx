@@ -25,6 +25,7 @@ import { Message } from '../../types/api';
 import { ContentCard as ContentCardType, SuggestedAction, ToolStatus } from '../../types/cards';
 import { assistantAnalytics } from '../../services/assistantAnalytics';
 import { chatService } from '../../services/chat';
+import { surfacesService } from '../../services/surfaces';
 import { voiceService } from '../../services/voice';
 import { ImageAttachment } from '../../services/imagePicker';
 import { DocumentAttachment } from '../../services/documentPicker';
@@ -126,6 +127,36 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
   const flatListRef = useRef<FlatList>(null);
   const messagesRef = useRef<Message[]>([]);
   const streamingMessageRef = useRef('');
+  // Mirror of pendingCards. The streaming onComplete closure captures state from
+  // when the request started (pendingCards just cleared to []), so reading
+  // pendingCards there loses every card that streamed in. Read the ref instead.
+  const pendingCardsRef = useRef<ContentCardType[]>([]);
+
+  // Surfaces (interactive checklists / cook-mode) are persistent DB rows, but
+  // reloaded chat history comes back without cards. Re-inject any active
+  // surfaces for the conversation onto the last assistant message so they
+  // survive screen switches and cross-device.
+  const attachActiveSurfaces = useCallback(
+    async (msgs: Message[], convId: string | null): Promise<Message[]> => {
+      if (!convId) return msgs;
+      try {
+        const surfaces = await surfacesService.list({ status: 'active', conversation_id: convId });
+        if (!surfaces.length) return msgs;
+        const cards = surfaces.map((s) => ({ card_type: 'surface_card', title: s.title, surface: s })) as any[];
+        const copy = [...msgs];
+        for (let i = copy.length - 1; i >= 0; i--) {
+          if (copy[i].role === 'assistant') {
+            copy[i] = { ...copy[i], cards };
+            return copy;
+          }
+        }
+        return copy;
+      } catch {
+        return msgs;
+      }
+    },
+    []
+  );
   const isRecordingRef = useRef(false);
   const shouldResumeListening = useRef(false);
   const hasLoadedHistory = useRef(false);
@@ -412,7 +443,7 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
             created_at: ep.created_at,
             episode_id: ep.id,
           }));
-          setMessages(loadedMessages);
+          setMessages(await attachActiveSurfaces(loadedMessages, cid));
         }
       } catch (error) {
         console.error('[Chat] Error reloading after task inject:', error);
@@ -479,7 +510,7 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
               episode_id: ep.id,  // Map episode ID for rating
             }));
 
-            setMessages(loadedMessages);
+            setMessages(await attachActiveSurfaces(loadedMessages, savedConversationId));
             setConversationId(savedConversationId);
             console.log(`[Chat] Loaded ${loadedMessages.length} messages from conversation ${savedConversationId}`);
             return;
@@ -566,7 +597,7 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
             episode_id: ep.id,
           }));
 
-          setMessages(loadedMessages);
+          setMessages(await attachActiveSurfaces(loadedMessages, reloadId));
           console.log(`[Chat] Reloaded ${loadedMessages.length} messages`);
         }
       } catch (error) {
@@ -693,6 +724,7 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
     // Clear previous suggestions when sending new message
     setSuggestedActions([]);
     setPendingCards([]);
+    pendingCardsRef.current = [];
     setActiveToolStatus(null);
     if (activeConversationContext) {
       setConversationContext(null);
@@ -751,6 +783,7 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
         noteId: resolvedNoteId,  // Pass note for report/note discussion context
         source: isEmbedded ? 'ios' : 'ios',
         onContentCard: (card: any) => {
+          pendingCardsRef.current = [...pendingCardsRef.current, card];
           setPendingCards(prev => [...prev, card]);
         },
         onToolStatus: (status: ToolStatus) => {
@@ -784,15 +817,16 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
           content: responseText || 'I finished thinking, but no visible response text was returned.',
           created_at: new Date().toISOString(),
           episode_id: episodeId,  // Include episode_id for star rating
-          cards: [...pendingCards],  // Attach accumulated cards
+          cards: [...pendingCardsRef.current],  // Attach accumulated cards (ref avoids stale closure)
         };
 
-        console.log('[Chat] 📝 Creating assistant message with episode_id:', episodeId, 'cards:', pendingCards.length);
+        console.log('[Chat] 📝 Creating assistant message with episode_id:', episodeId, 'cards:', pendingCardsRef.current.length);
         setMessages((prev) => [...prev, assistantMessage]);
         setStreamingMessage('');
         streamingMessageRef.current = '';
         setIsStreaming(false);
         setPendingCards([]);
+        pendingCardsRef.current = [];
         setActiveToolStatus(null);
 
         // Always update conversation_id if backend provides one
@@ -1210,6 +1244,7 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
             setConversationContext(null);
             setSuggestedActions([]);
             setPendingCards([]);
+            pendingCardsRef.current = [];
             setActiveToolStatus(null);
 
             // Clear active conversation on backend

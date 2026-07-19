@@ -15,6 +15,17 @@ StartLimitIntervalSec=300
 StartLimitBurst=5
 Environment=CUDA_VISIBLE_DEVICES=0
 Environment=PYTHONUNBUFFERED=1
+# Required so the ALSA "pulse" PCM plugin (and thus PortAudio) can find the
+# user PipeWire/pulse socket at /run/user/1000/pulse/native. Without this a
+# system service can't see the "pulse" input device and falls back to a silent
+# Tegra APE loopback — i.e. Sara goes deaf. (uid 1000 = david.)
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+# Pin capture to the AIRHUG source explicitly. The "pulse" device otherwise
+# follows the server default source, which drifts (e.g. to the silent onboard
+# platform-sound codec) and, even when the default IS the AIRHUG, the ALSA
+# pulse plugin was still capturing silence. PULSE_SOURCE forces libpulse (and
+# thus the "pulse" PortAudio device) onto the AIRHUG regardless of the default.
+Environment=PULSE_SOURCE=alsa_input.usb-Generic_AIRHUG_21_AIRHUG_21-00.analog-stereo
 EnvironmentFile=-/home/david/sara-voice/.env
 StandardOutput=journal
 StandardError=journal
