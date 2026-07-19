@@ -167,7 +167,7 @@ services:
   celery-worker:
     build: ./backend
     restart: unless-stopped
-    command: celery -A app.celery_app worker --loglevel=info --concurrency=4 -Q cognitive,health,input,maintenance,low_priority,reflection
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=4 -Q cognitive,health,input,maintenance,low_priority,reflection,dispatch
     env_file: .env
     environment:
       - REDIS_URL=redis://redis:6379/0

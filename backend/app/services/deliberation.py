@@ -103,7 +103,9 @@ async def _deep_llm_call(messages: List[Dict[str, str]], max_tokens: int = 3000)
     if system_content:
         payload["system"] = system_content
 
-    async with httpx.AsyncClient(timeout=90.0) as client:
+    # 180s, not 90s: hourly deliberations measure 53–61s and any slow sample on
+    # the local 27B was a coin-flip against the old 90s kill threshold (Phase 4).
+    async with httpx.AsyncClient(timeout=180.0) as client:
         response = await client.post(
             "https://api.anthropic.com/v1/messages",
             json=payload,

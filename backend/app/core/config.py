@@ -39,6 +39,14 @@ class Settings(BaseSettings):
     bg_llm_connect_timeout: float = 6.0
     bg_llm_num_ctx: int = 32768
     bg_llm_fallback_max_tokens: int = 24000  # Max input tokens for fallback model (leave headroom from 32k window)
+
+    # Phase 4 — run agent dispatch in the Celery `dispatch` worker (durable across
+    # backend restarts) instead of in-process asyncio. Falls back to in-process if
+    # the enqueue fails.
+    dispatch_via_celery: bool = True
+    # Progress-based watchdog: kill a dispatch task only after this many seconds
+    # with NO progress event (replaces the fixed 4h auto-expire).
+    dispatch_stall_seconds: int = 900  # 15 min of no progress
     learning_guide_num_ctx: int = 32768
 
     # Research Executor LLM Configuration

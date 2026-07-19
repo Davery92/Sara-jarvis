@@ -49,26 +49,51 @@ def check_stuck_tasks(self):
     db = SessionLocal()
     newly_failed = []
     try:
-        cutoff = local_now() - timedelta(hours=MAX_RUNTIME_HOURS)
+        # Progress-based watchdog (Phase 4): a `running` task is only stalled if it
+        # has made no progress for dispatch_stall_seconds (updated_at is bumped on
+        # every progress event). needs_clarification is waiting on David, so it keeps
+        # a generous 24h ceiling rather than the short stall window.
+        try:
+            from app.core.config import settings as _settings
+            stall_secs = int(getattr(_settings, "dispatch_stall_seconds", 900))
+        except Exception:
+            stall_secs = 900
+        agent_types = ["vm_agent", "self_orchestrate", "internal_agent", "vm_claude_agent", "code_mode"]
+        # background_task.updated_at is naive UTC (DB session tz = UTC) — compare
+        # cutoffs in the same convention, not local ET.
+        from app.core.timezone import naive_utc_now
+        _now_naive = naive_utc_now()
+        stall_cutoff = _now_naive - timedelta(seconds=stall_secs)
+        clarify_cutoff = _now_naive - timedelta(hours=24)
         stuck = (
-            db.query(BackgroundTask)
-            .filter(
+            db.query(BackgroundTask).filter(
                 BackgroundTask.user_id == DEFAULT_USER_ID,
-                BackgroundTask.task_type.in_(
-                    ["vm_agent", "self_orchestrate", "internal_agent", "vm_claude_agent", "code_mode"]
-                ),
-                BackgroundTask.status.in_(["needs_clarification", "running"]),
-                BackgroundTask.updated_at < cutoff,
-            )
-            .all()
+                BackgroundTask.task_type.in_(agent_types),
+                BackgroundTask.status == "running",
+                BackgroundTask.updated_at < stall_cutoff,
+            ).all()
+        )
+        stuck += (
+            db.query(BackgroundTask).filter(
+                BackgroundTask.user_id == DEFAULT_USER_ID,
+                BackgroundTask.task_type.in_(agent_types),
+                BackgroundTask.status == "needs_clarification",
+                BackgroundTask.updated_at < clarify_cutoff,
+            ).all()
         )
         for t in stuck:
-            logger.info(f"[dispatch_watchdog] Auto-expiring stuck task {t.id} (status={t.status})")
             original_status = t.status
+            mins = stall_secs // 60 if original_status == "running" else 1440
+            logger.info(f"[dispatch_watchdog] Auto-expiring stalled task {t.id} "
+                        f"(status={original_status}, no progress >{mins}m)")
             t.status = "failed"
             meta = t.task_metadata or {}
-            meta["error"] = f"Auto-expired by watchdog: stuck in {original_status} for >{MAX_RUNTIME_HOURS}h"
+            meta["error"] = f"Auto-expired by watchdog: no progress for >{mins} min (was {original_status})"
             meta["auto_expired_at"] = local_now().isoformat()
+            # Attach the step journal so David/Claude Code can see how far it got.
+            journal = meta.get("step_journal", [])
+            if journal:
+                meta["journal_tail"] = journal[-8:]
             t.task_metadata = {**meta}
             newly_failed.append(t)
         if newly_failed:

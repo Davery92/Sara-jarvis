@@ -85,6 +85,7 @@ celery_app = Celery(
         "app.tasks.workspace_jobs",
         "app.tasks.fleet",
         "app.tasks.interoception",
+        "app.tasks.dispatch",
     ]
 )
 
@@ -150,6 +151,10 @@ celery_app.conf.task_routes = {
     "app.tasks.ml.*": {"queue": "cognitive"},
     "app.tasks.assistant_verbs.*": {"queue": "cognitive"},
     "app.tasks.workspace_jobs.*": {"queue": "cognitive"},
+    # Durable agent dispatch (Phase 4) — long-running, isolated on its own queue so
+    # a 20-min agent task never starves cognitive work and survives a backend restart.
+    "app.tasks.dispatch.*": {"queue": "dispatch"},
+    "app.tasks.interoception.*": {"queue": "maintenance"},
 }
 
 # Define queues with priorities
@@ -162,6 +167,7 @@ celery_app.conf.task_queues = {
     "reflection": {"exchange": "reflection", "routing_key": "reflection"},
     "maintenance": {"exchange": "maintenance", "routing_key": "maintenance"},
     "low_priority": {"exchange": "low_priority", "routing_key": "low_priority"},
+    "dispatch": {"exchange": "dispatch", "routing_key": "dispatch"},
 }
 
 # Default queue

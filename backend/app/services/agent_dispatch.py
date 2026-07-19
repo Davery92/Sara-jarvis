@@ -182,7 +182,12 @@ DISPATCH_TOOLS = [
                     "command": {
                         "type": "string",
                         "description": "The shell command to execute",
-                    }
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": "Seconds to allow before killing (default 120). Raise it "
+                                       "for long builds/installs — up to 3600.",
+                    },
                 },
                 "required": ["command"],
             },
@@ -339,11 +344,19 @@ async def _execute_dispatch_tool(
             command = args.get("command", "")
             if not command.strip():
                 return "Error: empty command"
+            # Timeout is agent-adjustable (Phase 4): default 120s, but a real
+            # build/install on a managed host can request up to 1h.
+            try:
+                timeout = int(args.get("timeout") or 120)
+            except (TypeError, ValueError):
+                timeout = 120
+            timeout = max(5, min(timeout, 3600))
             result = await bridge.execute_command(
-                f"cd {working_dir} && {command}", timeout=120,
+                f"cd {working_dir} && {command}", timeout=timeout,
             )
             if result.timed_out:
-                return "Command timed out after 120s"
+                return (f"Command timed out after {timeout}s. If this was a long "
+                        f"build/install, retry with a larger `timeout` (up to 3600).")
             output = result.stdout
             if result.stderr:
                 output += f"\nSTDERR: {result.stderr}"
@@ -1321,17 +1334,34 @@ class AgentDispatchService:
             except Exception:
                 pass
 
-        # Launch async execution — VM primary, internal fallback
+        # Launch execution — VM primary, internal fallback.
         skill_context = task_metadata.get("skill_context", "")
-        coro = self._run_vm_claude_mode(
-            task_id, mission_id, user_id, task_description,
-            skill_context=skill_context,
-            fallback_categories=classified_categories,
-        )
 
-        async_task = asyncio.create_task(coro)
-        async_task.add_done_callback(self._task_done_callback)
-        self._running_tasks[task_id] = async_task
+        # Phase 4: run in the Celery `dispatch` worker so a backend restart doesn't
+        # kill in-flight agent work (acks_late + reject_on_worker_lost are global).
+        launched_via_celery = False
+        try:
+            from app.core.config import settings as _settings
+            if getattr(_settings, "dispatch_via_celery", True):
+                from app.tasks.dispatch import execute_dispatch
+                execute_dispatch.delay(
+                    task_id, mission_id, user_id, task_description,
+                    skill_context, classified_categories or [],
+                )
+                launched_via_celery = True
+                logger.info(f"[dispatch] task {task_id} enqueued to Celery dispatch queue")
+        except Exception as e:
+            logger.error(f"[dispatch] Celery enqueue failed, falling back to in-process: {e}")
+
+        if not launched_via_celery:
+            coro = self._run_vm_claude_mode(
+                task_id, mission_id, user_id, task_description,
+                skill_context=skill_context,
+                fallback_categories=classified_categories,
+            )
+            async_task = asyncio.create_task(coro)
+            async_task.add_done_callback(self._task_done_callback)
+            self._running_tasks[task_id] = async_task
 
         # Emit dispatched event
         await self._emit_progress(user_id, task_id, "dispatched",
@@ -2826,7 +2856,9 @@ class AgentDispatchService:
         self, user_id: str, task_id: str, status: str,
         summary: str = "", extra: dict = None,
     ):
-        """Emit an AGENT_TASK_PROGRESS event on the event bus."""
+        """Emit an AGENT_TASK_PROGRESS event on the event bus AND bump the task's
+        liveness timestamp + step journal so the progress-based watchdog (Phase 4)
+        can tell a live task from a hung one, and long tasks can report step N/M."""
         try:
             payload = {"task_id": task_id, "status": status, "summary": summary}
             if extra:
@@ -2839,6 +2871,41 @@ class AgentDispatchService:
             ))
         except Exception as e:
             logger.debug(f"[dispatch] Failed to emit progress event: {e}")
+        # Liveness + journal (best-effort, must not break the run).
+        try:
+            self._record_progress(task_id, status, summary)
+        except Exception as e:
+            logger.debug(f"[dispatch] progress liveness bump failed: {e}")
+
+    def _record_progress(self, task_id: str, status: str, summary: str = ""):
+        """Bump task.updated_at (liveness for the stall watchdog) and append a
+        capped step-journal entry to task_metadata."""
+        from app.main_simple import SessionLocal
+        from app.models.background_task import BackgroundTask
+        db = SessionLocal()
+        try:
+            task = db.query(BackgroundTask).filter(BackgroundTask.id == task_id).first()
+            if not task:
+                return
+            meta = dict(task.task_metadata or {})
+            journal = list(meta.get("step_journal", []))
+            journal.append({
+                "at": local_now().isoformat(), "status": status,
+                "summary": (summary or "")[:300],
+            })
+            meta["step_journal"] = journal[-50:]  # cap
+            meta["last_progress_at"] = local_now().isoformat()
+            meta["step_count"] = len(journal)
+            task.task_metadata = meta
+            # background_task timestamps are naive UTC (DB session tz is UTC, so
+            # func.now() stores naive UTC). Match that or the stall watchdog mis-fires.
+            from app.core.timezone import naive_utc_now
+            task.updated_at = naive_utc_now()
+            from sqlalchemy.orm.attributes import flag_modified
+            flag_modified(task, "task_metadata")
+            db.commit()
+        finally:
+            db.close()
 
     async def _deliver_result_to_user(
         self, db, user_id: str, task_id: str,

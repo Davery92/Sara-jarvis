@@ -450,18 +450,41 @@ class BackgroundTaskService:
         """
         from ..main_simple import BackgroundTask
 
-        # Auto-expire stuck tasks before returning results
-        cutoff = local_now() - timedelta(hours=4)
+        # Progress-based watchdog (Phase 4): kill a task only after it has made NO
+        # progress for `dispatch_stall_seconds` — a task streaming progress stays
+        # alive indefinitely; a truly hung one dies in ~15 min. `updated_at` is
+        # bumped on every progress event (agent_dispatch._record_progress).
+        # needs_clarification is exempt from the short window (it's waiting on
+        # David, not hung) — it keeps a generous 24h ceiling.
+        try:
+            from app.core.config import settings as _settings
+            stall_secs = int(getattr(_settings, "dispatch_stall_seconds", 900))
+        except Exception:
+            stall_secs = 900
+        # background_task.updated_at is naive UTC (DB session tz = UTC); compare in
+        # the same convention.
+        from app.core.timezone import naive_utc_now
+        _now_naive = naive_utc_now()
+        stall_cutoff = _now_naive - timedelta(seconds=stall_secs)
+        clarify_cutoff = _now_naive - timedelta(hours=24)
+
         stuck = db.query(BackgroundTask).filter(
             BackgroundTask.user_id == user_id,
-            BackgroundTask.status.in_(["needs_clarification", "running"]),
-            BackgroundTask.updated_at < cutoff,
+            BackgroundTask.status == "running",
+            BackgroundTask.updated_at < stall_cutoff,
+        ).all()
+        stuck += db.query(BackgroundTask).filter(
+            BackgroundTask.user_id == user_id,
+            BackgroundTask.status == "needs_clarification",
+            BackgroundTask.updated_at < clarify_cutoff,
         ).all()
         for t in stuck:
-            logger.info(f"Auto-expiring stuck task {t.id} (status={t.status})")
+            mins = stall_secs // 60 if t.status == "running" else 1440
+            logger.info(f"Auto-expiring stalled task {t.id} (status={t.status}, no progress >{mins}m)")
             orig_status = t.status
             t.status = "failed"
-            t.error_message = f"Auto-expired: stuck in {orig_status} for >4 hours"
+            t.error_message = (f"Auto-expired: no progress for >{mins} min "
+                               f"(was {orig_status}). Retry to re-run it.")
         if stuck:
             db.commit()
 
