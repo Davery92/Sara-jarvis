@@ -162,7 +162,7 @@ async def resolve(db, user_id: str, force: bool = False) -> DevicePresence:
         await r.setex(key, CACHE_TTL_SECONDS, json.dumps(asdict(result)))
         return result
     finally:
-        await r.aclose()
+        await r.close()
 
 
 async def _publish_if_changed(r, user_id: str, result: DevicePresence) -> None:

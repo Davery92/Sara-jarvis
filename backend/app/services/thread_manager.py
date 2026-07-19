@@ -57,7 +57,8 @@ async def get_open_threads(user_id: str, db: AsyncSession) -> List[Dict]:
     for r in rows:
         hours_ago = 0
         if r.opened_at:
-            delta = datetime.now(timezone.utc) - r.opened_at.replace(tzinfo=None)
+            # opened_at is a naive `timestamp` column (naive UTC); subtract naive-from-naive
+            delta = datetime.now(timezone.utc).replace(tzinfo=None) - r.opened_at.replace(tzinfo=None)
             hours_ago = round(delta.total_seconds() / 3600, 1)
 
         threads.append({

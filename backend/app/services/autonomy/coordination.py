@@ -114,7 +114,7 @@ class WorkerCoordinator:
         if self._redis is None or cur_loop != self._redis_loop_id:
             if self._redis is not None:
                 try:
-                    await self._redis.aclose()
+                    await self._redis.close()
                 except Exception:
                     pass
             self._redis = redis.from_url(self.redis_url)

@@ -58,7 +58,7 @@ class NightlyDreamService:
         acquired = await r.set(DREAM_LOCK_KEY, self._owner_token, nx=True, ex=DREAM_LOCK_TTL)
         if not acquired:
             logger.warning("Dream scheduler already running (lock held by another instance)")
-            await r.aclose()
+            await r.close()
             return
 
         logger.info("Starting nightly dream scheduler (lock acquired)...")
@@ -94,7 +94,7 @@ class NightlyDreamService:
                 await r.eval(RELEASE_SCRIPT, 1, DREAM_LOCK_KEY, self._owner_token)
             except Exception:
                 pass
-            await r.aclose()
+            await r.close()
     
     def _should_dream(self, eastern_now: datetime) -> bool:
         """Check if we should run the dream sequence (Eastern time)"""

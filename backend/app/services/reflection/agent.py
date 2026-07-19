@@ -188,11 +188,11 @@ class ReflectionAgent:
             text("""
                 SELECT COUNT(*) as count,
                        MIN(created_at) as first_followup
-                FROM episodes
+                FROM episode
                 WHERE user_id = :user_id
                 AND created_at > :action_time
                 AND created_at < :action_time + INTERVAL '1 hour'
-                AND content ILIKE '%thank%' OR content ILIKE '%great%' OR content ILIKE '%perfect%'
+                AND (content ILIKE '%thank%' OR content ILIKE '%great%' OR content ILIKE '%perfect%')
             """),
             {
                 "user_id": pending["user_id"],
@@ -205,7 +205,7 @@ class ReflectionAgent:
         negative_result = await self.db.execute(
             text("""
                 SELECT COUNT(*)
-                FROM episodes
+                FROM episode
                 WHERE user_id = :user_id
                 AND created_at > :action_time
                 AND created_at < :action_time + INTERVAL '1 hour'
@@ -233,8 +233,12 @@ class ReflectionAgent:
                 "source": "implicit"
             }
         else:
-            # After timeout, assume partial success if no negative signals
-            hours_elapsed = (datetime.now(timezone.utc) - created_at).total_seconds() / 3600
+            # After timeout, assume partial success if no negative signals.
+            # created_at comes from a naive `timestamp` column (naive UTC); compare
+            # naive-to-naive to avoid offset-naive/aware subtraction errors.
+            if created_at is not None and created_at.tzinfo is not None:
+                created_at = created_at.astimezone(timezone.utc).replace(tzinfo=None)
+            hours_elapsed = (datetime.now(timezone.utc).replace(tzinfo=None) - created_at).total_seconds() / 3600
             if hours_elapsed > 24:
                 return {
                     "status": "unknown",

@@ -22,7 +22,8 @@ from sqlalchemy import text
 
 from app.core.config import settings
 from app.core.deps import get_current_user, get_current_user_optional
-from app.db.session import get_async_session_factory
+from app.db.session import get_async_session_factory, get_db
+from sqlalchemy.orm import Session
 from app.models.user import User
 
 logger = logging.getLogger(__name__)
@@ -951,6 +952,7 @@ async def stream_activity(
     request: Request,
     x_daemon_token: Optional[str] = Header(None),
     current_user: Optional[User] = Depends(get_current_user_optional),
+    _auth_db: Session = Depends(get_db),
 ) -> StreamingResponse:
     """Server-sent events stream of new activity log entries.
 
@@ -962,6 +964,13 @@ async def stream_activity(
     is_daemon = bool(expected and x_daemon_token == expected)
     if not is_daemon and current_user is None:
         raise HTTPException(status_code=401, detail="auth required")
+
+    # Release the auth session's connection before streaming — otherwise it sits
+    # idle-in-transaction for the SSE lifetime and Postgres kills it (5-min timeout).
+    try:
+        _auth_db.close()
+    except Exception:
+        pass
 
     import json as _json
 

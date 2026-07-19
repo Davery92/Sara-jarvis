@@ -6,6 +6,7 @@ from typing import Dict, Any
 from app.tools.base import BaseTool, ToolResult
 from sqlalchemy import text
 from datetime import datetime, timezone, timedelta
+from app.core.timezone import naive_local_now
 import json
 
 
@@ -197,7 +198,7 @@ class FitnessSummaryTool(BaseTool):
             upcoming_result = db.execute(upcoming_sql, {"user_id": user_id})
 
             upcoming_workouts = []
-            current_day = datetime.now().strftime('%A').lower()
+            current_day = naive_local_now().strftime('%A').lower()
 
             for row in upcoming_result.fetchall():
                 scheduled_days = json.loads(row.scheduled_days) if isinstance(row.scheduled_days, str) else (row.scheduled_days or [])

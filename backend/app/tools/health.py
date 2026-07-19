@@ -11,6 +11,7 @@ Tool capabilities:
 
 import logging
 from datetime import datetime, timedelta
+from app.core.timezone import naive_utc_now
 from typing import Optional, Dict, Any
 
 from sqlalchemy import text
@@ -412,7 +413,7 @@ class WorkoutHistoryTool(BaseTool):
         days: int,
         activity_filter: Optional[str],
     ) -> str:
-        cutoff = datetime.utcnow() - timedelta(days=days)
+        cutoff = naive_utc_now() - timedelta(days=days)
         af = (activity_filter or "").lower().strip()
 
         # HealthKit-tracked workouts (Apple Watch / Health app)

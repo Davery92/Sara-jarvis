@@ -26,6 +26,8 @@ import httpx
 import redis
 
 from app.main_simple import get_current_user
+from app.db.session import get_db
+from sqlalchemy.orm import Session
 from app.services.voice.control_plane import update_service_heartbeat
 
 logger = logging.getLogger(__name__)
@@ -114,8 +116,18 @@ async def get_sensory_status(current_user=Depends(get_current_user)):
 
 
 @router.get("/events")
-async def stream_sensory_events(request: Request, current_user=Depends(get_current_user)):
+async def stream_sensory_events(
+    request: Request,
+    current_user=Depends(get_current_user),
+    _auth_db: Session = Depends(get_db),
+):
     """Stream real-time sensory events via SSE."""
+    # Release the auth session before streaming (Redis-only stream) so it doesn't
+    # sit idle-in-transaction and get killed by Postgres after 5 min.
+    try:
+        _auth_db.close()
+    except Exception:
+        pass
 
     async def event_generator() -> AsyncGenerator[str, None]:
         """Generate SSE events from Redis pub/sub and Jetson logs."""

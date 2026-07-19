@@ -4,6 +4,7 @@ Daily Briefings, Context Modes, Intelligence Reports, Proactive Suggestions, Pat
 """
 import json
 from datetime import datetime, timedelta
+from app.core.timezone import naive_local_now
 from typing import List, Dict, Optional
 from sqlalchemy.orm import Session
 import logging
@@ -44,7 +45,7 @@ async def generate_daily_briefing(
             db.commit()
 
         # Gather context data
-        today = datetime.now().date()
+        today = naive_local_now().date()
         yesterday = today - timedelta(days=1)
         week_ago = today - timedelta(days=7)
 
@@ -190,7 +191,7 @@ def get_context_stats(db: Session, user_id: str, Episode, Note, Document, Calend
         doc_count = db.query(Document).filter(Document.user_id == user_id).count()
 
         # Count events (future and recent past)
-        thirty_days_ago = datetime.now() - timedelta(days=30)
+        thirty_days_ago = naive_local_now() - timedelta(days=30)
         event_count = db.query(CalendarEvent).filter(
             CalendarEvent.user_id == user_id,
             CalendarEvent.start_time >= thirty_days_ago
@@ -230,7 +231,7 @@ async def generate_intelligence_report(
     """Generate periodic intelligence report (weekly/monthly/quarterly)"""
     try:
         # Determine date range
-        today = datetime.now()
+        today = naive_local_now()
         if report_type == "weekly":
             start_date = today - timedelta(days=7)
             title = f"Weekly Intelligence Report - {today.strftime('%b %d, %Y')}"

@@ -20,6 +20,7 @@ import logging
 import re
 import uuid
 from datetime import date, datetime, timezone
+from app.core.timezone import naive_local_now
 from typing import Any, Dict, Optional
 
 from sqlalchemy import text
@@ -43,7 +44,7 @@ def _today_et() -> date:
         return now_et().date()
     except Exception:
         # Fallback: server local
-        return datetime.now().date()
+        return naive_local_now().date()
 
 
 async def _llm_json(system: str, user: str, *, max_tokens: int = 2000, temperature: float = 0.3) -> Dict[str, Any]:

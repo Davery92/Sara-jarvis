@@ -766,7 +766,7 @@ class AttentionQueueService:
                     }))
                     await r.expire(response_key, 3600)
                     if hasattr(r, "aclose"):
-                        await r.aclose()
+                        await r.close()
                     else:
                         await r.close()
                 except Exception as e:

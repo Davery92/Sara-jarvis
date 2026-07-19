@@ -17,6 +17,7 @@ from pydantic import BaseModel, EmailStr
 from typing import Optional, Dict, Any, List, Union
 # CryptContext imported via app.core.auth.pwd_context
 from datetime import datetime, timedelta, timezone, date
+from app.core.timezone import naive_local_now
 from zoneinfo import ZoneInfo
 from app.core.timezone import now as local_now, today as local_today, format_datetime as format_local_datetime, USER_TIMEZONE, format_iso_utc, format_memory_timestamp, relative_time
 from jose import jwt, JWTError
@@ -2363,7 +2364,7 @@ class SimpleLLMClient:
                     return "Reminder not found."
                 
                 reminder.is_completed = True
-                reminder.updated_at = datetime.now()
+                reminder.updated_at = naive_local_now()
                 db.commit()
                 
                 return f"Marked reminder '{reminder.title}' as completed"
@@ -3238,7 +3239,7 @@ Keep it brief and factual."""
 
             # Update the conversation with the title
             conversation.title = title
-            conversation.updated_at = datetime.now()
+            conversation.updated_at = naive_local_now()
             db.commit()
             logger.info(f"Generated title for conversation {conversation_id}: {title}")
 
@@ -7593,6 +7594,17 @@ async def startup_event():
     STARTUP_HEALTH["startup_time"] = datetime.now(timezone.utc).isoformat()
     STARTUP_HEALTH["critical_failures"] = []
 
+    # 0. Probe the briefs mount for writability (loud log on failure — a
+    #    non-writable data/briefs silently kills weekly_synthesis + morning brief).
+    try:
+        from app.services.daily_brief.status_tracker import probe_briefs_writable
+        _probe = probe_briefs_writable()
+        STARTUP_HEALTH["briefs_writable"] = _probe
+        if _probe.get("ok"):
+            logger.info("✅ Briefs directory writable")
+    except Exception as _pe:
+        logger.error(f"Briefs writability probe crashed: {_pe}")
+
     # 1. CRITICAL: Validate database connection
     try:
         db = SessionLocal()
@@ -10153,7 +10165,7 @@ async def get_analytics_dashboard(current_user: User = Depends(get_current_user)
         recent_chats = db.query(ConversationTurn).filter(
             ConversationTurn.user_id == current_user.id,
             ConversationTurn.role == "assistant",
-            ConversationTurn.created_at >= datetime.now() - timedelta(days=7)
+            ConversationTurn.created_at >= naive_local_now() - timedelta(days=7)
         ).count()
         
         # Tool usage stats (simplified)

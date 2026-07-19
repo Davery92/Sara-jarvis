@@ -68,6 +68,36 @@ async def get_current_user(
     raise credentials_exception
 
 
+async def get_streaming_user(
+    request: Request,
+    access_token: Optional[str] = Cookie(None),
+) -> User:
+    """Authenticate for a long-lived SSE/streaming endpoint WITHOUT holding a DB
+    session open for the stream's lifetime.
+
+    FastAPI keeps ``yield`` dependencies (get_db) alive until the response
+    finishes; on an SSE stream that can be hours, and the auth SELECT's
+    transaction sits idle until Postgres kills it ("idle-in-transaction
+    timeout"). This opens its own short-lived session, resolves + detaches the
+    user, and closes the session before the stream begins.
+    """
+    from app.db.session import SessionLocal
+    db = SessionLocal()
+    try:
+        user = await get_current_user(request=request, access_token=access_token, db=db)
+        # Touch commonly-used attributes so they're loaded before we detach,
+        # preventing a lazy-load from reopening a transaction mid-stream.
+        _ = user.id
+        _ = getattr(user, "email", None)
+        try:
+            db.expunge(user)
+        except Exception:
+            pass
+        return user
+    finally:
+        db.close()
+
+
 async def get_current_user_optional(
     request: Request,
     access_token: Optional[str] = Cookie(None),

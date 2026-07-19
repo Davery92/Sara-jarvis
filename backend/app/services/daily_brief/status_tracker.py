@@ -12,6 +12,28 @@ logger = logging.getLogger(__name__)
 BRIEFS_DIR = Path("/home/david/jarvis/data/briefs")
 
 
+def probe_briefs_writable() -> Dict[str, Any]:
+    """Write+delete a probe file under BRIEFS_DIR to detect permission/mount issues.
+
+    Returns {"ok": bool, "path": str, "error": str|None}. Logs loudly on failure —
+    a non-writable briefs dir silently kills weekly_synthesis and the morning brief.
+    Also consumed by the Phase-2 interoception self-check.
+    """
+    probe = BRIEFS_DIR / ".write_probe"
+    try:
+        BRIEFS_DIR.mkdir(parents=True, exist_ok=True)
+        probe.write_text("ok")
+        probe.unlink()
+        return {"ok": True, "path": str(BRIEFS_DIR), "error": None}
+    except Exception as e:  # pragma: no cover - environment dependent
+        logger.error(
+            "BRIEFS DIR NOT WRITABLE (%s): %s — weekly_synthesis / morning brief "
+            "will fail. Check ownership/uid of the data/briefs mount.",
+            BRIEFS_DIR, e,
+        )
+        return {"ok": False, "path": str(BRIEFS_DIR), "error": str(e)}
+
+
 def _utc_iso(timestamp: Optional[datetime] = None) -> str:
     ts = timestamp or datetime.now(timezone.utc)
     if ts.tzinfo is None:

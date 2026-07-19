@@ -318,7 +318,15 @@ async def get_food_details(
             recipe_id = food_id[len("recipe-"):]
             return await get_recipe_food_details(recipe_id, db)
 
-        # Otherwise, look up custom food
+        # Otherwise, look up custom food. food_database.id is a uuid column, so a
+        # non-UUID id (e.g. a synthetic "quick-..." quick-add entry) is simply not
+        # a stored food — return 404 rather than letting the cast 500.
+        import uuid as _uuid
+        try:
+            _uuid.UUID(str(food_id))
+        except (ValueError, AttributeError, TypeError):
+            raise HTTPException(status_code=404, detail="Food not found")
+
         query = text("SELECT * FROM food_database WHERE id = :id")
         result = db.execute(query, {"id": food_id}).fetchone()
 

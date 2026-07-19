@@ -6,6 +6,7 @@ Extracted from main_simple.py.
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from datetime import datetime
+from app.core.timezone import naive_local_now
 import logging
 
 from app.db.session import get_db
@@ -99,7 +100,7 @@ async def update_briefing_settings(settings_data: dict, db: Session = Depends(ge
             if hasattr(settings, key) and key != "id" and key != "user_id":
                 setattr(settings, key, 1 if value else 0 if key.startswith("include_") or key.endswith("_enabled") else value)
 
-        settings.updated_at = datetime.now()
+        settings.updated_at = naive_local_now()
         db.commit()
         db.refresh(settings)
 
@@ -197,7 +198,7 @@ async def set_context_mode_route(data: dict, db: Session = Depends(get_db), curr
             db.add(context_mode)
         else:
             context_mode.current_mode = new_mode
-            context_mode.updated_at = datetime.now()
+            context_mode.updated_at = naive_local_now()
 
         db.commit()
         return {"mode": new_mode}

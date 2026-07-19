@@ -872,6 +872,36 @@ class InterestIdIn(BaseModel):
                          description="Used by bump_interest. Ignored by touch_interest.")
 
 
+def _is_full_uuid(raw: str) -> bool:
+    import uuid as _uuid
+    try:
+        _uuid.UUID(str(raw))
+        return True
+    except (ValueError, AttributeError, TypeError):
+        return False
+
+
+async def _resolve_interest_id(db, raw: str) -> "str | None":
+    """Resolve a sara_interest id, tolerating a display-shortened prefix.
+
+    The ACS daemon sometimes echoes back the 8-char id prefix it saw in a log
+    line instead of the full UUID; binding that straight into a uuid column
+    raised 500s. Match exactly when it's a full UUID, otherwise resolve a
+    unique prefix; ambiguous/none returns None (caller raises 404).
+    """
+    raw = (raw or "").strip()
+    if _is_full_uuid(raw):
+        return raw
+    if len(raw) >= 4:
+        rows = (await db.execute(
+            text("SELECT id::text FROM sara_interest WHERE id::text LIKE :p LIMIT 2"),
+            {"p": raw + "%"},
+        )).fetchall()
+        if len(rows) == 1:
+            return rows[0][0]
+    return None
+
+
 @router.post("/bump_interest", response_model=InterestRow,
              dependencies=[Depends(verify_daemon_token)])
 async def bump_interest_tool(payload: InterestIdIn) -> InterestRow:
@@ -879,6 +909,9 @@ async def bump_interest_tool(payload: InterestIdIn) -> InterestRow:
     positive delta to reinforce, negative to dampen."""
     async_session = get_async_session_factory()
     async with async_session() as db:
+        resolved = await _resolve_interest_id(db, payload.id)
+        if resolved is None:
+            raise HTTPException(status_code=404, detail=f"interest {payload.id} not found")
         row = (await db.execute(
             text("""
                 UPDATE sara_interest
@@ -888,7 +921,7 @@ async def bump_interest_tool(payload: InterestIdIn) -> InterestRow:
                 RETURNING id, display_name, why, weight, source,
                           last_acted_at, created_at
             """),
-            {"delta": payload.delta, "id": payload.id},
+            {"delta": payload.delta, "id": resolved},
         )).mappings().first()
         await db.commit()
     if not row:
@@ -911,6 +944,9 @@ async def touch_interest_tool(payload: InterestIdIn) -> InterestRow:
     clock so it doesn't pull at her again until enough time passes."""
     async_session = get_async_session_factory()
     async with async_session() as db:
+        resolved = await _resolve_interest_id(db, payload.id)
+        if resolved is None:
+            raise HTTPException(status_code=404, detail=f"interest {payload.id} not found")
         row = (await db.execute(
             text("""
                 UPDATE sara_interest
@@ -919,7 +955,7 @@ async def touch_interest_tool(payload: InterestIdIn) -> InterestRow:
                 RETURNING id, display_name, why, weight, source,
                           last_acted_at, created_at
             """),
-            {"id": payload.id},
+            {"id": resolved},
         )).mappings().first()
         await db.commit()
     if not row:

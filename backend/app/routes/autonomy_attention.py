@@ -168,7 +168,7 @@ async def reply_to_attention_item(
         )
     finally:
         if hasattr(r, "aclose"):
-            await r.aclose()
+            await r.close()
         else:
             await r.close()
 

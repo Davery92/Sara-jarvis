@@ -6,6 +6,7 @@ from typing import Dict, Any, List, Optional, Tuple
 from app.tools.base import BaseTool, ToolResult
 from sqlalchemy import text
 from datetime import datetime
+from app.core.timezone import naive_local_now
 import uuid
 import json
 import re
@@ -427,7 +428,7 @@ class FoodSearchAndLogTool(BaseTool):
                 "carbs": round(carbs, 1),
                 "fats": round(fats, 1),
                 "notes": "Auto-logged via FatSecret search",
-                "logged_at": datetime.now()
+                "logged_at": naive_local_now()
             })
 
             db.commit()

@@ -5,6 +5,7 @@ uses the real /api/fitness/* endpoints in routes/fitness.py, not these.
 """
 
 import logging
+from app.core.timezone import naive_local_now
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -30,9 +31,9 @@ async def get_fitness_recovery(
     try:
         from datetime import datetime, timedelta
         if not start_date:
-            start_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+            start_date = (naive_local_now() - timedelta(days=30)).strftime("%Y-%m-%d")
         if not end_date:
-            end_date = datetime.now().strftime("%Y-%m-%d")
+            end_date = naive_local_now().strftime("%Y-%m-%d")
         query = text("""
             SELECT id, user_id, log_date, hrv, heart_rate, sleep_hours,
                    soreness_level, body_weight, weight_unit, notes, created_at, updated_at
@@ -79,7 +80,7 @@ async def create_fitness_recovery(
     db = SessionLocal()
     try:
         from datetime import datetime
-        log_date_str = recovery_data.get('log_date', datetime.now().strftime("%Y-%m-%d"))
+        log_date_str = recovery_data.get('log_date', naive_local_now().strftime("%Y-%m-%d"))
         soreness_level = recovery_data.get('soreness_level')
         if soreness_level is not None:
             if soreness_level < 1 or soreness_level > 10:

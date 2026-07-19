@@ -19,6 +19,7 @@ import logging
 import signal
 import sys
 from datetime import date, datetime, timedelta
+from app.core.timezone import naive_local_now
 from pathlib import Path
 
 # Add parent directory to path for imports
@@ -135,7 +136,7 @@ async def run_nightly_discovery():
 
 async def should_run_nightly() -> bool:
     """Check if it's time for nightly discovery (2:30 AM)."""
-    now = datetime.now()
+    now = naive_local_now()
     return now.hour == 2 and 25 <= now.minute <= 35
 
 
@@ -151,7 +152,7 @@ async def main_loop():
 
     while not shutdown_requested:
         try:
-            now = datetime.now()
+            now = naive_local_now()
             current_hour = now.replace(minute=0, second=0, microsecond=0)
             current_date = now.date()
 

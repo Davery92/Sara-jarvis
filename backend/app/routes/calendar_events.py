@@ -2,6 +2,7 @@
 import uuid
 import logging
 from datetime import datetime
+from app.core.timezone import naive_local_now
 from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -263,7 +264,7 @@ async def update_calendar_event(
         else:
             event.rrule = None  # Empty string clears recurrence
 
-    event.updated_at = datetime.now()
+    event.updated_at = naive_local_now()
     db.commit()
     db.refresh(event)
 
@@ -391,7 +392,7 @@ async def sync_ios_calendar_events(
                 existing_event.ios_calendar_name = event_data.ios_calendar_name
                 existing_event.attendees = attendees_list
                 existing_event.organizer = event_data.organizer
-                existing_event.updated_at = datetime.now()
+                existing_event.updated_at = naive_local_now()
                 db.flush()
                 event_for_linkage = existing_event
             else:

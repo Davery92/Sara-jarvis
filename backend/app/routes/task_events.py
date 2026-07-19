@@ -17,6 +17,8 @@ from fastapi.responses import StreamingResponse
 import redis
 
 from app.core.deps import get_current_user
+from app.db.session import get_db
+from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
@@ -56,9 +58,22 @@ def publish_task_event(user_id: str, event_dict: dict) -> bool:
 
 
 @router.get("/stream")
-async def stream_task_events(request: Request, current_user=Depends(get_current_user)):
+async def stream_task_events(
+    request: Request,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """Stream background task result events via SSE for the authenticated user."""
     user_id = current_user.id
+    # Release the auth DB session's connection immediately. FastAPI keeps `yield`
+    # dependencies (get_db) alive until the response finishes, so on a long-lived
+    # SSE stream the auth SELECT's transaction would sit idle and Postgres kills it
+    # ("idle-in-transaction timeout") after 5 min. The stream itself uses Redis, not
+    # the DB, so we don't need this session.
+    try:
+        db.close()
+    except Exception:
+        pass
 
     async def event_generator() -> AsyncGenerator[str, None]:
         # Register this connection

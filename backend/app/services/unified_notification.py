@@ -829,7 +829,7 @@ async def _maybe_speak_via_jetson(user_id: str, title: str, message: str) -> Non
         count = await redis_client.incr(key)
         if count == 1:
             await redis_client.expire(key, 90000)  # a little over 24h, clock-skew safe
-        await redis_client.aclose()
+        await redis_client.close()
 
         if count > JETSON_SPEAK_DAILY_CAP:
             logger.info(f"Jetson speak skipped — daily cap ({JETSON_SPEAK_DAILY_CAP}) reached")

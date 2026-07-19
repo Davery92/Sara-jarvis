@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 from app.db.session import get_db
 from datetime import date, datetime, timedelta
+from app.core.timezone import naive_local_now
 import uuid
 import json
 
@@ -1029,7 +1030,7 @@ class PhaseActivateTool(BaseTool):
             duration_weeks = phase_dict.get('duration_weeks') or 4
 
             if not start_date:
-                start_date = datetime.now().date()
+                start_date = naive_local_now().date()
             if not end_date:
                 end_date = start_date + timedelta(weeks=duration_weeks)
 

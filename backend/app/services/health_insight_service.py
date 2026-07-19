@@ -8,6 +8,7 @@ Similar to insight_injection.py but specialized for health data.
 import logging
 import json
 from datetime import datetime, timedelta
+from app.core.timezone import naive_local_now
 from typing import Optional, List, Dict, Any
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -227,7 +228,7 @@ class HealthInsightService:
         Analyze trend for a specific metric over the given number of days.
         """
         try:
-            cutoff = datetime.now() - timedelta(days=days)
+            cutoff = naive_local_now() - timedelta(days=days)
 
             # Get daily averages
             result = db.execute(text("""

@@ -5,6 +5,7 @@ Archives day layers nightly for historical analysis.
 import json
 import logging
 from datetime import datetime, timedelta
+from app.core.timezone import naive_local_now
 from pathlib import Path
 from typing import Optional, List, Dict
 
@@ -231,7 +232,7 @@ class Archiver:
         if not user_archive_dir.exists():
             return
 
-        cutoff_date = datetime.now() - timedelta(days=keep_days)
+        cutoff_date = naive_local_now() - timedelta(days=keep_days)
         removed_count = 0
 
         # Walk through year/month/day directories

@@ -113,7 +113,7 @@ async def notification_funnel(
                 ],
             }
         finally:
-            await r.aclose()
+            await r.close()
     except Exception as e:
         funnel["observations"] = {"error": str(e)}
 

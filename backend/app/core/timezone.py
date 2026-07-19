@@ -27,6 +27,56 @@ def now_utc() -> datetime:
     return datetime.now(UTC)
 
 
+def naive_local_now() -> datetime:
+    """Current Eastern wall-clock time as a *naive* datetime.
+
+    Use ONLY when writing to a ``timestamp without time zone`` column that stores
+    ET wall-clock (the legacy convention in a few tables, e.g. home_state_summary,
+    created_at columns). For everything else prefer ``now()`` (aware ET) or
+    ``now_utc()``. asyncpg cannot encode an aware datetime into a naive column, so
+    the two must be kept consistent — this helper makes that explicit.
+    """
+    return datetime.now(USER_TIMEZONE).replace(tzinfo=None)
+
+
+def naive_utc_now() -> datetime:
+    """Current UTC time as a *naive* datetime (drop-in for the banned datetime.utcnow()).
+
+    Use ONLY when writing to a ``timestamp without time zone`` column that stores
+    naive UTC. Prefer ``now_utc()`` (aware) for new code / timestamptz columns.
+    """
+    return datetime.now(UTC).replace(tzinfo=None)
+
+
+def to_naive_utc(dt: Optional[datetime]) -> Optional[datetime]:
+    """Coerce any datetime to naive UTC wall-clock.
+
+    Aware datetimes are converted to UTC then stripped of tzinfo; naive datetimes
+    are assumed to already be UTC and returned unchanged. Use when binding a value
+    into a ``timestamp without time zone`` column that stores UTC (the convention
+    for the reflection/consolidation/action_log tables).
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(UTC)
+    return dt.replace(tzinfo=None)
+
+
+def to_naive_local(dt: Optional[datetime]) -> Optional[datetime]:
+    """Coerce any datetime to naive Eastern wall-clock.
+
+    Aware datetimes are converted to ET then stripped of tzinfo; naive datetimes
+    are assumed to already be ET wall-clock and returned unchanged. Use when
+    binding a value into a ``timestamp without time zone`` column.
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(USER_TIMEZONE)
+    return dt.replace(tzinfo=None)
+
+
 def to_local(dt: Optional[datetime]) -> Optional[datetime]:
     """Convert a datetime to user's local timezone."""
     if dt is None:

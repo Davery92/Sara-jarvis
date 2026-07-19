@@ -51,7 +51,7 @@ def send_weekly_digest(self):
         return _run_async(_send_weekly_digest_async(DEFAULT_USER_ID))
     except Exception as e:
         logger.warning(f"[learning_digest] failed: {e}")
-        return {"error": str(e)}
+        raise  # failures must fail — Celery records FAILURE (Phase 1.3)
 
 
 async def _send_weekly_digest_async(user_id: str) -> dict:

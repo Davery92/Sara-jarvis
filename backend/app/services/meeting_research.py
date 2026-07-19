@@ -22,6 +22,7 @@ from both the chat tool and the Celery prep task.
 import logging
 import re
 from datetime import datetime, timedelta
+from app.core.timezone import naive_utc_now
 from typing import Optional
 
 from sqlalchemy import text
@@ -232,7 +233,7 @@ def recent_research(db: Session, user_id: str, company: str, days: int = 21) -> 
         """),
         {
             "uid": user_id,
-            "since": datetime.utcnow() - timedelta(days=days),
+            "since": naive_utc_now() - timedelta(days=days),
             "like": f"%{company}%",
         },
     ).mappings().first()

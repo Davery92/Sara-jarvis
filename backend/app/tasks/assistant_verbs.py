@@ -112,4 +112,4 @@ def assistant_verbs_sweep(self):
         return _run_async(_sweep(DEFAULT_USER_ID))
     except Exception as e:
         logger.error(f"assistant_verbs_sweep failed: {e}")
-        return {"error": str(e)}
+        raise  # failures must fail — Celery records FAILURE (Phase 1.3)

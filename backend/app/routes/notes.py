@@ -2,6 +2,7 @@
 import uuid
 import logging
 from datetime import datetime
+from app.core.timezone import naive_local_now
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from typing import List, Optional
@@ -393,7 +394,7 @@ async def update_note(
         note.tags = normalize_note_tags(note_data.tags)
     if note_data.starred is not None:
         note.starred = bool(note_data.starred)
-    note.updated_at = datetime.now()
+    note.updated_at = naive_local_now()
     db.commit()
     db.refresh(note)
 

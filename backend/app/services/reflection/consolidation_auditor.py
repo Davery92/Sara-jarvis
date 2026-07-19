@@ -79,6 +79,14 @@ class ConsolidationAuditor:
             window_end=window_end,
         )
 
+        # The consolidation_runs / consolidation_discards / action_log tables use
+        # `timestamp without time zone` columns storing naive UTC. asyncpg cannot
+        # encode an aware datetime into them, so coerce the window bounds to naive
+        # UTC before binding.
+        from app.core.timezone import to_naive_utc
+        window_start = to_naive_utc(window_start)
+        window_end = to_naive_utc(window_end)
+
         # Get consolidation run stats for this window
         run_result = await self.db.execute(
             text("""

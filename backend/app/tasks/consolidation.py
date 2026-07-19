@@ -117,7 +117,7 @@ def check_consolidation_trigger(self) -> Dict[str, Any]:
 
     except Exception as e:
         logger.error(f"Consolidation trigger check failed: {e}")
-        return {"error": str(e), "triggered": False}
+        raise  # failures must fail — Celery records FAILURE (Phase 1.3)
 
 
 @celery_app.task(bind=True, name="app.tasks.consolidation.run_consolidation")

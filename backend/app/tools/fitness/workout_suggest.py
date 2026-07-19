@@ -14,6 +14,7 @@ This is the KEY tool that makes Sara an intelligent fitness coach.
 import json
 import logging
 from datetime import datetime, timedelta, date
+from app.core.timezone import naive_local_now
 from typing import Optional, Dict, List
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -80,7 +81,7 @@ class WorkoutSuggestTool(BaseTool):
             if target_date:
                 workout_date = datetime.strptime(target_date, "%Y-%m-%d").date()
             else:
-                workout_date = datetime.now().date()
+                workout_date = naive_local_now().date()
 
             day_of_week = workout_date.strftime("%A").lower()
 

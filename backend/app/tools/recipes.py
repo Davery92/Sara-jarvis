@@ -9,6 +9,7 @@ import json
 import logging
 import uuid
 from datetime import datetime, timezone
+from app.core.timezone import naive_local_now
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -696,7 +697,7 @@ class RecipeLogMadeTool(BaseTool):
                     "carbs": round(float(r.carbs) * servings_eaten, 1),
                     "fats": round(float(r.fats) * servings_eaten, 1),
                     "notes": f"Logged from recipe: {r.name}",
-                    "logged_at": datetime.now(),
+                    "logged_at": naive_local_now(),
                 })
 
             db.commit()

@@ -7,6 +7,7 @@ and feedback for the contextual intelligence system.
 import json
 import logging
 from datetime import datetime, timedelta
+from app.core.timezone import naive_local_now
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -79,7 +80,7 @@ async def submit_insight_feedback(
         raise HTTPException(status_code=404, detail="Insight not found")
     insight.feedback_score = feedback.feedback_score
     insight.user_action = feedback.user_action
-    insight.surfaced_at = datetime.now()
+    insight.surfaced_at = naive_local_now()
     db.commit()
     return {"message": "Feedback recorded", "insight_id": insight_id}
 
@@ -99,7 +100,7 @@ async def trigger_autonomous_sweep(
         raw_insights = await sweep_service.execute_sweep(
             user_id=current_user.id, sweep_type=sweep_type, triggered_by="manual"
         )
-        recent_cutoff = datetime.now() - timedelta(hours=6)
+        recent_cutoff = naive_local_now() - timedelta(hours=6)
         recent_insights = db.query(AutonomousInsight).filter(
             and_(
                 AutonomousInsight.user_id == current_user.id,
@@ -128,7 +129,7 @@ async def trigger_autonomous_sweep(
                         **insight_data.get('related_data', {}),
                         **(insight_data.get('memory_context', {})),
                     }),
-                    generated_at=datetime.now(),
+                    generated_at=naive_local_now(),
                 )
                 db.add(insight)
                 stored_insights.append(insight)
@@ -202,7 +203,7 @@ async def update_user_profile(
         profile.ntfy_topics = json.dumps(profile_data.ntfy_topics)
     if profile_data.sprite_notifications is not None:
         profile.sprite_notifications = profile_data.sprite_notifications
-    profile.updated_at = datetime.now()
+    profile.updated_at = naive_local_now()
     db.commit()
     return {"message": "Profile updated successfully", "profile_id": profile.id}
 

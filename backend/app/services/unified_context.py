@@ -221,7 +221,7 @@ async def _get_redis() -> aioredis.Redis:
         # Close stale pool (best-effort)
         if _redis_pool is not None:
             try:
-                await _redis_pool.aclose()
+                await _redis_pool.close()
             except Exception:
                 pass
         _redis_pool = await aioredis.from_url(

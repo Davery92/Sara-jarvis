@@ -6,6 +6,7 @@ from typing import Dict, Any
 from app.tools.base import BaseTool, ToolResult
 from sqlalchemy import text
 from datetime import datetime, timezone, timedelta
+from app.core.timezone import naive_local_now
 import uuid
 import json
 import logging
@@ -112,7 +113,7 @@ class WorkoutListTool(BaseTool):
 
                     # Get current day of week to mark if it's scheduled for today
                     from datetime import datetime
-                    current_day = datetime.now().strftime('%A').lower()
+                    current_day = naive_local_now().strftime('%A').lower()
                     is_today = current_day in [day.lower() for day in scheduled_days]
 
                     workout = {

@@ -136,9 +136,11 @@ class ReflectionScratchpad:
         pattern_id: Optional[str] = None,
     ) -> int:
         """Add a new observation to the scratchpad."""
-        # Calculate expiration based on type
+        # Calculate expiration based on type. reflection_observations.expires_at is
+        # a naive `timestamp` column (naive UTC); bind naive to satisfy asyncpg.
+        from app.core.timezone import to_naive_utc
         retention = RETENTION_POLICY.get(observation_type)
-        expires_at = datetime.now(timezone.utc) + retention if retention else None
+        expires_at = to_naive_utc(datetime.now(timezone.utc) + retention) if retention else None
 
         result = await self.db.execute(
             text("""

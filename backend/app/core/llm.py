@@ -15,6 +15,7 @@ import json
 import logging
 import time
 from datetime import datetime
+from app.core.timezone import naive_local_now
 from enum import Enum
 from dataclasses import dataclass, field
 from typing import Dict, List, Any, Optional, Callable
@@ -226,7 +227,7 @@ class LLMClientWithFailover:
 
     async def _check_primary_health(self):
         """Check primary endpoint health via /v1/models endpoint"""
-        self.primary_status.last_check = datetime.now()
+        self.primary_status.last_check = naive_local_now()
         previous_state = self.primary_status.state
 
         try:
@@ -239,7 +240,7 @@ class LLMClientWithFailover:
             # Success
             self.primary_status.consecutive_failures = 0
             self.primary_status.consecutive_successes += 1
-            self.primary_status.last_success = datetime.now()
+            self.primary_status.last_success = naive_local_now()
 
             # State transition logic
             if self.primary_status.state in (EndpointState.UNHEALTHY, EndpointState.RECOVERING):
@@ -261,7 +262,7 @@ class LLMClientWithFailover:
         except Exception as e:
             self.primary_status.consecutive_failures += 1
             self.primary_status.consecutive_successes = 0
-            self.primary_status.last_failure = datetime.now()
+            self.primary_status.last_failure = naive_local_now()
 
             if self.primary_status.consecutive_failures >= 2:
                 if previous_state == EndpointState.HEALTHY:
@@ -360,7 +361,7 @@ class LLMClientWithFailover:
 
                     result = response.json()
                     logger.info(f"Failover to {self.fallback_url} successful")
-                    self.fallback_status.last_success = datetime.now()
+                    self.fallback_status.last_success = naive_local_now()
                     self.fallback_status.consecutive_successes += 1
 
                     # Track token usage with fallback context
@@ -371,7 +372,7 @@ class LLMClientWithFailover:
                 except Exception as fallback_error:
                     self.fallback_status.total_failures += 1
                     self.fallback_status.consecutive_failures += 1
-                    self.fallback_status.last_failure = datetime.now()
+                    self.fallback_status.last_failure = naive_local_now()
                     logger.error(f"Fallback to {self.fallback_url} also failed: {fallback_error}")
                     raise
 
@@ -930,7 +931,27 @@ class BackgroundLLMClient:
         return result
 
     async def _ensure_started(self):
-        """Initialize HTTP clients if not already started"""
+        """Initialize HTTP clients if not already started.
+
+        Loop-guarded: Celery prefork workers run each task under a fresh
+        asyncio.run() loop, but this client is a module-level singleton whose
+        httpx.AsyncClient instances are bound to the loop that created them.
+        Reusing them on a later loop raises "Event loop is closed". So if the
+        running loop changed since the clients were built, drop the stale ones
+        (WITHOUT awaiting aclose() — their loop is already gone) and rebuild.
+        """
+        import asyncio
+        try:
+            cur_loop = id(asyncio.get_running_loop())
+        except RuntimeError:
+            cur_loop = 0
+
+        if self._started and getattr(self, "_loop_id", None) not in (None, cur_loop):
+            # Stale clients from a now-closed loop — abandon them, do not aclose().
+            self._primary_client = None
+            self._fallback_client = None
+            self._started = False
+
         if self._started:
             return
 
@@ -943,6 +964,7 @@ class BackgroundLLMClient:
             base_url=self.fallback_url,
             timeout=request_timeout
         )
+        self._loop_id = cur_loop
         self._started = True
         logger.debug(
             f"Background LLM client started. Primary: {self.primary_url} ({self.primary_model}), "

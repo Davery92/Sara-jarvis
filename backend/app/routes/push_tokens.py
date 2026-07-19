@@ -1,6 +1,7 @@
 """Push notification token management routes."""
 import logging
 from datetime import datetime
+from app.core.timezone import naive_local_now
 from typing import Optional
 
 import httpx
@@ -45,7 +46,7 @@ async def register_push_token(
             existing_token.platform = request.platform
             existing_token.device_name = request.device_name
             existing_token.is_active = True
-            existing_token.updated_at = datetime.now()
+            existing_token.updated_at = naive_local_now()
 
             # Keep one active token per named device/platform to prevent stale duplicates.
             if request.device_name:
@@ -56,7 +57,7 @@ async def register_push_token(
                     PushToken.token != request.token,
                     PushToken.is_active == True,
                 ).update(
-                    {"is_active": False, "updated_at": datetime.now()},
+                    {"is_active": False, "updated_at": naive_local_now()},
                     synchronize_session=False,
                 )
             db.commit()
@@ -81,7 +82,7 @@ async def register_push_token(
                     PushToken.token != request.token,
                     PushToken.is_active == True,
                 ).update(
-                    {"is_active": False, "updated_at": datetime.now()},
+                    {"is_active": False, "updated_at": naive_local_now()},
                     synchronize_session=False,
                 )
 

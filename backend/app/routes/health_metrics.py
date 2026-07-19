@@ -12,6 +12,7 @@ import uuid
 import json
 import logging
 from datetime import datetime, timedelta
+from app.core.timezone import naive_local_now
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -219,7 +220,7 @@ async def _update_daily_recovery(
 ) -> bool:
     """Update daily_recovery_log with the latest data (backward compatibility)."""
     try:
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = naive_local_now().strftime("%Y-%m-%d")
 
         # Check if row exists for today
         existing = db.execute(text("""
@@ -280,7 +281,7 @@ async def get_recent_metrics(
     - Ordered by recorded_at DESC
     """
     user_id = current_user.id
-    cutoff = datetime.now() - timedelta(hours=hours)
+    cutoff = naive_local_now() - timedelta(hours=hours)
 
     try:
         if metric_type:
@@ -631,7 +632,7 @@ async def get_recent_external_workouts(
 ):
     """List recent external workouts (HealthKit/Watch) for the user."""
     user_id = current_user.id
-    cutoff = datetime.now() - timedelta(days=days)
+    cutoff = naive_local_now() - timedelta(days=days)
 
     query = """
         SELECT id, source, external_id, activity_type, started_at, ended_at,

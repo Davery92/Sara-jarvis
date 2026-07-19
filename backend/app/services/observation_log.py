@@ -51,7 +51,7 @@ async def _get_redis() -> aioredis.Redis:
     if _redis_pool is None or cur_loop != _redis_loop_id:
         if _redis_pool is not None:
             try:
-                await _redis_pool.aclose()
+                await _redis_pool.close()
             except Exception:
                 pass
         _redis_pool = await aioredis.from_url(

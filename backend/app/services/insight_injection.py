@@ -11,6 +11,7 @@ Updated to support:
 """
 import logging
 from datetime import datetime, timedelta
+from app.core.timezone import naive_local_now
 from typing import List, Optional, Dict, Any, Tuple
 from sqlalchemy import select, and_, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -215,7 +216,7 @@ class InsightInjectionService:
         # Recency boost (insights from today/yesterday)
         dream_date = insight.get("dream_date")
         if dream_date:
-            days_old = (datetime.now() - dream_date).days if isinstance(dream_date, datetime) else 7
+            days_old = (naive_local_now() - dream_date).days if isinstance(dream_date, datetime) else 7
             if days_old <= 1:
                 score += 0.1
             elif days_old <= 3:
@@ -248,7 +249,7 @@ class InsightInjectionService:
         """
         # Don't surface if already mentioned recently
         if insight.get("last_mentioned"):
-            time_since_mention = datetime.now() - insight["last_mentioned"]
+            time_since_mention = naive_local_now() - insight["last_mentioned"]
             if time_since_mention < timedelta(hours=self.MENTION_COOLDOWN_HOURS):
                 return False, "mentioned_recently", 0.0
 

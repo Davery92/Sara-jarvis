@@ -26,7 +26,7 @@ def _run_async(coro):
 
 from app.celery_app import celery_app
 from sqlalchemy import text
-from app.core.timezone import USER_TIMEZONE, now as local_now
+from app.core.timezone import USER_TIMEZONE, now as local_now, to_naive_local, to_naive_utc
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +140,7 @@ def mission_worker(self):
         return result
     except Exception as e:
         logger.error(f"Mission worker failed: {e}")
-        return {"error": str(e)}
+        raise  # failures must fail — Celery records FAILURE (Phase 1.3)
 
 
 async def _mission_worker_async():
@@ -340,7 +340,7 @@ def _rescore_importance_sync(max_batches: int = 50) -> dict:
             return _asyncio.run(scorer.rescore_all_episodes(max_batches=max_batches))
     except Exception as exc:
         logger.warning(f"Importance rescoring failed: {exc}")
-        return {"error": str(exc)}
+        raise  # failures must fail — Celery records FAILURE (Phase 1.3)
 
 
 def _consolidate_ratings_sync() -> dict:
@@ -361,7 +361,7 @@ def _consolidate_ratings_sync() -> dict:
             return _asyncio.run(run_rating_consolidation_job(db))
     except Exception as exc:
         logger.warning(f"Rating consolidation failed: {exc}")
-        return {"error": str(exc)}
+        raise  # failures must fail — Celery records FAILURE (Phase 1.3)
 
 
 async def _memory_consolidation_async():
@@ -640,7 +640,8 @@ async def _pkg_deep_extract_async(user_id: str, since_hours: int):
     from app.db.session import get_async_session_factory
     async_session = get_async_session_factory()
     async with async_session() as db:
-        since = local_now() - timedelta(hours=since_hours)
+        # episode.created_at is a naive `timestamp` column storing UTC; bind naive UTC.
+        since = to_naive_utc(local_now() - timedelta(hours=since_hours))
 
         # Load recent episodes (regular chat)
         result = await db.execute(text("""
@@ -978,7 +979,7 @@ def weather_context_refresh(self):
         return result
     except Exception as e:
         logger.warning(f"Weather refresh failed: {e}")
-        return {"error": str(e)}
+        raise  # failures must fail — Celery records FAILURE (Phase 1.3)
 
 
 async def _weather_refresh_async():
@@ -1002,7 +1003,7 @@ async def _weather_refresh_async():
         return {"skipped": "no_weather_data"}
     except Exception as e:
         logger.warning(f"Weather refresh async failed: {e}")
-        return {"error": str(e)}
+        raise  # failures must fail — Celery records FAILURE (Phase 1.3)
 
 
 # ── Home State Hourly Summary ────────────────────────────────────
@@ -1083,7 +1084,9 @@ async def _home_state_summary_async():
                     door_events = EXCLUDED.door_events
             """), {
                 "uid": DEFAULT_USER_ID,
-                "bucket": hour_bucket,
+                # hour_bucket column is `timestamp without time zone` (naive ET);
+                # asyncpg cannot encode an aware datetime into it.
+                "bucket": to_naive_local(hour_bucket),
                 "rooms": json.dumps(list(rooms_active)),
                 "temp_avg": sum(temp_readings) / len(temp_readings) if temp_readings else None,
                 "lights": lights_on,
@@ -1123,7 +1126,7 @@ def daily_autonomy_digest(self):
         return result
     except Exception as e:
         logger.error(f"Daily digest failed: {e}")
-        return {"error": str(e)}
+        raise  # failures must fail — Celery records FAILURE (Phase 1.3)
 
 
 async def _daily_digest_async():
@@ -1471,7 +1474,7 @@ def periodic_deliberation_fallback(self):
         return result
     except Exception as e:
         logger.error(f"Deliberation fallback failed: {e}")
-        return {"error": str(e)}
+        raise  # failures must fail — Celery records FAILURE (Phase 1.3)
 
 
 async def _deliberation_fallback_async():
@@ -1530,7 +1533,7 @@ def proactive_checkin_sweep(self):
         return _run_async(run_followup_sweep(DEFAULT_USER_ID))
     except Exception as e:
         logger.error(f"Follow-up sweep failed: {e}")
-        return {"error": str(e)}
+        raise  # failures must fail — Celery records FAILURE (Phase 1.3)
 
 
 @celery_app.task(
@@ -1548,7 +1551,7 @@ def deep_deliberation(self):
         return _run_async(_deep_deliberation_async(DEFAULT_USER_ID))
     except Exception as e:
         logger.error(f"Deep deliberation failed: {e}")
-        return {"error": str(e)}
+        raise  # failures must fail — Celery records FAILURE (Phase 1.3)
 
 
 async def _deep_deliberation_async(user_id: str):
@@ -1591,7 +1594,7 @@ def scan_ended_meetings(self):
         return _run_async(_scan(DEFAULT_USER_ID))
     except Exception as e:
         logger.error(f"Ended-meeting scan failed: {e}")
-        return {"error": str(e)}
+        raise  # failures must fail — Celery records FAILURE (Phase 1.3)
 
 
 # ─── Consolidation Task (Phase 4: Deep Reflection) ──────────────

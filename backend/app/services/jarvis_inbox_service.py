@@ -10,6 +10,7 @@ This service handles:
 
 from typing import List, Optional, Dict, Any
 from datetime import datetime, time, timedelta
+from app.core.timezone import naive_local_now
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_, desc
 import uuid
@@ -41,7 +42,7 @@ class NudgePolicy:
     def is_quiet_hours(self, dt: datetime = None) -> bool:
         """Check if current time is in quiet hours"""
         if dt is None:
-            dt = datetime.now()
+            dt = naive_local_now()
         
         current_time = dt.time()
         
@@ -57,12 +58,12 @@ class NudgePolicy:
         if last_batch_time is None:
             return True
         
-        elapsed = datetime.now() - last_batch_time
+        elapsed = naive_local_now() - last_batch_time
         return elapsed.total_seconds() >= (self.batch_interval_min * 60)
     
     def daily_count_exceeded(self, db: Session, user_id: int) -> bool:
         """Check if daily nudge limit has been reached"""
-        today = datetime.now().date()
+        today = naive_local_now().date()
         count = db.query(JarvisInbox).filter(
             and_(
                 JarvisInbox.user_id == user_id,
@@ -121,7 +122,7 @@ class JarvisInboxService:
             "payload": payload or {},
             "priority": priority,
             "dedupe_key": dedupe_key,
-            "created_at": datetime.now()
+            "created_at": naive_local_now()
         }
         
         # Handle immediate items (skip batching)
@@ -224,7 +225,7 @@ class JarvisInboxService:
         
         # Clear batch
         self._pending_nudges.clear()
-        self._last_batch_time = datetime.now()
+        self._last_batch_time = naive_local_now()
         
         logger.info(f"Flushed batch: {len(nudges)} items -> inbox item {item.id}")
         return item
@@ -258,7 +259,7 @@ class JarvisInboxService:
             return False
         
         item.status = InboxStatus.READ
-        item.read_at = datetime.now()
+        item.read_at = naive_local_now()
         db.commit()
         
         return True
@@ -277,7 +278,7 @@ class JarvisInboxService:
             return False
         
         item.status = InboxStatus.ARCHIVED
-        item.archived_at = datetime.now()
+        item.archived_at = naive_local_now()
         db.commit()
         
         return True

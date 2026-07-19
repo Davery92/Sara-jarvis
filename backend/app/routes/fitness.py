@@ -7,6 +7,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, validator
 from typing import List, Optional, Dict, Any
 from datetime import datetime, date, timedelta, timezone
+from app.core.timezone import naive_local_now
 import uuid
 
 from app.core.timezone import now as local_now
@@ -626,7 +627,7 @@ async def update_food_log_entry(
             "carbs": request.carbs,
             "fats": request.fats,
             "notes": request.notes or "",
-            "logged_at": request.logged_at or datetime.now()
+            "logged_at": request.logged_at or naive_local_now()
         })
 
         updated = result.fetchone()
@@ -783,7 +784,7 @@ async def get_recent_foods(
         # fall back to food_items (name/qty/unit) so logs made before detailed_items
         # was populated still surface — for single-item logs the row-level macros
         # ARE that item's macros (multi-item logs can't be split, so macros stay null).
-        thirty_days_ago = datetime.now() - timedelta(days=30)
+        thirty_days_ago = naive_local_now() - timedelta(days=30)
 
         query = text("""
             SELECT food_items, detailed_items, calories, protein, carbs, fats, logged_at
@@ -1822,7 +1823,7 @@ async def fitness_chat(
         active_phase = dict(phase_result._mapping) if phase_result else None
 
         # 4. Get today's scheduled templates
-        today_dow = datetime.now().strftime('%A').lower()
+        today_dow = naive_local_now().strftime('%A').lower()
         templates_result = db.execute(text("""
             SELECT id, name, scheduled_days, exercises, notes
             FROM fitness_template
@@ -1833,7 +1834,7 @@ async def fitness_chat(
         todays_templates = [dict(t._mapping) for t in templates_result]
 
         # 5. Get recent workouts (last 7 days) - grouped by session
-        week_ago = datetime.now() - timedelta(days=7)
+        week_ago = naive_local_now() - timedelta(days=7)
         recent_workouts = db.execute(text("""
             SELECT session_date, COUNT(DISTINCT exercise_id) as exercise_count,
                    STRING_AGG(DISTINCT notes, '; ') as notes
@@ -1845,7 +1846,7 @@ async def fitness_chat(
         recent_workouts_list = [dict(w._mapping) for w in recent_workouts]
 
         # 6. Get recent food logs (last 3 days)
-        three_days_ago = datetime.now() - timedelta(days=3)
+        three_days_ago = naive_local_now() - timedelta(days=3)
         recent_food = db.execute(text("""
             SELECT DATE(logged_at) as log_date, meal_type, food_items,
                    calories, protein, carbs, fats
@@ -3493,7 +3494,7 @@ async def list_templates(
         from datetime import datetime
 
         # Get today's day name for sorting
-        today = datetime.now().strftime("%A").lower()
+        today = naive_local_now().strftime("%A").lower()
 
         sql = """
             SELECT t.id, t.phase_id, t.name, t.scheduled_days, t.exercises,
@@ -3581,7 +3582,7 @@ async def get_today_template(user_id: str = Depends(get_current_user_id), db: Se
         import json
         from datetime import datetime
 
-        day_of_week = datetime.now().strftime("%A").lower()
+        day_of_week = naive_local_now().strftime("%A").lower()
 
         # First, find the active phase (if any)
         active_phase = db.execute(text("""

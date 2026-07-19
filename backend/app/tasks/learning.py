@@ -220,7 +220,7 @@ async def _run_deep_research_async(job_id: str = None):
                 await db.commit()
             except Exception:
                 pass
-            return {"error": str(e), "job_id": job_id}
+            raise  # failures must fail — Celery records FAILURE (Phase 1.3)
 
     await engine.dispose()
 
@@ -569,7 +569,7 @@ def fetch_pending_sources(self, batch_size: int = 5):
         return result
     except Exception as e:
         logger.error(f"Pending source fetcher failed: {e}")
-        return {"error": str(e)}
+        raise  # failures must fail — Celery records FAILURE (Phase 1.3)
 
 
 async def _fetch_pending_sources_async(batch_size: int):
@@ -1035,7 +1035,7 @@ def process_uploaded_source(self, source_id: str, user_id: str):
         return result
     except Exception as e:
         logger.error(f"Background source processing failed for {source_id}: {e}")
-        return {"error": str(e)}
+        raise  # failures must fail — Celery records FAILURE (Phase 1.3)
 
 
 async def _process_uploaded_source_async(source_id: str, user_id: str):

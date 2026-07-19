@@ -72,7 +72,7 @@ class MLPersistenceSubscriber(EventSubscriber):
             prompt_key = f"sara:morning_brief_prompted:{event.user_id}:{now.date().isoformat()}"
             already_prompted = await redis_client.get(prompt_key)
             if already_prompted:
-                await redis_client.aclose()
+                await redis_client.close()
                 return
 
             from app.db.base import SessionLocal
@@ -87,11 +87,11 @@ class MLPersistenceSubscriber(EventSubscriber):
 
             import asyncio
             if not await asyncio.to_thread(_brief_exists):
-                await redis_client.aclose()
+                await redis_client.close()
                 return
 
             await redis_client.set(prompt_key, "1", ex=86400)
-            await redis_client.aclose()
+            await redis_client.close()
 
             from app.services.unified_notification import send_notification
             await send_notification(

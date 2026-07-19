@@ -103,7 +103,7 @@ def check_stuck_tasks(self):
         return {"expired": len(newly_failed), "notified": notified}
     except Exception as e:
         logger.warning(f"[dispatch_watchdog] check failed: {e}")
-        return {"error": str(e)}
+        raise  # failures must fail — Celery records FAILURE (Phase 1.3)
     finally:
         db.close()
 
