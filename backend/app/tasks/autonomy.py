@@ -1248,6 +1248,26 @@ async def _autonomy_retention_async():
             results["action_traces_error"] = str(e)
             await db.rollback()
 
+        # Append-only tables that had no retention (Phase 8.4). promotion_event is
+        # the biggest table in the DB (~32k rows, 4x episodes); cap it hard.
+        _RETENTION = [
+            ("promotion_event", "created_at", 30),
+            ("sara_activity_log", "created_at", 90),
+            ("home_activity_log", "created_at", 90),
+            ("location_event", "created_at", 90),
+            ("token_usage", "created_at", 90),
+            ("system_event", "created_at", 30),
+        ]
+        for table, col, days in _RETENTION:
+            try:
+                r = await db.execute(text(
+                    f"DELETE FROM {table} WHERE {col} < NOW() - INTERVAL '{days} days'"))
+                results[f"{table}_deleted"] = r.rowcount
+                await db.commit()
+            except Exception as e:
+                results[f"{table}_error"] = str(e)[:80]
+                await db.rollback()
+
         # Attention items: delete archived older than 30 days (Phase 2)
         try:
             r = await db.execute(text("""
