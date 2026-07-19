@@ -56,8 +56,15 @@ deploy_daemon() {
     err "cannot reach daemon host $DAEMON_HOST (key $DAEMON_KEY)"; return 1
   fi
   log "rsync acs-daemon/ -> $DAEMON_HOST:$DAEMON_PATH…"
+  # NOTE: the VM's virtualenv lives at /opt/acs-daemon/venv (no dot) and the daemon
+  # runs from it (systemd ExecStart) — exclude it (and .venv) or --delete wipes it.
+  # Daemon config is in /etc/acs-daemon/config.env (EnvironmentFile), not here.
+  # /opt/acs-daemon is root-owned; sara has passwordless sudo, so run the remote
+  # rsync as root via --rsync-path.
   rsync -az --delete -e "ssh -i $DAEMON_KEY -o StrictHostKeyChecking=accept-new" \
-    --exclude '__pycache__' --exclude '.venv' --exclude '*.pyc' \
+    --rsync-path="sudo rsync" \
+    --exclude '__pycache__' --exclude '.venv' --exclude 'venv' --exclude '*.pyc' \
+    --exclude 'VERSION' --exclude '*.bak.*' \
     "$REPO_ROOT/acs-daemon/" "$DAEMON_HOST:$DAEMON_PATH/"
   # stamp the daemon's deployed SHA so its heartbeat can report it
   ssh -i "$DAEMON_KEY" "$DAEMON_HOST" "echo '$FULL_SHA $BUILT_AT' | sudo tee $DAEMON_PATH/VERSION >/dev/null"
