@@ -9347,6 +9347,25 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
             except Exception as e:
                 logger.debug(f"interoception header skipped: {e}")
 
+            # Phase 10B/10C: David's known routine + pinned standing context, so
+            # chat reasons from his schedule and the things he told Sara to remember.
+            try:
+                _ctx_bits = []
+                from app.services.life_facts import get_life_facts_summary
+                _lf = await get_life_facts_summary(str(current_user.id))
+                if _lf:
+                    _ctx_bits.append(_lf)
+                from app.services.scratchpad import get_scratchpad_for_context
+                _sp = await get_scratchpad_for_context(str(current_user.id))
+                if _sp:
+                    _ctx_bits.append(_sp)
+                if _ctx_bits:
+                    system_message = ChatMessage(
+                        role="system",
+                        content=system_message.content + "\n\n" + "\n\n".join(_ctx_bits))
+            except Exception as e:
+                logger.debug(f"life-facts/scratchpad injection skipped: {e}")
+
             # CONTENT INBOX: Inject inbox item content when discussing a shared item
             if request.inbox_item_id:
                 try:

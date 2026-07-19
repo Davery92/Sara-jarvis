@@ -143,6 +143,8 @@ from app.tools.sara_queue import QueueForSaraTool
 from app.tools.notifications import NOTIFICATION_TOOLS
 from app.tools.diagnostics import DIAGNOSTICS_TOOLS
 from app.tools.interests import INTEREST_TOOLS
+from app.tools.scratchpad import SCRATCHPAD_TOOLS
+from app.tools.day_type import DAY_TYPE_TOOLS
 from app.tools.shell import SHELL_TOOLS
 from app.tools.recipes import RECIPE_TOOLS
 from app.tools.people import ListPeopleTool
@@ -402,6 +404,14 @@ class ToolRegistry:
         'interests': {
             'description': "Record David's reaction to a topic Sara keeps surfacing. Use when he pushes back — \"stop bringing up X\", \"I don't care about Y\", \"quit updating me on Z\". Two strikes auto-mutes the interest (reversible).",
             'tools': ['react_to_interest']
+        },
+        'scratchpad': {
+            'description': "Pin standing context David wants kept front-of-mind for a while — meal-prep status, recurring plans, temporary schedule changes ('smoothie every morning', 'meal prepped this week', 'off Thursday'). Read/clear it too.",
+            'tools': ['scratchpad_write', 'scratchpad_read', 'scratchpad_clear']
+        },
+        'day_type': {
+            'description': "Mark today (or a date) as a rest or training day, flipping the nutrition targets. Use when David skips or adds a workout, or asks to switch to a rest day.",
+            'tools': ['set_day_type']
         },
         'vm_agents': {
             'description': "Dispatch background tasks (research, code, setup) to agents, check status, resume sessions, and propose candidate skills. Use dispatch_and_monitor for tasks where David should be notified on completion.",
@@ -678,6 +688,12 @@ class ToolRegistry:
 
             # Interest feedback — "stop bringing up X" -> two-strikes auto-mute
             *INTEREST_TOOLS,
+
+            # Standing-context scratchpad — David pins things Sara keeps front-of-mind
+            *SCRATCHPAD_TOOLS,
+
+            # Situational: flip a day to rest/training (nutrition targets follow)
+            *DAY_TYPE_TOOLS,
 
             # Research Plan Tools (delegate research to dedicated agent)
             CreateResearchPlanTool(),

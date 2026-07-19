@@ -35,6 +35,19 @@ def is_training_day(db: Session, user_id: str, on_date: date) -> Dict:
     Returns {is_training_day: bool, reason: str, template_id, template_name}.
     `reason` is one of: "session_logged", "scheduled", "rest".
     """
+    # 0. Explicit day-type override (Phase 10D set_day_type) wins over everything.
+    try:
+        ov = db.execute(text("""
+            SELECT day_type FROM day_type_override
+            WHERE user_id = :uid AND override_date = :d
+        """), {"uid": user_id, "d": on_date}).fetchone()
+        if ov:
+            is_tr = ov.day_type == "training"
+            return {"is_training_day": is_tr, "reason": "override",
+                    "template_id": None, "template_name": None}
+    except Exception:
+        pass  # table may not exist yet
+
     # 1. Explicit session row (logged / started / toggled).
     sess = db.execute(text("""
         SELECT id FROM workout_session
@@ -75,3 +88,20 @@ def is_training_day(db: Session, user_id: str, on_date: date) -> Dict:
 
     return {"is_training_day": False, "reason": "rest",
             "template_id": None, "template_name": None}
+
+
+def set_day_type(db: Session, user_id: str, on_date: date, day_type: str, note: str = "") -> Dict:
+    """Override a day as 'rest' or 'training' (Phase 10D). Flips the nutrition
+    targets (fitness_context reads calories_rest_day/carbs_rest_day when the day
+    resolves to rest). Returns the stored override."""
+    if day_type not in ("rest", "training"):
+        return {"error": "day_type must be 'rest' or 'training'"}
+    from app.core.timezone import now_utc
+    db.execute(text("""
+        INSERT INTO day_type_override (user_id, override_date, day_type, note, created_at)
+        VALUES (:uid, :d, :t, :n, :now)
+        ON CONFLICT (user_id, override_date)
+        DO UPDATE SET day_type = :t, note = :n, created_at = :now
+    """), {"uid": user_id, "d": on_date, "t": day_type, "n": note, "now": now_utc()})
+    db.commit()
+    return {"date": str(on_date), "day_type": day_type, "note": note}

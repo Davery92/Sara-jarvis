@@ -202,6 +202,37 @@ class DeliberationEngine:
         except Exception as _de:
             logger.debug(f"health digest injection skipped: {_de}")
 
+        # 3c. Life facts (Phase 10B) — David's known routine, so the brain reasons
+        # from his schedule ("normally trains 13:10") instead of guessing.
+        try:
+            from app.services.life_facts import get_life_facts_summary
+            _lf = await get_life_facts_summary(user_id)
+            if _lf:
+                user_msg = f"{_lf}\n\n{user_msg}"
+        except Exception as _le:
+            logger.debug(f"life facts injection skipped: {_le}")
+
+        # 3d. Standing context scratchpad (Phase 10C) — things David told Sara to
+        # keep front-of-mind ("meal prepped this week; smoothie every morning").
+        try:
+            from app.services.scratchpad import get_scratchpad_for_context
+            _sp = await get_scratchpad_for_context(user_id)
+            if _sp:
+                user_msg = f"{_sp}\n\n{user_msg}"
+        except Exception as _se:
+            logger.debug(f"scratchpad injection skipped: {_se}")
+
+        # 3e. Cross-domain signals (Phase 10D) — today's training-day status + a
+        # food-log digest, plus guidance so deliberation *derives* the office/rest
+        # and pre-gym-meal scenarios instead of a generic "how's your day".
+        try:
+            from app.services.situational_signals import build_situational_block
+            _sig = await build_situational_block(user_id)
+            if _sig:
+                user_msg = f"{_sig}\n\n{user_msg}"
+        except Exception as _sige:
+            logger.debug(f"situational signals injection skipped: {_sige}")
+
         # 4. LLM call — deep runs use the strong model (Anthropic), hourly
         # runs stay on the local BackgroundLLMClient (qwen).
         try:

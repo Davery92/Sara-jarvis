@@ -52,6 +52,42 @@ _RHYTHM_KEY_TO_PREDICATE = {
     v["rhythm_key"]: k for k, v in LIFE_FACT_PREDICATES.items() if v["rhythm_key"]
 }
 
+# Order life facts read as a day (Phase 10B injection).
+_SUMMARY_ORDER = [
+    "wakes_at", "departs_for_work_at", "starts_work_at", "trains_at", "lunch_at",
+    "ends_work_at", "returns_home_at", "dinner_at", "winds_down_at", "bedtime_at",
+]
+
+
+async def get_life_facts_summary(user_id: str) -> Optional[str]:
+    """One compact line of David's known routine for the deliberation + chat
+    context (Phase 10B). "David normally: wakes 5:00, leaves for work 7:00,
+    trains 13:10, winds down 19:30." None if no facts stored."""
+    from sqlalchemy import text
+    from app.db.session import get_async_session_factory
+    factory = get_async_session_factory()
+    try:
+        async with factory() as db:
+            rows = (await db.execute(text(
+                "SELECT predicate, value_text FROM life_fact WHERE user_id = :uid AND weekday IS NULL"),
+                {"uid": user_id})).mappings().all()
+    except Exception:
+        return None
+    if not rows:
+        return None
+    by_pred = {r["predicate"]: r["value_text"] for r in rows}
+    parts = []
+    for pred in _SUMMARY_ORDER:
+        if pred in by_pred:
+            spec = LIFE_FACT_PREDICATES.get(pred, {})
+            val = _fmt_time(by_pred[pred]) if spec.get("value_kind") == "time" else by_pred[pred]
+            parts.append(f"{spec.get('label', pred)} {val}")
+    if "works_from" in by_pred:
+        parts.append(f"works from {by_pred['works_from']}")
+    if not parts:
+        return None
+    return "David normally: " + ", ".join(parts) + "."
+
 
 # ---------------------------------------------------------------------------
 # time parsing helpers
