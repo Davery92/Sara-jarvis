@@ -84,6 +84,7 @@ celery_app = Celery(
         "app.tasks.assistant_verbs",
         "app.tasks.workspace_jobs",
         "app.tasks.fleet",
+        "app.tasks.interoception",
     ]
 )
 
@@ -223,3 +224,83 @@ def _validate_queue_topology():
 
 
 _validate_queue_topology()
+
+
+# ---------------------------------------------------------------------------
+# Interoception — Sara feels her own body (Phase 2)
+# Every Celery FAILURE writes to the task_failure ledger + system_event, and
+# escalates critical/recurring failures to a Needs-You item + health notification.
+# A matching success clears the ledger entry. A redis set gates the recovery
+# path so successful tasks don't each incur a DB write.
+# ---------------------------------------------------------------------------
+_FAILING_SET_KEY = "sara:failing_tasks"
+
+
+def _sync_redis():
+    import os
+    import redis as _redis
+    return _redis.Redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"),
+                                 decode_responses=True)
+
+
+try:
+    from celery.signals import task_failure as _task_failure_sig
+    from celery.signals import task_success as _task_success_sig
+
+    @_task_failure_sig.connect
+    def _interoception_on_failure(sender=None, task_id=None, exception=None,
+                                  traceback=None, einfo=None, **kw):
+        try:
+            import asyncio
+            task_name = getattr(sender, "name", None) or str(sender)
+            error_class = type(exception).__name__ if exception else "Unknown"
+            tb = ""
+            try:
+                tb = einfo.traceback if einfo is not None and hasattr(einfo, "traceback") else str(einfo or "")
+            except Exception:
+                tb = str(einfo or "")
+
+            async def _go():
+                from app.services.diagnostics_service import record_task_failure
+                res = await record_task_failure(task_name, error_class, str(exception), tb)
+                if res.get("escalate"):
+                    try:
+                        from app.services.interoception_alerts import escalate_task_failure
+                        await escalate_task_failure(task_name, error_class, res)
+                    except Exception as _e:
+                        logger.debug(f"health escalation skipped: {_e}")
+                return res
+
+            asyncio.run(_go())
+            try:
+                r = _sync_redis(); r.sadd(_FAILING_SET_KEY, task_name); r.close()
+            except Exception:
+                pass
+        except Exception as e:  # never let interoception break the worker
+            logger.error(f"interoception failure-handler crashed: {e}")
+
+    @_task_success_sig.connect
+    def _interoception_on_success(sender=None, result=None, **kw):
+        try:
+            task_name = getattr(sender, "name", None)
+            if not task_name:
+                return
+            # Only touch the DB if this task was known to be failing.
+            try:
+                r = _sync_redis()
+                if not r.sismember(_FAILING_SET_KEY, task_name):
+                    r.close()
+                    return
+                r.srem(_FAILING_SET_KEY, task_name)
+                r.close()
+            except Exception:
+                return
+            import asyncio
+            from app.services.diagnostics_service import mark_recovered
+            asyncio.run(mark_recovered(task_name))
+            logger.info(f"[interoception] {task_name} recovered — cleared from ledger")
+        except Exception as e:
+            logger.error(f"interoception success-handler crashed: {e}")
+
+except Exception as _sig_e:  # pragma: no cover
+    logger.error(f"Failed to register interoception signal handlers: {_sig_e}")

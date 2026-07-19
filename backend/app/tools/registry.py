@@ -141,6 +141,7 @@ from app.tools.content_inbox import CONTENT_INBOX_TOOLS
 from app.tools.agent_dispatch import AGENT_DISPATCH_TOOLS
 from app.tools.sara_queue import QueueForSaraTool
 from app.tools.notifications import NOTIFICATION_TOOLS
+from app.tools.diagnostics import DIAGNOSTICS_TOOLS
 from app.tools.shell import SHELL_TOOLS
 from app.tools.recipes import RECIPE_TOOLS
 from app.tools.people import ListPeopleTool
@@ -389,6 +390,13 @@ class ToolRegistry:
         'notifications': {
             'description': "Read the notifications Sara has sent David — what's unread, what the app icon badge refers to, recent notification history. Use when David asks \"what's the notification?\" or \"did I miss anything?\"",
             'tools': ['get_recent_notifications']
+        },
+        'diagnostics': {
+            'description': "Read-only self-diagnostics — Sara's own health. Failing background tasks, error events, an explanation of any single event, and a handoff report for Claude Code. Use when David asks \"what's broken?\", \"are you okay?\", \"why did that fail?\", or \"is anything failing?\"",
+            'tools': [
+                'diagnostics_overview', 'diagnostics_failures', 'diagnostics_events',
+                'diagnostics_explain', 'diagnostics_report',
+            ]
         },
         'vm_agents': {
             'description': "Dispatch background tasks (research, code, setup) to agents, check status, resume sessions, and propose candidate skills. Use dispatch_and_monitor for tasks where David should be notified on completion.",
@@ -659,6 +667,9 @@ class ToolRegistry:
 
             # Notification history ("what's the notification?" / badge explainer)
             *NOTIFICATION_TOOLS,
+
+            # Read-only self-diagnostics ("Sara, what's wrong?")
+            *DIAGNOSTICS_TOOLS,
 
             # Research Plan Tools (delegate research to dedicated agent)
             CreateResearchPlanTool(),

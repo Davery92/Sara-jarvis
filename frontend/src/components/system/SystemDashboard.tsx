@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react'
 import { Activity, Brain, Eye, Gauge, RefreshCw, AlertTriangle, Radio, Sparkles, Mail, Users, Undo2, BookOpen, ThumbsUp, MessageCircle } from 'lucide-react'
 import { APP_CONFIG } from '../../config'
+import VitalsStrip from './VitalsStrip'
 
 /**
  * THE SYSTEM — god-view dashboard (Phase 0 + 1).
@@ -136,6 +137,9 @@ const SystemDashboard: React.FC = () => {
             <AlertTriangle className="w-4 h-4" /> {err}
           </div>
         )}
+
+        {/* VITALS — Sara's own health (Phase 2 interoception) */}
+        <VitalsStrip />
 
         {/* WORLD — what she perceives right now */}
         <div className="assistant-panel rounded-xl p-5">

@@ -166,6 +166,14 @@ def setup_logging(
     handler.setFormatter(formatter)
     root_logger.addHandler(handler)
 
+    # Interoception: buffer WARNING+ records to redis for the system_event ring
+    # buffer (drained into the DB by a Celery beat task). Best-effort.
+    try:
+        from app.core.diagnostics_logging import install as _install_diag_logging
+        _install_diag_logging(service_name=service_name or "backend")
+    except Exception:
+        pass
+
     # Set specific log levels for noisy libraries
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
     logging.getLogger("uvicorn.error").setLevel(logging.INFO)

@@ -189,6 +189,17 @@ class DeliberationEngine:
             deep=deep,
         )
 
+        # 3b. Interoception — inject a health digest so Sara can *feel* her own
+        # broken parts and choose to tell David (Phase 2). Only surfaces tasks
+        # that cross the escalation threshold; None when healthy.
+        try:
+            from app.services.diagnostics_service import build_health_digest
+            _digest = await build_health_digest()
+            if _digest:
+                user_msg = f"{_digest}\n\n{user_msg}"
+        except Exception as _de:
+            logger.debug(f"health digest injection skipped: {_de}")
+
         # 4. LLM call — deep runs use the strong model (Anthropic), hourly
         # runs stay on the local BackgroundLLMClient (qwen).
         try:

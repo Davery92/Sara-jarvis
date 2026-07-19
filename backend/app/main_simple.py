@@ -5763,6 +5763,13 @@ except Exception as e:
     logger.error(f"❌ Fleet routes failed to load: {e}")
 
 try:
+    from app.routes.diagnostics import router as diagnostics_router
+    app.include_router(diagnostics_router)
+    logger.info("✅ Diagnostics routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Diagnostics routes failed to load: {e}")
+
+try:
     from app.routes.browse_shots import router as browse_shots_router
     app.include_router(browse_shots_router, prefix="/api", tags=["Browse Screenshots"])
     logger.info("✅ Browse screenshot routes loaded successfully")
