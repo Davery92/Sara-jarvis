@@ -10,7 +10,15 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 _async_engine = None
 _AsyncSessionLocal = None
-_async_loop_id = None  # track which event loop the engine was created on
+# Identity of the loop the engine was built on. We keep a WEAKREF to the loop
+# object, NOT id(loop): CPython reuses the id() of a freed object, so a new
+# asyncio.run() loop can land on the same id() a previous (now-closed) loop had.
+# The old guard then thought "same loop", kept the stale engine, and handed out
+# connections bound to a closed loop — the "underlying connection is closed" /
+# rollback-on-closed-connection errors on the check-in sweep. Identity via a live
+# weakref is collision-free; a dead weakref means the loop was GC'd -> rebuild.
+_async_loop_ref = None      # weakref.ref to the loop the engine was built on
+_async_loop_id = None       # kept only for _try_dispose_engine's skip check
 _async_pid = None
 
 
@@ -35,16 +43,17 @@ def _current_loop_id() -> int:
 
 
 def reset_async_session_factory():
-    """Dispose the cached async engine so the next call recreates it.
+    """Drop the cached async engine so the next call recreates it.
 
     Call this at the top of any Celery task that uses asyncio.run() to avoid
-    'Event loop is closed' / 'Future attached to a different loop' errors.
+    'Event loop is closed' / 'Future attached to a different loop' errors. The
+    old engine is abandoned (its connections belong to a closed/other loop, so it
+    cannot be disposed cleanly from here) and closed when garbage-collected.
     """
-    global _async_engine, _AsyncSessionLocal, _async_loop_id, _async_pid
-    if _async_engine is not None:
-        _try_dispose_engine(_async_engine, engine_loop_id=_async_loop_id)
+    global _async_engine, _AsyncSessionLocal, _async_loop_ref, _async_loop_id, _async_pid
     _async_engine = None
     _AsyncSessionLocal = None
+    _async_loop_ref = None
     _async_loop_id = None
     _async_pid = None
 
@@ -85,17 +94,28 @@ def get_async_session_factory():
     Safe to call from Celery tasks that use asyncio.run() — the engine is
     automatically rebuilt if the event loop has changed since last creation.
     """
-    global _async_engine, _AsyncSessionLocal, _async_loop_id, _async_pid
+    global _async_engine, _AsyncSessionLocal, _async_loop_ref, _async_loop_id, _async_pid
+    import asyncio
+    import weakref
     current_pid = os.getpid()
-    cur_loop = _current_loop_id()
-    if (
+    try:
+        cur_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        cur_loop = None
+
+    cached_loop = _async_loop_ref() if _async_loop_ref is not None else None
+    stale = (
         _AsyncSessionLocal is None
         or _async_pid != current_pid
-        or (cur_loop and cur_loop != _async_loop_id)
-    ):
-        # Process or event loop changed (or first call) — rebuild engine
-        if _async_engine is not None:
-            _try_dispose_engine(_async_engine, engine_loop_id=_async_loop_id)
+        # Identity comparison — collision-free (see _async_loop_ref note above).
+        or (cur_loop is not None and cached_loop is not cur_loop)
+        # Cached loop was GC'd or closed underneath us.
+        or (cached_loop is None and _AsyncSessionLocal is not None and cur_loop is not None)
+        or (cached_loop is not None and cached_loop.is_closed())
+    )
+    if stale:
+        # Abandon the old engine. Its connections are bound to a closed/other loop
+        # and cannot be disposed from here without raising; GC closes them.
         from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
         from sqlalchemy.orm import sessionmaker as sa_sessionmaker
         engine_kwargs = {
@@ -109,7 +129,8 @@ def get_async_session_factory():
         _AsyncSessionLocal = sa_sessionmaker(
             _async_engine, class_=AsyncSession, expire_on_commit=False,
         )
-        _async_loop_id = cur_loop
+        _async_loop_ref = weakref.ref(cur_loop) if cur_loop is not None else None
+        _async_loop_id = id(cur_loop) if cur_loop is not None else None
         _async_pid = current_pid
     return _AsyncSessionLocal
 

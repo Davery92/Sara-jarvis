@@ -211,12 +211,16 @@ def check_stuck_research():
 
 async def _check_stuck():
     from sqlalchemy import text
-    from app.db.session import get_db
+    from app.db.base import SessionLocal
 
-    db = next(get_db())
-
+    # Use a self-contained sync session and END the read transaction explicitly.
+    # The old code used `next(get_db())` (whose generator finally never runs) inside
+    # this async fn and left the connection INTRANS in the sync pool — poisoning it
+    # so the next pool_pre_ping (e.g. the tunables cache reload) failed with
+    # "can't change 'autocommit' now: connection in transaction status INTRANS".
+    rows = []
+    db = SessionLocal()
     try:
-        # Find pending questions older than 2 minutes (gives time for event-driven path)
         result = db.execute(
             text("""
                 SELECT rm.id, rm.plan_id
@@ -228,10 +232,12 @@ async def _check_stuck():
                   AND rp.status IN ('running', 'stuck')
             """)
         )
-
-        for row in result.fetchall():
-            logger.info("Auto-triggering Sara answer for message %s", row.id)
-            answer_research_question.delay(row.id, row.plan_id)
-
+        rows = result.fetchall()
+        db.rollback()  # end the read txn — never return the connection INTRANS
     finally:
         db.close()
+
+    # Dispatch outside the DB session.
+    for row in rows:
+        logger.info("Auto-triggering Sara answer for message %s", row.id)
+        answer_research_question.delay(row.id, row.plan_id)
