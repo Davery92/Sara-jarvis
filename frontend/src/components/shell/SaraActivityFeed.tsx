@@ -54,7 +54,9 @@ export default function SaraActivityFeed() {
 
   const fetchActivity = useCallback(async () => {
     try {
-      const res = await fetch(`${APP_CONFIG.apiUrl}/api/acs/v2/activity?limit=40`, {
+      // Phase 6: only things Sara did *for David* — her internal goal-lifecycle /
+      // loop-management chatter lives in the ACS/mind view, not this dashboard card.
+      const res = await fetch(`${APP_CONFIG.apiUrl}/api/acs/v2/activity?limit=40&audience=user_facing`, {
         credentials: 'include',
       })
       if (res.ok) {

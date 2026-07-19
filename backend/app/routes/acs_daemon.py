@@ -342,6 +342,39 @@ def _row_to_activity(row: dict) -> ActivityOut:
     )
 
 
+# Feed hygiene (Phase 6). Only things Sara did *for David* belong in the
+# user-facing "While you were away" feed; her own bookkeeping is internal.
+_USER_FACING_KINDS = {"notify_david", "inbox_complete"}
+# Summaries that are Sara narrating her own internal state / goal lifecycle /
+# loop management — forced internal even if the daemon tagged them notify_david
+# (the JIT-goal-funeral class of leak).
+import re as _re
+_INTERNAL_PHRASE = _re.compile(
+    r"\b(going quiet|idle loop|abandon(?:ing|ed)?|closing (?:the )?\w+ goal|jit goal|"
+    r"stale goal|loop management|habituat|went quiet|staying quiet|no action needed|"
+    r"formally clos|deprioritiz|self-audit)\b", _re.IGNORECASE)
+
+
+def classify_audience(kind: str, summary: str, metadata: dict = None) -> str:
+    """internal | user_facing. Explicit metadata.audience wins; then internal
+    phrasing forces internal; then kind decides."""
+    if metadata and metadata.get("audience") in ("internal", "user_facing"):
+        return metadata["audience"]
+    if summary and _INTERNAL_PHRASE.search(summary):
+        return "internal"
+    return "user_facing" if kind in _USER_FACING_KINDS else "internal"
+
+
+def _dedup_key(kind: str, summary: str, metadata: dict = None) -> str:
+    """Collapse near-identical repeats: (kind, subject). subject = explicit
+    metadata.subject, else the first ~8 lowercased alnum words of the summary."""
+    subj = (metadata or {}).get("subject")
+    if not subj:
+        words = _re.findall(r"[a-z0-9]+", (summary or "").lower())
+        subj = " ".join(words[:8])
+    return f"{kind}:{subj}"[:200]
+
+
 # Kinds we bother embedding — content kinds where semantic recall is useful.
 # Booking/lifecycle (boot, shutdown, tick, error) gets skipped to keep the
 # similarity search relevant. Focus_set and inbox transitions are kept because
@@ -390,13 +423,33 @@ async def append_activity(payload: ActivityIn) -> ActivityOut:
     """
     if payload.kind not in ALLOWED_ACTIVITY_KINDS:
         raise HTTPException(status_code=422, detail=f"unknown kind '{payload.kind}'")
+    audience = classify_audience(payload.kind, payload.summary, payload.metadata)
+    dedup_key = _dedup_key(payload.kind, payload.summary, payload.metadata)
     async_session = get_async_session_factory()
     async with async_session() as db:
+        # Lifecycle dedup (Phase 6): collapse a near-identical entry within 24h into
+        # the existing one (bump its timestamp) instead of appending a duplicate —
+        # kills the "Closing abandoned JIT goal" x4 spam.
+        existing = (await db.execute(
+            text("""SELECT id FROM sara_activity_log
+                    WHERE dedup_key = :dk AND created_at > NOW() - INTERVAL '24 hours'
+                    ORDER BY created_at DESC LIMIT 1"""),
+            {"dk": dedup_key})).first()
+        if existing:
+            row = (await db.execute(
+                text("""UPDATE sara_activity_log
+                        SET created_at = NOW(), summary = :summary, body = :body
+                        WHERE id = :id
+                        RETURNING id, created_at, kind, summary, body, tags, metadata"""),
+                {"id": existing[0], "summary": payload.summary, "body": payload.body})).mappings().first()
+            await db.commit()
+            return _row_to_activity(dict(row))
+
         row = (await db.execute(
             text(
                 """
-                INSERT INTO sara_activity_log (kind, summary, body, tags, metadata)
-                VALUES (:kind, :summary, :body, CAST(:tags AS jsonb), CAST(:metadata AS jsonb))
+                INSERT INTO sara_activity_log (kind, summary, body, tags, metadata, audience, dedup_key)
+                VALUES (:kind, :summary, :body, CAST(:tags AS jsonb), CAST(:metadata AS jsonb), :audience, :dedup_key)
                 RETURNING id, created_at, kind, summary, body, tags, metadata
                 """
             ),
@@ -406,6 +459,8 @@ async def append_activity(payload: ActivityIn) -> ActivityOut:
                 "body": payload.body,
                 "tags": json.dumps(payload.tags),
                 "metadata": json.dumps(payload.metadata),
+                "audience": audience,
+                "dedup_key": dedup_key,
             },
         )).mappings().first()
         await db.commit()
@@ -426,6 +481,7 @@ async def append_activity(payload: ActivityIn) -> ActivityOut:
 async def list_activity(
     limit: int = Query(20, ge=1, le=200),
     kind: Optional[str] = Query(None),
+    audience: Optional[str] = Query(None, description="'user_facing' for the While-you-were-away feed; omit for everything"),
     x_daemon_token: Optional[str] = Header(None),
     current_user: Optional[User] = Depends(get_current_user_optional),
 ) -> list[ActivityOut]:
@@ -435,13 +491,21 @@ async def list_activity(
     if not is_daemon and current_user is None:
         raise HTTPException(status_code=401, detail="auth required")
 
-    where_clause = ""
+    clauses = []
     params: dict[str, Any] = {"limit": limit}
     if kind:
         if kind not in ALLOWED_ACTIVITY_KINDS:
             raise HTTPException(status_code=422, detail=f"unknown kind '{kind}'")
-        where_clause = "WHERE kind = :kind"
+        clauses.append("kind = :kind")
         params["kind"] = kind
+    if audience in ("internal", "user_facing"):
+        # Only the newer, classified rows have audience; treat NULL as internal so
+        # the user-facing feed is conservative (never leaks unclassified chatter).
+        if audience == "user_facing":
+            clauses.append("audience = 'user_facing'")
+        else:
+            clauses.append("(audience = 'internal' OR audience IS NULL)")
+    where_clause = ("WHERE " + " AND ".join(clauses)) if clauses else ""
 
     async_session = get_async_session_factory()
     async with async_session() as db:

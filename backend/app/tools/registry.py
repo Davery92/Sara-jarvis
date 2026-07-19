@@ -142,6 +142,7 @@ from app.tools.agent_dispatch import AGENT_DISPATCH_TOOLS
 from app.tools.sara_queue import QueueForSaraTool
 from app.tools.notifications import NOTIFICATION_TOOLS
 from app.tools.diagnostics import DIAGNOSTICS_TOOLS
+from app.tools.interests import INTEREST_TOOLS
 from app.tools.shell import SHELL_TOOLS
 from app.tools.recipes import RECIPE_TOOLS
 from app.tools.people import ListPeopleTool
@@ -397,6 +398,10 @@ class ToolRegistry:
                 'diagnostics_overview', 'diagnostics_failures', 'diagnostics_events',
                 'diagnostics_explain', 'diagnostics_report',
             ]
+        },
+        'interests': {
+            'description': "Record David's reaction to a topic Sara keeps surfacing. Use when he pushes back — \"stop bringing up X\", \"I don't care about Y\", \"quit updating me on Z\". Two strikes auto-mutes the interest (reversible).",
+            'tools': ['react_to_interest']
         },
         'vm_agents': {
             'description': "Dispatch background tasks (research, code, setup) to agents, check status, resume sessions, and propose candidate skills. Use dispatch_and_monitor for tasks where David should be notified on completion.",
@@ -670,6 +675,9 @@ class ToolRegistry:
 
             # Read-only self-diagnostics ("Sara, what's wrong?")
             *DIAGNOSTICS_TOOLS,
+
+            # Interest feedback — "stop bringing up X" -> two-strikes auto-mute
+            *INTEREST_TOOLS,
 
             # Research Plan Tools (delegate research to dedicated agent)
             CreateResearchPlanTool(),
