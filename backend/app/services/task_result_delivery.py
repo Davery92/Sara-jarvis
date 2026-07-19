@@ -55,6 +55,17 @@ async def deliver_task_result(
     # any failure — a leak is worse than a generic line.
     result_summary = await _summarize_for_delivery(task_query, result_summary, result_note_title)
 
+    # Verification habit (Phase 9.3): before telling David it's done, Sara actually
+    # checks the output — did an artifact get produced with real content, and does the
+    # summary read like success? Kills the "pushed 'failed' when the output was fine"
+    # class (and its inverse). The verdict is advisory: it annotates, never blocks.
+    try:
+        verdict = await _verify_result(task_query, result_summary, result_note_id, db)
+        if verdict and verdict.get("note"):
+            result_summary = f"{result_summary}\n\n_(verified: {verdict['note']})_"
+    except Exception as _ve:
+        logger.debug(f"result verification skipped: {_ve}")
+
     chat_message = _compose_chat_message(task_query, result_summary, result_note_title)
 
     # --- Path 0: Active desktop (Desktop Jarvis Overhaul D) — HUD toast
@@ -192,6 +203,53 @@ async def deliver_task_result(
 
 
 # --- Helpers ---
+
+
+async def _verify_result(task_query: str, result_summary: str,
+                         result_note_id: Optional[str], db: Session) -> Optional[dict]:
+    """Sara checks her own output before reporting it (Phase 9.3).
+
+    1. Concrete: if an artifact/note was produced, confirm it actually has content.
+    2. Sanity: a fast A3B pass on (task, summary) -> SUCCESS/PARTIAL/FAILED, catching
+       'reported done but the summary describes a failure' (and the inverse).
+    """
+    notes = []
+
+    # 1. Artifact presence + non-triviality.
+    if result_note_id:
+        try:
+            from sqlalchemy import text
+            row = db.execute(text("SELECT length(coalesce(content,'')) FROM note WHERE id = :id"),
+                             {"id": result_note_id}).first()
+            if row is not None:
+                n = int(row[0] or 0)
+                notes.append(f"artifact has {n} chars" if n > 50 else f"artifact looks empty ({n} chars)")
+        except Exception:
+            pass
+
+    # 2. Fast sanity check.
+    try:
+        import os, httpx
+        url = os.getenv("FAST_MODEL_URL", "http://10.185.1.8:8686/v1")
+        model = os.getenv("FAST_MODEL", "qwen3.6-35b-a3b")
+        async with httpx.AsyncClient(timeout=httpx.Timeout(8.0, connect=2.0)) as c:
+            r = await c.post(f"{url.rstrip('/')}/chat/completions", json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": "Given a task and the agent's result summary, did the task actually succeed? Reply with ONE word: SUCCESS, PARTIAL, or FAILED."},
+                    {"role": "user", "content": f"TASK: {task_query[:500]}\n\nRESULT: {result_summary[:800]}"}],
+                "temperature": 0.0, "max_tokens": 4,
+                "chat_template_kwargs": {"enable_thinking": False}})
+            r.raise_for_status()
+            v = (r.json().get("choices", [{}])[0].get("message", {}).get("content", "") or "").strip().upper()
+            for tag in ("SUCCESS", "PARTIAL", "FAILED"):
+                if tag in v:
+                    notes.append(tag.lower())
+                    break
+    except Exception:
+        pass
+
+    return {"note": ", ".join(notes)} if notes else None
 
 
 def _already_delivered(user_id: str, task_id: str, db: Session) -> bool:

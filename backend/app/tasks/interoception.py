@@ -204,6 +204,71 @@ def selftest(should_fail: bool = True):
     return {"status": "ok", "selftest": "recovered"}
 
 
+@celery_app.task(name="app.tasks.interoception.weekly_self_audit", queue="maintenance")
+def weekly_self_audit():
+    """Weekly 'state of me' (Phase 9.6): Sara reviews her own ledger, drift, feed
+    quality, and muted interests, and writes a short first-person journal entry —
+    the standing version of the audit that produced this whole plan."""
+    return _run(_weekly_self_audit_async())
+
+
+async def _weekly_self_audit_async():
+    import uuid
+    from sqlalchemy import text
+    from app.db.session import get_async_session_factory
+    from app.services.diagnostics_service import get_failing_tasks
+
+    factory = get_async_session_factory()
+    async with factory() as db:
+        failing = await get_failing_tasks(hours=168)
+        muted = (await db.execute(text(
+            "SELECT count(*) FROM sara_interest WHERE blocked = true"))).scalar() or 0
+        feed = (await db.execute(text(
+            """SELECT count(*) FILTER (WHERE audience='user_facing') uf,
+                      count(*) FILTER (WHERE audience='internal' OR audience IS NULL) it
+               FROM sara_activity_log WHERE created_at > NOW() - INTERVAL '7 days'"""))).mappings().first()
+        eval_row = (await db.execute(text(
+            """SELECT meta->>'pass_rate' pr FROM system_event
+               WHERE category='eval' ORDER BY created_at DESC LIMIT 1"""))).first()
+
+    uf = feed["uf"] if feed else 0
+    it = feed["it"] if feed else 0
+    pr = None
+    try:
+        pr = float(eval_row[0]) if eval_row and eval_row[0] else None
+    except Exception:
+        pr = None
+
+    # Compose a short first-person "state of me".
+    parts = ["State of me, this week."]
+    if failing:
+        names = ", ".join(f["task_name"].split(".")[-1] for f in failing[:3])
+        parts.append(f"{len(failing)} of my background jobs threw errors ({names}) — I've logged them; ask me 'what's broken?' for the details.")
+    else:
+        parts.append("All my background jobs ran clean — nothing failing.")
+    parts.append(f"I did {uf} thing(s) for you and kept {it} bits of my own bookkeeping to myself.")
+    if muted:
+        parts.append(f"I've muted {muted} topic(s) you weren't into.")
+    if pr is not None:
+        parts.append(f"My tool-calling held at {pr*100:.0f}% on the weekly check.")
+    content = " ".join(parts)[:2000]
+
+    async with factory() as db:
+        await db.execute(text("""
+            INSERT INTO sara_journal (id, user_id, entry_type, content, emotional_state, created_at)
+            VALUES (:id, :uid, 'self_audit', :content, 'reflective', NOW())
+        """), {"id": str(uuid.uuid4()), "uid": DEFAULT_USER_ID, "content": content})
+        await db.commit()
+    # Also record to the ledger for the vitals view.
+    try:
+        from app.services.diagnostics_service import record_system_event
+        await record_system_event(category="self_audit", service="weekly_self_audit",
+                                  level="INFO", message=content[:500])
+    except Exception:
+        pass
+    return {"state_of_me": content, "failing": len(failing), "muted": muted}
+
+
 @celery_app.task(name="app.tasks.interoception.tool_call_eval", queue="maintenance")
 def tool_call_eval():
     """Weekly tool-call reliability eval (Phase 5.6/9.4). Pass-rate -> ledger."""
