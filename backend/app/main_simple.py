@@ -9364,6 +9364,12 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                 _sp = await get_scratchpad_for_context(str(current_user.id))
                 if _sp:
                     _ctx_bits.append(_sp)
+                # Phase 12K: notifications Sara sent that David hasn't acked, so a reply
+                # referencing them lands with context and can be acknowledged in one shot.
+                from app.services.notification_ack import get_unacked_for_context
+                _unacked = await get_unacked_for_context(str(current_user.id))
+                if _unacked:
+                    _ctx_bits.append(_unacked)
                 if _ctx_bits:
                     system_message = ChatMessage(
                         role="system",

@@ -147,6 +147,7 @@ from app.tools.scratchpad import SCRATCHPAD_TOOLS
 from app.tools.day_type import DAY_TYPE_TOOLS
 from app.tools.quiet import QUIET_TOOLS
 from app.tools.directives import DIRECTIVE_TOOLS
+from app.tools.notification_ack import NOTIFICATION_ACK_TOOLS
 from app.tools.shell import SHELL_TOOLS
 from app.tools.recipes import RECIPE_TOOLS
 from app.tools.people import ListPeopleTool
@@ -393,8 +394,8 @@ class ToolRegistry:
             'tools': ['inbox_search', 'inbox_read']
         },
         'notifications': {
-            'description': "Read the notifications Sara has sent David — what's unread, what the app icon badge refers to, recent notification history. Use when David asks \"what's the notification?\" or \"did I miss anything?\"",
-            'tools': ['get_recent_notifications']
+            'description': "Read the notifications Sara has sent David and acknowledge his replies to them. Use when David asks \"what's the notification?\"/\"did I miss anything?\", or when he responds to notifications ('saw your messages', 'yes to the first two, skip the gym thing').",
+            'tools': ['get_recent_notifications', 'acknowledge_notifications']
         },
         'diagnostics': {
             'description': "Read-only self-diagnostics — Sara's own health. Failing background tasks, error events, an explanation of any single event, and a handoff report for Claude Code. Use when David asks \"what's broken?\", \"are you okay?\", \"why did that fail?\", or \"is anything failing?\"",
@@ -710,6 +711,9 @@ class ToolRegistry:
 
             # Directives — David's standing rules with permanent teeth
             *DIRECTIVE_TOOLS,
+
+            # Acknowledge notifications David is replying to in chat (Phase 12K)
+            *NOTIFICATION_ACK_TOOLS,
 
             # Research Plan Tools (delegate research to dedicated agent)
             CreateResearchPlanTool(),

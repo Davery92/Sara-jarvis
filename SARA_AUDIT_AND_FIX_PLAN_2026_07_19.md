@@ -966,6 +966,54 @@ of real-time chatter, higher threshold for contact except security, and a "welco
 catch-up brief on return. Travel is when a house-AI proves its worth; right now Sara
 doesn't know the difference.
 
+### 12K. Notification acknowledgment in chat — close the loop between channels
+Real scenario (2026-07-19): David comes home to four missed notifications and wants to
+answer several in ONE chat message — but chat has no idea those notifications exist, so
+"saw your messages — yes to the first two, skip the gym thing" lands contextless, and the
+only alternative is acking each item individually in the inbox. The notification channel
+and the chat channel don't share state.
+
+The schema is already ready: `notification_log` has `read_at`, `engaged`, and
+`attention_item_id` (link into the attention queue / unified inbox). Build:
+1. **Inject pending notifications into chat context.** New context block alongside the
+   other parallel context sources: "## Sent but unacknowledged (last 24h)" — id, title,
+   truncated message, category, sent_at — for rows with `sent=true AND read_at IS NULL`,
+   capped ~8 newest, inside the existing ContextBudget. Sara can now *understand* a reply
+   that references any of them.
+2. **`acknowledge_notifications` chat tool**: args `ids` (list or `"all"`) + optional
+   per-id `response` note. Effects: set `read_at=now()`; set `engaged=true` only where
+   David actually responded (not just cleared); resolve/archive the linked
+   `attention_item_id` so the unified inbox and iOS badge (compute_badge) clear
+   immediately; where the notification belongs to a `followup_thread`, route David's
+   response text into the thread so anti-harping state updates (a responded thread stops
+   nagging).
+3. **The digest anchor.** When a chat message arrives after a gap (>2h since last
+   exchange) and ≥2 unacked notifications exist, Sara opens her reply with a one-line-each
+   recap: "While you were out: ① dentist reminder ② deploy finished ③ … — anything to act
+   on?" David answers all in one message; Sara maps each answer to its notification, calls
+   the ack tool once with the full mapping, confirms compactly. If David's message already
+   addresses them unprompted, skip the recap and just resolve.
+4. **Blanket ack semantics:** "I'm back / saw your messages / all good" with no specifics →
+   acknowledge all displayed (`read_at` set, `engaged` left false), one-line confirmation,
+   no per-item interrogation.
+5. **Arrival tie-in (with Phase 10/12J):** arriving home with unacked notifications makes
+   the welcome-home greeting the acknowledgment anchor — walk in → one recap → one reply →
+   all cleared.
+6. **One ack state, every surface:** acking in chat clears iOS inbox badges and web
+   Needs-You items in the same transaction. iOS needs NO app changes for the core feature —
+   its chat hits the same `/chat/stream`, and its badge is server-computed
+   (`/api/assistant-inbox/badge` + push payload counts via `compute_badge`), so the cleared
+   count propagates on the next fetch/push. Two small client touches for immediacy (JS-only,
+   no native rebuild): refetch the badge + inbox list right after a chat response whose tool
+   calls included `acknowledge_notifications`, and/or have the backend send a silent push
+   with the updated badge count after an ack — otherwise the app-icon badge lags until the
+   next foreground refresh.
+
+**Accept when:** coming home to N missed notifications and typing one message that
+addresses some and ignores others results in: recap shown, each addressed item resolved
+with David's response attached, ignored items cleared as read-but-not-engaged, badges at
+zero on web and iOS, and no re-nag on anything acknowledged.
+
 ---
 
 ## Suggested execution order (dependency order — do them in sequence, each to its
