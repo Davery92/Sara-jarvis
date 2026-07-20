@@ -992,6 +992,40 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoSendToken, message, loading])
 
+  // Phase 12K item 4 — the inbox button. A pill appears when there are pending
+  // notifications / Needs-You items (server-computed badge); pressing it pulls
+  // them into the conversation so David can address any subset in one reply, and
+  // the ack tool (called by that reply) clears them. Manual twin of the automatic
+  // return-recap. iOS gets the same via its own ChatScreen chip.
+  const [inboxCount, setInboxCount] = useState(0)
+  const [inboxSendToken, setInboxSendToken] = useState(0)
+  const loadInboxCount = useCallback(async () => {
+    try {
+      const r = await fetch(`${APP_CONFIG.apiUrl}/api/assistant-inbox/badge`, { credentials: 'include' })
+      if (r.ok) setInboxCount((await r.json()).badge || 0)
+    } catch { /* noop */ }
+  }, [])
+  useEffect(() => {
+    loadInboxCount()
+    const id = setInterval(loadInboxCount, 30000)
+    return () => clearInterval(id)
+  }, [loadInboxCount])
+  // Refetch right after a response completes (an ack in that turn drops the count).
+  useEffect(() => { if (!loading) loadInboxCount() }, [loading, loadInboxCount])
+  const lastInboxSendRef = useRef(0)
+  useEffect(() => {
+    if (!inboxSendToken || inboxSendToken === lastInboxSendRef.current) return
+    if (!message.trim() || loading) return
+    lastInboxSendRef.current = inboxSendToken
+    handleSendMessage({ preventDefault: () => {} } as React.FormEvent)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inboxSendToken, message, loading])
+  const openInbox = () => {
+    if (loading) return
+    setMessage("What's waiting for me? Show me the pending notifications and Needs-You items so I can address them.")
+    setInboxSendToken((t) => t + 1)
+  }
+
   // Handle text-to-speech for messages via the shared voice-agent endpoint
   // (same Kokoro backend the iOS app uses — see /api/voice-agent/speak).
   const handleSpeak = async (text: string, messageIndex: number) => {
@@ -1634,6 +1668,17 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                   </div>
                 ))}
               </div>
+            )}
+
+            {inboxCount > 0 && !loading && (
+              <button
+                type="button"
+                onClick={openInbox}
+                className="mb-2 inline-flex items-center gap-1.5 rounded-full border border-teal-300/30 bg-teal-500/10 px-3 py-1 text-xs font-medium text-teal-200 hover:bg-teal-500/20 transition-colors"
+                title="Pull your pending notifications and inbox items into the chat"
+              >
+                📥 {inboxCount} waiting — address here
+              </button>
             )}
 
             <form onSubmit={handleSendMessage} className="py-3">

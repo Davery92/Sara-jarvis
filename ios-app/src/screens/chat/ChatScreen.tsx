@@ -114,6 +114,8 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
   // Empty = no override; adopted from the server's default once models load.
   const [selectedModel, setSelectedModel] = useState<string>('');
   const [isEphemeral, setIsEphemeral] = useState(false);
+  // Phase 12K item 4 — inbox chip: pending notifications + Needs-You items count.
+  const [inboxCount, setInboxCount] = useState(0);
   const [availableModels, setAvailableModels] = useState<ChatModelsResponse | null>(null);
   const [showConversationControls, setShowConversationControls] = useState(false);
   const [conversationContext, setConversationContext] = useState<ConversationContextState | null>(null);
@@ -707,6 +709,21 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
     }
     return '';
   };
+
+  // Inbox chip (12K.4): keep the pending count fresh; refetch after each stream
+  // completes (an ack in that turn drops it).
+  const loadInboxCount = useCallback(async () => {
+    try {
+      const r = await apiClient.get<{ badge: number }>('/api/assistant-inbox/badge');
+      setInboxCount(r?.badge || 0);
+    } catch { /* noop */ }
+  }, []);
+  useEffect(() => {
+    loadInboxCount();
+    const id = setInterval(loadInboxCount, 30000);
+    return () => clearInterval(id);
+  }, [loadInboxCount]);
+  useEffect(() => { if (!isStreaming) loadInboxCount(); }, [isStreaming, loadInboxCount]);
 
   const handleSendMessage = async (
     messageText: string,
@@ -1593,6 +1610,25 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
         {/* Suggested Actions */}
         {suggestedActions.length > 0 && !isStreaming && (
           <SuggestedActions actions={suggestedActions} onAction={handleSuggestedAction} />
+        )}
+
+        {/* Inbox chip (Phase 12K.4) — pull pending items into the chat */}
+        {inboxCount > 0 && !isStreaming && (
+          <TouchableOpacity
+            onPress={() => handleSendMessage(
+              "What's waiting for me? Show me the pending notifications and Needs-You items so I can address them.")}
+            style={{
+              alignSelf: 'flex-start', marginHorizontal: 12, marginBottom: 6,
+              flexDirection: 'row', alignItems: 'center',
+              paddingHorizontal: 12, paddingVertical: 6, borderRadius: 999,
+              backgroundColor: 'rgba(45,212,191,0.12)', borderWidth: 1, borderColor: 'rgba(45,212,191,0.3)',
+            }}
+            accessibilityLabel={`${inboxCount} items waiting — address in chat`}
+          >
+            <Text style={{ color: '#5eead4', fontSize: 12, fontWeight: '600' }}>
+              📥 {inboxCount} waiting — address here
+            </Text>
+          </TouchableOpacity>
         )}
 
         {/* Input */}

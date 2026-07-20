@@ -674,6 +674,27 @@ that silently fails or misattributes calendar events shouldn't get *more* proact
    finally usable from chat ("when I leave here remind me…"), and `at_place_since` means
    "David has been at the office since 8:40" is a fact the brain can use.
 
+### 10A-fix. Geofence events always fail from the phone — "I couldn't reach the server"
+Found 2026-07-20. Every location-triggered notification David sees says "…but I couldn't
+reach the server to check for reminders." That's the iOS *local fallback* at
+`locationTracking.ts:128`, fired when the background geofence task's POST to
+`/api/location/geofence-event` fails. It fails **structurally, not randomly**: the dev
+client hardcodes the LAN backend (`http://10.185.1.180:8000`, `api.ts:6`), and a home
+geofence fires precisely while crossing the home boundary — when the phone is still on
+cellular (arriving) or has just left WiFi (leaving). The trigger condition correlates
+almost perfectly with the LAN being unreachable, so the primary path basically never
+succeeds from the geofence task. Fix:
+1. **Reachability fallback for background location calls:** try the LAN URL, then retry
+   via the WAN/Tailscale URL (`https://sara-api.avery.cloud`) — or simply use the WAN URL
+   for the two location endpoints always; they're tiny requests and must work from
+   cellular by definition.
+2. **Queue-and-flush:** if both fail, cache the event (with its client timestamp) and
+   flush on next foreground/next significant-location report; backend processes late
+   events using the client timestamp and dedupes.
+3. **Quiet the fallback:** only show the local "couldn't reach" notice if locally-cached
+   region metadata says an armed `location_trigger` was actually riding on that geofence —
+   otherwise fail silently to the log. No more noise notifications about nothing.
+
 ### 10B. Life facts become the brain's assumptions
 1. Inject `life_fact` rows into the deliberation context ("David Right Now" gains: *normally
    trains at 13:10 on office days; departs for work 7:00; winds down 19:30*) and into chat
@@ -866,6 +887,28 @@ for superseded episodes, and the Neo4j ActionItem bloat flagged in the June audi
 nodes — verify it was actually cleaned). Default: 90-day raw retention, aggregates kept
 forever, documented in one retention table in the code.
 
+## Post-implementation punch list (found 2026-07-20, after the build)
+
+**P1. The confident no-op — Sara claimed an action she couldn't perform.** On 07-19 at 12:03Z
+David told Sara "remove it from your acs interest areas and forget it" (the Python JIT
+topic); Sara replied "Done." The `react_to_interest` tool didn't deploy until 18:13Z — she
+had no tool to do it, said Done anyway, and `sara_interest` still showed `blocked=false,
+strikes=0, weight=3.0`, so the daemon kept researching JIT and attempting pings for another
+day. *Data fixed by hand 07-20 (blocked=true).* The systemic fix: (a) chat prompt rule +
+directive — Sara NEVER confirms an action unless a tool call actually succeeded this turn;
+if no tool matches, she says she can't do it yet; (b) Phase 9.3 verification habit covers
+the agent side. This failure mode — fluent confirmation with zero effect — is the single
+most trust-corrosive bug the product can have.
+
+**P2. Email→event cross-reference fans out and repeats.**
+`proactive_intelligence.py:85-109` loops per *event*, so one email matching three "Risk
+Ninja" events sent three notifications in 13 seconds (07-20 13:44), and the per-pair dedup
+key (`xref:email:X:event:Y`) plus 2h cooldown let a pair re-fire at 15:44. Fix: invert the
+grouping — ONE insight per email listing all matched events ("Jim's email relates to 3
+upcoming Risk Ninja events: Mon 2PM, Tue 9:30, Wed 10AM"), dedup key `xref:email:{id}`
+only, and notify **once per email lifetime** (skip if any notification with that email's
+topic prefix was ever sent — the connection only needs making once).
+
 ## Phase 12 — The last mile to "her": what separates a great tool from the dream assistant
 
 A final sweep past reliability and features, at the level of *felt experience*. Most of these
@@ -993,13 +1036,24 @@ The schema is already ready: `notification_log` has `read_at`, `engaged`, and
    on?" David answers all in one message; Sara maps each answer to its notification, calls
    the ack tool once with the full mapping, confirms compactly. If David's message already
    addresses them unprompted, skip the recap and just resolve.
-4. **Blanket ack semantics:** "I'm back / saw your messages / all good" with no specifics →
+4. **The inbox button — manual pull into chat (explicitly requested by David).** A pill/chip
+   on the chat screen (web ChatInterface AND iOS ChatScreen), visible only when pending
+   items exist: "📥 4 waiting — address here" (count = unacked notifications + Needs-You
+   inbox items; both clients already fetch these counts for badges). Pressing it sends a
+   structured intent through the normal `/chat/stream` endpoint (e.g. an `/inbox` command
+   message), so Sara's numbered digest of the items arrives as a real message in the
+   conversation history — visible, scrollable, synced across surfaces — with the items now
+   in context. David replies once addressing any subset; the ack tool (item 2) resolves
+   them; the button disappears on the post-ack badge refetch. iOS side is JS-only (no
+   native rebuild). This is the manual twin of item 3's automatic recap: the recap covers
+   "Sara notices you're back"; the button covers "David decides now is the time."
+5. **Blanket ack semantics:** "I'm back / saw your messages / all good" with no specifics →
    acknowledge all displayed (`read_at` set, `engaged` left false), one-line confirmation,
    no per-item interrogation.
-5. **Arrival tie-in (with Phase 10/12J):** arriving home with unacked notifications makes
+6. **Arrival tie-in (with Phase 10/12J):** arriving home with unacked notifications makes
    the welcome-home greeting the acknowledgment anchor — walk in → one recap → one reply →
    all cleared.
-6. **One ack state, every surface:** acking in chat clears iOS inbox badges and web
+7. **One ack state, every surface:** acking in chat clears iOS inbox badges and web
    Needs-You items in the same transaction. iOS needs NO app changes for the core feature —
    its chat hits the same `/chat/stream`, and its badge is server-computed
    (`/api/assistant-inbox/badge` + push payload counts via `compute_badge`), so the cleared

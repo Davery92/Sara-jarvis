@@ -46,6 +46,10 @@ class GeofenceEvent(BaseModel):
     event: str  # 'enter' | 'exit'
     latitude: float
     longitude: float
+    # Client timestamp (ISO8601). Present when the phone replays a geofence event it
+    # queued while the backend was unreachable (Phase 10A-fix), so the backend can
+    # process late events at their real time instead of arrival time.
+    event_time: Optional[str] = None
 
 
 @router.post("/geofence-event")
@@ -58,7 +62,10 @@ async def geofence_event(
     if data.event not in ("enter", "exit"):
         raise HTTPException(status_code=400, detail="event must be 'enter' or 'exit'")
     from app.services.location_service import handle_geofence_event
-    result = await handle_geofence_event(db, current_user.id, data.region_id, data.event, data.latitude, data.longitude)
+    result = await handle_geofence_event(
+        db, current_user.id, data.region_id, data.event, data.latitude, data.longitude,
+        event_time=data.event_time,
+    )
     return {"ok": True, **result}
 
 

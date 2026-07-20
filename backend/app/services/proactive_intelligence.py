@@ -71,42 +71,52 @@ async def cross_reference_check(user_id: str) -> List[Dict[str, Any]]:
         if not email_rows or not event_rows:
             return insights
 
-        # Extract entities from emails
-        email_entities = set()
-        for _eid, sender, subject, _imp in email_rows:
-            if sender:
-                email_entities.add(sender.lower().split()[0])  # First name
-            if subject:
-                for word in subject.split():
-                    if len(word) > 4 and word[0].isupper():
-                        email_entities.add(word.lower())
+        # ONE insight per EMAIL listing ALL matched events (P2 punch-list fix). The
+        # old code looped per event, so one email matching three "Risk Ninja" events
+        # fired three notifications seconds apart; the per-pair dedup + 2h cooldown
+        # even let a pair re-fire an hour later. Group by email, dedup on the email id
+        # only, and notify at most once per email lifetime.
+        email_xref_topics = []
+        for email_id, sender, subject, _imp in email_rows:
+            sender_first = sender.lower().split()[0] if sender else None
+            subj_words = {w.lower() for w in (subject or "").split() if len(w) > 4 and w[0].isupper()}
+            matched = []
+            for event_id, title, start_time, description in event_rows:
+                event_text = f"{title} {description or ''}".lower()
+                if (sender_first and sender_first in event_text) or any(w in event_text for w in subj_words):
+                    matched.append((title, start_time))
+            if not matched:
+                continue
+            n = len(matched)
+            ev_list = "; ".join(
+                f"{t} ({st.strftime('%a %-I:%M %p') if st else 'soon'})" for t, st in matched[:5]
+            )
+            topic = f"xref:email:{email_id}"
+            email_xref_topics.append(topic)
+            insights.append({
+                "type": "email_calendar_link",
+                "title": f"Email from {sender} relates to {n} upcoming event{'s' if n > 1 else ''}",
+                "message": (f"{sender}'s email about \"{subject}\" relates to {n} upcoming "
+                            f"event{'s' if n > 1 else ''}: {ev_list}."),
+                "priority": "normal",
+                "confidence": 0.7,
+                "topic": topic,
+            })
 
-        # Check calendar events for overlap
-        for event_id, title, start_time, description in event_rows:
-            event_text = f"{title} {description or ''}".lower()
-            matches = [e for e in email_entities if e in event_text]
-
-            if matches:
-                # Find the matching email
-                for email_id, sender, subject, _imp in email_rows:
-                    sender_match = sender and sender.lower().split()[0] in matches
-                    subject_match = subject and any(m in subject.lower() for m in matches)
-                    if sender_match or subject_match:
-                        time_str = start_time.strftime("%A at %I:%M %p") if start_time else "soon"
-                        # Stable dedup key per email-event pair. The old
-                        # code hashed the title which drifted as new emails
-                        # arrived, causing one push per hour.
-                        short_email = (str(email_id) or "")[-12:]
-                        short_event = (str(event_id) or "")[:12]
-                        insights.append({
-                            "type": "email_calendar_link",
-                            "title": f"Email from {sender} may relate to upcoming event",
-                            "message": f"You received an email from {sender} about \"{subject}\" — and you have \"{title}\" {time_str}.",
-                            "priority": "normal",
-                            "confidence": 0.7,
-                            "topic": f"xref:email:{short_email}:event:{short_event}",
-                        })
-                        break  # One insight per event
+        # Once per email lifetime: drop any xref insight whose topic was ever sent.
+        if email_xref_topics:
+            try:
+                from app.db.session import get_async_session_factory
+                factory = get_async_session_factory()
+                async with factory() as adb:
+                    sent = {r[0] for r in (await adb.execute(text(
+                        "SELECT topic FROM notification_log WHERE user_id = :uid AND sent = TRUE "
+                        "AND topic = ANY(:topics)"),
+                        {"uid": user_id, "topics": email_xref_topics})).all()}
+                if sent:
+                    insights = [i for i in insights if i.get("topic") not in sent]
+            except Exception as _e:
+                logger.debug(f"xref lifetime dedup skipped: {_e}")
 
         # Check notes for calendar overlap
         for event_id, title, start_time, description in event_rows:

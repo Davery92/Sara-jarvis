@@ -165,9 +165,29 @@ async def process_report(db: Session, user_id: str, lat: float, lon: float,
 
 
 async def handle_geofence_event(db: Session, user_id: str, region_id: str,
-                                 event_type: str, lat: float, lon: float) -> Dict[str, Any]:
+                                 event_type: str, lat: float, lon: float,
+                                 event_time: Optional[str] = None) -> Dict[str, Any]:
     """Handle a trusted native geofence transition from iOS. region_id is either a
-    known_place.id or a location_trigger.id (see geofence_payload)."""
+    known_place.id or a location_trigger.id (see geofence_payload).
+
+    ``event_time`` (ISO8601) is set when the phone replays an event it queued while
+    the backend was unreachable (Phase 10A-fix); a stale replay (>1h old) is
+    recorded but skips presence-state changes so we don't mis-set 'David is here'
+    hours after the fact.
+    """
+    stale_replay = False
+    if event_time:
+        try:
+            from datetime import datetime, timezone
+            et = datetime.fromisoformat(event_time.replace("Z", "+00:00"))
+            if et.tzinfo is None:
+                et = et.replace(tzinfo=timezone.utc)
+            stale_replay = (datetime.now(timezone.utc) - et).total_seconds() > 3600
+        except Exception:
+            stale_replay = False
+    if stale_replay:
+        return {"handled": True, "kind": "late_replay", "stale": True, "region_id": region_id}
+
     place = _fetch_place(db, region_id)
     if place:
         r = await _get_redis()
@@ -440,6 +460,10 @@ def geofence_payload(db: Session, user_id: str, max_regions: int = 18) -> List[D
             "radius_m": row.radius_m,
             "notify_on_entry": True,
             "notify_on_exit": True,
+            # Whether an armed location_trigger rides on this place — the phone uses
+            # this to decide whether a failed geofence POST is worth a local "couldn't
+            # reach the server" notice (Phase 10A-fix). A plain presence place isn't.
+            "has_trigger": bool(row.has_trigger),
         })
 
     return regions[:max_regions]

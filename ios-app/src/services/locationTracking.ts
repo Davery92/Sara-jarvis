@@ -29,6 +29,17 @@ let lastReportedAt = 0;
 let lastLat = 0;
 let lastLon = 0;
 
+// Phase 10A-fix: geofence/location POSTs must work from CELLULAR. A home geofence
+// fires exactly while crossing the boundary — when the phone is on cellular
+// (arriving) or just off WiFi (leaving) — so the dev client's LAN backend
+// (http://10.185.1.180:8000) is almost never reachable at that instant. These two
+// tiny endpoints always go over the WAN/Tailscale URL first, then fall back to the
+// app's normal base (LAN in dev), and queue for replay if both fail.
+const LOCATION_WAN_URL = 'https://sara-api.avery.cloud';
+const TOKEN_KEY = '@sara_auth_token';
+const LOCATION_QUEUE_KEY = 'sara:location_event_queue';
+const ARMED_REGIONS_KEY = 'sara:armed_region_ids';
+
 interface GeofenceRegion {
   identifier: string;
   kind: 'place' | 'trigger';
@@ -37,6 +48,66 @@ interface GeofenceRegion {
   radius_m: number;
   notify_on_entry: boolean;
   notify_on_exit: boolean;
+  has_trigger?: boolean;  // place with an armed location_trigger riding on it
+}
+
+/** POST to a location endpoint over WAN first, then the LAN/base client. */
+async function postLocation(path: string, body: Record<string, unknown>): Promise<boolean> {
+  const token = await AsyncStorage.getItem(TOKEN_KEY);
+  const withTime = { ...body, event_time: body.event_time ?? new Date().toISOString() };
+  // 1. WAN/Tailscale — reachable from cellular by definition.
+  try {
+    const res = await fetch(`${LOCATION_WAN_URL}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      body: JSON.stringify(withTime),
+    });
+    if (res.ok) return true;
+  } catch { /* fall through */ }
+  // 2. Normal client (LAN in dev) — works when actually on the home network.
+  try {
+    await apiClient.post(path, withTime);
+    return true;
+  } catch { /* fall through */ }
+  return false;
+}
+
+async function queueLocationEvent(path: string, body: Record<string, unknown>): Promise<void> {
+  try {
+    const raw = await AsyncStorage.getItem(LOCATION_QUEUE_KEY);
+    const queue: Array<{ path: string; body: Record<string, unknown> }> = raw ? JSON.parse(raw) : [];
+    queue.push({ path, body: { ...body, event_time: body.event_time ?? new Date().toISOString() } });
+    // Cap the queue so a long offline stretch can't grow unbounded.
+    await AsyncStorage.setItem(LOCATION_QUEUE_KEY, JSON.stringify(queue.slice(-50)));
+  } catch { /* best effort */ }
+}
+
+/** Replay any queued location events (call on foreground / next report). */
+export async function flushQueuedLocationEvents(): Promise<void> {
+  let queue: Array<{ path: string; body: Record<string, unknown> }> = [];
+  try {
+    const raw = await AsyncStorage.getItem(LOCATION_QUEUE_KEY);
+    queue = raw ? JSON.parse(raw) : [];
+  } catch { return; }
+  if (!queue.length) return;
+  const remaining: typeof queue = [];
+  for (const item of queue) {
+    const ok = await postLocation(item.path, item.body);
+    if (!ok) remaining.push(item);
+  }
+  try {
+    if (remaining.length) await AsyncStorage.setItem(LOCATION_QUEUE_KEY, JSON.stringify(remaining));
+    else await AsyncStorage.removeItem(LOCATION_QUEUE_KEY);
+  } catch { /* noop */ }
+}
+
+/** True if a failed geofence at this region is worth a local "couldn't reach" notice. */
+async function regionIsArmed(identifier: string): Promise<boolean> {
+  try {
+    const raw = await AsyncStorage.getItem(ARMED_REGIONS_KEY);
+    const armed: string[] = raw ? JSON.parse(raw) : [];
+    return armed.includes(identifier);
+  } catch { return false; }
 }
 
 /**
@@ -80,16 +151,18 @@ async function onLocationUpdate(location: Location.LocationObject): Promise<void
   lastLat = latitude;
   lastLon = longitude;
 
-  try {
-    await apiClient.post('/api/location/report', {
-      latitude,
-      longitude,
-      accuracy: accuracy ?? undefined,
-      source: 'ios_significant',
-    });
+  const ok = await postLocation('/api/location/report', {
+    latitude,
+    longitude,
+    accuracy: accuracy ?? undefined,
+    source: 'ios_significant',
+  });
+  if (ok) {
     console.log(`[Location] Reported: ${latitude.toFixed(4)}, ${longitude.toFixed(4)}`);
-  } catch (err) {
-    console.warn('[Location] Report failed:', err);
+    // A successful report means we have connectivity — flush any queued geofence events.
+    flushQueuedLocationEvents().catch(() => {});
+  } else {
+    console.warn('[Location] Report failed (WAN + LAN); queued events will retry later');
   }
 }
 
@@ -109,23 +182,29 @@ TaskManager.defineTask(GEOFENCE_TASK, async ({ data, error }) => {
   const event = eventType === Location.GeofencingEventType.Enter ? 'enter' : 'exit';
   const identifier = region.identifier || '';
 
-  try {
-    await apiClient.post('/api/location/geofence-event', {
-      region_id: identifier,
-      event,
-      latitude: region.latitude,
-      longitude: region.longitude,
-    });
+  const body = {
+    region_id: identifier,
+    event,
+    latitude: region.latitude,
+    longitude: region.longitude,
+    event_time: new Date().toISOString(),
+  };
+  const ok = await postLocation('/api/location/geofence-event', body);
+  if (ok) {
     console.log(`[Location] Geofence ${event}: ${identifier}`);
-  } catch (err) {
-    console.warn('[Location] Geofence event report failed, falling back to local notice:', err);
-    // Network failure shouldn't silently drop a location-triggered reminder —
-    // surface something locally so it's not lost entirely.
+    return;
+  }
+  // Both WAN and LAN failed — queue for replay on next foreground/report.
+  await queueLocationEvent('/api/location/geofence-event', body);
+  console.warn('[Location] Geofence event queued (server unreachable):', identifier);
+  // Only surface a local notice if an armed reminder was actually riding on this
+  // region — otherwise fail silently to the log (no noise notifications).
+  if (await regionIsArmed(identifier)) {
     try {
       await Notifications.scheduleNotificationAsync({
         content: {
           title: 'Sara: location reminder',
-          body: `You just ${event === 'enter' ? 'arrived at' : 'left'} a saved place, but I couldn't reach the server to check for reminders.`,
+          body: `You just ${event === 'enter' ? 'arrived at' : 'left'} a saved place — I'll check your reminder as soon as I'm back online.`,
           sound: true,
         },
         trigger: null,
@@ -237,6 +316,17 @@ export async function resyncGeofences(): Promise<void> {
 
     const resp = await apiClient.get<{ regions: GeofenceRegion[] }>('/api/location/geofences');
     const regions = resp.regions || [];
+
+    // Cache which region ids have an armed reminder, so a failed geofence POST only
+    // surfaces a local notice when there's actually something to check (10A-fix).
+    try {
+      const armed = regions
+        .filter((r) => r.kind === 'trigger' || r.has_trigger)
+        .map((r) => r.identifier);
+      await AsyncStorage.setItem(ARMED_REGIONS_KEY, JSON.stringify(armed));
+    } catch { /* noop */ }
+    // Foreground sync is a good moment to replay any queued events.
+    flushQueuedLocationEvents().catch(() => {});
 
     if (regions.length === 0) {
       if (await TaskManager.isTaskRegisteredAsync(GEOFENCE_TASK)) {
