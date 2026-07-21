@@ -217,4 +217,14 @@ async def _escalate_unread_attention_async() -> dict:
             "users": len(per_user_count),
         }
     finally:
+        # Explicitly end the transaction before returning the connection to the
+        # pool. Every read here (the SELECTs, and the early "no rows" return
+        # path) opens an implicit transaction; without this rollback the sync
+        # connection goes back to the pool INTRANS and the NEXT run of this
+        # 30-min task fails at checkout with "can't change 'autocommit' now:
+        # connection in transaction status INTRANS" — a self-poisoning loop.
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
