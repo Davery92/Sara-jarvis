@@ -43,6 +43,31 @@ from app.core.timezone import now as local_now
 
 logger = logging.getLogger(__name__)
 
+
+def _is_transient_db_error(exc: Exception) -> bool:
+    """True for self-recovering DB/connection blips (pooled connection closed
+    under a celery asyncio.run() loop, server-side idle drop, timeouts). These
+    heal on the next run and must not be escalated to David as a malfunction."""
+    transient_names = {
+        "InterfaceError", "OperationalError", "DisconnectionError",
+        "TimeoutError", "ConnectionDoesNotExistError", "ConnectionResetError",
+    }
+    seen = set()
+    cur = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if type(cur).__name__ in transient_names:
+            return True
+        msg = str(cur).lower()
+        if ("the underlying connection is closed" in msg
+                or "connection is closed" in msg
+                or "connection was closed" in msg
+                or "event loop is closed" in msg):
+            return True
+        cur = getattr(cur, "__cause__", None) or getattr(cur, "__context__", None)
+    return False
+
+
 # ── Tunables ──────────────────────────────────────────────────────────────
 CHECKIN_START_HOUR = 8           # 8am
 CHECKIN_END_HOUR = 21            # stop after 9pm (hour < 21)
@@ -130,29 +155,40 @@ async def run_followup_sweep(user_id: str) -> dict:
         return {"skipped": "not_interruptible", "state": state, "score": round(score, 2)}
 
     from app.db.session import get_async_session_factory
+    from app.services.thread_manager import get_open_threads, record_mention
     factory = get_async_session_factory()
-    async with factory() as db:
-        sent_today = await _checkins_sent_today(db, user_id)
-        if sent_today >= DAILY_CHECKIN_CAP:
-            return {"skipped": "daily_cap", "sent_today": sent_today}
 
-        # Ripe thread follow-up (post-meeting recaps + commitments) — the only
-        # remaining path. Always payload-carrying: a thread always names a
-        # concrete meeting, commitment, or topic.
-        from app.services.thread_manager import get_open_threads, record_mention
-        threads = await get_open_threads(user_id, db)
-        if not threads:
-            return {"skipped": "nothing_to_say", "state": state}
+    # Transient asyncpg/pool blips (connection closed under the celery
+    # asyncio.run() loop, server-side idle drop) used to bubble up as a task
+    # FAILURE and get escalated to David as "my check-ins failed N× today". They
+    # self-recover on the next 15-min run, so they are noise, not a malfunction he
+    # should act on: catch them, log, and skip this cycle quietly.
+    try:
+        # ── Reads in a SHORT session, released BEFORE the slow notification send
+        #    so we never hold a pooled connection across network I/O (that idle
+        #    window is where the connection was dying). ──
+        async with factory() as db:
+            sent_today = await _checkins_sent_today(db, user_id)
+            if sent_today >= DAILY_CHECKIN_CAP:
+                return {"skipped": "daily_cap", "sent_today": sent_today}
 
-        t = threads[0]
+            # Ripe thread follow-up (post-meeting recaps + commitments) — the only
+            # remaining path. Always payload-carrying: a thread always names a
+            # concrete meeting, commitment, or topic.
+            threads = await get_open_threads(user_id, db)
+            if not threads:
+                return {"skipped": "nothing_to_say", "state": state}
+
+            t = threads[0]
+            stimulus_key = f"followup:{t['id']}"
+            try:
+                from app.services.habituation import should_generate
+                if not await should_generate(db, "proactive_checkins", stimulus_key):
+                    return {"skipped": "habituated", "stimulus_key": stimulus_key}
+            except Exception as e:
+                logger.debug(f"[checkin] habituation check skipped: {e}")
+
         message = (t.get("suggested_followup") or "").strip() or f"Wanted to follow up on {t['topic']}."
-        stimulus_key = f"followup:{t['id']}"
-        try:
-            from app.services.habituation import should_generate
-            if not await should_generate(db, "proactive_checkins", stimulus_key):
-                return {"skipped": "habituated", "stimulus_key": stimulus_key}
-        except Exception as e:
-            logger.debug(f"[checkin] habituation check skipped: {e}")
         res = await _send(
             user_id,
             title="Hey David",
@@ -162,11 +198,19 @@ async def run_followup_sweep(user_id: str) -> dict:
             priority="normal",
             stimulus_key=stimulus_key,
         )
+        # Record the mention in a fresh short session (connection was never held
+        # across the send above).
         if res.get("sent"):
-            await record_mention(t["id"], db)
-            await db.commit()
+            async with factory() as db2:
+                await record_mention(t["id"], db2)
+                await db2.commit()
         return {"sent": bool(res.get("sent")), "kind": "thread",
                 "meeting": t.get("category") == "meeting", "reason": res.get("reason")}
+    except Exception as e:
+        if _is_transient_db_error(e):
+            logger.warning(f"[checkin] transient DB blip, skipping this cycle: {e}")
+            return {"skipped": "transient_db_error", "error": type(e).__name__}
+        raise
 
 
 # Back-compat alias — anything importing the old name keeps working.

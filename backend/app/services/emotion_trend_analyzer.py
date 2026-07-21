@@ -51,7 +51,7 @@ class EmotionTrendAnalyzer:
             List of daily trend points
         """
         try:
-            start_date = datetime.now(timezone.utc) - timedelta(days=days)
+            start_date = (datetime.now(timezone.utc) - timedelta(days=days)).replace(tzinfo=None)  # episode.created_at is naive UTC
 
             query = text("""
                 SELECT
@@ -60,7 +60,7 @@ class EmotionTrendAnalyzer:
                     MODE() WITHIN GROUP (ORDER BY emotion_metadata->>'primary_emotion') as primary_emotion,
                     AVG((emotion_metadata->>'intensity')::float) as avg_intensity,
                     COUNT(*) as episode_count
-                FROM episodes
+                FROM episode
                 WHERE user_id = :user_id
                 AND emotion_metadata IS NOT NULL
                 AND created_at >= :start_date
@@ -106,14 +106,14 @@ class EmotionTrendAnalyzer:
         """
         try:
             # Get hourly sentiment averages
-            start_date = datetime.now(timezone.utc) - timedelta(days=days)
+            start_date = (datetime.now(timezone.utc) - timedelta(days=days)).replace(tzinfo=None)  # episode.created_at is naive UTC
 
             query = text("""
                 SELECT
                     DATE_TRUNC('hour', created_at) as hour,
                     AVG((emotion_metadata->>'sentiment')::float) as avg_sentiment,
                     emotion_metadata->>'primary_emotion' as emotion
-                FROM episodes
+                FROM episode
                 WHERE user_id = :user_id
                 AND emotion_metadata IS NOT NULL
                 AND created_at >= :start_date
@@ -197,14 +197,14 @@ class EmotionTrendAnalyzer:
     ) -> Optional[EmotionPattern]:
         """Detect if certain days of week have consistent emotions"""
         try:
-            start_date = datetime.now(timezone.utc) - timedelta(days=days)
+            start_date = (datetime.now(timezone.utc) - timedelta(days=days)).replace(tzinfo=None)  # episode.created_at is naive UTC
 
             query = text("""
                 SELECT
                     EXTRACT(DOW FROM created_at) as day_of_week,
                     AVG((emotion_metadata->>'sentiment')::float) as avg_sentiment,
                     COUNT(*) as count
-                FROM episodes
+                FROM episode
                 WHERE user_id = :user_id
                 AND emotion_metadata IS NOT NULL
                 AND created_at >= :start_date
@@ -248,14 +248,14 @@ class EmotionTrendAnalyzer:
     ) -> Optional[EmotionPattern]:
         """Detect if certain times of day have consistent emotions"""
         try:
-            start_date = datetime.now(timezone.utc) - timedelta(days=days)
+            start_date = (datetime.now(timezone.utc) - timedelta(days=days)).replace(tzinfo=None)  # episode.created_at is naive UTC
 
             query = text("""
                 SELECT
                     EXTRACT(HOUR FROM created_at) as hour,
                     AVG((emotion_metadata->>'sentiment')::float) as avg_sentiment,
                     COUNT(*) as count
-                FROM episodes
+                FROM episode
                 WHERE user_id = :user_id
                 AND emotion_metadata IS NOT NULL
                 AND created_at >= :start_date

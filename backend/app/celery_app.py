@@ -241,12 +241,45 @@ _validate_queue_topology()
 # ---------------------------------------------------------------------------
 _FAILING_SET_KEY = "sara:failing_tasks"
 
+# Transient DB/connection blips self-recover on the next run; escalating them to
+# David ("my check-ins failed 9× today, want me to write a handoff?") is noise,
+# not a malfunction he can act on. We still record them to the ledger for
+# diagnostics — we just don't nag unless the task is GENUINELY stuck (a long
+# consecutive-failure streak with no recovery in between).
+_TRANSIENT_ERROR_CLASSES = {
+    "InterfaceError", "OperationalError", "DisconnectionError", "TimeoutError",
+    "ConnectionDoesNotExistError", "ConnectionResetError", "OSError",
+}
+_TRANSIENT_STREAK_TO_ESCALATE = 5
+
 
 def _sync_redis():
     import os
     import redis as _redis
     return _redis.Redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"),
                                  decode_responses=True)
+
+
+def _bump_failstreak(task_name: str) -> int:
+    """Increment and return the consecutive-failure streak for a task (TTL 6h)."""
+    try:
+        r = _sync_redis()
+        key = f"sara:failstreak:{task_name}"
+        n = r.incr(key)
+        r.expire(key, 6 * 3600)
+        r.close()
+        return int(n)
+    except Exception:
+        return 1
+
+
+def _clear_failstreak(task_name: str) -> None:
+    try:
+        r = _sync_redis()
+        r.delete(f"sara:failstreak:{task_name}")
+        r.close()
+    except Exception:
+        pass
 
 
 try:
@@ -266,9 +299,20 @@ try:
             except Exception:
                 tb = str(einfo or "")
 
+            # Track the consecutive-failure streak so a transient blip that
+            # recovers next run never escalates, while a genuinely-stuck task
+            # still does once the streak crosses the threshold.
+            streak = _bump_failstreak(task_name)
+            is_transient = error_class in _TRANSIENT_ERROR_CLASSES
+
             async def _go():
                 from app.services.diagnostics_service import record_task_failure
                 res = await record_task_failure(task_name, error_class, str(exception), tb)
+                # Suppress the user-facing nag for transient errors unless the
+                # task is genuinely stuck (long streak with no recovery). The
+                # ledger row is still written above for diagnostics.
+                if is_transient and streak < _TRANSIENT_STREAK_TO_ESCALATE:
+                    res["escalate"] = False
                 if res.get("escalate"):
                     try:
                         from app.services.interoception_alerts import escalate_task_failure
@@ -301,6 +345,7 @@ try:
                 r.close()
             except Exception:
                 return
+            _clear_failstreak(task_name)  # recovered → reset the streak
             import asyncio
             from app.services.diagnostics_service import mark_recovered
             asyncio.run(mark_recovered(task_name))

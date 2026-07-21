@@ -171,7 +171,7 @@ async def migrate_existing_episodes_to_emotion_metadata(db, limit: int = 100):
         # Find episodes with emotional_tone but no emotion_metadata
         query = text("""
             SELECT id, emotional_tone
-            FROM episodes
+            FROM episode
             WHERE emotional_tone IS NOT NULL
             AND emotion_metadata IS NULL
             LIMIT :limit

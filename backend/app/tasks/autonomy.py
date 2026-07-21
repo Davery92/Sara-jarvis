@@ -1159,7 +1159,7 @@ async def _daily_digest_async():
         notif_result = await db.execute(text("""
             SELECT COUNT(*) as total,
                    COUNT(CASE WHEN sent = TRUE THEN 1 END) as sent,
-                   COUNT(CASE WHEN outcome = 'dismissed' THEN 1 END) as dismissed
+                   COUNT(CASE WHEN dismissed_at IS NOT NULL THEN 1 END) as dismissed
             FROM notification_log
             WHERE user_id = :uid AND sent_at >= NOW() - INTERVAL '24 hours'
         """), {"uid": user_id})

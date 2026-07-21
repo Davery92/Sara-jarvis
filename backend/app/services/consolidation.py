@@ -265,7 +265,11 @@ class ConsolidationEngine:
 
                 # Recent conversation topics (last 2 weeks) for research proposal context
                 try:
-                    topics_since = datetime.now(timezone.utc) - timedelta(days=14)
+                    # episode.created_at is `timestamp without time zone` storing
+                    # naive UTC; bind a naive-UTC value so asyncpg doesn't reject an
+                    # aware datetime ("can't subtract offset-naive and offset-aware")
+                    # and poison the whole consolidation transaction.
+                    topics_since = (datetime.now(timezone.utc) - timedelta(days=14)).replace(tzinfo=None)
                     rows = await db.execute(text("""
                         SELECT content, created_at
                         FROM episode

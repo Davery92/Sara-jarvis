@@ -10,12 +10,21 @@ from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
 from enum import Enum
 
-from app.core.timezone import now as local_now, today as local_today, start_of_day
+from app.core.timezone import now as local_now, today as local_today, start_of_day, USER_TIMEZONE
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
+
+
+def _as_aware_local(dt: datetime) -> datetime:
+    """Coerce a datetime to tz-aware local. calendar_event.start_time is stored
+    naive (local wall-clock); local_now() is tz-aware, so subtracting/comparing
+    the two raises 'can't subtract offset-naive and offset-aware datetimes'."""
+    if dt is not None and dt.tzinfo is None:
+        return dt.replace(tzinfo=USER_TIMEZONE)
+    return dt
 
 
 class PreparationType(str, Enum):
@@ -253,6 +262,7 @@ class AnticipationService:
         start_time = event.get("start_time")
         if not start_time:
             return []
+        start_time = _as_aware_local(start_time)
 
         # Build context for Sara
         time_until = start_time - local_now()
@@ -307,6 +317,7 @@ class AnticipationService:
     ) -> List[Preparation]:
         """Fallback rule-based preparation if Sara invocation fails."""
         preparations = []
+        start_time = _as_aware_local(start_time)
 
         # Set reminder 30 minutes before
         reminder_time = start_time - timedelta(minutes=30)
@@ -383,12 +394,17 @@ class AnticipationService:
 
     async def _summarize_today(self) -> Dict:
         """Generate a summary of today's activity."""
+        # episode.created_at is `timestamp without time zone` (naive local); bind
+        # a naive value so asyncpg doesn't reject an aware datetime, and use the
+        # correct table name (`episode`, not `episodes`).
         today_start = start_of_day()
+        if today_start.tzinfo is not None:
+            today_start = today_start.replace(tzinfo=None)
 
         # Count interactions
         interaction_result = await self.db.execute(
             text("""
-                SELECT COUNT(*) FROM episodes
+                SELECT COUNT(*) FROM episode
                 WHERE created_at >= :today
             """),
             {"today": today_start}

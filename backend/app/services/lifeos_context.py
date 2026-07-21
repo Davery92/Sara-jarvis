@@ -340,7 +340,7 @@ class LifeOSContextAggregator:
             # For now, return basic mood indicators
             query = text("""
                 SELECT emotion_metadata
-                FROM episodes
+                FROM episode
                 WHERE user_id = :user_id
                 AND emotion_metadata IS NOT NULL
                 ORDER BY created_at DESC
