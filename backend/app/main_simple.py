@@ -6470,6 +6470,32 @@ def _set_canvas_mode(user_id: str, enabled: bool = True):
         logger.warning(f"[Voice] Failed to set canvas mode: {e}")
 
 
+# P3 follow-up: the inbox digest is injected on the button-press turn, but David
+# decides what to do with each item on his NEXT reply — by then the system prompt
+# is rebuilt without the digest and the item ids are gone. Persist a short-lived
+# "inbox review" flag per conversation so the digest (with live ids) and the
+# clear_inbox_items tool stay available across the review, and drop it once the
+# badge is clear.
+def _set_inbox_review(conversation_key: str, enabled: bool = True):
+    try:
+        from redis import Redis
+        redis_client = Redis.from_url(config.settings.redis_url, decode_responses=True)
+        if enabled:
+            redis_client.setex(f"inbox_review:{conversation_key}", 900, "1")  # 15 min
+        else:
+            redis_client.delete(f"inbox_review:{conversation_key}")
+    except Exception as e:
+        logger.debug(f"inbox_review set failed: {e}")
+
+def _in_inbox_review(conversation_key: str) -> bool:
+    try:
+        from redis import Redis
+        redis_client = Redis.from_url(config.settings.redis_url, decode_responses=True)
+        return redis_client.get(f"inbox_review:{conversation_key}") == "1"
+    except Exception:
+        return False
+
+
 @app.get("/api/workspace/pending-commands")
 async def get_pending_workspace_commands(current_user: User = Depends(get_current_user)):
     """
@@ -8620,6 +8646,14 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                 tool_categories = list(set(tool_categories + screen_cats))
                 logger.info(f"📱 Screen-aware: added {screen_cats} for screen={request.current_screen}")
 
+            # P3: on an inbox-load turn (or a follow-up still inside the review
+            # window), force the notifications category so clear_inbox_items is
+            # actually available — the injected digest tells Sara to call it.
+            _inbox_conv_key = request.conversation_id or str(current_user.id)
+            if (request.include_inbox or _in_inbox_review(_inbox_conv_key)) and 'notifications' not in tool_categories:
+                tool_categories = list(set(tool_categories + ['notifications']))
+                logger.info("📥 include_inbox/review: forced 'notifications' category")
+
             # Multi-intent detection: for long messages with conjunctions, merge tool categories
             _conjunction_words = {'and', 'also', 'then', 'plus', 'as well as', 'along with'}
             if len(last_user_message.split()) > 10 and any(w in last_user_message.lower() for w in _conjunction_words):
@@ -9387,7 +9421,10 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
             # P3: David pressed the inbox button — deterministically inject the FULL
             # unified inbox (the exact items the badge counts), NOT a question Sara
             # must answer from a partial slice. Uses the sync `db` Session in scope.
-            if request.include_inbox:
+            # Re-inject on follow-up turns within the review window so the item ids
+            # (needed by clear_inbox_items) survive until he's finished addressing them.
+            _inbox_conv_key = request.conversation_id or str(current_user.id)
+            if request.include_inbox or _in_inbox_review(_inbox_conv_key):
                 try:
                     from app.routes.assistant_inbox import (
                         build_unified_inbox, format_inbox_for_chat,
@@ -9402,6 +9439,12 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                             f"📥 Injected unified inbox digest "
                             f"({_inbox_data['counts']['needs_you']} needs-you, "
                             f"{_inbox_data['counts']['fyi_unread']} fyi-unread)")
+                    # Keep the review window open while anything is still waiting;
+                    # close it the moment the badge is clear so we stop injecting.
+                    if _inbox_data["counts"]["badge"] > 0:
+                        _set_inbox_review(_inbox_conv_key, True)
+                    else:
+                        _set_inbox_review(_inbox_conv_key, False)
                 except Exception as e:
                     logger.warning(f"⚠️ Inbox digest injection failed (non-critical): {e}")
 

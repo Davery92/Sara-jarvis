@@ -117,6 +117,119 @@ async def acknowledge(user_id: str, ids: Union[List[int], str],
     return {"acknowledged": acked, "count": len(acked), "engaged": engaged_count, "badge": badge}
 
 
+async def resolve_inbox_items(user_id: str, items: List[dict]) -> dict:
+    """Clear ANY inbox kind from one chat reply (P3 follow-up fix).
+
+    The badge counts unread attention items + task clarifications + unread
+    notifications; the digest lists all of them. acknowledge() only touched
+    notifications, so a reply addressing attention items left the badge up and
+    David had to clear them by hand. This routes each item to its real
+    resolution path by kind:
+
+      - notification  → same read/engaged/linked-attention/followup path as acknowledge()
+      - attention     → mark_engaged (he acted on it) or mark_archived (dismissed)
+      - clarification → resume the background task with his answer (or dismiss)
+      - capture       → mark the shared_content row read
+
+    `items` is a list of {kind, id, disposition?, response?}. disposition is
+    "engaged"/"done"/"answered" (acted on) vs "dismissed"/"skip" (not relevant);
+    default is engaged. Returns per-kind counts + the recomputed badge.
+    """
+    from app.db.session import get_async_session_factory
+    from app.services.autonomy.attention_queue import attention_queue
+
+    counts = {"notification": 0, "attention": 0, "clarification": 0, "capture": 0, "failed": 0}
+    # Batch notifications through the existing acknowledge() path (handles
+    # linked attention items + followup threads).
+    notif_ids: List[int] = []
+    notif_resp: Dict[str, str] = {}
+    others: List[dict] = []
+    for it in items or []:
+        kind = (it.get("kind") or "").strip().lower()
+        rid = it.get("id")
+        if kind in ("notification", "notif"):
+            try:
+                nid = int(rid)
+                notif_ids.append(nid)
+                if it.get("response"):
+                    notif_resp[str(nid)] = str(it["response"])
+            except (TypeError, ValueError):
+                counts["failed"] += 1
+        else:
+            others.append(it)
+
+    if notif_ids:
+        r = await acknowledge(user_id, notif_ids, notif_resp or None)
+        counts["notification"] = r.get("count", 0)
+
+    factory = get_async_session_factory()
+    async with factory() as db:
+        for it in others:
+            kind = (it.get("kind") or "").strip().lower()
+            rid = str(it.get("id") or "").strip()
+            disp = (it.get("disposition") or "engaged").strip().lower()
+            resp = it.get("response")
+            dismissed = disp in ("dismissed", "skip", "skipped", "ignore", "not_relevant")
+            if not rid:
+                counts["failed"] += 1
+                continue
+            try:
+                if kind == "attention":
+                    ok = (await attention_queue.mark_archived(db, rid, user_id)
+                          if dismissed else
+                          await attention_queue.mark_engaged(db, rid, user_id))
+                    counts["attention"] += 1 if ok else 0
+                    if not ok:
+                        counts["failed"] += 1
+                elif kind in ("clarification", "task_clarification", "task"):
+                    if dismissed or not resp:
+                        # No answer to give (or explicitly skipped) → cancel the
+                        # blocked task so it stops counting, rather than leaving
+                        # it stuck forever.
+                        await db.execute(text("""
+                            UPDATE background_task SET status = 'cancelled', updated_at = NOW()
+                            WHERE id = CAST(:id AS uuid) AND user_id = :uid
+                              AND status = 'needs_clarification'
+                        """), {"id": rid, "uid": user_id})
+                        counts["clarification"] += 1
+                    else:
+                        # resume_task uses a sync Session and runs the agent
+                        # resumption inline (same as the agent_dispatch tool).
+                        from app.db.base import SessionLocal
+                        from app.services.agent_dispatch import agent_dispatch_service
+                        sdb = SessionLocal()
+                        try:
+                            await agent_dispatch_service.resume_task(
+                                db=sdb, task_id=rid, user_id=user_id, instruction=str(resp))
+                        finally:
+                            sdb.close()
+                        counts["clarification"] += 1
+                elif kind == "capture":
+                    await db.execute(text("""
+                        UPDATE shared_content SET status = 'read'
+                        WHERE id = CAST(:id AS uuid) AND user_id = :uid AND status = 'unread'
+                    """), {"id": rid, "uid": user_id})
+                    counts["capture"] += 1
+                else:
+                    counts["failed"] += 1
+            except Exception as e:
+                logger.warning(f"resolve_inbox_items: {kind} {rid} failed: {e}")
+                counts["failed"] += 1
+        await db.commit()
+
+    # Recompute the badge after all mutations.
+    badge = None
+    try:
+        from app.db.base import SessionLocal
+        from app.routes.assistant_inbox import compute_badge
+        with SessionLocal() as sdb:
+            badge = compute_badge(sdb, user_id)
+    except Exception:
+        pass
+    total = counts["notification"] + counts["attention"] + counts["clarification"] + counts["capture"]
+    return {"counts": counts, "cleared": total, "badge": badge}
+
+
 async def _resolve_followup_thread(db, user_id: str, topic: str, engaged: bool, resp: Optional[str]):
     """Resolve the follow-up thread behind a 'followup:<id-prefix>' notification so
     a responded thread stops nagging."""

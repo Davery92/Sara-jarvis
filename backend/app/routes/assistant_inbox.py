@@ -335,12 +335,16 @@ def format_inbox_for_chat(data: Dict[str, Any], max_lines: int = 15) -> str:
     extra = total - n
     header = (
         "## David's inbox — he pressed the inbox button; these are the exact items waiting\n"
-        "Walk him through EVERY item below (do not summarize or drop any). Group Needs-You "
-        "before FYI. For each, use its ref tag:\n"
-        "- `[notification #N]` — acknowledge with the `acknowledge_notifications` tool when he responds.\n"
-        "- `[attention <id>]` — an item blocked on him; his answer here engages/resolves it.\n"
-        "- `[clarification task <id>]` — a background task needs his input; capture his answer.\n"
-        "- `[capture <id>]` — something he saved to read.\n"
+        "Walk him through EVERY item below (do not summarize or drop any), Needs-You before FYI.\n"
+        "When he tells you what to do with them, call the `clear_inbox_items` tool ONCE with one "
+        "entry per item he addressed — this is what actually drops the badge. Each entry needs the "
+        "item's `kind` and `id` exactly as tagged below, a `disposition` ('engaged' = he acted "
+        "on/answered it, 'dismissed' = not relevant), and `response` (what he said; REQUIRED to "
+        "answer a `clarification`, which resumes the blocked task). Ref tags → kind: "
+        "`[notification #N]`→notification, `[attention <id>]`→attention, "
+        "`[clarification task <id>]`→clarification, `[capture <id>]`→capture.\n"
+        "Do NOT claim anything is cleared unless the clear_inbox_items call succeeded this turn, "
+        "and only clear items he actually addressed — leave the rest.\n"
     )
     body_txt = "\n".join(lines)
     if extra > 0:

@@ -394,8 +394,8 @@ class ToolRegistry:
             'tools': ['inbox_search', 'inbox_read']
         },
         'notifications': {
-            'description': "Read the notifications Sara has sent David and acknowledge his replies to them. Use when David asks \"what's the notification?\"/\"did I miss anything?\", or when he responds to notifications ('saw your messages', 'yes to the first two, skip the gym thing').",
-            'tools': ['get_recent_notifications', 'acknowledge_notifications']
+            'description': "Read the notifications Sara has sent David, acknowledge his replies, and CLEAR inbox items he addresses (attention items, clarifications, captures, notifications). Use when David asks \"what's the notification?\"/\"did I miss anything?\", opens his inbox, or responds to items ('saw your messages', 'yes to the first two, skip the gym thing', 'handle these').",
+            'tools': ['get_recent_notifications', 'acknowledge_notifications', 'clear_inbox_items']
         },
         'diagnostics': {
             'description': "Read-only self-diagnostics — Sara's own health. Failing background tasks, error events, an explanation of any single event, and a handoff report for Claude Code. Use when David asks \"what's broken?\", \"are you okay?\", \"why did that fail?\", or \"is anything failing?\"",

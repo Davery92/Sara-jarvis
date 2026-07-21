@@ -59,4 +59,82 @@ class AcknowledgeNotificationsTool(BaseTool):
                           message=f"Acknowledged {r['count']} ({r['engaged']} you acted on).{tail}")
 
 
-NOTIFICATION_ACK_TOOLS = [AcknowledgeNotificationsTool()]
+class ClearInboxItemsTool(BaseTool):
+    """Clear ANY inbox item David addresses in chat — not just notifications.
+
+    The inbox badge counts attention items + task clarifications + notifications,
+    and the inbox digest lists all of them with a `kind` and `id`. Use THIS tool
+    (not acknowledge_notifications) whenever David responds to items from the
+    inbox digest, so the badge actually drops on web and iOS.
+    """
+
+    @property
+    def name(self) -> str:
+        return "clear_inbox_items"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Clear the inbox items David just addressed, of ANY kind (attention, "
+            "notification, clarification, capture) — this is what drops the badge. "
+            "Pass one entry per item he responded to, using the exact `kind` and `id` "
+            "from the inbox digest. `disposition`: 'engaged' (he acted on / answered it) "
+            "or 'dismissed' (not relevant). `response`: what he said — REQUIRED to answer "
+            "a clarification (it resumes the blocked task); optional otherwise. Call once "
+            "per reply. Use this instead of acknowledge_notifications when the digest was loaded."
+        )
+
+    @property
+    def parameters(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "description": "The inbox items David addressed.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "kind": {
+                                "type": "string",
+                                "enum": ["attention", "notification", "clarification", "capture"],
+                                "description": "The item's kind, from its digest ref tag.",
+                            },
+                            "id": {
+                                "description": "The item's id from the digest (uuid, or integer for notifications).",
+                                "type": ["string", "integer"],
+                            },
+                            "disposition": {
+                                "type": "string",
+                                "enum": ["engaged", "dismissed"],
+                                "description": "engaged = he acted on/answered it; dismissed = not relevant.",
+                            },
+                            "response": {
+                                "type": "string",
+                                "description": "What David said. Required to answer a clarification.",
+                            },
+                        },
+                        "required": ["kind", "id"],
+                    },
+                },
+            },
+            "required": ["items"],
+        }
+
+    async def execute(self, user_id: str, **kwargs) -> ToolResult:
+        items = kwargs.get("items")
+        if not items:
+            return ToolResult(success=False, message="items is required (a list of {kind, id}).")
+        from app.services.notification_ack import resolve_inbox_items
+        r = await resolve_inbox_items(user_id, items)
+        if r["cleared"] == 0:
+            return ToolResult(success=True, data=r, message="Nothing cleared (check kinds/ids).")
+        c = r["counts"]
+        parts = [f"{c[k]} {k}" for k in ("attention", "notification", "clarification", "capture") if c.get(k)]
+        badge = r.get("badge")
+        tail = f" Badge now {badge}." if badge is not None else ""
+        return ToolResult(success=True, data=r,
+                          message=f"Cleared {', '.join(parts)}.{tail}")
+
+
+NOTIFICATION_ACK_TOOLS = [AcknowledgeNotificationsTool(), ClearInboxItemsTool()]
