@@ -730,9 +730,14 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
           ...((window as any).__attentionItemId
             ? { attention_item_id: (window as any).__attentionItemId }
             : {}),
+          // P3: the inbox button sets this one-shot so THIS turn's context gets
+          // the full unified inbox injected server-side (deterministic, not a
+          // question Sara answers from a partial slice). Cleared right after.
+          ...((window as any).__includeInbox ? { include_inbox: true } : {}),
         })
       })
       ;(window as any).__attentionItemId = undefined
+      ;(window as any).__includeInbox = undefined
 
       console.log('📤 Sending request with conversation_id:', currentConversationId)
 
@@ -1022,7 +1027,10 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
   }, [inboxSendToken, message, loading])
   const openInbox = () => {
     if (loading) return
-    setMessage("What's waiting for me? Show me the pending notifications and Needs-You items so I can address them.")
+    // The server injects the full inbox on this turn (include_inbox). The typed
+    // text is just David's cue to Sara; the authoritative item list is the digest.
+    ;(window as any).__includeInbox = true
+    setMessage("Walk me through my inbox — everything waiting for me right now.")
     setInboxSendToken((t) => t + 1)
   }
 

@@ -731,6 +731,7 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
     documents?: DocumentAttachment[],
     inboxItemId?: string,
     noteId?: string,
+    includeInbox?: boolean,
   ) => {
     const activeConversationContext = conversationContext;
     const pendingMessageSource = pendingMessageSourceRef.current;
@@ -798,6 +799,7 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
         ephemeral: isEphemeral,  // Pass ephemeral mode
         inboxItemId: resolvedInboxItemId,  // Pass inbox item for discussion context
         noteId: resolvedNoteId,  // Pass note for report/note discussion context
+        includeInbox,  // P3: inbox button injects the full unified inbox server-side this turn
         source: isEmbedded ? 'ios' : 'ios',
         onContentCard: (card: any) => {
           pendingCardsRef.current = [...pendingCardsRef.current, card];
@@ -1616,7 +1618,8 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
         {inboxCount > 0 && !isStreaming && (
           <TouchableOpacity
             onPress={() => handleSendMessage(
-              "What's waiting for me? Show me the pending notifications and Needs-You items so I can address them.")}
+              "Walk me through my inbox — everything waiting for me right now.",
+              undefined, undefined, undefined, undefined, true)}
             style={{
               alignSelf: 'flex-start', marginHorizontal: 12, marginBottom: 6,
               flexDirection: 'row', alignItems: 'center',

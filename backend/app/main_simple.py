@@ -9370,16 +9370,40 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     _ctx_bits.append(_sp)
                 # Phase 12K: notifications Sara sent that David hasn't acked, so a reply
                 # referencing them lands with context and can be acknowledged in one shot.
-                from app.services.notification_ack import get_unacked_for_context
-                _unacked = await get_unacked_for_context(str(current_user.id))
-                if _unacked:
-                    _ctx_bits.append(_unacked)
+                # Skipped on include_inbox turns (P3) — the full inbox digest below
+                # supersedes this narrower notification-only slice.
+                if not request.include_inbox:
+                    from app.services.notification_ack import get_unacked_for_context
+                    _unacked = await get_unacked_for_context(str(current_user.id))
+                    if _unacked:
+                        _ctx_bits.append(_unacked)
                 if _ctx_bits:
                     system_message = ChatMessage(
                         role="system",
                         content=system_message.content + "\n\n" + "\n\n".join(_ctx_bits))
             except Exception as e:
                 logger.debug(f"life-facts/scratchpad injection skipped: {e}")
+
+            # P3: David pressed the inbox button — deterministically inject the FULL
+            # unified inbox (the exact items the badge counts), NOT a question Sara
+            # must answer from a partial slice. Uses the sync `db` Session in scope.
+            if request.include_inbox:
+                try:
+                    from app.routes.assistant_inbox import (
+                        build_unified_inbox, format_inbox_for_chat,
+                    )
+                    _inbox_data = build_unified_inbox(db, str(current_user.id))
+                    _inbox_digest = format_inbox_for_chat(_inbox_data)
+                    if _inbox_digest:
+                        system_message = ChatMessage(
+                            role="system",
+                            content=system_message.content + "\n\n" + _inbox_digest)
+                        logger.info(
+                            f"📥 Injected unified inbox digest "
+                            f"({_inbox_data['counts']['needs_you']} needs-you, "
+                            f"{_inbox_data['counts']['fyi_unread']} fyi-unread)")
+                except Exception as e:
+                    logger.warning(f"⚠️ Inbox digest injection failed (non-critical): {e}")
 
             # CONTENT INBOX: Inject inbox item content when discussing a shared item
             if request.inbox_item_id:

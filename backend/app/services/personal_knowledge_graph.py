@@ -1074,6 +1074,65 @@ class PersonalKnowledgeGraph:
             logger.error(f"PKG: browse failed: {e}")
             return []
 
+    def decay_node_confidence(self, pkg_id: str, factor: float = 0.8) -> Optional[float]:
+        """Multiply a single node's confidence by `factor` (P4 routine decay).
+
+        Returns the new confidence, or None on failure. Used by the routine
+        corroboration sweep to gradually demote a routine whose calendar
+        support has dried up before retiring it outright.
+        """
+        if not self._ensure_driver():
+            return None
+        try:
+            with self.driver.session() as session:
+                rec = session.run(f"""
+                    MATCH (n) WHERE n.pkg_id = $pkg_id
+                    AND ({" OR ".join(f"n:{label}" for label in PKG_LABELS)})
+                    SET n.confidence = n.confidence * $factor
+                    RETURN n.confidence AS confidence
+                """, {"pkg_id": pkg_id, "factor": factor}).single()
+                return float(rec["confidence"]) if rec else None
+        except Exception as e:
+            logger.warning(f"PKG: decay_node_confidence failed for {pkg_id}: {e}")
+            return None
+
+    def retire_node(self, pkg_id: str) -> bool:
+        """Permanently retire a PKG node: DETACH DELETE in Neo4j AND drop its
+        pkg_embedding shadow row, together (P4). A node deleted from only one
+        store is exactly the immortal-fact bug this fixes.
+        """
+        ok_graph = False
+        if self._ensure_driver():
+            try:
+                with self.driver.session() as session:
+                    session.run(f"""
+                        MATCH (n) WHERE n.pkg_id = $pkg_id
+                        AND ({" OR ".join(f"n:{label}" for label in PKG_LABELS)})
+                        DETACH DELETE n
+                    """, {"pkg_id": pkg_id})
+                    ok_graph = True
+            except Exception as e:
+                logger.warning(f"PKG: retire_node Neo4j delete failed for {pkg_id}: {e}")
+        try:
+            from sqlalchemy import text as sa_text, create_engine
+            from sqlalchemy.orm import sessionmaker as sync_sm
+            database_url = _to_psycopg3_url(os.getenv("DATABASE_URL", ""))
+            engine = create_engine(database_url, echo=False)
+            Session = sync_sm(bind=engine)
+            session = Session()
+            try:
+                session.execute(sa_text("DELETE FROM pkg_embedding WHERE pkg_id = :pid"),
+                                {"pid": pkg_id})
+                session.commit()
+            finally:
+                session.close()
+                engine.dispose()
+        except Exception as e:
+            logger.warning(f"PKG: retire_node embedding delete failed for {pkg_id}: {e}")
+        if ok_graph:
+            logger.info(f"PKG: retired node {pkg_id} (Neo4j + pkg_embedding)")
+        return ok_graph
+
     def get_stats(self) -> Dict[str, Any]:
         """Get node counts and confidence distribution"""
         if not self._ensure_driver():

@@ -69,14 +69,16 @@ def _iso(dt) -> Optional[str]:
     return dt.isoformat() if dt else None
 
 
-@router.get("/unified")
-async def get_unified_inbox(
-    fyi_days: int = Query(7, ge=1, le=30),
-    limit: int = Query(50, ge=1, le=100),
-    db: Session = Depends(get_db),
-    current_user=Depends(get_current_user),
-):
-    user_id = str(current_user.id)
+def build_unified_inbox(
+    db: Session, user_id: str, fyi_days: int = 7, limit: int = 50
+) -> Dict[str, Any]:
+    """Server-side merge of everything Sara surfaces, as a plain dict.
+
+    Extracted from the route so /chat/stream can inject the exact same inbox
+    the badge counts (P3 punch-list fix) — the button is a deterministic
+    "load these items" gesture, not a question Sara has to answer from a
+    partial context slice.
+    """
     needs_you: List[Dict[str, Any]] = []
     fyi: List[Dict[str, Any]] = []
 
@@ -250,6 +252,110 @@ async def get_unified_inbox(
             "badge": compute_badge(db, user_id),
         },
     }
+
+
+def _age(iso: Optional[str]) -> str:
+    """Compact human age from an ISO timestamp, ET-aware, no naive math."""
+    if not iso:
+        return ""
+    try:
+        from datetime import datetime, timezone
+        dt = datetime.fromisoformat(iso)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        secs = (datetime.now(timezone.utc) - dt).total_seconds()
+        if secs < 3600:
+            return f"{int(secs // 60)}m ago"
+        if secs < 86400:
+            return f"{int(secs // 3600)}h ago"
+        return f"{int(secs // 86400)}d ago"
+    except Exception:
+        return ""
+
+
+# Map each inbox kind to the ref-tag Sara should cite and the action she has.
+_KIND_TAG = {
+    "attention": "attention",
+    "task_clarification": "clarification task",
+    "notification": "notification",
+    "capture": "capture",
+    "task": "task",
+}
+
+
+def format_inbox_for_chat(data: Dict[str, Any], max_lines: int = 15) -> str:
+    """Compact numbered digest of the unified inbox for deterministic chat injection.
+
+    Needs-You first, then unread FYI. Each line carries kind + ref id so Sara can
+    act on the right item (ack notifications, engage attention items, answer
+    clarifications). Already-read FYI rows are skipped.
+    """
+    needs = data.get("needs_you") or []
+    fyi = [i for i in (data.get("fyi") or []) if i.get("unread")]
+    if not needs and not fyi:
+        return ""
+
+    def _tag(item: Dict[str, Any]) -> str:
+        kind = item.get("kind", "")
+        label = _KIND_TAG.get(kind, kind)
+        return f"[{label} #{item.get('ref_id')}]"
+
+    lines: List[str] = []
+    n = 0
+    for item in needs:
+        if n >= max_lines:
+            break
+        n += 1
+        body = (item.get("body") or "").strip().replace("\n", " ")
+        if len(body) > 140:
+            body = body[:137] + "…"
+        age = _age(item.get("created_at"))
+        head = f"{n}. {_tag(item)} {item.get('title') or '(untitled)'}"
+        if age:
+            head += f" — {age}"
+        lines.append(head + (f"\n   {body}" if body else ""))
+
+    fyi_started = False
+    for item in fyi:
+        if n >= max_lines:
+            break
+        n += 1
+        if not fyi_started:
+            fyi_started = True
+        body = (item.get("body") or "").strip().replace("\n", " ")
+        if len(body) > 140:
+            body = body[:137] + "…"
+        age = _age(item.get("created_at"))
+        head = f"{n}. {_tag(item)} {item.get('title') or '(untitled)'}"
+        if age:
+            head += f" — {age}"
+        lines.append(head + (f"\n   {body}" if body else ""))
+
+    total = len(needs) + len(fyi)
+    extra = total - n
+    header = (
+        "## David's inbox — he pressed the inbox button; these are the exact items waiting\n"
+        "Walk him through EVERY item below (do not summarize or drop any). Group Needs-You "
+        "before FYI. For each, use its ref tag:\n"
+        "- `[notification #N]` — acknowledge with the `acknowledge_notifications` tool when he responds.\n"
+        "- `[attention <id>]` — an item blocked on him; his answer here engages/resolves it.\n"
+        "- `[clarification task <id>]` — a background task needs his input; capture his answer.\n"
+        "- `[capture <id>]` — something he saved to read.\n"
+    )
+    body_txt = "\n".join(lines)
+    if extra > 0:
+        body_txt += f"\n(+{extra} more not shown)"
+    return header + "\n" + body_txt
+
+
+@router.get("/unified")
+async def get_unified_inbox(
+    fyi_days: int = Query(7, ge=1, le=30),
+    limit: int = Query(50, ge=1, le=100),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    return build_unified_inbox(db, str(current_user.id), fyi_days=fyi_days, limit=limit)
 
 
 @router.get("/badge")

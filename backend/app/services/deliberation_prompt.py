@@ -408,6 +408,12 @@ Respond with ONLY valid JSON in this exact format:
   app usage back at him ("I see you're in Fitness"). It's context for you, not a topic.
 - Check the Notification Engagement section: if David ignores a category (<25% engagement), skip it unless urgent
 - Categories with high engagement (>70%) are safe to use when relevant
+- NEVER assert a recurring activity (kid's swimming/practice, a weekly class, "every Tuesday
+  David does X") unless it appears on the actual schedule above. Recurring routines end, and a
+  routine you "remember" is not evidence it still happens. If it's not in the Schedule section
+  as a concrete upcoming or recent event, do not state it as happening — say nothing rather than
+  restating a possibly-dead routine. This is how "Everett has swimming today" got sent 3.5
+  months after lessons ended.
 
 ### Examples
 - ACT (correct): working memory shows an unhandled important email from Jim about the

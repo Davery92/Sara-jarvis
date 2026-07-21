@@ -35,6 +35,7 @@ class ChatRequest(BaseModel):
     ephemeral: Optional[bool] = False  # If true, chat won't be saved to memory
     source: Optional[str] = None  # "workspace" | "webapp" | "ios" - determines available tools
     inbox_item_id: Optional[str] = None  # Pre-load inbox item content for discussion
+    include_inbox: Optional[bool] = False  # P3: deterministically inject the FULL unified inbox into this turn
     attention_item_id: Optional[str] = None  # SARA_UNLEASHED T.4: original proactive item this reply continues
     note_id: Optional[str] = None  # Pre-load note content for discussion
     notify_on_complete: Optional[bool] = False  # Send push notification when response is ready

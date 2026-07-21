@@ -26,6 +26,7 @@ export interface ChatOptions {
   notifyOnComplete?: boolean;  // Send push notification when response is ready (for background completion)
   inboxItemId?: string;  // Pre-load inbox item content for discussion
   noteId?: string;  // Pre-load note content for discussion
+  includeInbox?: boolean;  // P3: inject the full unified inbox into this turn
   source?: string;  // 'ios' | 'ios_overlay' | 'workspace'
   currentScreen?: string;  // Current iOS screen for context-aware tool loading
   onContentCard?: (card: any) => void;  // Content card callback
@@ -505,6 +506,9 @@ class ApiClient {
         }
         if (options?.noteId) {
           requestBody.note_id = options.noteId;
+        }
+        if (options?.includeInbox) {
+          requestBody.include_inbox = options.includeInbox;
         }
         if (options?.source) {
           requestBody.source = options.source;

@@ -288,7 +288,9 @@ class ConsolidationEngine:
         # Gather calendar patterns
         context["calendar_patterns"] = []
         try:
-            from app.services.calendar_intelligence import extract_patterns, sync_patterns_to_pkg
+            from app.services.calendar_intelligence import (
+                extract_patterns, sync_patterns_to_pkg, retire_uncorroborated_routines,
+            )
             patterns = await extract_patterns(user_id, lookback_days=90)
             for p in patterns:
                 context["calendar_patterns"].append({
@@ -302,6 +304,9 @@ class ConsolidationEngine:
             # Sync detected patterns to PKG as routines
             if patterns:
                 await sync_patterns_to_pkg(user_id, patterns)
+            # P4: retire routines whose calendar support has dried up, so
+            # synthesis stops re-blessing dead routines (e.g. ended swim lessons).
+            await retire_uncorroborated_routines(user_id)
         except Exception as e:
             logger.debug(f"[Consolidation] Calendar pattern query failed: {e}")
 
