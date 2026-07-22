@@ -371,3 +371,12 @@ try:
 
 except Exception as _sig_e:  # pragma: no cover
     logger.error(f"Failed to register interoception signal handlers: {_sig_e}")
+
+
+# Outcome contracts (M1) — correct the scheduler's dispatch-time "success" when a
+# task actually returns an error contract or raises. Import registers the signal.
+try:
+    import app.celery_signals  # noqa: F401
+    logger.info("Outcome-contract signal handler registered")
+except Exception as _oc_e:  # pragma: no cover
+    logger.error(f"Failed to register outcome-contract handler: {_oc_e}")
