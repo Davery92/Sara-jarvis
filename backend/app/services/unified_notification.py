@@ -481,7 +481,7 @@ async def _send_notification_impl(
     if db and not desktop_sent:
         try:
             from app.services.delivery_policy import decide_delivery, hold_notification
-            _decision = await decide_delivery(db, user_id, category, priority, source)
+            _decision = await decide_delivery(db, user_id, category, priority, source, topic=effective_topic)
             if _decision.action == "hold":
                 await hold_notification(
                     db, user_id=user_id, title=title, message=message,

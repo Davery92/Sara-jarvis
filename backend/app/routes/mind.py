@@ -46,6 +46,17 @@ async def get_self_model(current_user=Depends(get_current_user)):
         return await build_self_model(db, str(current_user.id))
 
 
+@router.get("/why")
+async def get_why_traces(limit: int = 15, current_user=Depends(get_current_user)):
+    """Why-trace (§3.10): the causal chain behind recent interruption decisions —
+    'why did you ping me / why did you hold that?'."""
+    from app.db.session import get_async_session_factory
+    from app.services.delivery_policy import recent_why_traces
+    sf = get_async_session_factory()
+    async with sf() as db:
+        return {"traces": await recent_why_traces(db, str(current_user.id), limit)}
+
+
 @router.get("/held")
 async def get_held(current_user=Depends(get_current_user)):
     """What the delivery policy held while David slept (§3.6 transparency).

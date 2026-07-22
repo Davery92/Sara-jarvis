@@ -181,9 +181,60 @@ truthfully, including problems. Read-only; you cannot fix these from here."""
             return ToolResult(success=False, message=f"Couldn't read my self-model: {e}")
 
 
+class WhyDidYouNotifyTool(BaseTool):
+    """Why-trace (§3.10) — the real causal chain behind recent notifications."""
+
+    @property
+    def name(self) -> str:
+        return "why_did_you_notify"
+
+    @property
+    def description(self) -> str:
+        return """Explain WHY you recently notified David (or held something back).
+
+Use this when David asks "why did you ping me?", "why did you tell me that?",
+"why didn't you tell me sooner?", or "why did you hold that until morning?".
+Returns the actual decision chain for recent notifications: category, priority,
+whether it was delivered/held/dropped, the reason (e.g. asleep, security-exempt),
+David's sensed state, and the value-model's opinion. Report the REAL chain — do
+not confabulate a plausible-sounding reason."""
+
+    @property
+    def parameters(self) -> Dict[str, Any]:
+        return {"type": "object", "properties": {
+            "limit": {"type": "integer", "description": "How many recent decisions (default 10)"}
+        }}
+
+    async def execute(self, user_id: str, limit: int = 10, **kwargs) -> ToolResult:
+        try:
+            from app.db.session import get_async_session_factory
+            from app.services.delivery_policy import recent_why_traces
+            sf = get_async_session_factory()
+            async with sf() as db:
+                traces = await recent_why_traces(db, user_id, min(int(limit or 10), 25))
+            if not traces:
+                return ToolResult(success=True, message="No recent notification decisions on record.")
+            lines = []
+            for t in traces:
+                chain = t.get("chain") or {}
+                extra = []
+                if chain.get("sleep_source"):
+                    extra.append(f"state={chain['sleep_source']}")
+                if chain.get("ml_p_valuable") is not None:
+                    extra.append(f"value={chain['ml_p_valuable']}")
+                lines.append(f"- [{t['decision']}] {t.get('category')} via {t.get('source')} — "
+                             f"{t.get('reason')}" + (f" ({', '.join(extra)})" if extra else ""))
+            return ToolResult(success=True, message="Recent notification decisions:\n" + "\n".join(lines),
+                              data={"traces": traces})
+        except Exception as e:
+            logger.error(f"why_did_you_notify failed: {e}")
+            return ToolResult(success=False, message=f"Couldn't read my decision log: {e}")
+
+
 # Export for registry
 SELF_KNOWLEDGE_TOOLS = [
     GetSelfKnowledgeTool(),
     CheckCurrentStateTool(),
     SelfDiagnosticsTool(),
+    WhyDidYouNotifyTool(),
 ]

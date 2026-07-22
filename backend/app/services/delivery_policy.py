@@ -206,47 +206,85 @@ async def sense_sleep_state(db, user_id: str) -> SleepState:
 
 async def decide_delivery(
     db, user_id: str, category: str, priority: str, source: str,
+    topic: Optional[str] = None,
 ) -> DeliveryDecision:
     """Decide whether a push should deliver now, be held until wake, or drop.
 
     v1 is a sleep gate only; the richer channel/timing matrix (§3.6) layers on
     later. Exemptions (security, critical, brief-flush sources) always deliver.
+    Every decision is persisted as a why-trace (§3.10) so it can explain itself.
     """
     cat = (category or "").lower()
     prio = (priority or "").lower()
     src = (source or "").lower()
 
+    decision: DeliveryDecision
     if prio in _ALWAYS_DELIVER_PRIORITIES:
-        return DeliveryDecision("deliver", "exempt_priority_critical")
-    if cat in _ALWAYS_DELIVER_CATEGORIES:
-        return DeliveryDecision("deliver", "exempt_category_security")
-    if src in _ALWAYS_DELIVER_SOURCES:
-        return DeliveryDecision("deliver", "exempt_source_batched")
+        decision = DeliveryDecision("deliver", "exempt_priority_critical")
+    elif cat in _ALWAYS_DELIVER_CATEGORIES:
+        decision = DeliveryDecision("deliver", "exempt_category_security")
+    elif src in _ALWAYS_DELIVER_SOURCES:
+        decision = DeliveryDecision("deliver", "exempt_source_batched")
+    else:
+        sleep = await sense_sleep_state(db, user_id)
+        # Shadow-mode ML (§4.2.5): log the notification_value model's opinion next
+        # to the heuristic decision so we can watch it before it ever gates.
+        ml_opinion = await _notification_value_opinion(db, user_id, category, priority, sleep)
+        if sleep.asleep and sleep.confidence >= 0.5:
+            decision = DeliveryDecision(
+                action="hold", reason=f"asleep:{sleep.source}",
+                deliver_after=sleep.expected_wake,
+                why_trace={
+                    "sleep_source": sleep.source,
+                    "sleep_confidence": round(sleep.confidence, 2),
+                    "sleep_signals": sleep.signals,
+                    "category": category, "priority": priority,
+                    "ml_p_valuable": ml_opinion,
+                },
+            )
+        else:
+            decision = DeliveryDecision(
+                "deliver", f"awake:{sleep.source}",
+                why_trace={"sleep_source": sleep.source, "category": category,
+                           "priority": priority, "ml_p_valuable": ml_opinion},
+            )
 
-    sleep = await sense_sleep_state(db, user_id)
+    await _persist_why_trace(db, user_id, category, priority, source, topic, decision)
+    return decision
 
-    # Shadow-mode ML (§4.2.5): log the notification_value model's opinion next to
-    # the heuristic decision so we can watch it before it ever gates anything.
-    # It does NOT change the decision yet — promotion to a real gate comes only
-    # after the shadow-mode comparison shows it winning.
-    ml_opinion = await _notification_value_opinion(db, user_id, category, priority, sleep)
 
-    if sleep.asleep and sleep.confidence >= 0.5:
-        return DeliveryDecision(
-            action="hold",
-            reason=f"asleep:{sleep.source}",
-            deliver_after=sleep.expected_wake,
-            why_trace={
-                "sleep_source": sleep.source,
-                "sleep_confidence": round(sleep.confidence, 2),
-                "sleep_signals": sleep.signals,
-                "category": category,
-                "priority": priority,
-                "ml_p_valuable": ml_opinion,
-            },
-        )
-    return DeliveryDecision("deliver", f"awake:{sleep.source}",
-                            why_trace={"ml_p_valuable": ml_opinion})
+async def _persist_why_trace(db, user_id, category, priority, source, topic, decision):
+    """Record the decision's causal chain (§3.10). Best-effort, never blocks."""
+    import json
+    try:
+        await db.execute(text("""
+            INSERT INTO action_why_trace
+              (user_id, kind, category, priority, source, topic, decision, reason, chain, created_at)
+            VALUES (:u, 'notification', :cat, :prio, :src, :topic, :dec, :reason,
+                    CAST(:chain AS jsonb), NOW())
+        """), {
+            "u": user_id, "cat": category, "prio": priority, "src": source,
+            "topic": topic, "dec": decision.action, "reason": decision.reason,
+            "chain": json.dumps(decision.why_trace or {}, default=str),
+        })
+        # decide_delivery runs inside the caller's txn; don't commit here.
+    except Exception as e:
+        logger.debug(f"why-trace persist skipped: {e}")
+
+
+async def recent_why_traces(db, user_id: str, limit: int = 10) -> list:
+    """Recent interruption decisions, newest first — powers 'why did you ping me?'."""
+    rows = (await db.execute(text("""
+        SELECT category, priority, source, topic, decision, reason, chain, created_at
+        FROM action_why_trace
+        WHERE user_id = :u
+        ORDER BY created_at DESC LIMIT :lim
+    """), {"u": user_id, "lim": limit})).fetchall()
+    return [{
+        "category": r.category, "priority": r.priority, "source": r.source,
+        "topic": r.topic, "decision": r.decision, "reason": r.reason,
+        "chain": r.chain, "at": r.created_at.isoformat() if r.created_at else None,
+    } for r in rows]
 
 
 async def _notification_value_opinion(db, user_id, category, priority, sleep) -> Optional[float]:
