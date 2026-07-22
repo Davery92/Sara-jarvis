@@ -17,7 +17,9 @@ from sqlalchemy import text
 logger = logging.getLogger(__name__)
 
 _DAVID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
-_FRESH_HOURS = 30  # a signal older than this doesn't reflect *this* morning
+# Recovery signals sync daily-ish and can lag a day; 40h keeps yesterday's
+# morning HRV/RHR in play instead of throwing away the only reading we have.
+_FRESH_HOURS = 40
 _SLEEP_TARGET = 7.5
 
 
@@ -32,14 +34,26 @@ async def _latest_metric(db, metric_type: str) -> Optional[Tuple[float, object]]
 
 
 async def _baseline(db, metric_type: str) -> Optional[Tuple[float, float]]:
+    # Prefer the maintained baseline...
     r = (await db.execute(text("""
         SELECT average_value, std_deviation FROM health_baseline
         WHERE metric_type = :m AND average_value IS NOT NULL
         ORDER BY calculated_at DESC LIMIT 1
     """), {"m": metric_type})).first()
-    if not r or not r[0]:
-        return None
-    return (float(r[0]), float(r[1]) if r[1] else 0.0)
+    if r and r[0] and r[1]:
+        return (float(r[0]), float(r[1]))
+    # ...but the baseline pipeline doesn't maintain the recovery signals (HRV/RHR/
+    # respiratory), so fall back to a rolling baseline computed straight from the
+    # raw metrics. This makes readiness self-sufficient instead of flat.
+    roll = (await db.execute(text("""
+        SELECT AVG(value)::float, STDDEV_SAMP(value)::float, COUNT(*)
+        FROM health_metric
+        WHERE metric_type = :m
+          AND recorded_at >= NOW() - INTERVAL '60 days'
+    """), {"m": metric_type})).first()
+    if roll and roll[0] is not None and roll[1] and roll[2] and roll[2] >= 5:
+        return (float(roll[0]), float(roll[1]))
+    return None
 
 
 def _z(value: float, base: Tuple[float, float]) -> Optional[float]:
@@ -54,9 +68,14 @@ async def compute_readiness(db, user_id: str = _DAVID) -> dict:
     contributions: List[Tuple[str, float, str]] = []  # (label, delta, driver_text)
     score = 70.0  # neutral baseline
 
+    # Use the metric-type names that actually exist in health_metric:
+    # hrv_morning is the fresh daily reading (raw `hrv` is stale); RHR is
+    # `resting_hr` (NOT resting_heart_rate — the name mismatch meant RHR never
+    # contributed).
     sleep = await _latest_metric(db, "sleep_hours")
-    hrv = await _latest_metric(db, "hrv") or await _latest_metric(db, "hrv_morning")
-    rhr = await _latest_metric(db, "resting_heart_rate")
+    hrv = await _latest_metric(db, "hrv_morning") or await _latest_metric(db, "hrv")
+    rhr = await _latest_metric(db, "resting_hr") or await _latest_metric(db, "resting_heart_rate")
+    resp = await _latest_metric(db, "respiratory_rate")
 
     sleep_val = hrv_val = rhr_val = None
 
@@ -87,14 +106,27 @@ async def compute_readiness(db, user_id: str = _DAVID) -> dict:
     # Resting HR: elevated vs baseline = worse.
     if rhr:
         rhr_val = rhr[0]
-        b = await _baseline(db, "resting_heart_rate")
+        b = await _baseline(db, "resting_hr") or await _baseline(db, "resting_heart_rate")
         if b:
             z = _z(rhr_val, b)
             if z is not None:
                 delta = max(-15, min(10, -z * 8))
                 score += delta
                 if z >= 0.7:
-                    contributions.append(("rhr", delta, "elevated resting HR"))
+                    contributions.append(("rhr", delta, f"elevated resting HR ({rhr_val:.0f})"))
+
+    # Respiratory rate: elevated overnight breathing = poorer recovery / oncoming
+    # illness. Only contributes when there's a personal baseline to compare to.
+    resp_val = None
+    if resp:
+        resp_val = resp[0]
+        b = await _baseline(db, "respiratory_rate")
+        if b:
+            z = _z(resp_val, b)
+            if z is not None and z >= 0.8:
+                delta = max(-10, -z * 5)
+                score += delta
+                contributions.append(("resp", delta, "elevated respiratory rate"))
 
     score = int(max(0, min(100, round(score))))
 
