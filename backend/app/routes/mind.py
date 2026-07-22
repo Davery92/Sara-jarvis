@@ -46,6 +46,32 @@ async def get_self_model(current_user=Depends(get_current_user)):
         return await build_self_model(db, str(current_user.id))
 
 
+@router.get("/held")
+async def get_held(current_user=Depends(get_current_user)):
+    """What the delivery policy held while David slept (§3.6 transparency).
+
+    Seeing the restraint — what she chose NOT to buzz him about overnight —
+    is what builds trust in the sleep-gating."""
+    from app.db.session import get_async_session_factory
+    from sqlalchemy import text
+    sf = get_async_session_factory()
+    async with sf() as db:
+        rows = (await db.execute(text("""
+            SELECT id, title, message, category, held_reason, held_at, status, deliver_after
+            FROM held_notification
+            WHERE user_id = :u
+              AND held_at >= NOW() - INTERVAL '48 hours'
+            ORDER BY held_at DESC LIMIT 50
+        """), {"u": str(current_user.id)})).fetchall()
+        return {"held": [
+            {"id": r.id, "title": r.title, "message": r.message, "category": r.category,
+             "reason": r.held_reason, "held_at": r.held_at.isoformat() if r.held_at else None,
+             "status": r.status,
+             "deliver_after": r.deliver_after.isoformat() if r.deliver_after else None}
+            for r in rows
+        ]}
+
+
 @router.get("/trust")
 async def get_trust_matrix(current_user=Depends(get_current_user)):
     """The graduated-autonomy trust matrix (§3.7 / §7.3)."""

@@ -13,9 +13,14 @@ import { setWidgetData, isAvailable, type WidgetData } from '../../modules/sara-
 export async function refreshWidgetData(): Promise<void> {
   if (!isAvailable()) return
   try {
-    const [statusRes, briefRes] = await Promise.allSettled([
+    const [statusRes, briefRes, mindRes] = await Promise.allSettled([
       apiClient.get<any>('/api/sara/status'),
       apiClient.get<any>('/api/sara/brief'),
+      // The global workspace synthesis (§3.1) — what Sara is holding in mind
+      // right now. This is the "she's alive" surface (§5.2.5): the widget shows
+      // her live internal state (prediction violations, open loops, concern),
+      // not a static thought.
+      apiClient.get<any>('/api/mind/anything-i-should-know'),
     ])
 
     const data: WidgetData = {}
@@ -24,6 +29,15 @@ export async function refreshWidgetData(): Promise<void> {
       data.emotional_state = statusRes.value.emotional_state || 'neutral'
       if (statusRes.value.latest_thought) {
         data.latest_thought = String(statusRes.value.latest_thought).slice(0, 140)
+      }
+    }
+
+    // Prefer the live workspace synthesis for the thought line when it has
+    // something specific to say (falls back to the emotional-status thought).
+    if (mindRes.status === 'fulfilled' && mindRes.value?.summary) {
+      const s = String(mindRes.value.summary).trim()
+      if (s && !/^nothing pressing/i.test(s)) {
+        data.latest_thought = s.slice(0, 140)
       }
     }
 
