@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react'
-import { Brain, RefreshCw, AlertTriangle, CheckCircle2, ShieldCheck, Sparkles, GitBranch } from 'lucide-react'
+import { Brain, RefreshCw, AlertTriangle, CheckCircle2, ShieldCheck, Sparkles, GitBranch, ScrollText } from 'lucide-react'
 import { APP_CONFIG } from '../../config'
 
 /**
@@ -50,6 +50,11 @@ interface Belief {
   ladder_status: string; times_suggested: number; times_accepted: number
 }
 
+interface ActionRow {
+  id: number; action_type: string; success: boolean; source: string
+  reason?: string; executed_at?: string; undone: boolean; undo_available: boolean
+}
+
 function Card({ title, icon, children }: { title: string; icon: React.ReactNode; children: React.ReactNode }) {
   return (
     <div className="rounded-2xl border border-slate-200/60 dark:border-slate-700/60 bg-white/70 dark:bg-slate-800/50 p-5 shadow-sm">
@@ -67,21 +72,24 @@ export default function MindDashboard() {
   const [trust, setTrust] = useState<TrustClass[]>([])
   const [beliefs, setBeliefs] = useState<Belief[]>([])
   const [contradictions, setContradictions] = useState(0)
+  const [actions, setActions] = useState<ActionRow[]>([])
   const [loading, setLoading] = useState(true)
 
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      const [w, s, t, b] = await Promise.all([
+      const [w, s, t, b, a] = await Promise.all([
         fetch(`${APP_CONFIG.apiUrl}/api/mind/workspace`, { credentials: 'include' }),
         fetch(`${APP_CONFIG.apiUrl}/api/mind/self`, { credentials: 'include' }),
         fetch(`${APP_CONFIG.apiUrl}/api/mind/trust`, { credentials: 'include' }),
         fetch(`${APP_CONFIG.apiUrl}/api/mind/beliefs`, { credentials: 'include' }),
+        fetch(`${APP_CONFIG.apiUrl}/api/mind/actions`, { credentials: 'include' }),
       ])
       if (w.ok) setWs(await w.json())
       if (s.ok) setSelf(await s.json())
       if (t.ok) setTrust((await t.json()).classes || [])
       if (b.ok) { const bj = await b.json(); setBeliefs(bj.beliefs || []); setContradictions(bj.open_contradictions || 0) }
+      if (a.ok) setActions((await a.json()).actions || [])
     } catch (e) {
       console.error('[Mind] load failed', e)
     } finally {
@@ -242,6 +250,26 @@ export default function MindDashboard() {
             </ul>
             <p className="text-xs text-slate-400">observed → believed → predictive → actionable → automated. Confirmed patterns become automations with your consent.</p>
           </div>
+        ) : <Empty loading={loading} />}
+      </Card>
+
+      {/* Action ledger */}
+      <Card title="What I've done (action ledger)" icon={<ScrollText className="w-4 h-4 text-teal-500" />}>
+        {actions.length > 0 ? (
+          <ul className="space-y-1.5">
+            {actions.slice(0, 15).map((a) => (
+              <li key={a.id} className="flex items-center gap-2 text-sm">
+                <span className={`w-2 h-2 rounded-full flex-shrink-0 ${a.undone ? 'bg-slate-400' : a.success ? 'bg-emerald-500' : 'bg-rose-500'}`} />
+                <span className="text-slate-600 dark:text-slate-300 truncate flex-1">
+                  {a.reason || a.action_type}
+                  {a.undone && <span className="text-slate-400 ml-1">(undone)</span>}
+                </span>
+                <span className="text-xs text-slate-400 flex-shrink-0">
+                  {a.source}{a.undo_available ? ' · undoable' : ''}
+                </span>
+              </li>
+            ))}
+          </ul>
         ) : <Empty loading={loading} />}
       </Card>
     </div>

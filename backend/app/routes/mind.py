@@ -46,6 +46,34 @@ async def get_self_model(current_user=Depends(get_current_user)):
         return await build_self_model(db, str(current_user.id))
 
 
+@router.get("/actions")
+async def get_actions(limit: int = 30, current_user=Depends(get_current_user)):
+    """The action ledger (§7.3): recent autonomous actions — what/when/outcome/undo."""
+    from app.db.session import get_async_session_factory
+    from sqlalchemy import text
+    sf = get_async_session_factory()
+    async with sf() as db:
+        rows = (await db.execute(text("""
+            SELECT id, action_type, action_config, trigger_context, success,
+                   executed_at, undo_available, undo_expires_at, undone, source
+            FROM action_ledger
+            WHERE user_id = :u
+            ORDER BY executed_at DESC LIMIT :lim
+        """), {"u": str(current_user.id), "lim": min(int(limit or 30), 100)})).fetchall()
+        def _reason(tc):
+            if isinstance(tc, dict):
+                return tc.get("reason")
+            return None
+        return {"actions": [{
+            "id": r.id, "action_type": r.action_type, "success": r.success,
+            "source": r.source, "reason": _reason(r.trigger_context),
+            "executed_at": r.executed_at.isoformat() if r.executed_at else None,
+            "undone": r.undone,
+            "undo_available": bool(r.undo_available) and not r.undone,
+            "undo_expires_at": r.undo_expires_at.isoformat() if r.undo_expires_at else None,
+        } for r in rows]}
+
+
 @router.get("/beliefs")
 async def get_beliefs(current_user=Depends(get_current_user)):
     """The belief ladder (§7.2): behavioral patterns by promotion status, with
