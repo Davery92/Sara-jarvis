@@ -46,6 +46,45 @@ async def get_self_model(current_user=Depends(get_current_user)):
         return await build_self_model(db, str(current_user.id))
 
 
+@router.get("/beliefs")
+async def get_beliefs(current_user=Depends(get_current_user)):
+    """The belief ladder (§7.2): behavioral patterns by promotion status, with
+    confidence, evidence, and where each sits on observed→…→automated."""
+    from app.db.session import get_async_session_factory
+    from sqlalchemy import text
+    sf = get_async_session_factory()
+    async with sf() as db:
+        rows = (await db.execute(text("""
+            SELECT id::text, description, confidence, evidence_count, category,
+                   ladder_status, times_suggested, times_accepted, times_rejected
+            FROM behavioral_pattern
+            WHERE user_id = :u AND status = 'active'
+            ORDER BY
+              CASE ladder_status WHEN 'automated' THEN 0 WHEN 'actionable' THEN 1
+                   WHEN 'predictive' THEN 2 WHEN 'believed' THEN 3 ELSE 4 END,
+              confidence DESC
+            LIMIT 100
+        """), {"u": str(current_user.id)})).fetchall()
+        beliefs = [{
+            "id": r.id, "statement": r.description, "confidence": r.confidence,
+            "evidence_count": r.evidence_count, "category": r.category,
+            "ladder_status": r.ladder_status, "times_suggested": r.times_suggested,
+            "times_accepted": r.times_accepted, "times_rejected": r.times_rejected,
+        } for r in rows]
+        # Contradiction count (consolidation finds these; surfaced here for §7.2).
+        contra = 0
+        try:
+            contra = (await db.execute(text(
+                "SELECT COUNT(*) FROM pkg_contradiction WHERE resolved = FALSE"
+            ))).scalar() or 0
+        except Exception:
+            pass
+        by_status: dict = {}
+        for b in beliefs:
+            by_status[b["ladder_status"]] = by_status.get(b["ladder_status"], 0) + 1
+        return {"beliefs": beliefs, "by_status": by_status, "open_contradictions": contra}
+
+
 @router.get("/why")
 async def get_why_traces(limit: int = 15, current_user=Depends(get_current_user)):
     """Why-trace (§3.10): the causal chain behind recent interruption decisions —

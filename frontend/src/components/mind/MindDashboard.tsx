@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react'
-import { Brain, RefreshCw, AlertTriangle, CheckCircle2, Gauge, Activity, ShieldCheck, Sparkles } from 'lucide-react'
+import { Brain, RefreshCw, AlertTriangle, CheckCircle2, ShieldCheck, Sparkles, GitBranch } from 'lucide-react'
 import { APP_CONFIG } from '../../config'
 
 /**
@@ -39,6 +39,17 @@ interface TrustClass {
 
 const LEVELS = ['Observe', 'Suggest', 'Act & tell', 'Act silently']
 
+const LADDER_ORDER = ['observed', 'believed', 'predictive', 'actionable', 'automated']
+const LADDER_COLOR: Record<string, string> = {
+  observed: 'bg-slate-400', believed: 'bg-sky-400', predictive: 'bg-violet-400',
+  actionable: 'bg-amber-400', automated: 'bg-emerald-500',
+}
+
+interface Belief {
+  id: string; statement: string; confidence: number; evidence_count: number
+  ladder_status: string; times_suggested: number; times_accepted: number
+}
+
 function Card({ title, icon, children }: { title: string; icon: React.ReactNode; children: React.ReactNode }) {
   return (
     <div className="rounded-2xl border border-slate-200/60 dark:border-slate-700/60 bg-white/70 dark:bg-slate-800/50 p-5 shadow-sm">
@@ -54,19 +65,23 @@ export default function MindDashboard() {
   const [ws, setWs] = useState<Workspace | null>(null)
   const [self, setSelf] = useState<SelfModel | null>(null)
   const [trust, setTrust] = useState<TrustClass[]>([])
+  const [beliefs, setBeliefs] = useState<Belief[]>([])
+  const [contradictions, setContradictions] = useState(0)
   const [loading, setLoading] = useState(true)
 
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      const [w, s, t] = await Promise.all([
+      const [w, s, t, b] = await Promise.all([
         fetch(`${APP_CONFIG.apiUrl}/api/mind/workspace`, { credentials: 'include' }),
         fetch(`${APP_CONFIG.apiUrl}/api/mind/self`, { credentials: 'include' }),
         fetch(`${APP_CONFIG.apiUrl}/api/mind/trust`, { credentials: 'include' }),
+        fetch(`${APP_CONFIG.apiUrl}/api/mind/beliefs`, { credentials: 'include' }),
       ])
       if (w.ok) setWs(await w.json())
       if (s.ok) setSelf(await s.json())
       if (t.ok) setTrust((await t.json()).classes || [])
+      if (b.ok) { const bj = await b.json(); setBeliefs(bj.beliefs || []); setContradictions(bj.open_contradictions || 0) }
     } catch (e) {
       console.error('[Mind] load failed', e)
     } finally {
@@ -191,6 +206,41 @@ export default function MindDashboard() {
               </div>
             ))}
             <p className="text-xs text-slate-400 pt-1">L0 observe · L1 suggest · L2 act &amp; tell · L3 act silently. Failures auto-demote.</p>
+          </div>
+        ) : <Empty loading={loading} />}
+      </Card>
+
+      {/* Belief ladder */}
+      <Card title="Beliefs" icon={<GitBranch className="w-4 h-4 text-violet-500" />}>
+        {beliefs.length > 0 ? (
+          <div className="space-y-3">
+            <div className="flex flex-wrap gap-2 text-xs">
+              {LADDER_ORDER.map((st) => {
+                const n = beliefs.filter((b) => b.ladder_status === st).length
+                if (!n) return null
+                return (
+                  <span key={st} className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-slate-100 dark:bg-slate-700">
+                    <span className={`w-2 h-2 rounded-full ${LADDER_COLOR[st] || 'bg-slate-400'}`} />
+                    {st} {n}
+                  </span>
+                )
+              })}
+              {contradictions > 0 && (
+                <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-rose-100 dark:bg-rose-900/40 text-rose-600 dark:text-rose-300">
+                  <AlertTriangle className="w-3 h-3" /> {contradictions} contradiction{contradictions !== 1 ? 's' : ''}
+                </span>
+              )}
+            </div>
+            <ul className="space-y-1.5">
+              {beliefs.slice(0, 12).map((b) => (
+                <li key={b.id} className="flex items-center gap-2 text-sm">
+                  <span className={`w-2 h-2 rounded-full flex-shrink-0 ${LADDER_COLOR[b.ladder_status] || 'bg-slate-400'}`} title={b.ladder_status} />
+                  <span className="text-slate-600 dark:text-slate-300 truncate flex-1">{b.statement}</span>
+                  <span className="text-xs text-slate-400 flex-shrink-0">{Math.round((b.confidence || 0) * 100)}% · {b.evidence_count}d</span>
+                </li>
+              ))}
+            </ul>
+            <p className="text-xs text-slate-400">observed → believed → predictive → actionable → automated. Confirmed patterns become automations with your consent.</p>
           </div>
         ) : <Empty loading={loading} />}
       </Card>
