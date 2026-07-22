@@ -4,8 +4,10 @@ Powers the webapp's Attention pane workspace strip (§7.1) and the Self page
 (§7.4 — "David should never need to re-run this audit by hand"). Read-only.
 """
 import logging
+from typing import Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Body
+from pydantic import BaseModel
 
 from app.core.deps import get_current_user
 
@@ -42,3 +44,28 @@ async def get_self_model(current_user=Depends(get_current_user)):
     sf = get_async_session_factory()
     async with sf() as db:
         return await build_self_model(db, str(current_user.id))
+
+
+@router.get("/trust")
+async def get_trust_matrix(current_user=Depends(get_current_user)):
+    """The graduated-autonomy trust matrix (§3.7 / §7.3)."""
+    from app.db.session import get_async_session_factory
+    from app.services.trust_matrix import get_matrix
+    sf = get_async_session_factory()
+    async with sf() as db:
+        return {"classes": await get_matrix(db)}
+
+
+class TrustGrantRequest(BaseModel):
+    action_class: str
+    level: int  # 0-3
+
+
+@router.post("/trust/grant")
+async def grant_trust(req: TrustGrantRequest, current_user=Depends(get_current_user)):
+    """David sets the granted trust ceiling for an action class."""
+    from app.db.session import get_async_session_factory
+    from app.services.trust_matrix import set_granted_level
+    sf = get_async_session_factory()
+    async with sf() as db:
+        return await set_granted_level(db, req.action_class, req.level)

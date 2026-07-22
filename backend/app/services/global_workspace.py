@@ -17,7 +17,7 @@ deliberation, the delivery policy, the webapp workspace strip §7.1) reads the
 same assembled view. Bounded (≤7 per slot, most-recent/most-salient first).
 """
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 from sqlalchemy import text
 
@@ -168,6 +168,57 @@ async def build_workspace(db, user_id: str = _DAVID) -> Dict[str, Any]:
         "todays_plan": await _todays_plan(db, user_id),
         "david_state": await _david_state(db, user_id),
     }
+
+
+def format_for_chat(ws: Dict[str, Any]) -> Optional[str]:
+    """Render the workspace as a compact system-prompt block (§3.1 enforcement).
+
+    This is what makes chat-Sara genuinely share the background mind: she reads
+    her own current working memory before responding, so "anything I should
+    know?" and re-entry both draw on the same live state the daemon writes."""
+    lines: List[str] = []
+
+    ds = ws.get("david_state") or {}
+    if ds:
+        bits = []
+        if "asleep" in ds:
+            bits.append("asleep" if ds["asleep"] else "awake")
+        if ds.get("readiness") is not None:
+            bits.append(f"readiness {ds['readiness']:.0f}")
+        if bits:
+            lines.append(f"- David is currently: {', '.join(bits)}.")
+
+    preds = ws.get("predictions_today") or {}
+    if preds.get("violated"):
+        notable = [n["what"] for n in preds.get("notable", []) if n.get("status") == "violated"][:2]
+        detail = f" ({'; '.join(notable)})" if notable else ""
+        lines.append(f"- {preds['violated']} of today's predictions were violated{detail} — "
+                     f"something is off from the usual pattern.")
+
+    plan = ws.get("todays_plan") or []
+    if plan:
+        lines.append(f"- Next on the calendar: {plan[0]['title']}"
+                     + (f" (+{len(plan) - 1} more today)" if len(plan) > 1 else "") + ".")
+
+    loops = ws.get("open_loops") or []
+    if loops:
+        lines.append(f"- Open loops with people: {len(loops)} "
+                     f"(e.g. {loops[0]['topic']}).")
+
+    work = ws.get("inflight_work") or []
+    if work:
+        kinds = ", ".join(sorted({w["kind"] for w in work}))
+        lines.append(f"- I'm working on {len(work)} thing(s) in the background: {kinds}.")
+
+    concern = ws.get("concern") or {}
+    if concern.get("level") and concern["level"] != "calm" and concern.get("drivers"):
+        lines.append(f"- On my mind ({concern['level']}): {concern['drivers'][0]}.")
+
+    if not lines:
+        return None
+    return ("\n\n## What I'm Holding In Mind Right Now (my working memory)\n"
+            "This is my live internal state — draw on it naturally; don't recite it.\n"
+            + "\n".join(lines))
 
 
 async def anything_i_should_know(db, user_id: str = _DAVID) -> str:

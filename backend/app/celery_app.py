@@ -92,6 +92,8 @@ celery_app = Celery(
         "app.tasks.belief_promotion",
         "app.tasks.ml_train",
         "app.tasks.curiosity",
+        "app.tasks.dreams",
+        "app.tasks.readiness",
     ]
 )
 
@@ -167,6 +169,8 @@ celery_app.conf.task_routes = {
     "app.tasks.belief_promotion.*": {"queue": "cognitive"},
     "app.tasks.ml_train.*": {"queue": "cognitive"},
     "app.tasks.curiosity.*": {"queue": "cognitive"},
+    "app.tasks.dreams.*": {"queue": "cognitive"},
+    "app.tasks.readiness.*": {"queue": "cognitive"},
 }
 
 # Define queues with priorities

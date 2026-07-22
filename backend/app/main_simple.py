@@ -9292,8 +9292,28 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                 except Exception:
                     pass
 
+            # --- Global workspace (§3.1 enforcement) ---
+            # Chat STARTS from what Sara is holding in mind right now — the same
+            # working memory the background daemon writes: today's predictions and
+            # any violations, open loops, in-flight autonomous work, current
+            # concern, David-state. This is the difference between a bag of
+            # reflexes and a mind that is *about something*; chat-Sara genuinely
+            # knows what the daemon did this morning because they share it.
+            mind_ctx = None
+            try:
+                from app.db.session import get_async_session_factory as _get_wsf
+                from app.services.global_workspace import build_workspace as _build_ws, format_for_chat as _fmt_ws
+                _wsf = _get_wsf()
+                async with _wsf() as _wsdb:
+                    _ws = await asyncio.wait_for(_build_ws(_wsdb, str(current_user.id)), timeout=2.0)
+                mind_ctx = _fmt_ws(_ws)
+            except Exception as e:
+                logger.debug(f"Workspace (mind) context failed (non-critical): {e}")
+
             # --- Apply token budget ---
             budget = ContextBudget(max_tokens=6000)
+            # Workspace first — it is the base the rest of retrieval adds to.
+            budget.add("workspace_mind", _safe(mind_ctx), priority=1)
             budget.add("memory", _safe(memory_ctx), priority=1)
             budget.add("personality", _safe(personality_ctx), priority=1)
             budget.add("daily_brief", _safe(daily_brief_ctx), priority=2)
