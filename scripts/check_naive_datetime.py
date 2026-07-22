@@ -29,6 +29,22 @@ BANNED = [
     (re.compile(r"\bdatetime\.utcnow\(\s*\)"), "datetime.utcnow()  -> use timezone.now_utc()/naive_utc_now()"),
 ]
 
+# Heuristic for the B2 shape: an aware "now" helper subtracted against a bare
+# variable that is very likely a naive value straight from the DB, e.g.
+#   hours_away = local_now() - last_message_time   # naive episode.created_at
+# Python raises "can't subtract offset-naive and offset-aware datetimes".
+# We exclude `- timedelta(...)` (legitimate and extremely common) and allow an
+# inline `# tz-ok` escape hatch for verified-aware operands.
+_AWARE_NOW = r"(?:local_now|now_utc|now)\(\s*\)"
+MIXED_SUB = [
+    # aware_now() - <bare name that is not timedelta / not a call>
+    (re.compile(_AWARE_NOW + r"\s*-\s*(?!timedelta\b)([A-Za-z_]\w*)(?!\s*\()"),
+     "aware now() minus a bare variable — confirm the variable is timezone-aware (naive DB value?) or add `# tz-ok`"),
+    # <bare name> - aware_now()
+    (re.compile(r"(?<![.\w])([A-Za-z_]\w*)\s*-\s*" + _AWARE_NOW),
+     "bare variable minus aware now() — confirm the variable is timezone-aware or add `# tz-ok`"),
+]
+
 
 def strip_comment(line: str) -> str:
     in_s = None
@@ -44,9 +60,12 @@ def strip_comment(line: str) -> str:
 
 
 def main() -> int:
-    root = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else "app")
+    argv = [a for a in sys.argv[1:] if not a.startswith("-")]
+    strict = "--strict" in sys.argv  # treat mixed-subtraction warnings as errors too
+    root = pathlib.Path(argv[0] if argv else "app")
     allow = {root / "core" / "timezone.py"}
-    violations = []
+    violations = []   # hard errors (fail CI)
+    warnings = []     # advisory mixed-subtraction heuristic (review, not fail)
     for p in root.rglob("*.py"):
         if p in allow or "__pycache__" in str(p):
             continue
@@ -55,14 +74,37 @@ def main() -> int:
             for rx, msg in BANNED:
                 if rx.search(code):
                     violations.append(f"{p}:{n}: {msg}")
+            if "# tz-ok" in line:
+                continue
+            for rx, msg in MIXED_SUB:
+                m = rx.search(code)
+                if not m:
+                    continue
+                # Skip the false-positive where the "bare name" is actually the
+                # left side of a timedelta subtraction captured on the right.
+                if m.group(1) in ("timedelta",):
+                    continue
+                warnings.append(f"{p}:{n}: {msg}")
+
+    rc = 0
     if violations:
         print("Naive datetime ban — %d violation(s):" % len(violations))
         for v in violations:
             print("  " + v)
         print("\nSee app/core/timezone.py for the sanctioned helpers.")
-        return 1
-    print("Naive datetime ban: clean.")
-    return 0
+        rc = 1
+    else:
+        print("Naive datetime ban: clean.")
+
+    if warnings:
+        label = "ERROR" if strict else "REVIEW"
+        print(f"\nMixed-subtraction heuristic — {len(warnings)} site(s) to {label} "
+              f"(naive/aware subtraction is the B2/B4 bug class; add `# tz-ok` once verified):")
+        for w in warnings:
+            print("  " + w)
+        if strict:
+            rc = 1
+    return rc
 
 
 if __name__ == "__main__":

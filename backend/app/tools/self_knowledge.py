@@ -109,7 +109,81 @@ Available sections:
             )
 
 
+class CheckCurrentStateTool(BaseTool):
+    """Live global workspace (§3.1) — what Sara is holding in mind right now."""
+
+    @property
+    def name(self) -> str:
+        return "check_current_state"
+
+    @property
+    def description(self) -> str:
+        return """Check what you're currently holding in mind — your live global workspace.
+
+Use this whenever David asks "anything I should know?", "what's going on?",
+"what are you working on?", or any open-ended check-in. Returns a synthesis of:
+open loops, today's predictions and any that were violated (things off from the
+usual), what you're working on in the background, today's plan, David's current
+state, and your current concern level. This is REAL current data — prefer it
+over guessing or a generic memory search for "what's up right now" questions."""
+
+    @property
+    def parameters(self) -> Dict[str, Any]:
+        return {"type": "object", "properties": {}}
+
+    async def execute(self, user_id: str, **kwargs) -> ToolResult:
+        try:
+            from app.db.session import get_async_session_factory
+            from app.services.global_workspace import build_workspace, anything_i_should_know
+            sf = get_async_session_factory()
+            async with sf() as db:
+                summary = await anything_i_should_know(db, user_id)
+                workspace = await build_workspace(db, user_id)
+            return ToolResult(success=True, message=summary, data={"workspace": workspace})
+        except Exception as e:
+            logger.error(f"check_current_state failed: {e}")
+            return ToolResult(success=False, message=f"Couldn't read my workspace: {e}")
+
+
+class SelfDiagnosticsTool(BaseTool):
+    """Live self-model (§3.4) — Sara's honest assessment of her own health."""
+
+    @property
+    def name(self) -> str:
+        return "self_diagnostics"
+
+    @property
+    def description(self) -> str:
+        return """Check your own current health honestly — the live self-model.
+
+Use this when David asks "how are you doing?", "is everything working?",
+"what's broken?", "anything wrong with you?", or when you want to add an honest
+caveat (e.g. "my sent-mail sync has been stalled, so I may have missed
+something"). Returns: unresolved failures, failed scheduled jobs, stalled data
+cursors, prediction calibration (how accurate your confidence actually is),
+capabilities, and deploy state. This is real self-inspection — report it
+truthfully, including problems. Read-only; you cannot fix these from here."""
+
+    @property
+    def parameters(self) -> Dict[str, Any]:
+        return {"type": "object", "properties": {}}
+
+    async def execute(self, user_id: str, **kwargs) -> ToolResult:
+        try:
+            from app.db.session import get_async_session_factory
+            from app.services.self_model import build_self_model
+            sf = get_async_session_factory()
+            async with sf() as db:
+                model = await build_self_model(db, user_id)
+            return ToolResult(success=True, message=model["summary"], data=model)
+        except Exception as e:
+            logger.error(f"self_diagnostics failed: {e}")
+            return ToolResult(success=False, message=f"Couldn't read my self-model: {e}")
+
+
 # Export for registry
 SELF_KNOWLEDGE_TOOLS = [
     GetSelfKnowledgeTool(),
+    CheckCurrentStateTool(),
+    SelfDiagnosticsTool(),
 ]

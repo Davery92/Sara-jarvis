@@ -72,6 +72,8 @@ class SalienceSubscriber(EventSubscriber):
             # Interoception — Sara's own body (ONE_MIND §3.1)
             EventType.SYSTEM_HEALTH_DEGRADED,
             EventType.SYSTEM_HEALTH_RECOVERED,
+            # Prediction loop (§3.2) — a violated prediction is surprise = salience
+            EventType.PREDICTION_VIOLATED,
         )
 
     async def handle_event(self, event: Event) -> None:

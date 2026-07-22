@@ -86,6 +86,12 @@ celery_app = Celery(
         "app.tasks.fleet",
         "app.tasks.interoception",
         "app.tasks.dispatch",
+        "app.tasks.db_maintenance",
+        "app.tasks.delivery_flush",
+        "app.tasks.predictions",
+        "app.tasks.belief_promotion",
+        "app.tasks.ml_train",
+        "app.tasks.curiosity",
     ]
 )
 
@@ -155,6 +161,12 @@ celery_app.conf.task_routes = {
     # a 20-min agent task never starves cognitive work and survives a backend restart.
     "app.tasks.dispatch.*": {"queue": "dispatch"},
     "app.tasks.interoception.*": {"queue": "maintenance"},
+    "app.tasks.db_maintenance.*": {"queue": "maintenance"},
+    "app.tasks.delivery_flush.*": {"queue": "cognitive"},
+    "app.tasks.predictions.*": {"queue": "cognitive"},
+    "app.tasks.belief_promotion.*": {"queue": "cognitive"},
+    "app.tasks.ml_train.*": {"queue": "cognitive"},
+    "app.tasks.curiosity.*": {"queue": "cognitive"},
 }
 
 # Define queues with priorities

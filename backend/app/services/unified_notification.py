@@ -471,6 +471,42 @@ async def _send_notification_impl(
         except Exception as e:
             logger.debug(f"Desktop WebSocket delivery skipped: {e}")
 
+    # ── Unified delivery policy (§3.6): sleep-gate the PUSH decision ──
+    # Every push funnels through here — the escalation sweep, the attention-queue
+    # buzz, and direct high-priority sends all reach this point. This is the one
+    # chokepoint. If David is asleep and this isn't security/critical, HOLD it
+    # for the morning digest instead of buzzing his phone at 5 AM (fixes N1).
+    # Desktop delivery already happened above and is fine; only hold when the
+    # item did NOT reach a connected desktop.
+    if db and not desktop_sent:
+        try:
+            from app.services.delivery_policy import decide_delivery, hold_notification
+            _decision = await decide_delivery(db, user_id, category, priority, source)
+            if _decision.action == "hold":
+                await hold_notification(
+                    db, user_id=user_id, title=title, message=message,
+                    category=category, priority=priority, source=source,
+                    topic=effective_topic, payload=payload, decision=_decision,
+                )
+                await _log_notification(
+                    db, user_id, effective_topic, category, title, message,
+                    priority, source, agent_run_id, 0,
+                    sent=False, dedup_blocked=False,
+                    attention_item_id=_attention_item_id,
+                )
+                logger.info(
+                    f"🌙 Push held (David asleep): {title[:50]!r} "
+                    f"category={category} reason={_decision.reason}"
+                )
+                return {
+                    "sent": False, "reason": "held_asleep", "held": True,
+                    "deliver_after": _decision.deliver_after.isoformat()
+                    if _decision.deliver_after else None,
+                    "why_trace": _decision.why_trace,
+                }
+        except Exception as e:
+            logger.debug(f"Delivery policy consult skipped: {e}")
+
     # Get push tokens
     tokens = await _get_push_tokens(db, user_id) if db else await _get_push_tokens_sync(user_id)
 

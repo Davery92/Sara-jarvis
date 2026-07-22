@@ -22,6 +22,7 @@ Standing orders differ from automations:
 
 import logging
 import json
+import asyncio
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 from zoneinfo import ZoneInfo
@@ -444,8 +445,69 @@ class StandingOrderService:
 
         return True, f"unknown condition '{ctype}' (ignored)"
 
+    @staticmethod
+    def _is_security_critical(action_type: str, config: Dict) -> bool:
+        """A security-class action (locks) must fail LOUDLY, not silently.
+
+        Covers ``lock_all`` and any ``home_control`` whose service targets a lock
+        (e.g. ``lock.lock``). B7: a silent lock failure means the front door may
+        simply not have locked — the wrong failure mode for a security action.
+        """
+        if action_type == "lock_all":
+            return True
+        if action_type == "home_control":
+            service = (config.get("service") or "").lower()
+            return service.startswith("lock.")
+        return False
+
     async def _execute_action(self, action_type: str, config: Dict, context: Dict) -> bool:
-        """Execute a standing order action."""
+        """Execute a standing order action.
+
+        For security-critical classes, applies retry-then-alert policy: one retry
+        after 60s, then a high-priority notification on the second failure. Quiet
+        hours do NOT suppress a lock-failure alert.
+        """
+        if self._is_security_critical(action_type, config):
+            success = await self._run_action_once(action_type, config, context)
+            if success:
+                return True
+            logger.warning(
+                f"Security-critical action '{action_type}' failed; retrying in 60s"
+            )
+            await asyncio.sleep(60)
+            success = await self._run_action_once(action_type, config, context)
+            if success:
+                logger.info(f"Security-critical action '{action_type}' succeeded on retry")
+                return True
+            # Second failure — wake something up. urgency="critical" is the
+            # always-delivers path (bypasses interruptibility/quiet-hours gating),
+            # which is exactly right for a security-class failure.
+            logger.error(
+                f"Security-critical action '{action_type}' failed twice — alerting David"
+            )
+            try:
+                from app.services.unified_notification import send_notification_with_interruptibility
+                await send_notification_with_interruptibility(
+                    user_id=DAVID_USER_ID,
+                    title="⚠️ Lock action failed",
+                    message=(
+                        f"I tried to run '{action_type}' twice and it failed both times. "
+                        "Your doors may not be locked — please check."
+                    ),
+                    urgency="critical",
+                    priority="high",
+                    category="security",
+                    topic=f"security_action_failed:{action_type}",
+                    source="standing_order",
+                )
+            except Exception as ne:
+                logger.error(f"Failed to send security-failure alert: {ne}")
+            return False
+
+        return await self._run_action_once(action_type, config, context)
+
+    async def _run_action_once(self, action_type: str, config: Dict, context: Dict) -> bool:
+        """Execute a standing order action exactly once (no retry policy)."""
         try:
             if action_type == "home_control":
                 from app.services.ha_control_service import ha_control

@@ -142,6 +142,9 @@ class EventType(str, Enum):
     # Fired on state transitions only (degraded ⇄ recovered), never per-tick.
     SYSTEM_HEALTH_DEGRADED = "system.health_degraded"
     SYSTEM_HEALTH_RECOVERED = "system.health_recovered"
+    # Prediction loop (§3.2): a confident prediction was violated — surprise is
+    # the primary input to attention. Confirmed predictions are silence.
+    PREDICTION_VIOLATED = "prediction.violated"
 
 
 class Event(BaseModel):

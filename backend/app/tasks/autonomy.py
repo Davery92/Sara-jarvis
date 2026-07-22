@@ -382,7 +382,15 @@ async def _memory_consolidation_async():
         from app.db.session import get_async_session_factory
         async_session = get_async_session_factory()
         async with async_session() as db:
-            today_start = local_now().replace(hour=0, minute=0, second=0)
+            # episode.created_at is a naive UTC `timestamp` column. Binding an
+            # aware-ET datetime against it made asyncpg raise
+            # "can't subtract offset-naive and offset-aware datetimes" — the
+            # nightly consolidation crashed at 23:00 and 03:00 every night.
+            # Compute ET-midnight (correct day boundary), then convert to
+            # naive-UTC to match the column.
+            today_start = to_naive_utc(
+                local_now().replace(hour=0, minute=0, second=0, microsecond=0)
+            )
 
             # Count today's episodes
             episode_result = await db.execute(

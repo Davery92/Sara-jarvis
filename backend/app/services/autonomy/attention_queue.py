@@ -618,6 +618,38 @@ class AttentionQueueService:
             await self._log_action(db, item_id, action_id, kind, "Completed")
             return {"success": success, "action_id": action_id, "kind": kind, "status": "completed"}
 
+        if kind == "create_standing_order":
+            # Belief promotion (§3.3 / D2): David accepted a "want me to automate
+            # this?" suggestion → promote the pattern to AUTOMATED and create the
+            # standing order via the existing CRUD (runs nightly, undo + B7 alert).
+            pattern_id = action.get("pattern_id") or payload.get("pattern_id")
+            spec = payload.get("action_spec") if isinstance(payload, dict) else None
+            if not (pattern_id and isinstance(spec, dict)):
+                return {"success": False, "error": "missing_pattern_spec"}
+            try:
+                from app.services.standing_order_service import standing_order_service
+                description = str(payload.get("pattern_description") or item.get("title") or "Automated routine")[:255]
+                result = await standing_order_service.create_order(
+                    db, user_id=item["user_id"], description=description,
+                    trigger_type=spec["trigger_type"], trigger_config=spec["trigger_config"],
+                    action_type=spec["action_type"], action_config=spec["action_config"],
+                    source="pattern", pattern_id=pattern_id,
+                )
+                db.execute(text("""
+                    UPDATE behavioral_pattern
+                    SET ladder_status = 'automated', times_accepted = times_accepted + 1,
+                        last_accepted_at = NOW()
+                    WHERE id = CAST(:id AS uuid)
+                """), {"id": pattern_id})
+                await self.mark_completed(db=db, item_id=item_id, user_id=user_id)
+                await self._log_action(db, item_id, action_id, kind,
+                                       f"Created standing order #{result.get('id')} from pattern")
+                return {"success": True, "action_id": action_id, "kind": kind,
+                        "standing_order_id": result.get("id")}
+            except Exception as e:
+                logger.warning(f"create_standing_order action failed: {e}")
+                return {"success": False, "error": "create_failed"}
+
         if kind == "stop_these":
             # SARA_UNLEASHED Phase T.4: the correction channel available at
             # the moment of annoyance, not just in the Sunday digest — the

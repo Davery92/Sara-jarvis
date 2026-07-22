@@ -127,9 +127,30 @@ async def _prep_for_event(
     from app.services.unified_notification import send_notification
     from app.services.calendar_ownership import classify_event
     from app.core.timezone import now as local_now
+    from app.db.session import get_async_session_factory
 
     # Check if we already sent prep for this event
     topic = f"cal_prep:{event_id}"
+
+    # N3: generation-side idempotence. The 15-min scan can mint a second prep
+    # for the same event (with re-frozen "starts in 36 min" text); the delivery
+    # layer dedups it, but only AFTER we've re-run all the memory/PKG/research
+    # searches. Skip the whole build if this event was already prepped recently.
+    # (An event only needs prepping once; 6h covers the whole pre-event window.)
+    try:
+        _sf = get_async_session_factory()
+        async with _sf() as _idem_db:
+            already = (await _idem_db.execute(text("""
+                SELECT 1 FROM notification_log
+                WHERE user_id = :uid AND topic = :topic
+                  AND sent_at >= NOW() - INTERVAL '6 hours'
+                LIMIT 1
+            """), {"uid": user_id, "topic": topic})).first()
+        if already:
+            logger.info(f"Calendar prep skipped for event {event_id}: already prepped within 6h")
+            return
+    except Exception as e:
+        logger.debug(f"Calendar prep idempotence check skipped: {e}")
 
     ownership = classify_event(title, calendar_name)
     attendee_names = [a.get("name") or a.get("email") for a in (attendees or []) if a.get("name") or a.get("email")]

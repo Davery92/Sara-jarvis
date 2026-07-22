@@ -347,6 +347,18 @@ class SalienceScorer:
         if etype == EventType.CONTEXT_UPDATED and event.payload.get("rhythm_deviation"):
             return max(score, RHYTHM_DEVIATION_FLOOR)
 
+        # Prediction violation (§3.2): surprise is the primary input to attention.
+        # Weight ∝ confidence × domain-prior — a high-confidence miss ("front door
+        # didn't lock by 00:40, first time in 33 days") floors high; a low-confidence
+        # miss barely registers and merely habituates.
+        if etype == EventType.PREDICTION_VIOLATED:
+            conf = float(event.payload.get("confidence") or 0.0)
+            domain_prior = {
+                "home": 0.9, "security": 1.0, "health": 0.85,
+                "calendar": 0.7, "routine": 0.6, "comms": 0.6,
+            }.get(str(event.payload.get("domain") or "").lower(), 0.6)
+            return max(score, conf * domain_prior)
+
         return score
 
     async def should_deliberate(self, user_id: str) -> bool:

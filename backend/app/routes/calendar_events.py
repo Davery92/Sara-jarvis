@@ -38,7 +38,10 @@ def _supersede_email_duplicates(db: Session, user_id: str, ios_event: CalendarEv
     within 90 minutes."""
     try:
         from datetime import timedelta
-        from app.tasks.email_sync import _normalize_meeting_title
+        # NB: the normalizer lives in calendar_intelligence as _normalize_title.
+        # The old `from app.tasks.email_sync import _normalize_meeting_title`
+        # never existed, so every sync raised ImportError and skipped dedup.
+        from app.services.calendar_intelligence import _normalize_title as _normalize_meeting_title
         from app.models.email import Email as EmailModel
 
         day_start = ios_event.start_time.replace(hour=0, minute=0, second=0, microsecond=0)

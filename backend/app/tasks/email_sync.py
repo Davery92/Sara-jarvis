@@ -21,7 +21,7 @@ from typing import Optional, Dict, Any, List
 from html import unescape
 
 from app.celery_app import celery_app
-from app.core.timezone import now as local_now
+from app.core.timezone import now as local_now, to_naive_utc
 
 logger = logging.getLogger(__name__)
 
@@ -432,14 +432,23 @@ async def _sync_sent_items_async():
                     since = sync_state.last_sync_at if sync_state and sync_state.last_sync_at else (
                         local_now() - timedelta(hours=24)
                     )
+                    # B5: the cursor stalled for weeks because `since` comes back
+                    # NAIVE from the DB while msgraph's received_at is AWARE — the
+                    # `received_at > latest_at` comparison raised TypeError, was
+                    # swallowed by the outer except, and the state was never
+                    # committed (cursor frozen, same window re-fetched forever).
+                    # Normalize everything to naive-UTC so comparisons are valid
+                    # and the stored cursor matches the naive DB column.
+                    since = to_naive_utc(since)
 
                     sent_emails = await msgraph.get_emails(mailbox, since=since, top=50, folder="sentitems")
                     total_sent += len(sent_emails)
 
                     latest_at = since
                     for sent in sent_emails:
-                        if sent.received_at and sent.received_at > latest_at:
-                            latest_at = sent.received_at
+                        recv = to_naive_utc(sent.received_at) if sent.received_at else None
+                        if recv and recv > latest_at:
+                            latest_at = recv
                         for recipient in (sent.to_recipients or []) + (sent.cc_recipients or []):
                             r_email = (recipient.get("email") or "").strip()
                             if not r_email:
@@ -1068,11 +1077,17 @@ async def _process_riskninja_attachments_async():
                 await db.flush()
                 logger.info(f"Created 'Sara's Findings' folder: {findings_folder.id}")
 
-            # Get RiskNinja-relevant attachments that haven't been filed
+            # Get RiskNinja-relevant attachments that haven't been assessed yet.
+            # Idempotence: `filing_analysis` is set on BOTH filing and skipping, so
+            # it's the per-attachment "assessed" marker. Previously the query only
+            # excluded `filed_at IS NOT NULL`, so every skipped attachment (analyzed
+            # but not filed) stayed NULL and was re-downloaded + re-evaluated every
+            # 15 min forever — the same 20 attachments, blowing SoftTimeLimitExceeded.
             result = await db.execute(
                 select(EmailAttachment).join(Email).where(
                     EmailAttachment.is_riskninja_relevant == True,
                     EmailAttachment.filed_at.is_(None),
+                    EmailAttachment.filing_analysis.is_(None),  # not yet assessed
                     EmailAttachment.minio_key.isnot(None)  # Must be downloaded
                 ).order_by(Email.received_at.desc()).limit(20)
             )

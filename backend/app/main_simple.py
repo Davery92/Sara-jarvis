@@ -5956,6 +5956,10 @@ app.include_router(standing_orders_router)
 from app.routes.autonomy_control import router as autonomy_control_router
 app.include_router(autonomy_control_router)
 
+# The Mind — global workspace (§3.1) + self-model (§3.4)
+from app.routes.mind import router as mind_router
+app.include_router(mind_router)
+
 # Autonomy traces (Phase 0 — Cortana Evolution)
 from app.routes.autonomy_traces import router as autonomy_traces_router
 app.include_router(autonomy_traces_router)
@@ -9573,7 +9577,15 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
 
                     # Build re-entry context from unified snapshot changes + agent memory + journal + PKG
                     try:
-                        hours_away = (local_now() - last_message_time).total_seconds() / 3600
+                        # Normalize both sides to aware-UTC before subtracting.
+                        # local_now() is aware-ET; last_message_time (episode.created_at)
+                        # comes back naive from the DB, so a raw subtraction raised
+                        # "can't subtract offset-naive and offset-aware datetimes" every
+                        # time — this feature had 0 successes all-time until this fix.
+                        _last_msg = last_message_time
+                        if _last_msg.tzinfo is None:
+                            _last_msg = _last_msg.replace(tzinfo=timezone.utc)
+                        hours_away = (datetime.now(timezone.utc) - _last_msg).total_seconds() / 3600
                         reentry_context = f"\n\n## Re-Entry Context\nDavid just returned after {hours_away:.1f} hours away.\n"
 
                         # Read changes_since_last_chat from unified context snapshot

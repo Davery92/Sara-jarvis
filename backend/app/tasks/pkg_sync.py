@@ -28,10 +28,13 @@ async def _reconcile(user_id: str):
 
     async_session = get_async_session_factory()
     async with async_session() as db:
-        # Count pgvector shadow entries
+        # Count pgvector shadow entries.
+        # Solo system: pkg_embedding has no user_id column (keyed by pkg_id),
+        # so we count all shadow rows. Filtering by :uid raised
+        # "column user_id does not exist" every run and the task swallowed it.
         result = await db.execute(text("""
-            SELECT COUNT(*) FROM pkg_embedding WHERE user_id = :uid
-        """), {"uid": user_id})
+            SELECT COUNT(*) FROM pkg_embedding
+        """))
         pg_count = result.scalar() or 0
 
     # Count Neo4j nodes (sync driver)
