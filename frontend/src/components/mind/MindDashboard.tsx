@@ -57,8 +57,8 @@ interface ActionRow {
 
 function Card({ title, icon, children }: { title: string; icon: React.ReactNode; children: React.ReactNode }) {
   return (
-    <div className="rounded-2xl border border-slate-200 dark:border-slate-700/80 bg-white dark:bg-slate-800/90 p-5 shadow-sm dark:shadow-lg dark:shadow-black/20">
-      <div className="flex items-center gap-2 mb-4 pb-3 border-b border-slate-100 dark:border-slate-700/60 text-slate-800 dark:text-slate-100">
+    <div className="rounded-2xl border border-slate-700/70 bg-slate-800/80 p-5 shadow-lg shadow-black/20">
+      <div className="flex items-center gap-2 mb-4 pb-3 border-b border-slate-700/60 text-slate-100">
         {icon}<h3 className="font-semibold text-[15px]">{title}</h3>
       </div>
       {children}
@@ -114,14 +114,14 @@ export default function MindDashboard() {
   }
 
   return (
-    <div className="flex-1 overflow-y-auto min-h-0 bg-slate-50 dark:bg-slate-900">
+    <div className="flex-1 overflow-y-auto min-h-0 bg-slate-900">
      <div className="p-4 md:p-6 space-y-5 max-w-5xl mx-auto w-full">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <Brain className="w-6 h-6 text-violet-500" />
-          <h1 className="text-2xl font-bold text-slate-900 dark:text-white">The Mind</h1>
+          <h1 className="text-2xl font-bold text-white">The Mind</h1>
         </div>
-        <button onClick={load} className="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-500">
+        <button onClick={load} className="p-2 rounded-lg hover:bg-slate-700 text-slate-500">
           <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
         </button>
       </div>
@@ -139,12 +139,12 @@ export default function MindDashboard() {
             <Stat label="In-flight" value={String(ws.inflight_work?.length ?? 0)}
               sub={ws.concern?.level && ws.concern.level !== 'calm' ? `concern: ${ws.concern.level}` : 'calm'} />
             {ws.todays_plan?.[0] && (
-              <div className="col-span-2 md:col-span-4 text-slate-700 dark:text-slate-200">
+              <div className="col-span-2 md:col-span-4 text-slate-200">
                 <span className="text-slate-400">Next:</span> {ws.todays_plan[0].title}
               </div>
             )}
             {ws.concern?.drivers?.[0] && (
-              <div className="col-span-2 md:col-span-4 text-amber-600 dark:text-amber-400 text-xs">
+              <div className="col-span-2 md:col-span-4 text-amber-400 text-xs">
                 On my mind: {ws.concern.drivers[0]}
               </div>
             )}
@@ -157,7 +157,7 @@ export default function MindDashboard() {
         icon={self?.health?.ok ? <CheckCircle2 className="w-4 h-4 text-emerald-500" /> : <AlertTriangle className="w-4 h-4 text-rose-500" />}>
         {self ? (
           <div className="space-y-3">
-            <div className={`text-sm ${self.health.ok ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}`}>
+            <div className={`text-sm ${self.health.ok ? 'text-emerald-400' : 'text-rose-400'}`}>
               {self.summary}
             </div>
             {self.health.issues?.length > 0 && (
@@ -165,12 +165,12 @@ export default function MindDashboard() {
                 {self.health.issues.map((iss, i) => (
                   <li key={i} className="flex items-start gap-2">
                     <span className={`mt-1 w-2 h-2 rounded-full ${iss.severity === 'error' ? 'bg-rose-500' : 'bg-amber-500'}`} />
-                    <span className="text-slate-700 dark:text-slate-200">{iss.what}</span>
+                    <span className="text-slate-200">{iss.what}</span>
                   </li>
                 ))}
               </ul>
             )}
-            <div className="grid grid-cols-2 md:grid-cols-3 gap-3 pt-2 border-t border-slate-200/60 dark:border-slate-700/60 text-xs">
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-3 pt-2 border-t border-slate-700/60 text-xs">
               {self.deploy?.acs_daemon && (
                 <Stat label="ACS daemon" value={self.deploy.acs_daemon.alive ? 'alive' : 'down'}
                   sub={`${self.deploy.acs_daemon.version || ''} · ${self.deploy.acs_daemon.heartbeat_minutes_ago ?? '?'}m ago`} />
@@ -196,7 +196,7 @@ export default function MindDashboard() {
             {trust.map((c) => (
               <div key={c.action_class} className="flex items-center justify-between gap-3 text-sm">
                 <div className="min-w-0">
-                  <div className="text-slate-700 dark:text-slate-200 truncate">{c.action_class.replace(/_/g, ' ')}</div>
+                  <div className="text-slate-200 truncate">{c.action_class.replace(/_/g, ' ')}</div>
                   <div className="text-xs text-slate-400">
                     {c.executions} runs · {c.failures} fails · {Math.round(c.acceptance_rate * 100)}% accepted
                     {c.promotion_eligible && <span className="text-emerald-500 ml-1">· eligible ↑</span>}
@@ -209,7 +209,7 @@ export default function MindDashboard() {
                       className={`px-2 py-1 rounded text-xs font-medium transition ${
                         c.granted_level === lvl
                           ? 'bg-sky-500 text-white'
-                          : 'bg-slate-100 dark:bg-slate-700 text-slate-500 hover:bg-slate-200 dark:hover:bg-slate-600'
+                          : 'bg-slate-700 text-slate-400 hover:bg-slate-600'
                       }`}>
                       L{lvl}
                     </button>
@@ -231,14 +231,14 @@ export default function MindDashboard() {
                 const n = beliefs.filter((b) => b.ladder_status === st).length
                 if (!n) return null
                 return (
-                  <span key={st} className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-slate-100 dark:bg-slate-700">
+                  <span key={st} className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-slate-700">
                     <span className={`w-2 h-2 rounded-full ${LADDER_COLOR[st] || 'bg-slate-400'}`} />
                     {st} {n}
                   </span>
                 )
               })}
               {contradictions > 0 && (
-                <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-rose-100 dark:bg-rose-900/40 text-rose-600 dark:text-rose-300">
+                <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-rose-900/40 text-rose-300">
                   <AlertTriangle className="w-3 h-3" /> {contradictions} contradiction{contradictions !== 1 ? 's' : ''}
                 </span>
               )}
@@ -247,7 +247,7 @@ export default function MindDashboard() {
               {beliefs.slice(0, 12).map((b) => (
                 <li key={b.id} className="flex items-center gap-2 text-sm">
                   <span className={`w-2 h-2 rounded-full flex-shrink-0 ${LADDER_COLOR[b.ladder_status] || 'bg-slate-400'}`} title={b.ladder_status} />
-                  <span className="text-slate-700 dark:text-slate-200 truncate flex-1">{b.statement}</span>
+                  <span className="text-slate-200 truncate flex-1">{b.statement}</span>
                   <span className="text-xs text-slate-400 flex-shrink-0">{Math.round((b.confidence || 0) * 100)}% · {b.evidence_count}d</span>
                 </li>
               ))}
@@ -264,7 +264,7 @@ export default function MindDashboard() {
             {actions.slice(0, 15).map((a) => (
               <li key={a.id} className="flex items-center gap-2 text-sm">
                 <span className={`w-2 h-2 rounded-full flex-shrink-0 ${a.undone ? 'bg-slate-400' : a.success ? 'bg-emerald-500' : 'bg-rose-500'}`} />
-                <span className="text-slate-700 dark:text-slate-200 truncate flex-1">
+                <span className="text-slate-200 truncate flex-1">
                   {a.reason || a.action_type}
                   {a.undone && <span className="text-slate-400 ml-1">(undone)</span>}
                 </span>
@@ -284,7 +284,7 @@ export default function MindDashboard() {
             {journal.slice(0, 8).map((e, i) => (
               <li key={i} className="text-sm">
                 <span className="text-[10px] uppercase tracking-wide text-indigo-400 mr-2">{e.type}</span>
-                <span className="text-slate-700 dark:text-slate-200">{e.content.slice(0, 220)}</span>
+                <span className="text-slate-200">{e.content.slice(0, 220)}</span>
               </li>
             ))}
           </ul>
@@ -298,9 +298,9 @@ export default function MindDashboard() {
 function Stat({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
     <div>
-      <div className="text-[11px] uppercase tracking-wide text-slate-500 dark:text-slate-400 font-medium">{label}</div>
-      <div className="font-semibold text-base text-slate-800 dark:text-slate-50 mt-0.5">{value}</div>
-      {sub && <div className="text-xs text-slate-500 dark:text-slate-400 truncate">{sub}</div>}
+      <div className="text-[11px] uppercase tracking-wide text-slate-400 font-medium">{label}</div>
+      <div className="font-semibold text-base text-slate-50 mt-0.5">{value}</div>
+      {sub && <div className="text-xs text-slate-400 truncate">{sub}</div>}
     </div>
   )
 }
