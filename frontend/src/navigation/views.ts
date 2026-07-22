@@ -25,6 +25,7 @@ export type AppView =
   | 'system-status'
   | 'system'
   | 'machines'
+  | 'mind'
 
 interface AppViewConfig {
   view: AppView
@@ -62,6 +63,7 @@ export const APP_VIEWS: AppViewConfig[] = [
   { view: 'system-status', path: '/system-status', title: 'System Status', icon: 'monitoring', keywords: ['system', 'status', 'health', 'metrics', 'monitoring'] },
   { view: 'system', path: '/system', title: 'The System', icon: 'hub', keywords: ['system', 'awareness', 'world', 'mind', 'god view', 'attention', 'balance', 'thoughts'] },
   { view: 'machines', path: '/machines', title: 'Machines', icon: 'dns', keywords: ['machines', 'fleet', 'servers', 'hosts', 'infrastructure', 'boxes', 'health', 'disk', 'agent'] },
+  { view: 'mind', path: '/mind', title: 'Mind', icon: 'psychology_alt', keywords: ['mind', 'workspace', 'self', 'self-model', 'health', 'calibration', 'trust', 'autonomy', 'predictions', 'concern', 'audit'] },
 ]
 
 const VIEW_ALIASES: Record<string, AppView> = {

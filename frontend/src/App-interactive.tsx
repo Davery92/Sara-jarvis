@@ -445,6 +445,7 @@ function App() {
     { view: 'notes', label: 'Knowledge', icon: 'edit_note' },
     { view: 'fitness', label: 'Fitness', icon: 'fitness_center' },
     { view: 'system', label: 'System', icon: 'hub' },
+    { view: 'mind', label: 'Mind', icon: 'psychology_alt' },
   ]
 
   // "More" tier first, then the more specialized/introspective "Advanced"
