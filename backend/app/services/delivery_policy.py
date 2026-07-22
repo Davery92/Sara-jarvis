@@ -49,6 +49,12 @@ _ALWAYS_DELIVER_SOURCES = {
 _FALLBACK_BEDTIME = time(22, 0)
 _FALLBACK_WAKE = time(6, 30)
 
+# §6.3.2: on a low-recovery day, batch the *soft* interruptions (routine
+# check-ins/nudges) into the next digest instead of buzzing — tired David gets
+# fewer, gentler pings. Never touches security/health/calendar/urgent.
+_SOFT_CATEGORIES = {"checkin", "general", "acs_discovery", "wellness", "learning_review"}
+_LOW_READINESS = 55
+
 
 @dataclass
 class SleepState:
@@ -243,14 +249,41 @@ async def decide_delivery(
                 },
             )
         else:
-            decision = DeliveryDecision(
-                "deliver", f"awake:{sleep.source}",
-                why_trace={"sleep_source": sleep.source, "category": category,
-                           "priority": priority, "ml_p_valuable": ml_opinion},
-            )
+            # §6.3.2: readiness-modulated appetite. On a low-recovery day, hold
+            # soft/routine pings for the morning digest even while awake.
+            readiness = await _latest_readiness(db, user_id)
+            if (readiness is not None and readiness < _LOW_READINESS
+                    and cat in _SOFT_CATEGORIES and prio in ("low", "normal")):
+                decision = DeliveryDecision(
+                    action="hold", reason=f"low_readiness:{readiness}",
+                    deliver_after=sleep.expected_wake,
+                    why_trace={"readiness": readiness, "category": category,
+                               "priority": priority, "ml_p_valuable": ml_opinion,
+                               "note": "batched — low recovery day"},
+                )
+            else:
+                decision = DeliveryDecision(
+                    "deliver", f"awake:{sleep.source}",
+                    why_trace={"sleep_source": sleep.source, "category": category,
+                               "priority": priority, "ml_p_valuable": ml_opinion,
+                               "readiness": readiness},
+                )
 
     await _persist_why_trace(db, user_id, category, priority, source, topic, decision)
     return decision
+
+
+async def _latest_readiness(db, user_id: str) -> Optional[int]:
+    """Today's readiness score (0-100), or None if not computed today."""
+    try:
+        r = (await db.execute(text("""
+            SELECT score FROM morning_readiness
+            WHERE user_id = :u AND created_at >= NOW() - INTERVAL '20 hours'
+            ORDER BY created_at DESC LIMIT 1
+        """), {"u": user_id})).first()
+        return int(r[0]) if r and r[0] is not None else None
+    except Exception:
+        return None
 
 
 async def _persist_why_trace(db, user_id, category, priority, source, topic, decision):
