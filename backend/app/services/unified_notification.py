@@ -1539,6 +1539,28 @@ async def _get_push_tokens_sync(user_id: str) -> List[str]:
         db.close()
 
 
+# Categories that are FYI/ambient — deliver quietly (no screen wake).
+_PASSIVE_CATEGORIES = {"acs_discovery", "learning_review", "inbox_digest", "attention_digest"}
+# Categories where a miss is genuinely time-critical — break through Focus.
+_TIME_SENSITIVE_CATEGORIES = {"security", "calendar_prep", "health_alert", "timer"}
+
+
+def _interruption_level(priority: str, category: str) -> str:
+    """Map delivery-policy priority/category → iOS interruption level (§5.4.1).
+
+    passive | active | timeSensitive | critical.
+    """
+    cat = (category or "").lower()
+    prio = (priority or "").lower()
+    if prio == "critical" or cat == "security":
+        return "critical" if prio == "critical" else "timeSensitive"
+    if cat in _TIME_SENSITIVE_CATEGORIES or prio == "urgent":
+        return "timeSensitive"
+    if cat in _PASSIVE_CATEGORIES or prio in ("low", "silent"):
+        return "passive"
+    return "active"
+
+
 async def _send_push(
     tokens: List[str],
     title: str,
@@ -1604,8 +1626,20 @@ async def _send_push(
         "acs_discovery": "ACS_DISCOVERY",
         "calendar_prep": "SARA_INSIGHT",
         "system_health": "GENERAL_NUDGE",
+        # §5.4: answerable categories (registered on-device — need a rebuild wave).
+        "automation": "SARA_SUGGESTION",       # belief-promotion "want me to automate this?"
+        "pattern_suggestion": "SARA_SUGGESTION",
+        "thread_followup": "THREAD_FOLLOWUP",
     }
     push_category_id = push_category_map.get(category, "GENERAL_NUDGE")
+
+    # §5.4.1: iOS interruption level gives the delivery policy native teeth on the
+    # device. This is a runtime push field — it takes effect on the CURRENT build
+    # (no rebuild needed). passive = no screen wake (FYI); timeSensitive = breaks
+    # Focus (prep-imminent, security, acute health); critical needs the Critical
+    # Alerts entitlement + opt-in (iOS silently downgrades it otherwise, so it's
+    # safe to send).
+    interruption_level = _interruption_level(normalized_priority, category)
 
     messages = [
         {
@@ -1616,6 +1650,7 @@ async def _send_push(
             "data": push_data,
             "priority": push_priority,
             "categoryId": push_category_id,
+            "interruptionLevel": interruption_level,
             "_contentAvailable": True,
             # Real unread count when the caller could compute it; the app icon
             # badge then matches the Notifications screen instead of a stuck "1".

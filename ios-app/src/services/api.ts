@@ -819,7 +819,10 @@ class ApiClient {
 
   async sendNotificationFeedback(
     notificationId: number,
-    action: 'read' | 'engaged' | 'dismissed',
+    // Canonical (read/engaged/dismissed/dislike) or a §5.4 button alias
+    // (acted/declined/never/done/…); the backend normalizes. Widened from the
+    // old union so explicit answer-button labels type-check.
+    action: string,
     responseText?: string,
   ): Promise<void> {
     try {

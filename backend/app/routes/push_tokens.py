@@ -218,8 +218,22 @@ async def send_push_notification(
 
 
 class NotificationFeedbackRequest(BaseModel):
-    action: str  # "read", "engaged", "dismissed", "dislike"
+    action: str  # canonical: read/engaged/dismissed/dislike — or a §5.4 button alias below
     response_text: Optional[str] = None
+
+
+# §5.4.2: explicit notification action buttons ([Yes][No][Tell me more],
+# [Do it][Not now][Never], [Done][Snooze][Tonight]) post EXPLICIT outcomes —
+# a far stronger training signal than inferred read/ignore. Normalize each to a
+# canonical action so the whole existing pipeline (notification_log → ML outcome
+# sync → attention learner → pattern-suggestion bridge) consumes them unchanged.
+_ACTION_ALIASES = {
+    "acted": "engaged", "do_it": "engaged", "done": "engaged", "yes": "engaged",
+    "tell_me_more": "engaged", "view": "engaged",
+    "declined": "dismissed", "not_now": "dismissed", "no": "dismissed",
+    "snoozed": "dismissed", "snooze": "dismissed", "tonight": "dismissed",
+    "never": "dislike",
+}
 
 
 @router.post("/api/notifications/{notification_id}/feedback")
@@ -235,9 +249,10 @@ async def notification_feedback(
     dislike (explicit "I didn't want this" — strongest negative; fast-trains the
     attention learner via the 'stop' outcome).
     """
-    action = request.action
+    # Normalize §5.4 button aliases (acted/declined/never/…) to canonical actions.
+    action = _ACTION_ALIASES.get(request.action, request.action)
     if action not in ("read", "engaged", "dismissed", "dislike"):
-        raise HTTPException(status_code=400, detail="action must be 'read', 'engaged', 'dismissed', or 'dislike'")
+        raise HTTPException(status_code=400, detail="action must be read/engaged/dismissed/dislike (or a known button alias)")
 
     try:
         user_id = current_user.id

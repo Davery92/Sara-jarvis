@@ -39,6 +39,11 @@ const NOTIFICATION_ACTIONS = {
   VIEW_DETAILS: 'VIEW_DETAILS',
   DISMISS: 'DISMISS',
   DISLIKE: 'DISLIKE',
+  // §5.4.2: explicit answers — post acted/declined/never straight to the learner.
+  DO_IT: 'DO_IT',
+  NOT_NOW: 'NOT_NOW',
+  NEVER: 'NEVER',
+  DONE: 'DONE',
 };
 
 // Notification category identifiers
@@ -51,6 +56,17 @@ const NOTIFICATION_CATEGORIES = {
   ACS_DISCOVERY: 'ACS_DISCOVERY',
   THREAD_FOLLOWUP: 'THREAD_FOLLOWUP',
   LEARNING_REVIEW: 'LEARNING_REVIEW',
+  // §5.4: "want me to automate this?" and other yes/no suggestions.
+  SARA_SUGGESTION: 'SARA_SUGGESTION',
+};
+
+// Which explicit action ids map to which backend feedback label. The backend
+// (/api/notifications/{id}/feedback) normalizes these to engaged/dismissed/dislike.
+const EXPLICIT_ACTION_FEEDBACK: Record<string, string> = {
+  [NOTIFICATION_ACTIONS.DO_IT]: 'acted',
+  [NOTIFICATION_ACTIONS.DONE]: 'acted',
+  [NOTIFICATION_ACTIONS.NOT_NOW]: 'declined',
+  [NOTIFICATION_ACTIONS.NEVER]: 'never',
 };
 
 // Set up interactive notification categories
@@ -81,6 +97,30 @@ async function setupNotificationCategories() {
     options: { opensAppToForeground: false },
   });
 
+  // §5.4: explicit answer buttons. "Do it" opens the app to complete the action
+  // where the real affordance lives (and records intent); "Not now"/"Never"/"Done"
+  // are background feedback that feed the learner directly.
+  const DO_IT = {
+    identifier: NOTIFICATION_ACTIONS.DO_IT,
+    buttonTitle: '✅ Do it',
+    options: { opensAppToForeground: true },
+  };
+  const NOT_NOW = {
+    identifier: NOTIFICATION_ACTIONS.NOT_NOW,
+    buttonTitle: 'Not now',
+    options: { opensAppToForeground: false },
+  };
+  const NEVER = {
+    identifier: NOTIFICATION_ACTIONS.NEVER,
+    buttonTitle: 'Never',
+    options: { opensAppToForeground: false, isDestructive: true },
+  };
+  const DONE = {
+    identifier: NOTIFICATION_ACTIONS.DONE,
+    buttonTitle: '✓ Done',
+    options: { opensAppToForeground: false },
+  };
+
   const categoryActions: Record<string, any[]> = {
     [NOTIFICATION_CATEGORIES.MEAL_NUDGE]: [
       { identifier: NOTIFICATION_ACTIONS.LOG_MEAL, buttonTitle: 'Log Meal', options: { opensAppToForeground: true } },
@@ -91,7 +131,10 @@ async function setupNotificationCategories() {
     [NOTIFICATION_CATEGORIES.GENERAL_NUDGE]: [REPLY('Tell Sara...')],
     [NOTIFICATION_CATEGORIES.SARA_INSIGHT]: [REPLY('Reply to Sara...'), VIEW(), DISMISS('Not Now')],
     [NOTIFICATION_CATEGORIES.ACS_DISCOVERY]: [VIEW(), DISMISS('Not Now')],
-    [NOTIFICATION_CATEGORIES.THREAD_FOLLOWUP]: [REPLY('Reply...'), DISMISS('Dismiss')],
+    // Suggestions ("want me to automate this?") get the full yes/soft-no/hard-no set.
+    [NOTIFICATION_CATEGORIES.SARA_SUGGESTION]: [DO_IT, NOT_NOW, NEVER],
+    // Open loops: mark done, reply, or defer.
+    [NOTIFICATION_CATEGORIES.THREAD_FOLLOWUP]: [DONE, REPLY('Reply...'), DISMISS('Snooze')],
     [NOTIFICATION_CATEGORIES.LEARNING_REVIEW]: [VIEW('Start Review'), DISMISS('Later')],
   };
 
@@ -287,7 +330,15 @@ class PushNotificationService {
         if (data?.notification_id) {
           const notifId = Number(data.notification_id);
           if (!isNaN(notifId)) {
-            if (actionIdentifier === NOTIFICATION_ACTIONS.DISLIKE) {
+            const explicit = actionIdentifier
+              ? EXPLICIT_ACTION_FEEDBACK[actionIdentifier]
+              : undefined;
+            if (explicit) {
+              // §5.4.2: explicit answer button (Do it / Not now / Never / Done) —
+              // the strongest, cleanest training signal for the notification_value
+              // model (acted / declined / never), far better than an inferred tap.
+              apiClient.sendNotificationFeedback(notifId, explicit, userText || undefined);
+            } else if (actionIdentifier === NOTIFICATION_ACTIONS.DISLIKE) {
               // Explicit "I dislike this" — strongest negative signal.
               apiClient.sendNotificationFeedback(notifId, 'dislike');
             } else if (actionIdentifier === NOTIFICATION_ACTIONS.DISMISS) {
@@ -376,8 +427,24 @@ class PushNotificationService {
   private handleNotificationNavigation(data: any, actionIdentifier?: string, userText?: string): void {
     if (!data) return;
 
-    // "Dislike" is a pure background feedback signal — never open or navigate.
-    if (actionIdentifier === NOTIFICATION_ACTIONS.DISLIKE) return;
+    // "Dislike" and the background answer buttons (Not now / Never / Done) are
+    // pure feedback signals — never open or navigate.
+    if (
+      actionIdentifier === NOTIFICATION_ACTIONS.DISLIKE ||
+      actionIdentifier === NOTIFICATION_ACTIONS.NOT_NOW ||
+      actionIdentifier === NOTIFICATION_ACTIONS.NEVER ||
+      actionIdentifier === NOTIFICATION_ACTIONS.DONE
+    ) {
+      return;
+    }
+    // "Do it" opens the app to the item's real affordance (server sets data.target;
+    // suggestions default to the inbox where the in-app "Do it" lives).
+    if (actionIdentifier === NOTIFICATION_ACTIONS.DO_IT) {
+      if (!this.routeByTarget(data.target, data.params, data)) {
+        navigateToInbox({ focus: 'new' });
+      }
+      return;
+    }
 
     // Tapping a "task done" notification must also clear its Live Activity —
     // the app may have been backgrounded/killed when the push landed.
