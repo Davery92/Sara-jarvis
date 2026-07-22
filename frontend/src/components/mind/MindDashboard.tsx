@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react'
-import { Brain, RefreshCw, AlertTriangle, CheckCircle2, ShieldCheck, Sparkles, GitBranch, ScrollText } from 'lucide-react'
+import { Brain, RefreshCw, AlertTriangle, CheckCircle2, ShieldCheck, Sparkles, GitBranch, ScrollText, Moon } from 'lucide-react'
 import { APP_CONFIG } from '../../config'
 
 /**
@@ -73,23 +73,26 @@ export default function MindDashboard() {
   const [beliefs, setBeliefs] = useState<Belief[]>([])
   const [contradictions, setContradictions] = useState(0)
   const [actions, setActions] = useState<ActionRow[]>([])
+  const [journal, setJournal] = useState<{ type: string; content: string; at?: string }[]>([])
   const [loading, setLoading] = useState(true)
 
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      const [w, s, t, b, a] = await Promise.all([
+      const [w, s, t, b, a, j] = await Promise.all([
         fetch(`${APP_CONFIG.apiUrl}/api/mind/workspace`, { credentials: 'include' }),
         fetch(`${APP_CONFIG.apiUrl}/api/mind/self`, { credentials: 'include' }),
         fetch(`${APP_CONFIG.apiUrl}/api/mind/trust`, { credentials: 'include' }),
         fetch(`${APP_CONFIG.apiUrl}/api/mind/beliefs`, { credentials: 'include' }),
         fetch(`${APP_CONFIG.apiUrl}/api/mind/actions`, { credentials: 'include' }),
+        fetch(`${APP_CONFIG.apiUrl}/api/mind/journal`, { credentials: 'include' }),
       ])
       if (w.ok) setWs(await w.json())
       if (s.ok) setSelf(await s.json())
       if (t.ok) setTrust((await t.json()).classes || [])
       if (b.ok) { const bj = await b.json(); setBeliefs(bj.beliefs || []); setContradictions(bj.open_contradictions || 0) }
       if (a.ok) setActions((await a.json()).actions || [])
+      if (j.ok) setJournal((await j.json()).entries || [])
     } catch (e) {
       console.error('[Mind] load failed', e)
     } finally {
@@ -267,6 +270,20 @@ export default function MindDashboard() {
                 <span className="text-xs text-slate-400 flex-shrink-0">
                   {a.source}{a.undo_available ? ' · undoable' : ''}
                 </span>
+              </li>
+            ))}
+          </ul>
+        ) : <Empty loading={loading} />}
+      </Card>
+
+      {/* Inner life / journal */}
+      <Card title="Inner life" icon={<Moon className="w-4 h-4 text-indigo-400" />}>
+        {journal.length > 0 ? (
+          <ul className="space-y-2.5">
+            {journal.slice(0, 8).map((e, i) => (
+              <li key={i} className="text-sm">
+                <span className="text-[10px] uppercase tracking-wide text-indigo-400 mr-2">{e.type}</span>
+                <span className="text-slate-600 dark:text-slate-300">{e.content.slice(0, 220)}</span>
               </li>
             ))}
           </ul>

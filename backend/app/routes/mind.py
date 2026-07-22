@@ -46,6 +46,27 @@ async def get_self_model(current_user=Depends(get_current_user)):
         return await build_self_model(db, str(current_user.id))
 
 
+@router.get("/journal")
+async def get_inner_life(limit: int = 20, current_user=Depends(get_current_user)):
+    """Sara's inner life (§7.5): her reflective journal — curiosity findings,
+    dream intuitions, weekly self-audits — the continuity-of-self texture."""
+    from app.db.session import get_async_session_factory
+    from sqlalchemy import text
+    sf = get_async_session_factory()
+    async with sf() as db:
+        rows = (await db.execute(text("""
+            SELECT entry_type, content, created_at
+            FROM sara_journal
+            WHERE user_id = :u
+              AND entry_type IN ('curiosity','dream','self_audit','weekly_digest','periodic','unified')
+            ORDER BY created_at DESC LIMIT :lim
+        """), {"u": str(current_user.id), "lim": min(int(limit or 20), 50)})).fetchall()
+        return {"entries": [{
+            "type": r.entry_type, "content": r.content,
+            "at": r.created_at.isoformat() if r.created_at else None,
+        } for r in rows]}
+
+
 @router.get("/actions")
 async def get_actions(limit: int = 30, current_user=Depends(get_current_user)):
     """The action ledger (§7.3): recent autonomous actions — what/when/outcome/undo."""
