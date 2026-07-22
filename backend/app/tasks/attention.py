@@ -70,28 +70,11 @@ def escalate_unread_attention():
 async def _escalate_unread_attention_async() -> dict:
     from app.services.unified_notification import send_notification
 
-    # ── Sleep gate (§3.6 / N1) ──
-    # The escalation sweep had NO quiet-hours gating of any kind — it bumped a
-    # routine system_health item to 'high' and pushed it at 05:23 AM while the
-    # system's own working memory said 'availability: sleeping'. Now: if David
-    # is asleep, don't escalate at all. Items stay status='new' and escalate
-    # after sensed wake. (Security/critical use their own always-deliver paths.)
-    try:
-        from app.services.delivery_policy import sense_sleep_state, _DAVID
-        from app.db.session import get_async_session_factory
-        _sf = get_async_session_factory()
-        async with _sf() as _adb:
-            _sleep = await sense_sleep_state(_adb, _DAVID)
-        if _sleep.asleep and _sleep.confidence >= 0.5:
-            logger.info(
-                f"Escalation sweep skipped: David asleep "
-                f"({_sleep.source}, conf={_sleep.confidence:.2f})"
-            )
-            return {"skipped": "asleep", "sleep_source": _sleep.source,
-                    "checked_at": local_now().isoformat()}
-    except Exception as e:
-        logger.debug(f"Escalation sleep gate skipped (fail-open): {e}")
-
+    # Sleep-gating (§3.6 / N1) is handled at the single delivery-policy chokepoint
+    # in _send_notification_impl: every escalated push funnels through it and is
+    # HELD while David is asleep. (An earlier explicit async sleep-check here mixed
+    # an async session into this sync task and raised ResourceClosedError — the
+    # chokepoint already covers it, so it's removed.)
     db = SessionLocal()
     try:
         archived_confirmations = db.execute(text("""

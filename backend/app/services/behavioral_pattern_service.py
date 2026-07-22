@@ -506,8 +506,15 @@ class BehavioralPatternService:
             if isinstance(last_suggested, str):
                 last_suggested = datetime.fromisoformat(last_suggested)
 
-            cooldown_end = last_suggested + timedelta(hours=cooldown_hours)
-            if current_time < cooldown_end:
+            # last_suggested_at is a naive (DB `timestamp`) value; current_time is
+            # aware ET (local_now()). Comparing them raises "can't compare
+            # offset-naive and offset-aware datetimes" — normalize both to naive
+            # UTC. (Latent until belief_promotion started setting last_suggested_at.)
+            from app.core.timezone import to_naive_utc
+            ls = to_naive_utc(last_suggested)
+            ct = to_naive_utc(current_time)
+            cooldown_end = ls + timedelta(hours=cooldown_hours)
+            if ct < cooldown_end:
                 return False, f"In cooldown until {cooldown_end}"
 
         return True, "Can suggest"

@@ -25,21 +25,25 @@ export async function refreshWidgetData(): Promise<void> {
 
     const data: WidgetData = {}
 
+    // Sara's actual first-person thought (the daemon's journal voice) is the
+    // best widget line — warm and conversational ("You just got home — quiet
+    // evening, holding off until you're settled"). Keep it as primary.
+    const GENERIC = /^(keeping an eye|here when you need|resting between)/i
+    let thought = ''
     if (statusRes.status === 'fulfilled' && statusRes.value) {
       data.emotional_state = statusRes.value.emotional_state || 'neutral'
       if (statusRes.value.latest_thought) {
-        data.latest_thought = String(statusRes.value.latest_thought).slice(0, 140)
+        thought = String(statusRes.value.latest_thought).trim()
       }
     }
-
-    // Prefer the live workspace synthesis for the thought line when it has
-    // something specific to say (falls back to the emotional-status thought).
-    if (mindRes.status === 'fulfilled' && mindRes.value?.summary) {
+    // Only fall back to the workspace synthesis when she has no real thought to
+    // show (avoids replacing a warm line with mechanical "predictions violated"
+    // plumbing).
+    if ((!thought || GENERIC.test(thought)) && mindRes.status === 'fulfilled' && mindRes.value?.summary) {
       const s = String(mindRes.value.summary).trim()
-      if (s && !/^nothing pressing/i.test(s)) {
-        data.latest_thought = s.slice(0, 140)
-      }
+      if (s && !/^nothing pressing/i.test(s)) thought = s
     }
+    if (thought) data.latest_thought = thought.slice(0, 140)
 
     if (briefRes.status === 'fulfilled' && briefRes.value) {
       const sections = briefRes.value.brief_sections || []

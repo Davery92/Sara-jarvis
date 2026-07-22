@@ -43,9 +43,13 @@ async def _open_loops(db, user_id: str) -> List[Dict[str, Any]]:
     loops = []
     try:
         rows = (await db.execute(text("""
-            SELECT topic, status, last_mentioned_at
+            SELECT topic, status, last_mentioned_at, topic_category
             FROM followup_thread
             WHERE user_id = :u AND status = 'open'
+              -- Exclude workout-plan rows: they're not interpersonal open loops.
+              AND COALESCE(topic_category, '') NOT IN ('fitness', 'workout')
+              AND topic NOT LIKE '🏋️%'
+              AND topic NOT LIKE 'Day % — %'
             ORDER BY last_mentioned_at DESC NULLS LAST
             LIMIT :cap
         """), {"u": user_id, "cap": _SLOT_CAP})).fetchall()
