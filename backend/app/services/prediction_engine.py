@@ -50,11 +50,37 @@ def _et_datetime_today(now_et: datetime, hhmm: str) -> datetime:
     return now_et.replace(hour=h, minute=m, second=0, microsecond=0)
 
 
+async def _calibration_factors(db, user_id: str) -> dict:
+    """Per-domain calibration multiplier (§3.9): how much to trust this domain's
+    stated confidence, learned from history. factor = actual_hit_rate /
+    mean_stated_confidence, clamped. A domain Sara is overconfident in (home
+    patterns hit 24% but claim 1.0) gets discounted; a well-calibrated one stays.
+    Domains with no history return 1.0 (no adjustment until she's been graded)."""
+    rows = (await db.execute(text("""
+        SELECT domain,
+               AVG(CASE WHEN outcome = 'confirmed' THEN 1.0 ELSE 0.0 END) AS hit_rate,
+               AVG(confidence) AS mean_conf, COUNT(*) AS n
+        FROM prediction
+        WHERE user_id = :u AND outcome IN ('confirmed','violated')
+          AND resolved_at >= NOW() - INTERVAL '30 days'
+        GROUP BY domain
+        HAVING COUNT(*) >= 8
+    """), {"u": user_id})).fetchall()
+    factors = {}
+    for r in rows:
+        if r.mean_conf and float(r.mean_conf) > 0:
+            factor = float(r.hit_rate) / float(r.mean_conf)
+            factors[r.domain] = max(0.3, min(1.15, round(factor, 3)))
+    return factors
+
+
 async def generate_daily_predictions(db, user_id: str = _DAVID) -> dict:
     """Mint today's predictions. Idempotent per (prediction_key)."""
     now_et = local_now()
     day = now_et.strftime("%Y-%m-%d")
     created = 0
+    # §3.9: discount confidence in domains Sara has proven overconfident about.
+    calib = await _calibration_factors(db, user_id)
 
     # ---- Home-event predictions from high-confidence behavioral patterns ----
     patterns = (await db.execute(text("""
@@ -76,11 +102,13 @@ async def generate_daily_predictions(db, user_id: str = _DAVID) -> dict:
             w_start = point - timedelta(minutes=_PATTERN_GRACE_MIN)
             w_end = point + timedelta(minutes=_PATTERN_GRACE_MIN)
             key = f"pattern:{pid}:{day}"
-            predicted = {"entity_id": entity, "to_state": to_state, "expected_time": t}
+            predicted = {"entity_id": entity, "to_state": to_state, "expected_time": t,
+                         "raw_confidence": float(conf)}
             domain = "security" if entity.startswith("lock.") else "home"
+            stated = round(float(conf) * calib.get(domain, 1.0), 3)
             if await _insert_prediction(
                 db, user_id, key, "pattern", desc or f"{entity}->{to_state} ~{t}",
-                domain, float(conf), w_start, w_end, predicted,
+                domain, stated, w_start, w_end, predicted,
             ):
                 created += 1
         except Exception as e:
@@ -101,11 +129,12 @@ async def generate_daily_predictions(db, user_id: str = _DAVID) -> dict:
         if w_end <= w_start:
             w_end = w_start + timedelta(hours=2)
         key = f"rhythm:wake:{day}"
+        stated = round(float(conf) * calib.get("routine", 1.0), 3)
         if await _insert_prediction(
             db, user_id, key, "rhythm",
             f"David wakes between {ws.strftime('%H:%M')} and {we.strftime('%H:%M')}",
-            "routine", float(conf), w_start, w_end,
-            {"rhythm_key": "wake", "median": med.strftime("%H:%M")},
+            "routine", stated, w_start, w_end,
+            {"rhythm_key": "wake", "median": med.strftime("%H:%M"), "raw_confidence": float(conf)},
         ):
             created += 1
 
