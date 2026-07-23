@@ -226,24 +226,8 @@ class AnticipationService:
                 "priority": 0.5,
             })
 
-        # Pending working memory actions
-        action_result = await self.db.execute(
-            text("""
-                SELECT id, action_type, context, priority
-                FROM working_memory_actions
-                WHERE status = 'pending'
-                ORDER BY priority DESC
-                LIMIT 10
-            """)
-        )
-        for row in action_result.fetchall():
-            items.append({
-                "id": str(row[0]),
-                "type": "action",
-                "title": row[1],
-                "context": row[2],
-                "priority": row[3] or 0.5,
-            })
+        # (working_memory_actions was an abandoned, always-empty table dropped in
+        # migration 118 — the pending-actions query that read it is removed.)
 
         return items
 

@@ -457,7 +457,13 @@ class WorkoutHistoryTool(BaseTool):
             ORDER BY ws.started_at DESC
             LIMIT 100
         """)
-        strength_rows = db.execute(strength_query, {"user_id": user_id, "cutoff": cutoff}).fetchall()
+        # `workout_sessions` was an empty duplicate dropped in migration 118 (real
+        # sessions live in active_workout_session) — this always returned []. Guard
+        # against the dropped table so the health tool doesn't crash; repoint later.
+        if db.execute(text("SELECT to_regclass('public.workout_sessions')")).scalar():
+            strength_rows = db.execute(strength_query, {"user_id": user_id, "cutoff": cutoff}).fetchall()
+        else:
+            strength_rows = []
 
         # Normalize into a single time-sorted list
         items = []

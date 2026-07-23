@@ -251,35 +251,30 @@ class BodyStateService:
         """), {"user_id": user_id}).fetchall()
         signals['hrv_history_daily'] = [float(r.avg_value) for r in hrv_daily if r.avg_value is not None]
 
-        # Recent workouts (last 5 days for recovery tracking)
-        # workout_sessions has the actual session data, workout_log has individual sets
-        workouts = db.execute(text("""
-            SELECT
-                ws.id,
-                w.title as workout_type,
-                ws.started_at,
-                ws.completed_at,
-                '' as notes,
-                COALESCE(
-                    (SELECT json_agg(json_build_object(
-                        'exercise', wl.exercise_id,
-                        'sets', 1,
-                        'reps', wl.reps,
-                        'weight', wl.weight
-                    ))
-                    FROM workout_log wl
-                    WHERE wl.session_id = ws.id),
-                    '[]'::json
-                ) as exercises
-            FROM workout_sessions ws
-            JOIN workout w ON w.id = ws.workout_id
-            WHERE ws.user_id = :user_id
-              AND ws.started_at >= NOW() - INTERVAL '5 days'
-              AND ws.session_state = 'completed'
-            ORDER BY ws.started_at DESC
-        """), {"user_id": user_id}).fetchall()
-
-        signals['workouts'] = [dict(w._mapping) for w in workouts]
+        # Recent workouts (last 5 days for recovery tracking).
+        # NOTE: this read the `workout_sessions` table, which was an empty
+        # duplicate (dropped in migration 118) — so it always returned []. Real
+        # session data lives in `active_workout_session` (+ workout_log); this
+        # query should be repointed there. Until then, guard against the dropped
+        # table so body-state doesn't crash (preserves the prior empty result).
+        if db.execute(text("SELECT to_regclass('public.workout_sessions')")).scalar():
+            workouts = db.execute(text("""
+                SELECT
+                    ws.id, w.title as workout_type, ws.started_at, ws.completed_at,
+                    '' as notes,
+                    COALESCE((SELECT json_agg(json_build_object(
+                        'exercise', wl.exercise_id, 'sets', 1, 'reps', wl.reps, 'weight', wl.weight))
+                        FROM workout_log wl WHERE wl.session_id = ws.id), '[]'::json) as exercises
+                FROM workout_sessions ws
+                JOIN workout w ON w.id = ws.workout_id
+                WHERE ws.user_id = :user_id
+                  AND ws.started_at >= NOW() - INTERVAL '5 days'
+                  AND ws.session_state = 'completed'
+                ORDER BY ws.started_at DESC
+            """), {"user_id": user_id}).fetchall()
+            signals['workouts'] = [dict(w._mapping) for w in workouts]
+        else:
+            signals['workouts'] = []
 
         # External workouts from HealthKit (Apple Watch / Fitness app) — separate
         # stream from app-logged strength sessions. Surfaced as a parallel signal

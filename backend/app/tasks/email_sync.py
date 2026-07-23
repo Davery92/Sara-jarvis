@@ -463,6 +463,12 @@ async def _sync_sent_items_async():
                             except Exception as e:
                                 logger.warning(f"[sent-sync] person upsert failed for {r_email}: {e}")
 
+                    # Never advance the cursor into the future: a scheduled
+                    # send-later email carries a future timestamp that would push
+                    # the cursor past NOW and make everything you actually send
+                    # before then invisible to the next sync. Clamp to now.
+                    latest_at = min(latest_at, to_naive_utc(local_now()))
+
                     if sync_state:
                         sync_state.last_sync_at = latest_at
                         sync_state.last_sync_count = len(sent_emails)

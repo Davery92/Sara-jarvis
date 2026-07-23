@@ -414,15 +414,10 @@ async def _memory_consolidation_async():
             )
             decayed = decay_result.rowcount
 
-            # Clean up old working memory
-            cleanup_result = await db.execute(
-                text("""
-                    DELETE FROM working_memory_actions
-                    WHERE status = 'completed'
-                    AND completed_at < NOW() - INTERVAL '7 days'
-                """)
-            )
-            cleaned = cleanup_result.rowcount
+            # (working_memory_actions was an abandoned, always-empty table that
+            # nothing wrote to — dropped in migration 118. The old cleanup DELETE
+            # here is gone with it.)
+            cleaned = 0
 
             await db.commit()
 
