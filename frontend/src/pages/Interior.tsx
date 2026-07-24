@@ -125,9 +125,29 @@ interface SchedulerDietJob {
   singular_class: string | null;
 }
 
+interface Interest {
+  id: string;
+  topic: string;
+  display_name: string;
+  why: string | null;
+  weight: number;
+  blocked: boolean;
+  last_acted_at: string | null;
+}
+
 async function getJson<T>(path: string): Promise<T | null> {
   try {
     const res = await fetch(`${APP_CONFIG.apiUrl}${path}`, { credentials: 'include' });
+    if (!res.ok) return null;
+    return (await res.json()) as T;
+  } catch {
+    return null;
+  }
+}
+
+async function postJson<T>(path: string): Promise<T | null> {
+  try {
+    const res = await fetch(`${APP_CONFIG.apiUrl}${path}`, { method: 'POST', credentials: 'include' });
     if (!res.ok) return null;
     return (await res.json()) as T;
   } catch {
@@ -179,12 +199,14 @@ export default function Interior() {
   const [bodyCapabilities, setBodyCapabilities] = useState<BodyCapability[]>([]);
   const [featureFlags, setFeatureFlags] = useState<FeatureFlags | null>(null);
   const [schedulerJobs, setSchedulerJobs] = useState<SchedulerDietJob[]>([]);
+  const [interests, setInterests] = useState<Interest[]>([]);
+  const [interestBusy, setInterestBusy] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
   const [showAdvanced, setShowAdvanced] = useState(false);
 
   const fetchAll = async () => {
-    const [ctx, body, intents, audit, attention, actions, events, capabilities, flags, scheduler] = await Promise.all([
+    const [ctx, body, intents, audit, attention, actions, events, capabilities, flags, scheduler, interestRows] = await Promise.all([
       getJson<ContextSnapshot>('/api/diagnostics/context-snapshot'),
       getJson<BodyState>('/api/diagnostics/body-state'),
       getJson<IntentGraph>('/api/diagnostics/intent-graph'),
@@ -195,6 +217,7 @@ export default function Interior() {
       getJson<{ bodies: BodyCapability[] }>('/api/diagnostics/body-capabilities'),
       getJson<FeatureFlags>('/api/diagnostics/feature-flags'),
       getJson<{ jobs: SchedulerDietJob[] }>('/api/diagnostics/scheduler-diet'),
+      getJson<Interest[]>('/api/acs/v2/interests?include_blocked=true&limit=20'),
     ]);
     setContext(ctx);
     setBodyState(body);
@@ -206,8 +229,19 @@ export default function Interior() {
     setBodyCapabilities(capabilities?.bodies || []);
     setFeatureFlags(flags);
     setSchedulerJobs(scheduler?.jobs || []);
+    setInterests(interestRows || []);
     setLastRefresh(new Date());
     setLoading(false);
+  };
+
+  const toggleInterestBlock = async (interest: Interest) => {
+    setInterestBusy(interest.id);
+    const next = !interest.blocked;
+    const updated = await postJson<Interest>(`/api/acs/v2/interests/${interest.id}/block?blocked=${next}`);
+    if (updated) {
+      setInterests((prev) => prev.map((i) => (i.id === interest.id ? updated : i)));
+    }
+    setInterestBusy(null);
   };
 
   useEffect(() => {
@@ -340,6 +374,40 @@ export default function Interior() {
           )}
         </Section>
       </div>
+
+      {/* Sara's interests — first-class, actionable (§4.3: "not downgraded
+          into notifications or hidden cron tasks"). Approve = keep active;
+          reject = block (a permanent veto, not a delete — reflection can't
+          silently resurrect a blocked topic). */}
+      <Section title="Sara's interests" subtitle="what she's curious about, on her own initiative">
+        {interests.length === 0 ? <Empty label="No interests yet" /> : (
+          <div className="space-y-2">
+            {interests.map((interest) => (
+              <div key={interest.id} className="flex items-center justify-between text-sm gap-3">
+                <div className="min-w-0">
+                  <div className={`truncate ${interest.blocked ? 'text-gray-500 line-through' : 'text-gray-200'}`}>
+                    {interest.display_name}
+                  </div>
+                  {interest.why && !interest.blocked && (
+                    <div className="text-xs text-gray-500 truncate">{interest.why}</div>
+                  )}
+                </div>
+                <button
+                  onClick={() => toggleInterestBlock(interest)}
+                  disabled={interestBusy === interest.id}
+                  className={`text-xs px-2 py-1 rounded flex-shrink-0 transition-colors ${
+                    interest.blocked
+                      ? 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                      : 'bg-red-500/10 text-red-300 hover:bg-red-500/20'
+                  } disabled:opacity-50`}
+                >
+                  {interestBusy === interest.id ? '…' : interest.blocked ? 'Restore' : 'Block'}
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </Section>
 
       {/* Attention + actions */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
