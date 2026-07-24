@@ -21,6 +21,7 @@ import EmailDetailScreen from '../screens/email/EmailDetailScreen';
 import LearningScreen from '../screens/learning/LearningScreen';
 import NotificationsScreen from '../screens/notifications/NotificationsScreen';
 import ACSScreen from '../screens/acs/ACSScreen';
+import InteriorScreen from '../screens/interior/InteriorScreen';
 import SystemScreen from '../screens/system/SystemScreen';
 import MachinesScreen from '../screens/machines/MachinesScreen';
 import StudioScreen from '../screens/studio/StudioScreen';
@@ -54,6 +55,7 @@ export type AppStackParamList = {
   ACS: undefined;
   System: undefined;
   Machines: undefined;
+  Interior: undefined;
 };
 
 const Stack = createNativeStackNavigator<AppStackParamList>();
@@ -196,6 +198,11 @@ export default function AppNavigator() {
         name="ACS"
         component={ACSScreen}
         options={{ title: 'Autonomous Cognition' }}
+      />
+      <Stack.Screen
+        name="Interior"
+        component={InteriorScreen}
+        options={{ title: 'Interior' }}
       />
     </Stack.Navigator>
   );

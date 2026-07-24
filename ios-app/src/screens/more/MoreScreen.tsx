@@ -155,6 +155,13 @@ const menuSections: MenuSection[] = [
         description: 'Fleet health for every box David owns — CPU, memory, disk, alerts, and the enroll command.',
       },
       {
+        name: 'Interior',
+        icon: 'analytics-outline',
+        label: 'Interior',
+        screen: 'Interior',
+        description: 'Kernel state, open intents, contradictions, attention decisions, and action receipts — one truthful surface.',
+      },
+      {
         name: 'Health',
         icon: 'heart-outline',
         label: 'Apple Health',
