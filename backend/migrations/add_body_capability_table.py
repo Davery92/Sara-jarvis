@@ -1,4 +1,6 @@
 """
+SUPERSEDED: this table/column is now also tracked by the canonical Alembic revision alembic/versions/121_singular_sara_tables.py — a fresh environment should use `alembic upgrade head`, not this script. Kept only because it's what actually created these objects in the shared dev database on 2026-07-24; this script and the Alembic revision agree on the schema, so re-running this (CREATE ... IF NOT EXISTS) is harmless but redundant.
+
 Migration: add `body_capability` table (SINGULAR_SARA_MASTER_PLAN §4.4/§C7).
 
 "Distinguish VM workshop, `acs-tool-runner`, managed hosts, and Proxmox
