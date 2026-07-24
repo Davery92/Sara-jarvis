@@ -47,26 +47,41 @@ def run_reflection_cycle(self):
 
 
 async def _run_reflection_async():
-    """Async implementation of reflection cycle."""
-    from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-    from sqlalchemy.orm import sessionmaker
-    import os
+    """Async implementation of reflection cycle.
 
-    from app.services.reflection.agent import get_reflection_agent
-
-    database_url = os.getenv("DATABASE_URL")
+    SINGULAR_SARA_MASTER_PLAN §C6: when SINGULAR_KERNEL is on, the reflection
+    cycle folds into `kernel.dreaming_turn()` instead of calling the
+    reflection agent directly. Default (flag off) behavior below is
+    unchanged from before this fold-in existed.
+    """
+    from app.core.feature_flags import Flag, is_enabled
     from app.db.session import get_async_session_factory
-    async_session = get_async_session_factory()
-    async with async_session() as db:
-        reflection_agent = await get_reflection_agent(db)
-        result = await reflection_agent.run_reflection_cycle()
-        result_dict = result.to_dict()
 
-        # Generate policy candidates from reflection (Phase 3 — Cortana Evolution)
+    if is_enabled(Flag.SINGULAR_KERNEL):
+        from app.services.kernel import dreaming_turn
+        result_dict = await dreaming_turn()
+    else:
+        from app.services.reflection.agent import get_reflection_agent
+
         try:
-            from app.core.config import settings
-            if getattr(settings, 'autonomy_policy_candidates_enabled', False):
-                from app.services.autonomy.policy_candidate import policy_candidate_service
+            from app.services.legacy_path_counters import record_legacy_path
+            await record_legacy_path("dreaming_cognition")
+        except Exception:
+            pass
+
+        async_session = get_async_session_factory()
+        async with async_session() as db:
+            reflection_agent = await get_reflection_agent(db)
+            result = await reflection_agent.run_reflection_cycle()
+            result_dict = result.to_dict()
+
+    # Generate policy candidates from reflection (Phase 3 — Cortana Evolution)
+    try:
+        from app.core.config import settings
+        if getattr(settings, 'autonomy_policy_candidates_enabled', False):
+            from app.services.autonomy.policy_candidate import policy_candidate_service
+            async_session = get_async_session_factory()
+            async with async_session() as db:
                 candidate_ids = await policy_candidate_service.generate_from_reflection(
                     db=db, user_id="64f37c56-85cb-4590-8de9-adfc17d343ed",
                     reflection_data=result_dict,
@@ -75,10 +90,10 @@ async def _run_reflection_async():
                 if candidate_ids:
                     logger.info(f"Generated {len(candidate_ids)} policy candidates from reflection")
                     result_dict["policy_candidates"] = len(candidate_ids)
-        except Exception as e:
-            logger.debug(f"Policy candidate generation from reflection failed (non-fatal): {e}")
+    except Exception as e:
+        logger.debug(f"Policy candidate generation from reflection failed (non-fatal): {e}")
 
-        return result_dict
+    return result_dict
 
 
 @celery_app.task(

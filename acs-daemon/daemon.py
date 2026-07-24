@@ -31,7 +31,7 @@ from typing import Optional
 from backend_client import BackendClient
 from config import config
 from llm import LLMClient
-from mind import Mind
+from mind import ALLOWED_TOOLS, Mind
 
 logging.basicConfig(
     level=getattr(logging, config.log_level.upper(), logging.INFO),
@@ -272,7 +272,7 @@ class Daemon:
             return await self.backend.heartbeat(
                 state=self.state, version=REPORTED_VERSION, pid=self.pid, hostname=self.hostname,
                 started_at=self.started_at, last_tick_summary=summary,
-                want_delta=want_delta,
+                want_delta=want_delta, capabilities=sorted(ALLOWED_TOOLS),
             )
         except Exception as e:
             # Heartbeat errors don't kill the daemon — backend may be transiently down.

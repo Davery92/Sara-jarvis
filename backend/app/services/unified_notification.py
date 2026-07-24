@@ -286,6 +286,21 @@ async def send_notification(
             overlay=overlay,
             payload=payload,
         )
+
+        # SINGULAR_SARA_MASTER_PLAN §C9 — shadow-record the decision this
+        # pipeline already made (sent/skipped + why) as one outbound-intent/
+        # attention-item pair. Purely observational: never gates, delays, or
+        # changes what was actually sent above.
+        if db is not None:
+            try:
+                from app.services.attention_shadow_recorder import record_notification_decision
+                await record_notification_decision(
+                    db, user_id=user_id, title=title, message=message,
+                    priority=priority, category=category, topic=topic, result=result,
+                )
+            except Exception as exc:
+                logger.debug(f"attention shadow record failed (non-fatal): {exc}")
+
         # AsyncSession does not auto-commit — if we opened this session
         # ourselves, the caller isn't going to commit for us, so the
         # dedup log row + attention item would roll back on exit and

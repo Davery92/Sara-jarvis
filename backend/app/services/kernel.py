@@ -73,6 +73,7 @@ async def set_state(
     state: KernelState,
     wake_reason: Optional[WakeReason] = None,
     detail: Optional[str] = None,
+    correlation_id: Optional[str] = None,
 ) -> None:
     """Publish the live kernel state so surfaces can read the one mind's real
     condition (honest orb / greeting / Interior). Best-effort."""
@@ -83,6 +84,7 @@ async def set_state(
             "wake_reason": wake_reason.value if wake_reason else None,
             "detail": detail,
             "at": datetime.now(timezone.utc).isoformat(),
+            "correlation_id": correlation_id,
         }
         await r.set(_STATE_KEY.format(user_id=user_id), json.dumps(payload), ex=_STATE_TTL)
         try:
@@ -106,7 +108,8 @@ async def get_state(user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]:
             return json.loads(raw)
     except Exception as e:
         logger.debug(f"[kernel] get_state failed: {e}")
-    return {"state": KernelState.AMBIENT.value, "wake_reason": None, "detail": None, "at": None}
+    return {"state": KernelState.AMBIENT.value, "wake_reason": None, "detail": None, "at": None,
+            "correlation_id": None}
 
 
 async def ambient_turn(
@@ -126,16 +129,36 @@ async def ambient_turn(
     Returns the deliberation summary plus the kernel state/wake-reason it ran in.
     """
     from app.services.autonomy.coordination import get_coordinator
+    from app.core.correlation import CorrelationIds, bind_correlation, new_id
+
+    # Mint one kernel_turn_id for this turn and bind it so anything this turn
+    # calls (deliberation, the gate, notification sends) can pick it up from
+    # `get_current_correlation()` without threading it through every signature
+    # (SINGULAR_SARA §C0/§C1 — one correlation spine per causal chain).
+    kernel_turn_id = new_id("turn")
+    bind_correlation(CorrelationIds(kernel_turn_id=kernel_turn_id))
+
+    # Every call that reaches the kernel is, by definition, the *target*
+    # ambient-cognition path (SINGULAR_SARA §C0 path counters) — the direct
+    # `deliberation_engine.run()` call sites still in `app/tasks/autonomy.py`
+    # that bypass this function record "legacy" instead.
+    try:
+        from app.services.legacy_path_counters import record_target_path
+        await record_target_path("ambient_cognition")
+    except Exception:
+        pass
 
     coordinator = get_coordinator()
     if not await coordinator.acquire_exclusive("deliberation", "heavy_llm"):
-        return {"skipped": "exclusive_group_busy", "state": KernelState.AMBIENT.value}
+        return {"skipped": "exclusive_group_busy", "state": KernelState.AMBIENT.value,
+                "correlation_id": kernel_turn_id}
 
     try:
         if not force:
             from app.services.salience import salience_scorer
             if not await salience_scorer.should_deliberate(user_id):
-                return {"skipped": "below_threshold", "state": KernelState.AMBIENT.value}
+                return {"skipped": "below_threshold", "state": KernelState.AMBIENT.value,
+                        "correlation_id": kernel_turn_id}
 
             # Reflex/ponder split (Phase 5.5): for event-driven wakes, a 2-3s A3B
             # triage decides whether this deserves the minute-long full deliberation.
@@ -147,12 +170,12 @@ async def ambient_turn(
                     if verdict == "drop":
                         # finally releases the coordinator.
                         return {"skipped": "reflex_drop", "state": KernelState.AMBIENT.value,
-                                "wake_reason": wake_reason.value}
+                                "wake_reason": wake_reason.value, "correlation_id": kernel_turn_id}
                 except Exception as _re:
                     pass  # fail-open: fall through to full deliberation
 
         await set_state(user_id, KernelState.AMBIENT, wake_reason,
-                        detail=f"thinking ({wake_reason.value})")
+                        detail=f"thinking ({wake_reason.value})", correlation_id=kernel_turn_id)
 
         from app.services.deliberation import deliberation_engine
         from app.services.deliberation_gate import process_deliberation_result
@@ -161,7 +184,7 @@ async def ambient_turn(
         summary = await process_deliberation_result(result, user_id)
 
         # Return to a resting ambient state once the turn completes.
-        await set_state(user_id, KernelState.AMBIENT, None, detail="resting")
+        await set_state(user_id, KernelState.AMBIENT, None, detail="resting", correlation_id=kernel_turn_id)
 
         return {
             "status": "completed",
@@ -171,7 +194,122 @@ async def ambient_turn(
             "notifications": summary["notifications_sent"],
             "home_actions": summary["home_actions_executed"],
             "observations_consumed": summary["observations_consumed"],
+            "tasks_dispatched": summary.get("tasks_dispatched", 0),
+            "tasks_proposed": summary.get("tasks_proposed", 0),
             "duration": result.duration_seconds,
+            "correlation_id": kernel_turn_id,
         }
     finally:
         await coordinator.release_exclusive("heavy_llm", "deliberation")
+
+
+async def engaged_turn(
+    user_id: str = DEFAULT_USER_ID,
+    conversation_id: Optional[str] = None,
+    message_preview: str = "",
+) -> Dict[str, Any]:
+    """The single engaged-state cognition entry (§4.4).
+
+    SHADOW ONLY today: assembles the same context packet a real chat turn
+    would need — canonical context snapshot (world/self/relationship),
+    open-intent count, and a `memory.recall()` pass seeded with the latest
+    message — and returns it. Nothing consumes this output yet; the live
+    `/chat/stream` handler calls this fire-and-forget, behind the
+    `SINGULAR_KERNEL` flag (default OFF), purely to prove the assembly is
+    correct against real conversations before anything depends on it. It
+    does not touch tool routing, streaming, or the response David sees.
+    """
+    from app.core.correlation import CorrelationIds, bind_correlation, new_id
+    from app.services.legacy_path_counters import record_target_path
+
+    kernel_turn_id = new_id("turn")
+    bind_correlation(CorrelationIds(kernel_turn_id=kernel_turn_id))
+    await set_state(user_id, KernelState.ENGAGED, detail="shadow context assembly",
+                    correlation_id=kernel_turn_id)
+
+    try:
+        await record_target_path("engaged_cognition")
+    except Exception:
+        pass
+
+    context: Dict[str, Any] = {}
+    open_intents = 0
+    recall_traces = 0
+
+    try:
+        from app.db.session import SessionLocal
+        from app.services.context_snapshot import get_context_snapshot
+        from app.services.intent_graph_projection import get_intent_graph
+
+        db = SessionLocal()
+        try:
+            context = await get_context_snapshot(db, user_id)
+            open_intents = get_intent_graph(db, user_id)["total"]
+        finally:
+            db.close()
+    except Exception as e:
+        logger.debug(f"[kernel] engaged_turn context assembly failed: {e}")
+
+    try:
+        from app.services.memory_recall import recall as memory_recall
+        recalled = await memory_recall(user_id=user_id, query=message_preview or "", k=5)
+        recall_traces = len(recalled.get("traces") or [])
+    except Exception as e:
+        logger.debug(f"[kernel] engaged_turn recall failed: {e}")
+
+    await set_state(user_id, KernelState.ENGAGED, detail="resting", correlation_id=kernel_turn_id)
+
+    return {
+        "state": KernelState.ENGAGED.value,
+        "correlation_id": kernel_turn_id,
+        "conversation_id": conversation_id,
+        "context": context,
+        "open_intents": open_intents,
+        "recall_traces": recall_traces,
+    }
+
+
+async def dreaming_turn(user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]:
+    """The single dreaming-state cognition entry (§4.4/§C6).
+
+    Wraps the existing reflection agent's cycle (pattern detection, proposal
+    generation) under one kernel state and correlation ID — the same
+    fold-in pattern C5 used for ambient cognition. Flag-gated by
+    `SINGULAR_KERNEL` in `app.tasks.reflection._run_reflection_async`; when
+    the flag is off (default), that task calls the reflection agent
+    directly and this function is never invoked.
+
+    Deliberately does not touch `run_consolidation` or `run_dream_cycle` —
+    those are the deterministic maintenance pipelines §C6 explicitly says to
+    keep separate from cognition ("Keep deterministic maintenance jobs
+    separate from cognition"). Only the LLM-driven reflection/proposal step
+    is cognition in the kernel's sense.
+    """
+    from app.core.correlation import CorrelationIds, bind_correlation, new_id
+    from app.services.legacy_path_counters import record_target_path
+
+    kernel_turn_id = new_id("turn")
+    bind_correlation(CorrelationIds(kernel_turn_id=kernel_turn_id))
+    await set_state(user_id, KernelState.DREAMING, detail="reflection cycle", correlation_id=kernel_turn_id)
+
+    try:
+        await record_target_path("dreaming_cognition")
+    except Exception:
+        pass
+
+    from app.db.session import get_async_session_factory
+    from app.services.reflection.agent import get_reflection_agent
+
+    async_session = get_async_session_factory()
+    async with async_session() as db:
+        reflection_agent = await get_reflection_agent(db)
+        result = await reflection_agent.run_reflection_cycle()
+        result_dict = result.to_dict()
+
+    await set_state(user_id, KernelState.DREAMING, detail="resting", correlation_id=kernel_turn_id)
+
+    return {
+        "state": KernelState.DREAMING.value,
+        "correlation_id": kernel_turn_id,
+        **result_dict,
+    }

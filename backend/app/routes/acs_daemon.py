@@ -55,6 +55,12 @@ class HeartbeatIn(BaseModel):
         False,
         description="ACS1: set true on a think tick to receive (and consume) the "
                     "world_delta since the last one served.")
+    # SINGULAR_SARA_MASTER_PLAN §C7 — additive, backward compatible: a daemon
+    # binary that predates this field simply omits it and heartbeats exactly
+    # as before. Feeds `body_capability` (the VM-workshop row), not the
+    # daemon's own identity/prompt — that stays untouched until parity gates
+    # in the plan are actually met.
+    capabilities: list[str] = Field(default_factory=list)
 
 
 class HeartbeatOut(BaseModel):
@@ -116,6 +122,20 @@ async def daemon_heartbeat(payload: HeartbeatIn) -> HeartbeatOut:
         world_delta: list[str] = []
         if payload.want_delta:
             world_delta = await _compute_world_delta(db)
+
+        # SINGULAR_SARA_MASTER_PLAN §C7: additive body-capability record for
+        # the VM workshop. Best-effort — a failure here must never fail the
+        # heartbeat the daemon depends on to be considered alive.
+        try:
+            from app.services.body_capability_service import upsert_capability
+            await upsert_capability(
+                db, name="vm_workshop", kind="vm", version=payload.version,
+                capabilities=payload.capabilities,
+                metadata={"hostname": payload.hostname, "pid": payload.pid},
+            )
+        except Exception as e:
+            logger.debug(f"body_capability upsert failed (non-fatal): {e}")
+
         await db.commit()
 
     return HeartbeatOut(server_time=datetime.now(timezone.utc), world_delta=world_delta)

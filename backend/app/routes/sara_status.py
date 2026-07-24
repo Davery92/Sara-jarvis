@@ -325,15 +325,30 @@ async def get_sara_brief(
         except Exception as e:
             logger.debug(f"Brief kernel_state failed: {e}")
 
-        # --- Interoception: her own body (ONE_MIND §3.1) ---
+        # --- Interoception: her own body (ONE_MIND §3.1 / SINGULAR_SARA §4.2) ---
         # The greeting references her real self-state — if a body/vital is
         # down, she says so at the top of the brief instead of pretending
         # she's whole. Only surfaced when actually degraded.
+        #
+        # Sourced from the canonical body-state projection so this can never
+        # disagree with /api/metrics or /analytics/dashboard about the same
+        # component (SINGULAR_SARA_MASTER_PLAN §13 item 3) — `self_status`
+        # keeps its old {healthy, degraded} shape for existing callers;
+        # `body_state` carries the full versioned projection for new ones.
         try:
-            from app.services.body_sense import current_self_status
-            self_status = await current_self_status(user_id)
+            from app.services.body_state_projection import get_body_state_projection
+            projection = await get_body_state_projection(user_id)
+            degraded_components = [c for c in projection.components if c.status.value == "degraded"]
+            self_status = {
+                "healthy": projection.healthy,
+                "degraded": [
+                    {"subsystem": c.name, "name": c.label or c.name, "impact": c.impact, "severity": c.severity}
+                    for c in degraded_components
+                ],
+            }
             result["self_status"] = self_status
-            if not self_status.get("healthy") and self_status.get("degraded"):
+            result["body_state"] = projection.model_dump(mode="json")
+            if not self_status["healthy"] and self_status["degraded"]:
                 degraded = self_status["degraded"]
                 names = ", ".join(d["name"] for d in degraded)
                 result["brief_sections"].insert(0, {

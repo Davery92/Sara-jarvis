@@ -45,6 +45,18 @@ async def get_metrics(db: Session = Depends(_get_db)):
     except Exception:
         metrics["health"] = {"overall_status": "unknown"}
 
+    # Canonical body-state projection (SINGULAR_SARA_MASTER_PLAN §13 item 3) —
+    # the same merged verdict `/api/sara/brief` and `/analytics/dashboard`
+    # read, so this endpoint's health picture can't silently diverge from
+    # theirs. `health` above is left untouched (raw heartbeat report; the
+    # System Status page reads `health.checks` directly).
+    try:
+        from app.services.body_state_projection import get_body_state_projection
+        projection = await get_body_state_projection(user_id) if user_id else await get_body_state_projection()
+        metrics["body_state"] = projection.model_dump(mode="json")
+    except Exception as e:
+        metrics["body_state"] = {"error": str(e)[:100]}
+
     # LLM status
     try:
         from app.core.llm import get_background_llm_client

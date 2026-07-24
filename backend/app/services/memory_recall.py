@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_USER_ID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
 
-ALL_KINDS = ["episode", "note", "document", "summary", "fact", "person", "thread"]
+ALL_KINDS = ["episode", "note", "document", "summary", "fact", "person", "thread", "intent", "artifact"]
 
 # kind → the search_memory scope that produces it (the multi-store searcher
 # already fans over these four).
@@ -44,7 +44,8 @@ _KIND_CONFIDENCE = {
     "note": "confirmed",
     "document": "confirmed",
     "person": "confirmed",
-    # facts computed per-row from PKG confidence below
+    "artifact": "confirmed",
+    # facts and intents computed per-row below
 }
 
 
@@ -185,6 +186,79 @@ async def _from_threads(user_id: str, query: str, per: int) -> List[Dict[str, An
     return out
 
 
+async def _from_intents(user_id: str, query: str, per: int) -> List[Dict[str, Any]]:
+    """SINGULAR_SARA_MASTER_PLAN §C8 — the real, durable `intent` table
+    (§C3) as a recall source. Confidence tier depends on origin: David's own
+    commitments are confirmed; Sara's self-chosen interests/goals are
+    inferred until she's acted on them (per §4.3, they're first-class, not
+    downgraded — but they also aren't facts David stated)."""
+    try:
+        from sqlalchemy import text
+        from app.db.session import get_async_session_factory
+        factory = get_async_session_factory()
+        async with factory() as db:
+            rows = (await db.execute(text("""
+                SELECT intent_id, kind, origin, status, next_step, priority, updated_at
+                FROM intent
+                WHERE owner_user_id = :uid
+                  AND status NOT IN ('done', 'cancelled')
+                  AND (COALESCE(next_step, '') ILIKE :q OR :q = '%%')
+                ORDER BY updated_at DESC
+                LIMIT :lim
+            """), {"uid": user_id, "q": f"%{query}%" if query else "%%", "lim": per})).mappings().all()
+    except Exception as e:
+        logger.debug(f"[recall] intent query failed: {e}")
+        return []
+
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        tier = "confirmed" if r["origin"] == "david" else "inferred"
+        out.append(_trace(
+            kind="intent",
+            id_=r["intent_id"],
+            text=f"[{r['kind']}/{r['status']}] {r['next_step'] or ''}".strip(),
+            score=0.5,
+            provenance=f"intent:{r['kind']}",
+            when=r["updated_at"].isoformat() if r["updated_at"] else None,
+            confidence=tier,
+        ))
+    return out
+
+
+async def _from_artifacts(user_id: str, query: str, per: int) -> List[Dict[str, Any]]:
+    """SINGULAR_SARA_MASTER_PLAN §C8 — Sara-produced artifacts (Studio) as a
+    recall source, so 'what did you make me about X' is answerable through
+    the one recall path instead of a separate Studio-only search."""
+    try:
+        from sqlalchemy import text
+        from app.db.session import get_async_session_factory
+        factory = get_async_session_factory()
+        async with factory() as db:
+            rows = (await db.execute(text("""
+                SELECT id, artifact_type, title, updated_at
+                FROM artifacts
+                WHERE user_id = :uid
+                  AND (title ILIKE :q OR COALESCE(content, '') ILIKE :q)
+                ORDER BY updated_at DESC
+                LIMIT :lim
+            """), {"uid": user_id, "q": f"%{query}%", "lim": per})).mappings().all()
+    except Exception as e:
+        logger.debug(f"[recall] artifact query failed: {e}")
+        return []
+
+    return [
+        _trace(
+            kind="artifact",
+            id_=r["id"],
+            text=f"[{r['artifact_type']}] {r['title'] or ''}".strip(),
+            score=0.5,
+            provenance=f"artifact:{r['artifact_type']}",
+            when=r["updated_at"].isoformat() if r["updated_at"] else None,
+        )
+        for r in rows
+    ]
+
+
 async def recall(
     user_id: str = DEFAULT_USER_ID,
     query: str = "",
@@ -208,6 +282,10 @@ async def recall(
         tasks.append(_from_people(user_id, query, per))
     if "thread" in kinds:
         tasks.append(_from_threads(user_id, query, per))
+    if "intent" in kinds:
+        tasks.append(_from_intents(user_id, query, per))
+    if "artifact" in kinds:
+        tasks.append(_from_artifacts(user_id, query, per))
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
     traces: List[Dict[str, Any]] = []

@@ -7238,12 +7238,26 @@ logger.info("✅ Pi Dashboard routes loaded successfully")
 @app.post("/api/health/sync")
 async def sync_health_data(data: dict, db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     """
-    Sync Apple Health data from iOS app
-    Stores health metrics and creates episodic memory entries
+    DEPRECATED — legacy episode-writing sync. The iOS app no longer calls this;
+    "Sync Now" and the background task both use syncHealthNow() → the
+    /api/health/metrics/batch + /workouts/batch + /sync-recovery pipeline.
+    Kept only as a defensive fallback for any old client still POSTing here.
+    Do not point new code at this endpoint.
     """
     try:
         user_id = current_user.id
         timestamp = data.get("timestamp", local_now().isoformat())
+
+        # HealthKit values may arrive as plain numbers OR as @kingstinct v13
+        # Quantity objects ({"quantity": N, "unit": ...} / {"value": N}). Coerce
+        # to float defensively so a client-side shape change can't 500 the sync.
+        def _num(v, default=0.0):
+            if isinstance(v, dict):
+                v = v.get("quantity", v.get("value", default))
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return default
 
         # Extract health data
         today_data = data.get("today", {})
@@ -7256,14 +7270,14 @@ async def sync_health_data(data: dict, db: Session = Depends(get_db), current_us
 
         if today_data:
             if today_data.get("steps"):
-                health_summary.append(f"Steps: {today_data['steps']:,}")
+                health_summary.append(f"Steps: {int(_num(today_data['steps'])):,}")
             if today_data.get("distance"):
-                km = today_data['distance'] / 1000
+                km = _num(today_data['distance']) / 1000
                 health_summary.append(f"Distance: {km:.2f} km")
             if today_data.get("activeEnergy"):
-                health_summary.append(f"Active Energy: {int(today_data['activeEnergy'])} kcal")
+                health_summary.append(f"Active Energy: {int(_num(today_data['activeEnergy']))} kcal")
             if today_data.get("heartRate"):
-                health_summary.append(f"Heart Rate: {int(today_data['heartRate'])} bpm")
+                health_summary.append(f"Heart Rate: {int(_num(today_data['heartRate']))} bpm")
 
         # Create memory entry for today's health stats
         if health_summary:
@@ -7287,8 +7301,8 @@ async def sync_health_data(data: dict, db: Session = Depends(get_db), current_us
         # Store workout data as separate memories
         for workout in workouts[:5]:  # Limit to 5 most recent workouts
             workout_type = workout.get("activityType", "Unknown")
-            duration = workout.get("duration", 0)
-            calories = workout.get("calories", 0)
+            duration = _num(workout.get("duration", 0))
+            calories = _num(workout.get("calories", 0))
 
             workout_memory = f"Workout: {workout_type}, Duration: {int(duration/60)} minutes, Calories: {int(calories)} kcal"
 
@@ -8426,6 +8440,29 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
             _aio_acs.ensure_future(_post_acs_event(last_user_text))
     except Exception:
         pass  # Non-critical
+
+    # SINGULAR_SARA_MASTER_PLAN §C4 — shadow-only kernel.engaged_turn() call.
+    # Fire-and-forget: never awaited inline, never touches the response
+    # David gets. Off by default (SINGULAR_KERNEL flag); exists purely to
+    # prove the engaged-state context assembly is correct against real
+    # conversations before anything is asked to depend on it.
+    try:
+        from app.core.feature_flags import Flag, is_enabled as _singular_flag_enabled
+        if _singular_flag_enabled(Flag.SINGULAR_KERNEL):
+            import asyncio as _aio_kernel
+            from app.services.kernel import engaged_turn as _kernel_engaged_turn
+
+            async def _shadow_engaged_turn(preview: str, conv_id) -> None:
+                try:
+                    await _kernel_engaged_turn(
+                        str(current_user.id), conversation_id=conv_id, message_preview=preview,
+                    )
+                except Exception as _kernel_err:
+                    logger.debug(f"[kernel] shadow engaged_turn failed: {_kernel_err}")
+
+            _aio_kernel.ensure_future(_shadow_engaged_turn(last_user_text, request.conversation_id))
+    except Exception:
+        pass  # Non-critical — the shadow path must never affect real chat
 
     # Update unified context snapshot: David is chatting now
     try:
@@ -10330,6 +10367,26 @@ async def get_analytics_dashboard(current_user: User = Depends(get_current_user)
         
         last_activity = last_conversation.updated_at if last_conversation else None
         
+        # Reconcile against the canonical body-state projection (SINGULAR_SARA
+        # §13 item 3) instead of trusting this endpoint's own live probes in
+        # isolation — those probes only check 2 components at *this instant*,
+        # while the projection reflects what /api/metrics and /api/sara/brief
+        # already agree on. A live probe still runs above so this endpoint
+        # keeps working even before any heartbeat has ever recorded a
+        # component (canonical component missing -> fall back to the probe).
+        body_state_projection = None
+        try:
+            from app.services.body_state_projection import get_body_state_projection, get_component
+            body_state_projection = await get_body_state_projection(str(current_user.id))
+            db_component = await get_component("database", str(current_user.id))
+            embed_component = await get_component("embeddings", str(current_user.id))
+            if db_component is not None:
+                db_health = db_component.status.value == "ok"
+            if embed_component is not None:
+                embedding_health = embed_component.status.value == "ok"
+        except Exception as e:
+            logger.debug(f"Analytics dashboard body_state reconciliation failed: {e}")
+
         return {
             "database": {
                 "size": db_size,
@@ -10359,7 +10416,8 @@ async def get_analytics_dashboard(current_user: User = Depends(get_current_user)
                 "database": db_health,
                 "ai_services": embedding_health,
                 "status": "healthy" if (db_health and embedding_health) else "degraded"
-            }
+            },
+            "body_state": body_state_projection.model_dump(mode="json") if body_state_projection else None,
         }
         
     except Exception as e:

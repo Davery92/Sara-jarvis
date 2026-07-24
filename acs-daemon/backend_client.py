@@ -31,16 +31,21 @@ class BackendClient:
     async def heartbeat(
         self, *, state: str, version: str, pid: int, hostname: str,
         started_at: datetime, last_tick_summary: Optional[str],
-        want_delta: bool = False,
+        want_delta: bool = False, capabilities: Optional[list] = None,
     ) -> dict:
         """Post a heartbeat. Returns the parsed response (incl. ACS1 world_delta
         when want_delta=True). Empty dict on any error — heartbeats survive
-        backend blips."""
+        backend blips.
+
+        `capabilities` (SINGULAR_SARA §C7) feeds the backend's
+        `body_capability` record for this VM workshop — additive; older
+        backends without that field simply ignore it."""
         payload = {
             "state": state, "version": version, "pid": pid, "hostname": hostname,
             "started_at": started_at.isoformat(),
             "last_tick_summary": last_tick_summary,
             "want_delta": want_delta,
+            "capabilities": capabilities or [],
         }
         try:
             r = await self._client.post("/api/acs/v2/heartbeat", json=payload)

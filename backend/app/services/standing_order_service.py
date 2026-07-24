@@ -583,6 +583,19 @@ class StandingOrderService:
             "undo_available": action_type in ("home_control", "all_lights_off", "lock_all"),
         })
 
+        # SINGULAR_SARA_MASTER_PLAN §C10 — shadow-record the same execution
+        # into the canonical action_receipt shape, alongside (not instead of)
+        # the action_ledger row above. Never changes undo behavior.
+        try:
+            from app.core.correlation import get_current_correlation
+            from app.services.action_receipt_service import record_standing_order_action
+            record_standing_order_action(
+                db, user_id=DAVID_USER_ID, order_id=order_id, action_type=action_type,
+                success=success, correlation_id=get_current_correlation().kernel_turn_id,
+            )
+        except Exception as e:
+            logger.debug(f"action_receipt shadow record failed (non-fatal): {e}")
+
     async def undo_action(self, db, ledger_id: int) -> Dict:
         """Undo a recently executed action (within undo window)."""
         from sqlalchemy import text

@@ -304,6 +304,17 @@ class EventBus:
             logger.error(f"Failed to publish event: {e}")
             self.redis_client = None
             self.pubsub = None
+            return
+
+        # SINGULAR_SARA_MASTER_PLAN §C1: translate + persist the canonical
+        # EventEnvelopeV1 alongside the legacy publish above. Best-effort and
+        # strictly additive — nothing subscribes to this yet, so a failure
+        # here must never affect the real publish this event bus exists for.
+        try:
+            from app.services.event_envelope_adapter import record_from_event
+            await record_from_event(event)
+        except Exception as e:
+            logger.debug(f"[event_envelope_adapter] record_from_event failed: {e}")
 
     def subscribe(self, subscriber: EventSubscriber):
         """
