@@ -313,3 +313,62 @@ async def dreaming_turn(user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]:
         "correlation_id": kernel_turn_id,
         **result_dict,
     }
+
+
+async def focused_turn(
+    db,
+    user_id: str = DEFAULT_USER_ID,
+    *,
+    task_description: str,
+    mode: str = "auto",
+    working_directory: Optional[str] = None,
+    notify_on_complete: bool = False,
+    target_host: Optional[str] = None,
+) -> Dict[str, Any]:
+    """The single focused-state cognition entry (§4.4/§C7).
+
+    Wraps the existing mission-dispatch pipeline
+    (`agent_dispatch_service.dispatch_task` — VM Claude/Qwen sessions,
+    resumable via `resume_task`/`retry_task`, already durable across backend
+    restarts per the "Durable dispatch" project) under one kernel state and
+    correlation ID, the same fold-in pattern used for ambient/dreaming. The
+    dispatch pipeline itself is untouched: this brackets it with
+    ENGAGED->FOCUSED state publication (visible in Interior) and binds the
+    correlation ID so anything the mission does downstream (notifications,
+    action receipts) can be traced back to the turn that started it.
+
+    Does not itself evaluate mission outcomes — the mission runs
+    asynchronously on the VM/Celery `dispatch` queue after this call
+    returns with a task_id; outcome evaluation happens where it already
+    does (`agent_dispatch_service._notify_completion` /
+    `unified_notification`), not synchronously inside this function.
+    """
+    from app.core.correlation import CorrelationIds, bind_correlation, new_id
+    from app.services.legacy_path_counters import record_target_path
+
+    kernel_turn_id = new_id("turn")
+    bind_correlation(CorrelationIds(kernel_turn_id=kernel_turn_id))
+    await set_state(user_id, KernelState.FOCUSED, detail="dispatching mission", correlation_id=kernel_turn_id)
+
+    try:
+        await record_target_path("focused_cognition")
+    except Exception:
+        pass
+
+    from app.services.agent_dispatch import agent_dispatch_service
+
+    try:
+        result = await agent_dispatch_service.dispatch_task(
+            db=db,
+            user_id=user_id,
+            task_description=task_description,
+            mode=mode,
+            working_directory=working_directory,
+            notify_on_complete=notify_on_complete,
+            target_host=target_host,
+        )
+    finally:
+        await set_state(user_id, KernelState.AMBIENT, detail="resting", correlation_id=kernel_turn_id)
+
+    result["correlation_id"] = kernel_turn_id
+    return result

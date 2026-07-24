@@ -82,13 +82,15 @@ class DispatchAgentTaskTool(BaseTool):
 
         try:
             from app.main_simple import SessionLocal
-            from app.services.agent_dispatch import agent_dispatch_service
+            from app.services.kernel import focused_turn
 
             db = SessionLocal()
             try:
-                result = await agent_dispatch_service.dispatch_task(
-                    db=db,
-                    user_id=str(user_id),
+                # SINGULAR_SARA_MASTER_PLAN §C7 — real focused-state entry.
+                # Wraps dispatch_task unchanged; publishes kernel state
+                # ENGAGED->FOCUSED (visible in Interior) around the call.
+                result = await focused_turn(
+                    db, str(user_id),
                     task_description=task_description,
                     mode=mode,
                     working_directory=working_directory,
@@ -381,13 +383,12 @@ class DispatchAndMonitorTool(BaseTool):
 
         try:
             from app.main_simple import SessionLocal
-            from app.services.agent_dispatch import agent_dispatch_service
+            from app.services.kernel import focused_turn
 
             db = SessionLocal()
             try:
-                result = await agent_dispatch_service.dispatch_task(
-                    db=db,
-                    user_id=str(user_id),
+                result = await focused_turn(
+                    db, str(user_id),
                     task_description=task_description,
                     mode=mode,
                     working_directory=working_directory,
