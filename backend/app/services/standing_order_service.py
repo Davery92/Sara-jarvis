@@ -207,11 +207,12 @@ class StandingOrderService:
 
                 # Execute the action
                 success = await self._execute_action(order.action_type, action_config, context)
+                verified = await self._verify_action_effect(order.action_type, action_config) if success else None
 
                 # Log to action ledger
                 await self._log_action(
                     db, order.id, order.action_type, action_config,
-                    trigger_context=context, success=success,
+                    trigger_context=context, success=success, verified=verified,
                     description=order.description,
                 )
 
@@ -307,11 +308,12 @@ class StandingOrderService:
 
             # Execute
             success = await self._execute_action(order.action_type, action_config, {"time": now.isoformat()})
+            verified = await self._verify_action_effect(order.action_type, action_config) if success else None
 
             await self._log_action(
                 db, order.id, order.action_type, action_config,
                 trigger_context={"time": now.isoformat(), "trigger_type": "time", "condition": cond_reason},
-                success=success, description=order.description,
+                success=success, verified=verified, description=order.description,
             )
 
             db.execute(text("""
@@ -555,9 +557,56 @@ class StandingOrderService:
 
         return False
 
+    async def _verify_action_effect(self, action_type: str, config: Dict) -> Optional[bool]:
+        """SINGULAR_SARA_MASTER_PLAN §C10 — 'record validation evidence before
+        completion' / 'no false completed actions'. `_run_action_once` above
+        returns True as soon as the Home Assistant service call doesn't raise
+        — that proves the request was accepted, not that the entity actually
+        reached the desired state. This is a read-only follow-up check
+        (never retries, never re-issues the command) so `action_receipt` can
+        distinguish 'completed' from 'partial' instead of trusting a bare
+        success flag.
+
+        Returns True/False when the effect is checkable, None when it isn't
+        (e.g. a 'notification' action, or an unrecognized service) — None
+        means 'no evidence either way', not 'verified', and the caller
+        should not downgrade a bare success to partial in that case.
+        """
+        try:
+            from app.services.ha_control_service import ha_control
+
+            if action_type == "home_control":
+                service = config.get("service")
+                entity_id = config.get("entity_id")
+                if not service or not entity_id:
+                    return None
+                _domain, action = service.split(".", 1)
+                desired = {
+                    "lock": "locked", "unlock": "unlocked",
+                    "turn_off": "off", "turn_on": "on",
+                }.get(action)
+                if desired is None:
+                    return None
+                state = await ha_control.get_state(entity_id)
+                return str(state.get("state")) == desired
+
+            if action_type == "all_lights_off":
+                states = await ha_control.get_states()
+                still_on = [s for s in states if s["entity_id"].startswith("light.") and s["state"] == "on"]
+                return len(still_on) == 0
+
+            if action_type == "lock_all":
+                states = await ha_control.get_states()
+                still_unlocked = [s for s in states if s["entity_id"].startswith("lock.") and s["state"] == "unlocked"]
+                return len(still_unlocked) == 0
+        except Exception as e:
+            logger.debug(f"[standing_order] action-effect verification skipped: {e}")
+        return None
+
     async def _log_action(
         self, db, order_id: int, action_type: str, action_config: Dict,
         trigger_context: Dict, success: bool, description: str = "",
+        verified: Optional[bool] = None,
     ):
         """Log action to the ledger for audit trail and undo."""
         from sqlalchemy import text
@@ -591,7 +640,8 @@ class StandingOrderService:
             from app.services.action_receipt_service import record_standing_order_action
             record_standing_order_action(
                 db, user_id=DAVID_USER_ID, order_id=order_id, action_type=action_type,
-                success=success, correlation_id=get_current_correlation().kernel_turn_id,
+                success=success, verified=verified,
+                correlation_id=get_current_correlation().kernel_turn_id,
             )
         except Exception as e:
             logger.debug(f"action_receipt shadow record failed (non-fatal): {e}")

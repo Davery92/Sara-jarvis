@@ -38,13 +38,27 @@ def record_standing_order_action(
     order_id: int,
     action_type: str,
     success: bool,
+    verified: Optional[bool] = None,
     correlation_id: Optional[str] = None,
 ) -> None:
-    """Shadow-record one standing-order action execution. Best-effort — must
-    never raise into the real action path that's already committed."""
+    """Record one standing-order action execution's receipt.
+
+    `verified` (SINGULAR_SARA_MASTER_PLAN §C10) is the read-after-write
+    check from `_verify_action_effect` — True/False when the entity's actual
+    state was checked, None when it isn't checkable (e.g. a notification
+    action). A bare `success=True` no longer means "completed": if we
+    checked and the entity didn't reach the desired state, the receipt says
+    `partial`, not `completed` — "no success state can be displayed when the
+    underlying operation... only partially completed" (Definition of Done #9).
+    """
     try:
         reversible = action_type in _REVERSIBLE_ACTION_TYPES
-        status = "completed" if success else "failed"
+        if not success:
+            status = "failed"
+        elif verified is False:
+            status = "partial"
+        else:
+            status = "completed"
         db.execute(text("""
             INSERT INTO action_receipt (
                 user_id, action_type, target, permission_tier, reversible,

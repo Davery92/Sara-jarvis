@@ -266,6 +266,25 @@ async def send_notification(
             db = None
 
     try:
+        # SINGULAR_SARA_MASTER_PLAN §C9 real cutover: a content-based dedup
+        # gate on top of the existing topic-string dedup, using the
+        # canonical attention_item table. Only at the outermost call
+        # (_bypass_attention=False) — the internal call
+        # route_through_attention_queue() makes to actually deliver
+        # (_bypass_attention=True) must not be gated again by this, or a
+        # message the attention market just approved would immediately
+        # dedupe against its own not-yet-committed record.
+        if not _bypass_attention and db is not None:
+            try:
+                from app.core.feature_flags import Flag, is_enabled
+                if is_enabled(Flag.SINGULAR_ATTENTION):
+                    from app.services.attention_shadow_recorder import check_recent_duplicate
+                    if await check_recent_duplicate(db, user_id, category, message):
+                        logger.info(f"Notification suppressed: attention-market content dedup, category={category}")
+                        return {"sent": False, "reason": "attention_market_dedup"}
+            except Exception as e:
+                logger.debug(f"Attention-market dedup check failed, proceeding: {e}")
+
         result = await _send_notification_impl(
             user_id=user_id,
             title=title,

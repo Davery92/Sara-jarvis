@@ -14,6 +14,22 @@ from app.services.unified_notification import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _disable_singular_attention_gate():
+    """This file predates the SINGULAR_SARA_MASTER_PLAN §C9 content-dedup
+    gate (unified_notification.send_notification -> feature_flags.is_enabled
+    -> attention_shadow_recorder.check_recent_duplicate) and uses a bare
+    AsyncMock() for `db`, which isn't a real session — the gate's DB query
+    would return a Mock (never None), so it always looks like a "duplicate"
+    once the real SINGULAR_ATTENTION flag is on in the shared dev database.
+    None of these tests are about that gate; keep it off here so they test
+    what they were written to test. See test_singular_sara_c9_attention.py
+    for the gate's own coverage.
+    """
+    with patch("app.core.feature_flags.is_enabled", return_value=False):
+        yield
+
+
 @pytest.fixture
 def patch_dedup_and_push():
     """Context manager that patches _check_dedup, _log_notification, _get_push_tokens, _send_push, and command_router."""
