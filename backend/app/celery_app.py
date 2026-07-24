@@ -95,6 +95,7 @@ celery_app = Celery(
         "app.tasks.dreams",
         "app.tasks.readiness",
         "app.tasks.bedtime",
+        "app.tasks.intent_graph",
     ]
 )
 
