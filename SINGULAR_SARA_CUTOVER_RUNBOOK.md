@@ -1,10 +1,19 @@
 # Singular Sara — Cutover Runbook
 
-**Status as of 2026-07-24:** every `SINGULAR_*` flag is OFF. Nothing in this
-document has been switched on. Sara's live behavior today is bit-for-bit
-identical to before this work started — everything built is either a
-read-only projection over existing data, or a shadow recorder/shadow call
-that runs alongside the real path without being consulted by it.
+**Status as of 2026-07-24 (updated):** `SINGULAR_KERNEL`, `SINGULAR_ATTENTION`,
+and `SINGULAR_ACTIONS` are **ON**, with your explicit go-ahead, and each
+change is real (not shadow):
+
+- ambient/dreaming cognition routes through the kernel instead of calling
+  legacy deliberation/reflection code directly;
+- `send_notification()` has one new, real dedup gate on top of the
+  already-live attention system (see `SINGULAR_ATTENTION` below);
+- standing-order actions get read-after-write verification, so
+  `action_receipt.status` can be `partial`, not a false `completed`.
+
+`SINGULAR_EVENT_ENVELOPE`, `SINGULAR_CONTEXT`, `SINGULAR_INTENTS`,
+`SINGULAR_VM_BODY`, and `LEGACY_COGNITION_SHADOW` remain OFF — nothing reads
+them yet (see each section below for why).
 
 This is the missing piece §13 and the phase-by-phase work didn't produce on
 its own: a map from "the code exists" to "it's safe to flip on," per
@@ -45,41 +54,32 @@ that was built here has a destructive one-way migration path.
 
 ## Per-flag cutover guide
 
-### `SINGULAR_KERNEL` — the one that matters most
+### `SINGULAR_KERNEL` — ON
 
-Gates three real fold-ins, all built and tested in shadow, none yet observed
-under real production load:
+Gates three fold-ins:
 
 1. **Ambient** (`app/tasks/autonomy.py`): `periodic_deliberation_fallback`
    and `deep_deliberation` stop calling `deliberation_engine.run()` directly
    and route through `kernel.ambient_turn()` instead.
-2. **Engaged** (`app/main_simple.py` `/chat/stream`): currently ALWAYS runs
-   `kernel.engaged_turn()` in shadow (fire-and-forget, never touches the
-   response). This flag does not change engaged behavior today — engaged
-   cognition has no legacy/target fork yet, only a shadow probe. Treat
-   "route real chat through kernel.engaged_turn's output" as unbuilt.
+2. **Engaged** (`app/main_simple.py` `/chat/stream`): still shadow-only —
+   `kernel.engaged_turn()` runs fire-and-forget on every real chat turn but
+   its output is never consulted. This flag does not change engaged
+   behavior; "route real chat through kernel.engaged_turn's output" is
+   still unbuilt.
 3. **Dreaming** (`app/tasks/reflection.py`): `_run_reflection_async` stops
    calling the reflection agent directly and routes through
    `kernel.dreaming_turn()`.
 
-**Before flipping ON:**
-- Check `path-counters?path_name=ambient_cognition` — confirm the legacy
-  lane has meaningful daily volume (proof this flag will actually be
-  exercised, not a no-op).
-- Read `SINGULAR_SARA_MASTER_PLAN_2026_07_24.md` §9.1 scenario suite — none
-  of those scenarios have been run against the kernel path yet. This flag
-  should not go on before at least the ambient-cognition scenarios have.
-- Confirm `truth-audit` is clean (zero violations) as a baseline — so any
-  new violation after cutover is attributable to the cutover.
+**Still true, even though it's on:** the plan's own §9.1 scenario suite has
+not been run against the kernel path, and the C5 exit gate ("shadow
+comparisons show no lost high-value notices or actions") means watching
+real ambient/dreaming output over the next several days and confirming
+nothing the legacy path would have caught silently drops. Turning the flag
+on did not skip that observation need — it just started the clock on it.
 
-**Observation window:** the plan's C5 exit gate wants "shadow comparisons
-show no lost high-value notices or actions" — that comparison does not
-exist as code; it means watching real ambient/dreaming output for a few
-days after flipping and confirming nothing the legacy path would have
-caught silently drops.
-
-**Rollback:** flip back to `False`. The legacy `deliberation_engine.run()` /
-reflection-agent-direct code paths are untouched and still there.
+**Rollback:** `set_flag(Flag.SINGULAR_KERNEL, False)`. The legacy
+`deliberation_engine.run()` / reflection-agent-direct code paths are
+untouched and still there.
 
 ### `SINGULAR_EVENT_ENVELOPE`
 
@@ -114,19 +114,57 @@ heartbeat (once redeployed — the `capabilities` field is additive and the
 currently-deployed daemon binary doesn't send it until pushed). Reserved for
 when a real work-claiming/lease protocol replaces direct daemon dispatch.
 
-### `SINGULAR_ATTENTION`
+### `SINGULAR_ATTENTION` — ON
 
-Not read by any code path yet. `outbound_intent`/`attention_item` are
-shadow-recorded on every `send_notification()` call — nothing acts on the
-recorded `decision` field. Reserved for when the attention market's decision
-is asked to gate delivery instead of just describing it after the fact.
+Important context: a real attention market already existed before this
+plan — `route_through_attention_queue()` (Phase 2, "Cortana Evolution"),
+gated by its own separate flag `autonomy_attention_enabled` (already `true`
+in production), writing to `autonomy_attention_item`. This flag does not
+replace that system. Two real things it does:
 
-### `SINGULAR_ACTIONS`
+1. `attention_shadow_recorder` now classifies decisions from that system's
+   actual signals (`routed_through_attention`, `attention_item_id`) instead
+   of guessing from `sent`+`priority` — `outbound_intent`/`attention_item`
+   are now an accurate record of the real decision, including a genuine
+   `add_to_today` outcome for items the real queue created but didn't push.
+2. **New, real behavior**: `send_notification()`'s outer wrapper now runs a
+   content-based dedup check (`attention_shadow_recorder.check_recent_
+   duplicate`) before the rest of the pipeline — if the *exact rendered
+   text* was already delivered to David within the lookback window under
+   any topic, the send is skipped (`reason: "attention_market_dedup"`).
+   This is additive to, not a replacement for, the existing topic-string
+   dedup — it catches the case the topic-based check can't (two different
+   call sites independently deciding to say the same thing under different
+   topics). Never applied to the attention queue's own internal delivery
+   call (`_bypass_attention=True`), which would otherwise dedupe a message
+   against its own not-yet-committed record.
 
-Not read by any code path yet. `action_receipt` is shadow-recorded
-alongside every standing-order action — `action_ledger` (undo, audit) is
-still authoritative. Reserved for when permission tiers in `action_receipt`
-are asked to gate execution instead of just describing it.
+**Rollback:** `set_flag(Flag.SINGULAR_ATTENTION, False)` — the content-dedup
+check stops running; the pre-existing `autonomy_attention_enabled` system is
+untouched either way.
+
+### `SINGULAR_ACTIONS` — ON
+
+No pre-existing equivalent existed for actions (unlike attention). What's
+real now: `StandingOrderService._verify_action_effect` does a read-only
+check of Home Assistant's actual state after `home_control`/
+`all_lights_off`/`lock_all` calls — previously "success" only meant "the API
+call didn't raise." `action_receipt.status` is now `partial`, not a false
+`completed`, when the entity didn't reach the desired state (Definition of
+Done #9: "No success state can be displayed when the underlying operation
+failed or only partially completed"). `action_ledger` (undo, audit) is
+unchanged and still authoritative for undo.
+
+This does **not** gate or block execution — the HA service call still
+happens exactly as before; only the *recorded* status became more honest.
+There was no safe, non-redundant execution-level gate to add here: standing
+orders already enforce their own cooldown via `action_ledger` before
+`_execute_action` is ever called, so an additional idempotency gate at this
+layer would be dead code, not new protection.
+
+**Rollback:** `set_flag(Flag.SINGULAR_ACTIONS, False)` — receipts stop
+recording verified/partial distinctions; `action_ledger` behavior is
+unaffected either way.
 
 ### `LEGACY_COGNITION_SHADOW`
 
@@ -142,22 +180,27 @@ real shadow-comparison harness exists.
 | 2 | Context/body projections | **Done (read-only)** — body-state, world/self/relationship snapshots |
 | 3 | Intent graph | **Partial** — real table + sync exist; nothing is authoritative yet |
 | 4 | Engaged kernel | **Shadow only** — `kernel.engaged_turn()` runs in shadow on every chat turn |
-| 5 | Ambient kernel (shadow → active) | **Built, flag-gated, not yet flipped** |
+| 5 | Ambient kernel | **ON** — `SINGULAR_KERNEL`, folded in for real |
 | 6 | Focused kernel + VM body | **Not started** — no mission-brief/lease protocol |
-| 7 | Dreaming kernel | **Built, flag-gated, not yet flipped** |
-| 8 | Attention/voice | **Shadow only** — decisions recorded, not enforced |
-| 9 | Action executor | **Shadow only** — receipts recorded, not enforced |
+| 7 | Dreaming kernel | **ON** — `SINGULAR_KERNEL`, folded in for real |
+| 8 | Attention/voice | **ON** — `SINGULAR_ATTENTION`; real content-dedup gate, decisions recorded accurately |
+| 9 | Action executor | **ON** — `SINGULAR_ACTIONS`; real verified/partial status, execution itself unchanged |
 | 10 | Scheduler retirement | **Classified, not retired** — 88 jobs classified, 22 legacy_cognition candidates, 24 unclassified need manual review |
-| 11 | UI | **Not started** — separate branch, out of scope for this work |
+| 11 | UI | **Substantially built** — `feat/singular-sara-ui`: new nav IA (Home/Chat/Today/Memory/Life/Work/Studio/Interior), Interior page (web+iOS) with real interests/intents/contradictions/attention/action views |
 
-## What "done" does NOT mean here
+## What "ON" does NOT mean here
 
-Every "Done" or "Built" above means *the code exists, is unit-tested, and
-has been verified against real production data read-only*. It does NOT mean:
+Every flag marked ON above means *the code exists, is tested, was verified
+against real production data, and was reviewed for exactly what it changes
+before flipping*. It does NOT mean:
 
 - Any multi-day/multi-week observation window has been served (C0's 7-day
   baseline, C12's 4-continuous-week gate) — those require real time passing
-  with the flag on, which cannot be satisfied by writing more code.
+  with the flag on, which cannot be satisfied by writing more code. The
+  clock on that observation started today, not before.
 - The plan's §9.1 scenario suite has been executed even once.
-- Sara's live behavior has changed at all — verify this yourself:
-  `GET /api/diagnostics/feature-flags` should show every flag `false`.
+- Every real-world edge case has been exercised — e.g. the action-effect
+  verification (`SINGULAR_ACTIONS`) has been tested against mocked HA
+  responses, not a live Home Assistant instance, since this environment
+  can't safely poke real lights/locks to check.
+- Check current state yourself: `GET /api/diagnostics/feature-flags`.
