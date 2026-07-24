@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { View, Text, ScrollView, RefreshControl, ActivityIndicator, StyleSheet } from 'react-native';
+import { View, Text, ScrollView, RefreshControl, ActivityIndicator, StyleSheet, TouchableOpacity } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import apiClient from '../../services/api';
 import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
@@ -74,6 +74,14 @@ interface BodyCapability {
   version: string | null;
   alive: boolean;
 }
+interface Interest {
+  id: string;
+  topic: string;
+  display_name: string;
+  why: string | null;
+  weight: number;
+  blocked: boolean;
+}
 
 const Section: React.FC<{ title: string; subtitle?: string; children: React.ReactNode }> = ({ title, subtitle, children }) => (
   <View style={styles.card}>
@@ -103,11 +111,13 @@ export default function InteriorScreen() {
   const [attentionLog, setAttentionLog] = useState<AttentionLogItem[]>([]);
   const [actionReceipts, setActionReceipts] = useState<ActionReceipt[]>([]);
   const [bodyCapabilities, setBodyCapabilities] = useState<BodyCapability[]>([]);
+  const [interests, setInterests] = useState<Interest[]>([]);
+  const [interestBusy, setInterestBusy] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
   const load = useCallback(async () => {
-    const [ctx, body, intents, audit, attention, actions, caps] = await Promise.all([
+    const [ctx, body, intents, audit, attention, actions, caps, interestRows] = await Promise.all([
       safeGet<ContextSnapshot>('/api/diagnostics/context-snapshot'),
       safeGet<BodyState>('/api/diagnostics/body-state'),
       safeGet<IntentGraph>('/api/diagnostics/intent-graph'),
@@ -115,6 +125,7 @@ export default function InteriorScreen() {
       safeGet<{ items: AttentionLogItem[] }>('/api/diagnostics/attention-log?limit=6'),
       safeGet<{ receipts: ActionReceipt[] }>('/api/diagnostics/action-receipts?limit=6'),
       safeGet<{ bodies: BodyCapability[] }>('/api/diagnostics/body-capabilities'),
+      safeGet<Interest[]>('/api/acs/v2/interests?include_blocked=true&limit=20'),
     ]);
     setContext(ctx);
     setBodyState(body);
@@ -123,7 +134,22 @@ export default function InteriorScreen() {
     setAttentionLog(attention?.items || []);
     setActionReceipts(actions?.receipts || []);
     setBodyCapabilities(caps?.bodies || []);
+    setInterests(interestRows || []);
     setLoading(false);
+  }, []);
+
+  const toggleInterestBlock = useCallback(async (interest: Interest) => {
+    setInterestBusy(interest.id);
+    try {
+      const updated = await apiClient.post<Interest>(
+        `/api/acs/v2/interests/${interest.id}/block?blocked=${!interest.blocked}`
+      );
+      setInterests((prev) => prev.map((i) => (i.id === interest.id ? updated : i)));
+    } catch {
+      // best-effort — leave the row as-is on failure
+    } finally {
+      setInterestBusy(null);
+    }
   }, []);
 
   useEffect(() => {
@@ -201,6 +227,32 @@ export default function InteriorScreen() {
               <View key={i.intent_id} style={styles.lineRow}>
                 <Text style={[styles.originTag, i.origin === 'sara' ? styles.originSara : styles.originDavid]}>{i.origin}</Text>
                 <Text style={styles.lineText} numberOfLines={1}>{i.next_step || i.kind}</Text>
+              </View>
+            ))
+          )}
+        </Section>
+
+        <Section title="SARA'S INTERESTS" subtitle="what she's curious about, on her own initiative">
+          {interests.length === 0 ? (
+            <Text style={styles.empty}>No interests yet</Text>
+          ) : (
+            interests.map((interest) => (
+              <View key={interest.id} style={styles.lineRow}>
+                <Text
+                  style={[styles.lineText, interest.blocked && styles.strikethrough]}
+                  numberOfLines={1}
+                >
+                  {interest.display_name}
+                </Text>
+                <TouchableOpacity
+                  onPress={() => toggleInterestBlock(interest)}
+                  disabled={interestBusy === interest.id}
+                  style={[styles.pillButton, interest.blocked ? styles.pillNeutral : styles.pillDanger]}
+                >
+                  <Text style={styles.pillText}>
+                    {interestBusy === interest.id ? '…' : interest.blocked ? 'Restore' : 'Block'}
+                  </Text>
+                </TouchableOpacity>
               </View>
             ))
           )}
@@ -297,4 +349,9 @@ const styles = StyleSheet.create({
   },
   originDavid: { backgroundColor: 'rgba(56, 189, 248, 0.16)', color: colors.hues.sky },
   originSara: { backgroundColor: 'rgba(167, 139, 250, 0.16)', color: colors.hues.violet },
+  strikethrough: { textDecorationLine: 'line-through', color: colors.textMuted },
+  pillButton: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: borderRadius.full, marginLeft: spacing.sm },
+  pillNeutral: { backgroundColor: colors.surfaceLight },
+  pillDanger: { backgroundColor: 'rgba(251, 113, 133, 0.14)' },
+  pillText: { fontSize: 11, fontWeight: '600', color: colors.text },
 });
