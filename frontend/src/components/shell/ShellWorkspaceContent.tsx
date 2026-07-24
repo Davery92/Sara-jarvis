@@ -29,6 +29,9 @@ const loadSystemDashboard = () => import('../system/SystemDashboard')
 const loadMachinesDashboard = () => import('../machines/MachinesDashboard')
 const loadMindDashboard = () => import('../mind/MindDashboard')
 const loadInterior = () => import('../../pages/Interior')
+const loadLife = () => import('../../pages/Life')
+const loadWork = () => import('../../pages/Work')
+const loadMemory = () => import('../../pages/Memory')
 const loadSensoryMonitor = () => import('../SensoryMonitor')
 const loadEmailPage = () => import('../EmailPage')
 const loadPersonalKnowledge = () => import('../PersonalKnowledge')
@@ -51,6 +54,9 @@ const SystemDashboard = lazy(loadSystemDashboard)
 const MachinesDashboard = lazy(loadMachinesDashboard)
 const MindDashboard = lazy(loadMindDashboard)
 const Interior = lazy(loadInterior)
+const Life = lazy(loadLife)
+const Work = lazy(loadWork)
+const Memory = lazy(loadMemory)
 const ACSPage = lazy(loadACSPage)
 const SensoryMonitor = lazy(loadSensoryMonitor)
 const EmailPage = lazy(loadEmailPage)
@@ -388,6 +394,30 @@ export default function ShellWorkspaceContent({
     return (
       <div className="flex-1 overflow-y-auto min-h-0">
         {renderDeferredView('Loading Interior…', <Interior />)}
+      </div>
+    )
+  }
+
+  if (targetView === 'life') {
+    return (
+      <div className="flex-1 min-h-0">
+        {renderDeferredView('Loading Life…', <Life />)}
+      </div>
+    )
+  }
+
+  if (targetView === 'work') {
+    return (
+      <div className="flex-1 min-h-0">
+        {renderDeferredView('Loading Work…', <Work />)}
+      </div>
+    )
+  }
+
+  if (targetView === 'memory') {
+    return (
+      <div className="flex-1 min-h-0">
+        {renderDeferredView('Loading Memory…', <Memory />)}
       </div>
     )
   }

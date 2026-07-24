@@ -438,14 +438,24 @@ function App() {
   // Knowledge label since NotesKnowledgeGarden already covers notes + graph
   // + connections; the raw PKG facts/people browser ('knowledge' view) moves
   // to More to avoid a two-items-named-"Knowledge" collision.
+  // SINGULAR_SARA_MASTER_PLAN §U0: primary nav is now the human-purpose IA
+  // (Home/Chat/Today/Memory/Life/Work/Studio/Interior/Settings) rather than
+  // a subsystem list. Every previously-primary item (Knowledge/notes,
+  // Fitness, System, Mind) still works exactly as before — it's reachable
+  // both directly (still listed below in "More") and as a tab inside its
+  // new grouped page (Memory, Life, Interior) — nothing was deleted or
+  // rewritten, only re-organized, per the plan's Definition of Done #10
+  // ("old paths are removed after measured parity, not merely hidden").
   const primaryNavItems: ShellNavItem[] = [
     { view: 'dashboard', label: 'Home', icon: 'home' },
     { view: 'chat', label: 'Chat', icon: 'chat' },
     { view: 'inbox', label: 'Today', icon: 'inbox' },
-    { view: 'notes', label: 'Knowledge', icon: 'edit_note' },
-    { view: 'fitness', label: 'Fitness', icon: 'fitness_center' },
-    { view: 'system', label: 'System', icon: 'hub' },
-    { view: 'mind', label: 'Mind', icon: 'psychology_alt' },
+    { view: 'memory', label: 'Memory', icon: 'psychology' },
+    { view: 'life', label: 'Life', icon: 'favorite' },
+    { view: 'work', label: 'Work', icon: 'work' },
+    { view: 'artifacts', label: 'Studio', icon: 'auto_awesome' },
+    { view: 'interior', label: 'Interior', icon: 'insights' },
+    { view: 'settings', label: 'Settings', icon: 'settings' },
   ]
 
   // "More" tier first, then the more specialized/introspective "Advanced"
@@ -453,12 +463,16 @@ function App() {
   // rail's More popover and the mobile menu's More section, so the order
   // here is the only grouping signal (no nested collapse UI this pass).
   const secondaryNavItems: ShellNavItem[] = [
+    // Direct access to individual pages that are now ALSO reached as tabs
+    // inside Memory/Life/Work/Interior — kept here, unchanged, so nothing
+    // that used to be a direct link becomes harder to reach.
+    { view: 'notes', label: 'Notes', icon: 'edit_note' },
     { view: 'calendar', label: 'Calendar', icon: 'calendar_today' },
     { view: 'email', label: 'Email', icon: 'email' },
     { view: 'documents', label: 'Documents', icon: 'description' },
-    { view: 'artifacts', label: 'Studio', icon: 'auto_awesome' },
     { view: 'tasks', label: 'Tasks', icon: 'check_circle' },
     { view: 'projects', label: 'Projects', icon: 'work' },
+    { view: 'fitness', label: 'Fitness', icon: 'fitness_center' },
     { view: 'recipes', label: 'Recipes', icon: 'restaurant_menu' },
     { view: 'learn', label: 'Learn', icon: 'school' },
     { view: 'briefings', label: 'Briefings', icon: 'wb_sunny' },
@@ -468,11 +482,11 @@ function App() {
     { view: 'acs', label: 'ACS', icon: 'smart_toy' },
     { view: 'sensory-monitor', label: 'Sensory', icon: 'sensors' },
     { view: 'machines', label: 'Machines', icon: 'dns' },
+    { view: 'system', label: 'System', icon: 'hub' },
+    { view: 'mind', label: 'Mind', icon: 'psychology_alt' },
     { view: 'orchestrator-lab', label: 'Orchestrator Lab', icon: 'science' },
     { view: 'system-status', label: 'System Status', icon: 'monitoring' },
-    { view: 'interior', label: 'Interior', icon: 'insights' },
     { view: 'privacy-dashboard', label: 'Privacy', icon: 'lock' },
-    { view: 'settings', label: 'Settings', icon: 'settings' },
   ]
 
   const mobileBottomNavItems: ShellNavItem[] = primaryNavItems

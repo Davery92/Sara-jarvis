@@ -111,12 +111,15 @@ export default function Documents() {
     return '📎'
   }
 
-  const getStatusColor = (processed: boolean) => {
-    return processed ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'
+  // Backend stores is_processed as the literal string "true"/"false"
+  // (app/models/doc.py), not a real boolean — a non-empty string is always
+  // truthy in JS, so comparing against 'true' is required, not cosmetic.
+  const getStatusColor = (processed: string) => {
+    return processed === 'true' ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'
   }
 
-  const getStatusText = (processed: boolean) => {
-    return processed ? 'Processed' : 'Processing'
+  const getStatusText = (processed: string) => {
+    return processed === 'true' ? 'Processed' : 'Processing'
   }
 
   return (

@@ -27,6 +27,9 @@ export type AppView =
   | 'machines'
   | 'mind'
   | 'interior'
+  | 'life'
+  | 'work'
+  | 'memory'
 
 interface AppViewConfig {
   view: AppView
@@ -66,6 +69,9 @@ export const APP_VIEWS: AppViewConfig[] = [
   { view: 'machines', path: '/machines', title: 'Machines', icon: 'dns', keywords: ['machines', 'fleet', 'servers', 'hosts', 'infrastructure', 'boxes', 'health', 'disk', 'agent'] },
   { view: 'mind', path: '/mind', title: 'Mind', icon: 'psychology_alt', keywords: ['mind', 'workspace', 'self', 'self-model', 'health', 'calibration', 'trust', 'autonomy', 'predictions', 'concern', 'audit'] },
   { view: 'interior', path: '/interior', title: 'Interior', icon: 'insights', keywords: ['interior', 'kernel', 'intents', 'attention', 'actions', 'contradictions', 'singular', 'truth', 'body state'] },
+  { view: 'life', path: '/life', title: 'Life', icon: 'favorite', keywords: ['life', 'calendar', 'email', 'fitness', 'recipes', 'routines', 'home'] },
+  { view: 'work', path: '/work', title: 'Work', icon: 'work', keywords: ['work', 'projects', 'automations', 'agent tasks', 'machines', 'standing orders'] },
+  { view: 'memory', path: '/memory', title: 'Memory', icon: 'psychology', keywords: ['memory', 'notes', 'documents', 'knowledge', 'learn', 'facts', 'people'] },
 ]
 
 const VIEW_ALIASES: Record<string, AppView> = {
