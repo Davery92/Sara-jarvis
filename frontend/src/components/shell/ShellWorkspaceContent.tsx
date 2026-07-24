@@ -28,6 +28,7 @@ const loadACSPage = () => import('../../pages/ACSPage')
 const loadSystemDashboard = () => import('../system/SystemDashboard')
 const loadMachinesDashboard = () => import('../machines/MachinesDashboard')
 const loadMindDashboard = () => import('../mind/MindDashboard')
+const loadInterior = () => import('../../pages/Interior')
 const loadSensoryMonitor = () => import('../SensoryMonitor')
 const loadEmailPage = () => import('../EmailPage')
 const loadPersonalKnowledge = () => import('../PersonalKnowledge')
@@ -49,6 +50,7 @@ const SystemStatus = lazy(loadSystemStatus)
 const SystemDashboard = lazy(loadSystemDashboard)
 const MachinesDashboard = lazy(loadMachinesDashboard)
 const MindDashboard = lazy(loadMindDashboard)
+const Interior = lazy(loadInterior)
 const ACSPage = lazy(loadACSPage)
 const SensoryMonitor = lazy(loadSensoryMonitor)
 const EmailPage = lazy(loadEmailPage)
@@ -378,6 +380,14 @@ export default function ShellWorkspaceContent({
     return (
       <div className="flex-1 overflow-y-auto min-h-0">
         {renderDeferredView('Loading the mind…', <MindDashboard />)}
+      </div>
+    )
+  }
+
+  if (targetView === 'interior') {
+    return (
+      <div className="flex-1 overflow-y-auto min-h-0">
+        {renderDeferredView('Loading Interior…', <Interior />)}
       </div>
     )
   }

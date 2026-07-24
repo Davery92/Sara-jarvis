@@ -470,6 +470,7 @@ function App() {
     { view: 'machines', label: 'Machines', icon: 'dns' },
     { view: 'orchestrator-lab', label: 'Orchestrator Lab', icon: 'science' },
     { view: 'system-status', label: 'System Status', icon: 'monitoring' },
+    { view: 'interior', label: 'Interior', icon: 'insights' },
     { view: 'privacy-dashboard', label: 'Privacy', icon: 'lock' },
     { view: 'settings', label: 'Settings', icon: 'settings' },
   ]
