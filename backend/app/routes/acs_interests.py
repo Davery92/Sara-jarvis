@@ -52,6 +52,11 @@ class InterestOut(BaseModel):
     source: str
     created_at: datetime
     blocked: bool = False
+    # SARA_PROACTIVENESS_IMPLEMENTATION_PLAN_2026_07_25 P5.1 lifecycle:
+    # noticed -> candidate -> aligned -> proposed -> discussing
+    #   -> approved | deferred | rejected -> active
+    #   -> blocked | completed | abandoned
+    status: str = "active"
 
 
 class InterestUpsertIn(BaseModel):
@@ -92,6 +97,7 @@ def _row_to_interest(row: dict) -> InterestOut:
         source=row["source"],
         created_at=row["created_at"],
         blocked=bool(row.get("blocked", False)),
+        status=row.get("status") or "active",
     )
 
 
@@ -139,7 +145,7 @@ async def list_interests(
             text(
                 f"""
                 SELECT id, topic, display_name, why, weight, last_acted_at,
-                       last_updated_at, source, created_at, blocked
+                       last_updated_at, source, created_at, blocked, status, status
                 FROM sara_interest
                 WHERE {' AND '.join(where)}
                 ORDER BY weight DESC, last_updated_at DESC
@@ -175,7 +181,7 @@ async def upsert_interest(payload: InterestUpsertIn) -> InterestUpsertOut:
             text(
                 """
                 SELECT id, topic, display_name, why, weight, last_acted_at,
-                       last_updated_at, source, created_at, blocked
+                       last_updated_at, source, created_at, blocked, status
                 FROM sara_interest WHERE topic = :topic
                 """
             ),
@@ -187,7 +193,7 @@ async def upsert_interest(payload: InterestUpsertIn) -> InterestUpsertOut:
                 text(
                     """
                     SELECT id, topic, display_name, why, weight, last_acted_at,
-                           last_updated_at, source, created_at, blocked,
+                           last_updated_at, source, created_at, blocked, status,
                            1 - (embedding <=> CAST(:vec AS vector)) AS similarity
                     FROM sara_interest
                     WHERE embedding IS NOT NULL
@@ -229,7 +235,7 @@ async def upsert_interest(payload: InterestUpsertIn) -> InterestUpsertOut:
                         embedding = COALESCE(CAST(:vec AS vector), embedding)
                     WHERE id = :id
                     RETURNING id, topic, display_name, why, weight, last_acted_at,
-                              last_updated_at, source, created_at, blocked
+                              last_updated_at, source, created_at, blocked, status
                     """
                 ),
                 {
@@ -242,15 +248,24 @@ async def upsert_interest(payload: InterestUpsertIn) -> InterestUpsertOut:
             await db.commit()
             return InterestUpsertOut(interest=_row_to_interest(dict(row)), merged=True)
 
+        # P5.1: a self-noticed interest starts life at 'noticed' — she may
+        # name it and lightly research it, but the daemon-side gate
+        # (mind.py) requires 'approved' or 'active' before provisioning a
+        # container or executing anything in one for this interest's work.
+        # An interest David creates himself, or one upserted from a real
+        # external event he'd clearly want tracked, needs no separate
+        # approval step — creating/reporting it IS the approval.
+        initial_status = "approved" if payload.source in ("manual", "external_event") else "noticed"
+
         row = (await db.execute(
             text(
                 """
                 INSERT INTO sara_interest
-                    (topic, display_name, why, weight, source, embedding)
+                    (topic, display_name, why, weight, source, embedding, status)
                 VALUES
-                    (:topic, :display_name, :why, :weight, :source, CAST(:vec AS vector))
+                    (:topic, :display_name, :why, :weight, :source, CAST(:vec AS vector), :status)
                 RETURNING id, topic, display_name, why, weight, last_acted_at,
-                          last_updated_at, source, created_at, blocked
+                          last_updated_at, source, created_at, blocked, status
                 """
             ),
             {
@@ -260,6 +275,7 @@ async def upsert_interest(payload: InterestUpsertIn) -> InterestUpsertOut:
                 "weight": max(payload.weight_delta, 0.1),
                 "source": payload.source,
                 "vec": str(vec) if vec is not None else None,
+                "status": initial_status,
             },
         )).mappings().first()
         await db.commit()
@@ -282,7 +298,7 @@ async def bump_interest(
                     last_updated_at = NOW()
                 WHERE id = :id
                 RETURNING id, topic, display_name, why, weight, last_acted_at,
-                          last_updated_at, source, created_at, blocked
+                          last_updated_at, source, created_at, blocked, status
                 """
             ),
             {"delta": delta, "id": interest_id},
@@ -297,17 +313,21 @@ async def bump_interest(
              dependencies=[Depends(verify_daemon_token)])
 async def touch_interest(interest_id: str) -> InterestOut:
     """Mark that she opened a session on this interest. Sets last_acted_at=NOW()
-    so the idle-seeding query won't re-pick it until it goes stale again."""
+    so the idle-seeding query won't re-pick it until it goes stale again.
+    Also the approved -> active lifecycle transition: the first real work
+    session after David's approval is what makes an interest 'active', not
+    the approval itself."""
     async_session = get_async_session_factory()
     async with async_session() as db:
         row = (await db.execute(
             text(
                 """
                 UPDATE sara_interest
-                SET last_acted_at = NOW(), last_updated_at = NOW()
+                SET last_acted_at = NOW(), last_updated_at = NOW(),
+                    status = CASE WHEN status = 'approved' THEN 'active' ELSE status END
                 WHERE id = :id
                 RETURNING id, topic, display_name, why, weight, last_acted_at,
-                          last_updated_at, source, created_at, blocked
+                          last_updated_at, source, created_at, blocked, status
                 """
             ),
             {"id": interest_id},
@@ -355,7 +375,7 @@ async def block_interest(
                     last_updated_at = NOW()
                 WHERE id = :id
                 RETURNING id, topic, display_name, why, weight, last_acted_at,
-                          last_updated_at, source, created_at, blocked
+                          last_updated_at, source, created_at, blocked, status
                 """
             ),
             {"id": interest_id, "blocked": blocked},
@@ -364,6 +384,66 @@ async def block_interest(
     if not row:
         raise HTTPException(status_code=404, detail="interest not found")
     return _row_to_interest(dict(row))
+
+
+async def _set_status(interest_id: str, status: str) -> InterestOut:
+    async_session = get_async_session_factory()
+    async with async_session() as db:
+        row = (await db.execute(
+            text(
+                """
+                UPDATE sara_interest
+                SET status = :status, last_updated_at = NOW()
+                WHERE id = :id
+                RETURNING id, topic, display_name, why, weight, last_acted_at,
+                          last_updated_at, source, created_at, blocked, status
+                """
+            ),
+            {"id": interest_id, "status": status},
+        )).mappings().first()
+        await db.commit()
+    if not row:
+        raise HTTPException(status_code=404, detail="interest not found")
+    return _row_to_interest(dict(row))
+
+
+@router.post("/{interest_id}/approve", response_model=InterestOut)
+async def approve_interest(
+    interest_id: str,
+    current_user: User = Depends(get_current_user),
+) -> InterestOut:
+    """David approves a proposed interest — the daemon may now use
+    provision_container/exec_in_container for it (mind.py gate)."""
+    return await _set_status(interest_id, "approved")
+
+
+@router.post("/{interest_id}/reject", response_model=InterestOut)
+async def reject_interest(
+    interest_id: str,
+    current_user: User = Depends(get_current_user),
+) -> InterestOut:
+    """David declines a proposed interest for now. Unlike /block, this is
+    not a permanent veto — a genuinely different future proposal on the
+    same topic can still be discussed."""
+    return await _set_status(interest_id, "rejected")
+
+
+@router.post("/{interest_id}/defer", response_model=InterestOut)
+async def defer_interest(
+    interest_id: str,
+    current_user: User = Depends(get_current_user),
+) -> InterestOut:
+    """David wants to revisit this interest later rather than decide now."""
+    return await _set_status(interest_id, "deferred")
+
+
+@router.post("/{interest_id}/discuss", response_model=InterestOut)
+async def discuss_interest(
+    interest_id: str,
+    current_user: User = Depends(get_current_user),
+) -> InterestOut:
+    """A conversation happened about this interest without a yes/no yet."""
+    return await _set_status(interest_id, "discussing")
 
 
 @router.delete("/{interest_id}")

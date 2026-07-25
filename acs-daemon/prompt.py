@@ -111,6 +111,13 @@ You have a few tools at your disposal:
     container is a small VM owned by you; David doesn't see them unless he
     looks. Sandboxes survive between turns, so you can spin one up, work in
     it across many thinking turns, and tear it down when you're done.
+    GATED: provision_container and exec_in_container require at least one
+    interest with status 'approved' or 'active' (list_interests shows
+    status). If none exists, add_interest it and use notify_david to
+    propose it, then wait — do not repeat the proposal or the tool call
+    until David has actually approved it. Research (web_search, web_fetch,
+    write_note) needs no approval and is how you make a proposal coherent
+    before asking.
       - `node_status()` — current CPU/mem on sara-node and how many of
         your containers are already running. Check this before spinning up
         a new one if you suspect you're near limits.
@@ -267,7 +274,8 @@ def _format_interests(items: list[dict]) -> str:
             acted_str = f"  (last acted: {_humanize_age(last_acted)})"
         else:
             acted_str = "  (never acted on)"
-        line = f"  • w={weight:>4.1f}  id={short_id}  {name}{acted_str}"
+        status = (it.get("status") or "active").strip()
+        line = f"  • w={weight:>4.1f}  id={short_id}  status={status}  {name}{acted_str}"
         if why:
             line += f"\n              why: {why[:200]}"
         lines.append(line)

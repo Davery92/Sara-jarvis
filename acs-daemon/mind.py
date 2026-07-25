@@ -14,6 +14,7 @@ If anything goes wrong (LLM unreachable, malformed JSON, tool failures), an
 """
 from __future__ import annotations
 
+import difflib
 import json
 import logging
 from datetime import datetime, timezone
@@ -76,7 +77,7 @@ class Mind:
 
         parsed = await self._run_chained_turn(
             system=system, user=user, turn="think",
-            max_tokens=900, temperature=0.7,
+            max_tokens=900, temperature=0.7, interests=interests,
         )
         if parsed is None:
             return None
@@ -119,7 +120,7 @@ class Mind:
 
         parsed = await self._run_chained_turn(
             system=system, user=user, turn="reflect",
-            max_tokens=1200, temperature=0.5,
+            max_tokens=1200, temperature=0.5, interests=interests,
         )
         if parsed is None:
             return None
@@ -127,6 +128,21 @@ class Mind:
         reflection = (parsed.get("reflection") or "").strip()
         verdict = parsed.get("verdict")
         summary = (parsed.get("summary") or reflection.split(".")[0] or "reflection").strip()[:200]
+
+        # SARA_PROACTIVENESS_AUDIT_AND_PLAN_2026_07_25 §5.6/§8.2: prompt-level
+        # instructions not to narrate "I'm still being still" twice weren't
+        # enough in practice — reflection history kept repeating "going
+        # quiet" verdicts every few hours. This is the code-level backstop:
+        # an idle/looping verdict whose text is substantially the same as
+        # the last reflection collapses into one compact marker instead of
+        # a fresh fully-narrated entry, so quiet periods stay quiet in the
+        # activity log too, not just in cadence (ACS2 already handles that).
+        if verdict in {"idle", "looping"}:
+            prior = await self.backend.list_activity(limit=1, kind="reflection")
+            prior_text = (prior[0].get("body") or prior[0].get("summary") or "").strip() if prior else ""
+            if self._is_repetitive_narration(reflection or summary, prior_text):
+                summary = f"still {verdict} — nothing new since last reflection"
+                reflection = None
 
         await self.backend.append_activity(
             kind="reflection", summary=summary, body=reflection or None,
@@ -146,7 +162,7 @@ class Mind:
     # ── chained tool execution ──
     async def _run_chained_turn(
         self, *, system: str, user: str, turn: str,
-        max_tokens: int, temperature: float,
+        max_tokens: int, temperature: float, interests: list[dict] | None = None,
     ) -> Optional[dict]:
         """Loop: call LLM → if tool_calls + finish=false, run them, re-ask, repeat.
 
@@ -200,14 +216,25 @@ class Mind:
             # Execute the requested tool calls.
             tool_calls = tool_calls[:MAX_TOOL_CALLS_PER_BATCH]
             results = await self._execute_tool_calls(tool_calls, turn=turn,
-                                                     iteration=iteration)
+                                                     iteration=iteration, interests=interests)
             # Re-ask the LLM with the results appended to the user prompt.
             current_user = self._build_followup_prompt(user, parsed, results, iteration)
 
         return last_parsed
 
+    # Tools that do real, consequential VM work — provisioning compute,
+    # running arbitrary commands — as opposed to research/notes/interest
+    # bookkeeping. SARA_PROACTIVENESS_IMPLEMENTATION_PLAN_2026_07_25 P5.2:
+    # "no self-originated focused work starts without an approval record."
+    _SUBSTANTIVE_VM_TOOLS = {"provision_container", "exec_in_container"}
+
+    @staticmethod
+    def _has_approved_interest(interests: list[dict] | None) -> bool:
+        return any((it.get("status") in ("approved", "active")) for it in (interests or []))
+
     async def _execute_tool_calls(
         self, calls: list[dict], *, turn: str, iteration: int,
+        interests: list[dict] | None = None,
     ) -> list[dict]:
         """Run a batch of tool calls, log call+result activity, return results."""
         results: list[dict] = []
@@ -225,6 +252,25 @@ class Mind:
                     metadata={"turn": turn, "iteration": iteration, "tool": name},
                 )
                 results.append({"name": name, "args": args, "error": "unknown tool"})
+                continue
+
+            if name in self._SUBSTANTIVE_VM_TOOLS and not self._has_approved_interest(interests):
+                logger.info("%s: blocked %r — no approved/active interest yet", turn, name)
+                await self.backend.append_activity(
+                    kind="error",
+                    summary=f"{name} blocked: no approved interest"[:200],
+                    body=(
+                        "Proposed interests need David's approval (POST "
+                        ".../interests/{id}/approve) before provisioning "
+                        "compute or running commands for them. Propose the "
+                        "interest and wait, or work on an already-approved one."
+                    ),
+                    metadata={"turn": turn, "iteration": iteration, "tool": name},
+                )
+                results.append({
+                    "name": name, "args": args,
+                    "error": "no approved/active interest — propose it and wait for approval first",
+                })
                 continue
 
             # Log the call attempt.
@@ -415,6 +461,19 @@ class Mind:
         # Sort by similarity desc, cap at 5.
         merged.sort(key=lambda r: r.get("similarity", 0.0), reverse=True)
         return merged[:5]
+
+    # Below this ratio, two reflections are "about the same nothing" rather
+    # than genuinely new content — calibrated loose on purpose: paraphrased
+    # idle narration ("still quiet, nothing pulling at me" vs "remaining
+    # still, no thread worth pulling on") should still collapse.
+    _NARRATION_SIMILARITY_THRESHOLD = 0.55
+
+    @staticmethod
+    def _is_repetitive_narration(new_text: str, prior_text: str) -> bool:
+        if not new_text or not prior_text:
+            return False
+        ratio = difflib.SequenceMatcher(None, new_text.lower(), prior_text.lower()).ratio()
+        return ratio >= Mind._NARRATION_SIMILARITY_THRESHOLD
 
     @staticmethod
     def _recalled_meta(recall: list[dict]) -> list[dict]:

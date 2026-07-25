@@ -1133,11 +1133,18 @@ def daily_autonomy_digest(self):
 
 
 async def _daily_digest_async():
+    """SARA_PROACTIVENESS_AUDIT_AND_PLAN_2026_07_25 §3/§7.2: "notification
+    counts, agent-run counts, or autonomy status" is explicitly listed as
+    usually not worth a push — it reports machinery instead of helping
+    David. This used to end in a `send_notification` push; it no longer
+    does. The stats are still computed and returned (visible in Celery task
+    results / Interior diagnostics) so nothing about the underlying
+    visibility is lost — only the "keep_internal" delivery decision changed,
+    from "always push" to "never push"."""
     from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
     from sqlalchemy.orm import sessionmaker
     import os
     import json
-    from app.services.unified_notification import send_notification
     from app.db.session import get_async_session_factory
     async_session = get_async_session_factory()
     async with async_session() as db:
@@ -1176,25 +1183,12 @@ async def _daily_digest_async():
         if runs == 0 and notifs_sent == 0:
             return {"skipped": "no_activity"}
 
-        lines = [f"Autonomy Digest for {today}:"]
-        lines.append(f"- {runs} agent runs ({errors} errors)")
-        lines.append(f"- {notifs_sent} notifications sent ({notifs_dismissed} dismissed)")
-
-        message = "\n".join(lines)
-
-        await send_notification(
-            user_id=user_id,
-            title="Daily Autonomy Digest",
-            message=message,
-            topic=f"digest:daily_{today}",
-            category="general",
-            priority="low",
-            source="daily_digest",
-            db=db,
+        logger.info(
+            f"[daily_autonomy_digest] {today}: {runs} agent runs ({errors} errors), "
+            f"{notifs_sent} notifications sent ({notifs_dismissed} dismissed) — kept internal, not pushed"
         )
-        await db.commit()
 
-        return {"runs": runs, "errors": errors, "notifications": notifs_sent}
+        return {"runs": runs, "errors": errors, "notifications": notifs_sent, "pushed": False}
 
 
 # ─── Retention Cleanup (Phase 0 — Cortana Evolution) ───────────────────

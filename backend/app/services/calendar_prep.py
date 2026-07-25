@@ -15,6 +15,17 @@ from sqlalchemy import text
 logger = logging.getLogger(__name__)
 
 
+# Same keyword set activity_state_machine.py already uses to recognize a
+# workout calendar event, kept in sync so "is this a routine personal event"
+# means the same thing everywhere in the codebase rather than drifting.
+_ROUTINE_PERSONAL_KEYWORDS = ("gym", "workout", "exercise", "gymnastics", "training", "crossfit")
+
+
+def _is_routine_personal_event(title: Optional[str]) -> bool:
+    t = (title or "").lower()
+    return any(kw in t for kw in _ROUTINE_PERSONAL_KEYWORDS)
+
+
 async def _attendee_history_lines(user_id: str, attendees: list) -> list:
     """One line per named attendee with a real person row: last interaction +
     the nearest open follow-up thread mentioning them (best-effort text match —
@@ -110,6 +121,16 @@ async def check_and_send_preps(user_id: str):
             continue
         if role.is_broadcast:
             logger.info(f"Calendar prep skipped for '{title}': broadcast invite ({role.attendee_count} attendees, not organizer)")
+            continue
+        if _is_routine_personal_event(title):
+            # SARA_PROACTIVENESS_AUDIT_AND_PLAN_2026_07_25 §7.2: "a routine
+            # workout ... reminder without a conflict" is explicitly listed
+            # as usually not worth a push — it's already on the calendar he
+            # put it on, and a "starts in 45 min" buzz for the gym adds
+            # nothing a routine event doesn't already tell him. Real meeting
+            # prep (context, attendee history, research) stays; a bare
+            # routine-personal-event ping does not.
+            logger.info(f"Calendar prep skipped for '{title}': routine personal event, no prep value")
             continue
 
         await _prep_for_event(

@@ -117,8 +117,14 @@ class BehavioralPatternService:
     CONFIDENCE_INCREMENT = 0.15  # How much confidence increases per observation
     CONFIDENCE_DECAY = 0.02  # Daily decay if pattern not observed
 
-    # Rejection thresholds
-    MAX_REJECTIONS_BEFORE_DORMANT = 3
+    # Rejection thresholds. SARA_PROACTIVENESS_AUDIT_AND_PLAN_2026_07_25 §7.2/
+    # IMPLEMENTATION_PLAN P4 home patterns: "propose once ... use rejection or
+    # Never to block recurrence; never escalate an ignored proposal." Was 3 —
+    # meaning David had to reject the SAME home-automation proposal three
+    # separate times (each re-suggested after only a 24h cooldown, per
+    # `cooldown_hours` default) before it stopped. One explicit "no" is a
+    # decision, not the start of a negotiation.
+    MAX_REJECTIONS_BEFORE_DORMANT = 1
 
     async def create_pattern(
         self,

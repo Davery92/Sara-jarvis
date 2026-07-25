@@ -996,6 +996,38 @@ async def _learned_buzz_decision(db: AsyncSession, user_id: str, category: str) 
         return False
 
 
+# SARA_PROACTIVENESS_IMPLEMENTATION_PLAN_2026_07_25 P2: "an initial adaptive
+# budget of no more than two non-urgent proactive pushes per day, excluding
+# requested timers, reminders, and critical events." Categories in this set
+# are the "requested timers, reminders" carve-out — explicit, David-requested
+# commitments are never rationed. Urgent/critical priority is exempted at the
+# call site below, not here.
+_BUDGET_EXEMPT_CATEGORIES = {"timer", "reminder", "reminders", "timers"}
+DAILY_NON_URGENT_PUSH_BUDGET = 2
+
+
+async def _daily_push_budget_available(db: AsyncSession, user_id: str, category: str, priority: str) -> bool:
+    """True iff this proactive push is exempt from the daily budget, or the
+    budget still has room today (ET). Fails open (True) on any query error —
+    a broken budget check must never itself suppress a legitimate push."""
+    if priority in ("urgent", "critical") or category in _BUDGET_EXEMPT_CATEGORIES:
+        return True
+    try:
+        row = await _db_execute(db, text("""
+            SELECT COUNT(*) FROM notification_log
+            WHERE user_id = :uid AND sent = TRUE
+              AND priority NOT IN ('urgent', 'critical')
+              AND category NOT IN ('timer', 'reminder', 'reminders', 'timers')
+              AND sent_at >= (date_trunc('day', NOW() AT TIME ZONE 'America/New_York')
+                              AT TIME ZONE 'America/New_York')
+        """), {"uid": user_id})
+        count_today = int(row.scalar() or 0)
+        return count_today < DAILY_NON_URGENT_PUSH_BUDGET
+    except Exception as e:
+        logger.debug(f"[budget] daily push budget check failed, failing open: {e}")
+        return True
+
+
 async def route_through_attention_queue(
     user_id: str,
     title: str,
@@ -1118,6 +1150,21 @@ async def route_through_attention_queue(
     if not should_push:
         should_push = await _learned_buzz_decision(db, user_id, category)
 
+    # P2 daily budget: even an item that earned a push (by priority or the
+    # learned buzz decision) still competes for one of the day's two
+    # non-urgent push slots — this is what makes "no more than two per day"
+    # a real ceiling instead of a per-category cooldown that N different
+    # categories can each independently clear.
+    if should_push and not await _daily_push_budget_available(db, user_id, category, priority):
+        logger.info(
+            f"Attention queue push suppressed by daily budget: category={category} "
+            f"priority={priority} title={title[:60]}"
+        )
+        should_push = False
+        budget_exhausted = True
+    else:
+        budget_exhausted = False
+
     if should_push:
         result = await send_notification(
             user_id=user_id, title=title, message=message,
@@ -1133,7 +1180,8 @@ async def route_through_attention_queue(
         "sent": False,
         "attention_item_id": item_id,
         "routed_through_attention": True,
-        "reason": "Low/normal priority routed to attention queue (buzz decision: inbox-only)",
+        "reason": "daily_push_budget_exhausted" if budget_exhausted
+                  else "Low/normal priority routed to attention queue (buzz decision: inbox-only)",
     }
 
 
