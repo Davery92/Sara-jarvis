@@ -22,6 +22,8 @@ import LearningScreen from '../screens/learning/LearningScreen';
 import NotificationsScreen from '../screens/notifications/NotificationsScreen';
 import ACSScreen from '../screens/acs/ACSScreen';
 import InteriorScreen from '../screens/interior/InteriorScreen';
+import FitnessScreen from '../screens/fitness/FitnessScreen';
+import LifeScreen from '../screens/life/LifeScreen';
 import SystemScreen from '../screens/system/SystemScreen';
 import MachinesScreen from '../screens/machines/MachinesScreen';
 import StudioScreen from '../screens/studio/StudioScreen';
@@ -56,6 +58,8 @@ export type AppStackParamList = {
   System: undefined;
   Machines: undefined;
   Interior: undefined;
+  Fitness: undefined;
+  Life: undefined;
 };
 
 const Stack = createNativeStackNavigator<AppStackParamList>();
@@ -203,6 +207,16 @@ export default function AppNavigator() {
         name="Interior"
         component={InteriorScreen}
         options={{ title: 'Interior' }}
+      />
+      <Stack.Screen
+        name="Fitness"
+        component={FitnessScreen}
+        options={{ title: 'Fitness' }}
+      />
+      <Stack.Screen
+        name="Life"
+        component={LifeScreen}
+        options={{ title: 'Life' }}
       />
     </Stack.Navigator>
   );

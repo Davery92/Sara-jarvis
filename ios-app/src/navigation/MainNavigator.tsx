@@ -3,7 +3,8 @@ import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { Ionicons } from '@expo/vector-icons';
 import SaraScreen from '../screens/sara/SaraScreen';
 import AssistantInboxScreen from '../screens/inbox/AssistantInboxScreen';
-import FitnessScreen from '../screens/fitness/FitnessScreen';
+import ChatScreen from '../screens/chat/ChatScreen';
+import LifeScreen from '../screens/life/LifeScreen';
 import MoreScreen from '../screens/more/MoreScreen';
 import CustomTabBar from '../components/CustomTabBar';
 import { MainTabParamList } from '../types/navigation';
@@ -11,6 +12,13 @@ import { colors, fontSizes } from '../styles/theme';
 
 const Tab = createBottomTabNavigator<MainTabParamList>();
 
+// SINGULAR_SARA_MASTER_PLAN §U8 recommended iOS tabs: Sara, Today, Chat,
+// Life, More. `AssistantInboxTab`/`Fitness` route keys are unchanged from
+// before this pass (existing navigate() call sites keep working) — only
+// the tab bar's composition and labels changed: Fitness folded into Life
+// (still reachable from there, and from the app stack directly via
+// navigation.navigate('Fitness')), Chat promoted from a stack-only screen
+// to a persistent tab, Inbox relabeled "Today".
 export default function MainNavigator() {
   return (
     <Tab.Navigator
@@ -42,22 +50,35 @@ export default function MainNavigator() {
         name="AssistantInboxTab"
         component={AssistantInboxScreen}
         options={{
-          title: 'Inbox',
+          title: 'Today',
           headerShown: false,
-          tabBarLabel: 'Inbox',
+          tabBarLabel: 'Today',
           tabBarIcon: ({ color, size }) => (
             <TabBarIcon name="file-tray-full-outline" color={color} size={size} />
           ),
         }}
       />
       <Tab.Screen
-        name="Fitness"
-        component={FitnessScreen}
+        name="Chat"
+        component={ChatScreen}
         options={{
-          title: 'Fitness',
-          tabBarLabel: 'Fitness',
+          title: 'Chat',
+          headerShown: false,
+          tabBarLabel: 'Chat',
           tabBarIcon: ({ color, size }) => (
-            <TabBarIcon name="barbell-outline" color={color} size={size} />
+            <TabBarIcon name="chatbubble-ellipses-outline" color={color} size={size} />
+          ),
+        }}
+      />
+      <Tab.Screen
+        name="Life"
+        component={LifeScreen}
+        options={{
+          title: 'Life',
+          headerShown: false,
+          tabBarLabel: 'Life',
+          tabBarIcon: ({ color, size }) => (
+            <TabBarIcon name="heart-outline" color={color} size={size} />
           ),
         }}
       />

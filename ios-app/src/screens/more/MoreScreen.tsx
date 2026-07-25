@@ -194,7 +194,7 @@ export default function MoreScreen() {
           <Text style={styles.heroEyebrow}>Secondary Spaces</Text>
           <Text style={styles.title}>More</Text>
           <Text style={styles.subtitle}>
-            Use this area for specialist tools, deeper review, and system controls beyond the core Sara, Inbox, and Fitness flow.
+            Use this area for specialist tools, deeper review, and system controls beyond the core Sara, Today, Chat, and Life flow.
           </Text>
 
           <View style={styles.heroStatsRow}>
@@ -210,7 +210,7 @@ export default function MoreScreen() {
             </View>
             <View style={styles.heroStatCard}>
               <Text style={styles.heroStatLabel}>Primary</Text>
-              <Text style={styles.heroStatValue}>3</Text>
+              <Text style={styles.heroStatValue}>4</Text>
               <Text style={styles.heroStatMeta}>surfaces stay out of here</Text>
             </View>
           </View>

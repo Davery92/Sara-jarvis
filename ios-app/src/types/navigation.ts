@@ -105,13 +105,19 @@ export type ChatScreenParams = {
   taskInject?: { taskId: string; conversationId?: string; noteId?: string };
 };
 
-// Main Tab Navigator
+// Main Tab Navigator — SINGULAR_SARA_MASTER_PLAN §U8: Sara, Today, Chat,
+// Life, More. `AssistantInboxTab` keeps its route key (existing call sites
+// navigate to it by name) but is now labeled "Today" in the tab bar; `Life`
+// replaces the standalone `Fitness` tab (Fitness itself moves to the app
+// stack, reachable from the Life hub and from any existing
+// navigation.navigate('Fitness') call).
 export type MainTabParamList = {
   Sara: undefined;
   AssistantInboxTab: {
     focus?: 'all' | 'waiting' | 'in_progress' | 'new' | 'done' | 'archived';
   } | undefined;
-  Fitness: undefined;
+  Chat: ChatScreenParams | undefined;
+  Life: undefined;
   More: undefined;
 };
 
