@@ -229,8 +229,41 @@ class Mind:
     _SUBSTANTIVE_VM_TOOLS = {"provision_container", "exec_in_container"}
 
     @staticmethod
-    def _has_approved_interest(interests: list[dict] | None) -> bool:
-        return any((it.get("status") in ("approved", "active")) for it in (interests or []))
+    def _resolve_interest(short_or_full_id: str, interests: list[dict] | None) -> Optional[dict]:
+        sid = (short_or_full_id or "").strip()
+        if len(sid) < 4:
+            return None
+        for it in (interests or []):
+            full = str(it.get("id", ""))
+            if full.startswith(sid) or full == sid:
+                return it
+        return None
+
+    @classmethod
+    def _approved_interest_for_call(
+        cls, args: dict, interests: list[dict] | None,
+    ) -> tuple[Optional[dict], Optional[str]]:
+        """Resolve the specific interest a VM tool call claims to be doing
+        work for, and validate it's actually approved. Returns
+        (interest, error) — exactly one is non-None.
+
+        Binding matters: a single approved interest must not blanket-unlock
+        VM tools for every OTHER interest the daemon happens to be turning
+        over that tick (SARA_PROACTIVENESS critique 2026-07-25 §4 — "approval
+        for one investigation can authorize unrelated self-originated work").
+        """
+        short_id = (args.get("interest_id") or "").strip()
+        if not short_id:
+            return None, ("missing interest_id — pass the id of the approved/active "
+                           "interest this work is for (see list_interests)")
+        interest = cls._resolve_interest(short_id, interests)
+        if interest is None:
+            return None, f"interest_id {short_id!r} not found in your current interests"
+        if interest.get("status") not in ("approved", "active"):
+            return None, (f"interest {interest.get('display_name', short_id)!r} has status "
+                           f"{interest.get('status')!r}, not approved/active — propose it and "
+                           "wait for David's decision first")
+        return interest, None
 
     async def _execute_tool_calls(
         self, calls: list[dict], *, turn: str, iteration: int,
@@ -254,32 +287,37 @@ class Mind:
                 results.append({"name": name, "args": args, "error": "unknown tool"})
                 continue
 
-            if name in self._SUBSTANTIVE_VM_TOOLS and not self._has_approved_interest(interests):
-                logger.info("%s: blocked %r — no approved/active interest yet", turn, name)
-                await self.backend.append_activity(
-                    kind="error",
-                    summary=f"{name} blocked: no approved interest"[:200],
-                    body=(
-                        "Proposed interests need David's approval (POST "
-                        ".../interests/{id}/approve) before provisioning "
-                        "compute or running commands for them. Propose the "
-                        "interest and wait, or work on an already-approved one."
-                    ),
-                    metadata={"turn": turn, "iteration": iteration, "tool": name},
-                )
-                results.append({
-                    "name": name, "args": args,
-                    "error": "no approved/active interest — propose it and wait for approval first",
-                })
-                continue
+            bound_interest = None
+            if name in self._SUBSTANTIVE_VM_TOOLS:
+                bound_interest, gate_error = self._approved_interest_for_call(args, interests)
+                if gate_error:
+                    logger.info("%s: blocked %r — %s", turn, name, gate_error)
+                    await self.backend.append_activity(
+                        kind="error",
+                        summary=f"{name} blocked: {gate_error}"[:200],
+                        body=(
+                            "VM tool calls must name the specific approved/active interest "
+                            "they're doing work for via interest_id (see list_interests). "
+                            "Proposed interests need David's approval (POST "
+                            ".../interests/{id}/approve) first — one approved interest does "
+                            "not authorize work on any other."
+                        ),
+                        metadata={"turn": turn, "iteration": iteration, "tool": name},
+                    )
+                    results.append({"name": name, "args": args, "error": gate_error})
+                    continue
 
-            # Log the call attempt.
+            # Log the call attempt. bound_interest_id records which specific
+            # interest authorized a VM tool call, for auditability — None for
+            # non-VM tools.
+            bound_interest_id = bound_interest.get("id") if bound_interest else None
             args_summary = self._summarize_args(name, args)
             await self.backend.append_activity(
                 kind="tool_call",
                 summary=f"{name}({args_summary})"[:200],
                 body=json.dumps({"name": name, "args": args}, indent=2)[:4000],
-                metadata={"turn": turn, "iteration": iteration, "tool": name},
+                metadata={"turn": turn, "iteration": iteration, "tool": name,
+                          "bound_interest_id": bound_interest_id},
             )
 
             # Run it.
@@ -298,7 +336,7 @@ class Mind:
                 tags=["error"] if error else [],
                 metadata={
                     "turn": turn, "iteration": iteration, "tool": name,
-                    "error": error,
+                    "error": error, "bound_interest_id": bound_interest_id,
                 },
             )
 
@@ -314,10 +352,11 @@ class Mind:
         if name == "write_note":
             return f"title={args.get('title', '')!r}"[:120]
         if name == "provision_container":
-            return f"preset={args.get('preset', 'research')!r}, purpose={args.get('purpose', '')!r}"[:120]
+            return (f"preset={args.get('preset', 'research')!r}, purpose={args.get('purpose', '')!r}, "
+                    f"interest_id={args.get('interest_id', '')!r}")[:160]
         if name == "exec_in_container":
             cmd = (args.get("command") or "")
-            return f"vmid={args.get('vmid')}, cmd={cmd!r}"[:120]
+            return f"vmid={args.get('vmid')}, cmd={cmd!r}, interest_id={args.get('interest_id', '')!r}"[:160]
         if name == "destroy_container":
             return f"vmid={args.get('vmid')}"
         if name in {"list_containers", "node_status", "list_interests", "list_goals"}:
