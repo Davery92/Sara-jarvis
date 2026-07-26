@@ -322,8 +322,8 @@ export function WorkoutModeProvider({ children }: { children: React.ReactNode })
       void syncWatch();
       // Sara may recommend a change off the back of this set — surfaced as
       // Approve / Keep current, never applied (§9.5, §11.2).
-      if ((result as any).proposal) {
-        setPendingProposal((result as any).proposal as WorkoutProposal);
+      if (result.proposal) {
+        setPendingProposal(result.proposal);
       }
       return {
         success: result.success,

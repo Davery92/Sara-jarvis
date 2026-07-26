@@ -870,6 +870,13 @@ class FitnessService {
       rest_seconds?: number;
       weight_adjustment?: number | null;
     };
+    /**
+     * A recommendation off the back of this set — surfaced as Approve / Keep
+     * current. Present but never applied: the execution target is unchanged
+     * until David says so (§11.2).
+     */
+    proposal?: WorkoutProposal | null;
+    session_version?: number;
     total_sets_completed?: number;
     total_volume?: number;
   }> {

@@ -626,9 +626,13 @@ async def ingest_workouts_batch(
                 ON CONFLICT (user_id, source, external_id) DO UPDATE
                     -- A re-sync must be able to attach the link it lacked the
                     -- first time, without ever clearing one already made.
-                    SET sara_session_id = COALESCE(
-                        external_workout.sara_session_id, EXCLUDED.sara_session_id
-                    )
+                    SET sara_session_id = EXCLUDED.sara_session_id
+                    -- Only when there is genuinely something to attach. The app
+                    -- re-uploads a rolling 30-day window, so an unconditional
+                    -- DO UPDATE would rewrite every historical row on every
+                    -- sync for nothing.
+                    WHERE external_workout.sara_session_id IS NULL
+                      AND EXCLUDED.sara_session_id IS NOT NULL
                 RETURNING id, (xmax = 0) AS was_insert
             """), {
                 "id": workout_id,

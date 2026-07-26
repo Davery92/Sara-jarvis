@@ -322,3 +322,53 @@ def test_ingestion_leaves_an_ordinary_watch_workout_unlinked(pg, user_id):
         duration_seconds=1800,
     )
     assert _resolve_sara_session(pg, user_id, w) is None
+
+
+@requires_pg
+@pytest.mark.asyncio
+async def test_resync_attaches_a_link_it_lacked_the_first_time(pg, user_id, template):
+    """The Watch's workout often syncs before the session records its UUID.
+
+    A later re-sync of the same workout must be able to attach the link — and
+    must not double-count the workout as newly inserted when it does.
+    """
+    from types import SimpleNamespace
+    from app.routes.health_metrics import (
+        BatchWorkoutsRequest, WorkoutInput, ingest_workouts_batch,
+    )
+
+    current_user = SimpleNamespace(id=user_id)
+    hk = str(uuid.uuid4())
+    payload = lambda: BatchWorkoutsRequest(workouts=[WorkoutInput(
+        external_id=hk, activity_type="50",
+        started_at="2026-07-26T10:00:00Z", ended_at="2026-07-26T11:00:00Z",
+        duration_seconds=3600, avg_heart_rate=130,
+    )])
+
+    first = await ingest_workouts_batch(payload(), db=pg, current_user=current_user)
+    assert (first.inserted_count, first.duplicate_count) == (1, 0)
+    assert pg.execute(text(
+        "SELECT sara_session_id FROM external_workout WHERE external_id = :hk"
+    ), {"hk": hk}).scalar() is None
+
+    # The session now claims that HealthKit workout.
+    sid = str(uuid.uuid4())
+    pg.execute(text("""
+        INSERT INTO active_workout_session (
+            id, user_id, template_id, status, workout_snapshot, healthkit_workout_uuid
+        ) VALUES (:id, :uid, :tid, 'completed', CAST('{}' AS jsonb), :hk)
+    """), {"id": sid, "uid": user_id, "tid": template, "hk": hk})
+    pg.commit()
+
+    second = await ingest_workouts_batch(payload(), db=pg, current_user=current_user)
+    assert (second.inserted_count, second.duplicate_count) == (0, 1)
+    assert pg.execute(text(
+        "SELECT sara_session_id FROM external_workout WHERE external_id = :hk"
+    ), {"hk": hk}).scalar() == sid
+
+    # And a third sync neither re-links nor re-counts.
+    third = await ingest_workouts_batch(payload(), db=pg, current_user=current_user)
+    assert (third.inserted_count, third.duplicate_count) == (0, 1)
+    assert pg.execute(text(
+        "SELECT COUNT(*) FROM external_workout WHERE external_id = :hk"
+    ), {"hk": hk}).scalar() == 1
