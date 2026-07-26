@@ -1,4 +1,14 @@
 import apiClient from './api';
+import type {
+  CoachingEvent,
+  CommandResult,
+  OriginDevice,
+  WatchCatalog,
+  WorkoutCommand,
+  WorkoutPolicy,
+  WorkoutProjection,
+  WorkoutProposal,
+} from './workoutContracts';
 
 export interface FoodLog {
   id: string;  // Composite ID for UI uniqueness (meal_log_id-index)
@@ -996,6 +1006,73 @@ class FitnessService {
     message: string;
   }> {
     return apiClient.post('/api/fitness/workout-session/abandon');
+  }
+
+  // ==========================================================================
+  // V2 — cross-device workout commands (Apple Watch + iPhone)
+  //
+  // The legacy endpoints above stay live and route into the same backend
+  // command service, so these are additive, not a cutover. What they add is
+  // the three things a second controller needs: an idempotent command id, a
+  // session version to check against, and a projection both devices render
+  // from. See `workoutContracts.ts` for the shapes.
+  // ==========================================================================
+
+  async v2Start(params: {
+    template_id: string;
+    start_attempt_id?: string;
+    origin_device?: OriginDevice;
+    healthkit_started_at?: string;
+    /** 'error' refuses to replace a running workout — that is the point (§6.6). */
+    on_conflict?: 'error' | 'abandon';
+  }): Promise<{ status: string; projection: WorkoutProjection }> {
+    return apiClient.post('/api/fitness/workout-session/v2/start', params);
+  }
+
+  async v2Active(compact = false): Promise<{ projection: WorkoutProjection | null }> {
+    return apiClient.get(`/api/fitness/workout-session/v2/active?compact=${compact}`);
+  }
+
+  /**
+   * Apply one command. Retrying with the same `command_id` replays the original
+   * result rather than applying twice.
+   */
+  async v2Command(command: WorkoutCommand): Promise<CommandResult> {
+    return apiClient.post('/api/fitness/workout-session/v2/commands', command);
+  }
+
+  /** Reconciliation after a reconnect or cold start — mirroring is primary. */
+  async v2Sync(afterVersion?: number, compact = false): Promise<{
+    projection: WorkoutProjection | null;
+    events: CoachingEvent[];
+  }> {
+    const params = new URLSearchParams({ compact: String(compact) });
+    if (afterVersion != null) params.append('after_version', String(afterVersion));
+    return apiClient.get(`/api/fitness/workout-session/v2/sync?${params.toString()}`);
+  }
+
+  /** Bind the exact HealthKit workout the Watch just saved (§6.4). */
+  async v2LinkHealthKit(params: {
+    session_id: string;
+    healthkit_workout_uuid: string;
+    activity_type?: string;
+    started_at?: string;
+    ended_at?: string;
+  }): Promise<{ success: boolean; external_workout_linked: boolean }> {
+    return apiClient.post('/api/fitness/workout-session/v2/healthkit-link', params);
+  }
+
+  /** Compact template list the Watch caches so it can start standalone (§7.5). */
+  async v2Catalog(limit = 8): Promise<WatchCatalog> {
+    return apiClient.get(`/api/fitness/workout-session/v2/catalog?limit=${limit}`);
+  }
+
+  async v2Proposals(status = 'pending'): Promise<{ proposals: WorkoutProposal[] }> {
+    return apiClient.get(`/api/fitness/workout-session/v2/proposals?status=${status}`);
+  }
+
+  async v2Policy(): Promise<{ policy: WorkoutPolicy }> {
+    return apiClient.get('/api/fitness/workout-session/v2/policy');
   }
 }
 

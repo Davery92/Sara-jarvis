@@ -20,6 +20,8 @@ import { navigateToChat, navigationRef, getCurrentViewName } from '../services/n
 import apiClient from '../services/api';
 import { consumeSiriPrompt } from '../services/siriDeepLink';
 import { refreshWidgetData } from '../services/widgetBridge';
+import { watchWorkout } from '../services/watchWorkout';
+import { workoutCoordinator } from '../services/workoutCoordinator';
 
 export const AuthenticatedOverlays: React.FC = () => {
   const { isAuthenticated } = useAuth();
@@ -212,8 +214,33 @@ export const AuthenticatedOverlays: React.FC = () => {
       } catch {}
     };
 
+    /**
+     * Apple Watch workout mirror (plan §7.2, §9.2).
+     *
+     * Must run at authenticated startup, not when the Fitness screen mounts:
+     * a workout David starts on his wrist arrives through a HealthKit handler
+     * that fires whether or not any Sara screen is open. If nothing is
+     * listening, the phone simply never learns a workout is underway — the
+     * exact failure this feature exists to remove.
+     *
+     * Hydrating the coordinator first restores any commands queued before the
+     * app was killed mid-workout, then flushes them; the backend replays
+     * duplicates rather than logging a second set.
+     */
+    const initWatchWorkout = async () => {
+      try {
+        await workoutCoordinator.hydrate();
+        watchWorkout.start();
+        await workoutCoordinator.flush();
+      } catch (e) {
+        // Never fatal: the phone workout must work with no Watch at all.
+        console.log('[AuthenticatedOverlays] Watch workout init skipped:', e);
+      }
+    };
+
     // Run all initializations
     initNotifications();
+    initWatchWorkout();
     initBackgroundHealthSync();
     initLocationTracking();
     syncHealth();
@@ -237,6 +264,11 @@ export const AuthenticatedOverlays: React.FC = () => {
         syncBadge();
         // Keep native geofence regions current with armed triggers/places
         resyncGeofences();
+        // Reconcile the workout after time away — mirrored messages are the
+        // primary transport, this is the fallback that catches what was
+        // missed while backgrounded, and retries anything still queued (§4.4).
+        void workoutCoordinator.sync().then(() => workoutCoordinator.flush());
+        void watchWorkout.syncCatalog();
       } else if (nextState === 'background' || nextState === 'inactive') {
         // Final hidden heartbeat so the backend reaper ends the session
         // promptly instead of waiting a full TTL.
@@ -254,6 +286,7 @@ export const AuthenticatedOverlays: React.FC = () => {
     // Cleanup on unmount
     return () => {
       pushNotificationService.cleanup();
+      watchWorkout.stop();
       appStateSubscription.remove();
       clearInterval(heartbeatInterval);
       navStateSub();
