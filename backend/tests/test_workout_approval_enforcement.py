@@ -189,6 +189,44 @@ async def test_completion_proposes_next_session_weights_without_applying(
 
 @requires_pg
 @pytest.mark.asyncio
+async def test_approved_progression_becomes_the_next_workouts_prescription(
+    pg, svc, user_id, template, v2_on
+):
+    """An approval that changes nothing would be theatre.
+
+    Approving a next-session progression out of the gym must mean the next
+    workout starts on that weight — and must not become standing permission
+    for every workout after it.
+    """
+    _history(pg, user_id, "Front Squat", 185, 5, 7, days_ago=4)
+    sid = (await svc.start(pg, user_id, template))["projection"]["session_id"]
+    await svc.execute(pg, user_id, {
+        "schema_version": 1, "command_id": str(uuid.uuid4()), "session_id": sid,
+        "expected_version": 1, "origin_device": "phone", "kind": "complete", "payload": {},
+    })
+
+    proposal = next(
+        p for p in svc.list_proposals(pg, user_id, status="pending")
+        if p["kind"] == "next_session_weight"
+    )
+    approved_weight = proposal["proposed_value"]["weight"]
+
+    await svc.execute(pg, user_id, {
+        "schema_version": 1, "command_id": str(uuid.uuid4()), "session_id": None,
+        "expected_version": None, "origin_device": "phone",
+        "kind": "approve_proposal", "payload": {"proposal_id": proposal["proposal_id"]},
+    })
+
+    second = await svc.start(pg, user_id, template)
+    assert second["projection"]["exercises"][0]["approved_weight"] == approved_weight
+    # Consumed, not standing: it must not silently re-apply forever.
+    assert pg.execute(text(
+        "SELECT status FROM workout_adjustment_proposal WHERE id = :p"
+    ), {"p": proposal["proposal_id"]}).scalar() == "superseded"
+
+
+@requires_pg
+@pytest.mark.asyncio
 async def test_without_the_flag_progression_is_applied_as_before(pg, svc, user_id, template):
     """Rollback path: flag off means today's behaviour, no proposal gate."""
     _history(pg, user_id, "Front Squat", 185, 5, 7, days_ago=4)

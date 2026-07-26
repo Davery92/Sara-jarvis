@@ -336,6 +336,7 @@ class WorkoutCommandService:
         deload = get_deload_state(db=db, user_id=user_id, on_date=date.today())
         is_deload = deload["is_deload"]
         enforce_approval = _v2_enabled()
+        consumed_approvals = self._approved_next_session_weights(db, user_id) if enforce_approval else {}
 
         snapshots = []
         for spec in specs:
@@ -346,12 +347,19 @@ class WorkoutCommandService:
             calculated = suggestion["suggested_weight"]
 
             # §6.8 — calculation is not application. The workout starts on the
-            # weight David last actually approved (what he lifted last time);
-            # Sara's new number rides along as a proposal she has to be told to
-            # apply. With the v2 flag off this collapses to today's behaviour.
+            # weight David last actually approved; Sara's new number rides along
+            # as a proposal she has to be told to apply. With the v2 flag off
+            # this collapses to today's behaviour.
             approved = calculated
             if enforce_approval:
-                approved = _last_approved_weight(suggestion.get("last_session")) or calculated
+                # A progression he already approved out of the gym IS the
+                # current prescription — otherwise approving it did nothing and
+                # he'd be asked the same question again at the rack.
+                approved = (
+                    consumed_approvals.get(name)
+                    or _last_approved_weight(suggestion.get("last_session"))
+                    or calculated
+                )
 
             effective_sets = target_sets
             if is_deload:
@@ -420,6 +428,16 @@ class WorkoutCommandService:
 
         session = self._load_by_id(db, session_id)
 
+        # A carried-over approval applies to exactly this workout. Retiring it
+        # here stops it silently re-applying to every future session, which
+        # would turn one "yes" into standing permission.
+        if consumed_approvals:
+            db.execute(text("""
+                UPDATE workout_adjustment_proposal
+                SET status = 'superseded', resolved_at = NOW()
+                WHERE user_id = :uid AND kind = 'next_session_weight' AND status = 'approved'
+            """), {"uid": user_id})
+
         # Surface the held-back progression as an approvable proposal rather
         # than quietly lifting more than David agreed to.
         if enforce_approval:
@@ -473,10 +491,25 @@ class WorkoutCommandService:
             # 3. Lock.
             session = self._lock_active_row(db, user_id)
 
-            # `set_policy` is about standing consent, not session state, so it
-            # is the one command that does not need an active workout.
+            # Two kinds are about consent rather than session state and must
+            # work with no workout running: standing policy, and resolving a
+            # proposal. Post-workout progression is deliberately approved out
+            # of the gym (§6.8) — requiring an active session would make those
+            # proposals unanswerable until David was back under a bar.
             if kind == "set_policy":
                 result = self._apply_set_policy(db, user_id, payload, origin)
+                self._record_command(db, command_id, None, user_id, origin, kind,
+                                     expected_version, payload, result, "applied")
+                db.commit()
+                return result
+
+            if not session and kind in ("approve_proposal", "reject_proposal"):
+                result = self._apply_resolve_proposal(
+                    db, None, user_id, payload, origin, command_id,
+                    approve=(kind == "approve_proposal"),
+                )
+                result = {"status": "accepted", "command_id": command_id,
+                          "projection": None, **result}
                 self._record_command(db, command_id, None, user_id, origin, kind,
                                      expected_version, payload, result, "applied")
                 db.commit()
@@ -564,9 +597,13 @@ class WorkoutCommandService:
         if kind == "abandon":
             return await self._apply_abandon(db, session, delete_sets=True)
         if kind == "approve_proposal":
-            return self._apply_resolve_proposal(db, session, payload, origin, command_id, approve=True)
+            return self._apply_resolve_proposal(
+                db, session, session["user_id"], payload, origin, command_id, approve=True
+            )
         if kind == "reject_proposal":
-            return self._apply_resolve_proposal(db, session, payload, origin, command_id, approve=False)
+            return self._apply_resolve_proposal(
+                db, session, session["user_id"], payload, origin, command_id, approve=False
+            )
         if kind == "healthkit_state":
             return self._apply_healthkit_state(db, session, payload)
         raise ValueError(f"unhandled kind {kind}")
@@ -1053,6 +1090,29 @@ class WorkoutCommandService:
             evidence={"target_rpe": target_rpe, "reported_rpe": rpe, "completed_reps": reps},
         )
 
+    def _approved_next_session_weights(self, db: Session, user_id: str) -> Dict[str, float]:
+        """Progressions David approved out of the gym, by exercise name (§6.8).
+
+        Newest wins if he answered the same question twice.
+        """
+        try:
+            rows = db.execute(text("""
+                SELECT scope, proposed_value FROM workout_adjustment_proposal
+                WHERE user_id = :uid AND kind = 'next_session_weight' AND status = 'approved'
+                ORDER BY resolved_at ASC
+            """), {"uid": user_id}).fetchall()
+        except Exception:
+            return {}
+
+        approved: Dict[str, float] = {}
+        for r in rows:
+            scope = r.scope if isinstance(r.scope, dict) else json.loads(r.scope or "{}")
+            value = r.proposed_value if isinstance(r.proposed_value, dict) else json.loads(r.proposed_value or "{}")
+            name, weight = scope.get("exercise"), value.get("weight")
+            if name and weight is not None:
+                approved[name] = float(weight)
+        return approved
+
     def _create_next_session_proposals(self, db: Session, session: Dict[str, Any]) -> None:
         """After the workout, propose next time's weights — never apply them."""
         if not _v2_enabled():
@@ -1087,8 +1147,8 @@ class WorkoutCommandService:
             )
 
     def _apply_resolve_proposal(
-        self, db: Session, session: Dict[str, Any], payload: Dict[str, Any],
-        origin: str, command_id: str, *, approve: bool,
+        self, db: Session, session: Optional[Dict[str, Any]], user_id: str,
+        payload: Dict[str, Any], origin: str, command_id: str, *, approve: bool,
     ) -> Dict[str, Any]:
         pid = payload.get("proposal_id")
         if not pid:
@@ -1098,7 +1158,7 @@ class WorkoutCommandService:
             SELECT id, session_id, kind, scope, current_value, proposed_value, status, expires_at
             FROM workout_adjustment_proposal
             WHERE id = :id AND user_id = :uid FOR UPDATE
-        """), {"id": pid, "uid": session["user_id"]}).fetchone()
+        """), {"id": pid, "uid": user_id}).fetchone()
         if not row:
             raise WorkoutConflict("proposal_stale", "That recommendation no longer exists.")
         if row.status != "pending":
@@ -1127,12 +1187,18 @@ class WorkoutCommandService:
         """), {"id": pid, "dev": origin, "cid": command_id})
         return {"proposal": {"proposal_id": pid, "status": "approved"}, "applied": applied}
 
-    def _apply_proposed_value(self, db: Session, session: Dict[str, Any], row) -> bool:
+    def _apply_proposed_value(self, db: Session, session: Optional[Dict[str, Any]], row) -> bool:
         """Write exactly the proposed value, nothing adjacent to it (§11.3)."""
         scope = row.scope if isinstance(row.scope, dict) else json.loads(row.scope or "{}")
         proposed = row.proposed_value if isinstance(row.proposed_value, dict) else json.loads(row.proposed_value or "{}")
 
         if row.kind in ("next_set_weight", "exercise_weight"):
+            if session is None:
+                # Scoped to a live workout by exercise index; with no session
+                # that index means nothing. Refuse rather than guess.
+                raise WorkoutConflict(
+                    "proposal_stale", "That workout is no longer running."
+                )
             snap = session["workout_snapshot"]
             exercises = snap.get("exercises") or []
             idx = scope.get("exercise_index")
@@ -1149,8 +1215,9 @@ class WorkoutCommandService:
             return True
 
         if row.kind == "next_session_weight":
-            # Nothing to mutate now — approving records the prescription that
-            # the next `start` will pre-fill from.
+            # Nothing to mutate in *this* session — the approval is the record,
+            # and `_approved_next_session_weights` turns it into the next
+            # workout's prescription (then retires it).
             return True
 
         logger.warning(f"[WorkoutCommand] no applicator for proposal kind {row.kind}")
