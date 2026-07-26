@@ -10,7 +10,6 @@ import SwiftUI
 /// proposal is displayed separately, as a proposal. Presenting Sara's
 /// preference as the default would make starting a workout an implicit
 /// approval, which is precisely the boundary §2.4 forbids crossing.
-@available(watchOS 10.0, *)
 struct PreStartView: View {
     let template: WatchCatalog.TemplateSummary
 

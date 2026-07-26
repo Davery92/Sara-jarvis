@@ -155,6 +155,7 @@ class WorkoutCoachingService {
       text: event.text,
       priority: event.priority,
       expiresAt: event.expires_at,
+      proposalId: event.proposal_id,
       audioBase64: audio,
     });
   }

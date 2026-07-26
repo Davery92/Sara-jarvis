@@ -10,7 +10,6 @@ import SwiftUI
 /// The list needs the full exercise array, which the compact Watch projection
 /// omits to keep per-set messages small. When it is absent this asks for it
 /// rather than pretending the workout has one exercise.
-@available(watchOS 10.0, *)
 struct ExerciseListView: View {
     @EnvironmentObject private var manager: WorkoutManager
     @Environment(\.dismiss) private var dismiss
@@ -20,12 +19,15 @@ struct ExerciseListView: View {
     var body: some View {
         List {
             if let exercises = projection?.exercises, !exercises.isEmpty {
-                ForEach(Array(exercises.enumerated()), id: \.offset) { index, exercise in
+                // One tuple parameter, taken whole. `{ index, exercise in }`
+                // relies on closure tuple destructuring, which Swift dropped in
+                // SE-0110 and rejects depending on how inference lands.
+                ForEach(Array(exercises.enumerated()), id: \.offset) { entry in
                     Button {
-                        manager.selectExercise(index)
+                        manager.selectExercise(entry.offset)
                         dismiss()
                     } label: {
-                        row(exercise, index: index)
+                        row(entry.element, index: entry.offset)
                     }
                 }
             } else {

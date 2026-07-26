@@ -14,7 +14,6 @@ import SwiftUI
 ///
 /// Both buttons issue the same kind of idempotent command, so a tap that is
 /// lost in flight resolves once when it replays — never twice, never opposite.
-@available(watchOS 10.0, *)
 struct ProposalView: View {
     let proposal: WorkoutProposal
 

@@ -14,7 +14,6 @@ import SwiftUI
 /// Everything about Sara's plan (which exercise, what weight, whether a change
 /// was approved) is backend state that arrives as a `WorkoutProjection`. This
 /// class never invents it; the only state it originates is physiological.
-@available(watchOS 10.0, *)
 @MainActor
 public final class WorkoutManager: NSObject, ObservableObject {
 
@@ -336,6 +335,11 @@ public final class WorkoutManager: NSObject, ObservableObject {
             if let pr = envelope.payload["pr"]?.objectValue, !pr.isEmpty {
                 WatchHaptics.personalRecord()
             }
+            // Only `complete` carries one; it is what swaps the set screen for
+            // the summary.
+            if let summary = envelope.payload["summary"], summary != .null {
+                completion = try? decode(WatchWorkoutSummary.self, from: summary)
+            }
             applyProjection(from: envelope)
             isStarting = false
 
@@ -379,8 +383,13 @@ public final class WorkoutManager: NSObject, ObservableObject {
             applyProjection(from: envelope)
 
         case .finishConfirmed:
-            if let summary = try? WorkoutWire.decodePayload(WatchWorkoutSummary.self, from: envelope) {
-                completion = summary
+            // Deliberately does NOT decode the whole payload as a summary:
+            // every field of WatchWorkoutSummary is optional, so decoding an
+            // envelope that carries something else succeeds and produces an
+            // all-nil summary — which is non-nil, and would strand the Watch
+            // on a blank summary screen. Only an explicit `summary` key counts.
+            if let summary = envelope.payload["summary"], summary != .null {
+                completion = try? decode(WatchWorkoutSummary.self, from: summary)
             }
             Task { await finalizeHealthKit(discard: false) }
 
@@ -391,6 +400,14 @@ public final class WorkoutManager: NSObject, ObservableObject {
         default:
             applyProjection(from: envelope)
         }
+    }
+
+    /// Re-encode one `JSONValue` and decode it as a concrete type.
+    ///
+    /// The payload is heterogeneous by design, so this is the seam between the
+    /// open wire format and the typed models.
+    private func decode<T: Decodable>(_ type: T.Type, from value: JSONValue) throws -> T {
+        try WorkoutWire.decoder.decode(T.self, from: WorkoutWire.encoder.encode(value))
     }
 
     private func applyProjection(from envelope: WireEnvelope) {
@@ -577,7 +594,6 @@ public final class WorkoutManager: NSObject, ObservableObject {
 
 // MARK: - HKWorkoutSessionDelegate
 
-@available(watchOS 10.0, *)
 extension WorkoutManager: HKWorkoutSessionDelegate {
     nonisolated public func workoutSession(
         _ workoutSession: HKWorkoutSession,
@@ -629,7 +645,6 @@ extension WorkoutManager: HKWorkoutSessionDelegate {
 
 // MARK: - HKLiveWorkoutBuilderDelegate
 
-@available(watchOS 10.0, *)
 extension WorkoutManager: HKLiveWorkoutBuilderDelegate {
     nonisolated public func workoutBuilderDidCollectEvent(_ workoutBuilder: HKLiveWorkoutBuilder) {}
 

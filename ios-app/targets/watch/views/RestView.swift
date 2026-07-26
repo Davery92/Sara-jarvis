@@ -10,7 +10,6 @@ import SwiftUI
 /// The countdown is driven locally by `WorkoutManager` from the backend's start
 /// time, not by inbound messages, so it stays right when the phone is in a bag
 /// on the other side of the gym.
-@available(watchOS 10.0, *)
 struct RestView: View {
     @EnvironmentObject private var manager: WorkoutManager
 

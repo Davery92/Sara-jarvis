@@ -63,6 +63,7 @@ interface SaraWorkoutNativeModuleType {
     text: string,
     priority: string,
     expiresAtEpochMs: number | null,
+    proposalId: string | null,
     audioBase64: string | null
   ): boolean
   suppressCoachingForProposal(proposalId: string): void
@@ -148,6 +149,8 @@ export function speakCoaching(opts: {
   text: string
   priority?: string
   expiresAt?: string | null
+  /** Set when this prompt asks for a decision, so it can be dropped once answered. */
+  proposalId?: string | null
   audioBase64?: string | null
 }): boolean {
   if (!SaraWorkoutNative) return false
@@ -157,6 +160,7 @@ export function speakCoaching(opts: {
     opts.text,
     opts.priority ?? 'normal',
     Number.isFinite(expiresMs) ? expiresMs : null,
+    opts.proposalId ?? null,
     opts.audioBase64 ?? null
   )
 }

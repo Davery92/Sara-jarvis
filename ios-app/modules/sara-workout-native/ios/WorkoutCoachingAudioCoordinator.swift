@@ -29,6 +29,9 @@ final class WorkoutCoachingAudioCoordinator: NSObject {
         let text: String
         let priority: String
         let expiresAt: Date?
+        /// Set when this prompt is Sara asking for a decision. Once David has
+        /// answered, anything still queued about it must not be spoken (§10.4).
+        let proposalId: String?
         /// Pre-fetched Sara/Kokoro audio. Nil falls back to on-device speech.
         let audioData: Data?
 
@@ -66,24 +69,27 @@ final class WorkoutCoachingAudioCoordinator: NSObject {
 
     /// Enqueue a coaching prompt.
     ///
-    /// Three filters before anything is spoken, in this order:
-    ///   - already spoken (mirrored delivery means the same event can arrive
-    ///     twice),
-    ///   - expired (coaching about two sets ago is worse than silence),
-    ///   - suppressed (a proposal David already answered).
+    /// `enqueue` is called from the JS bridge thread while `finish` runs on the
+    /// audio/main thread, so every touch of `queue` happens under the lock and
+    /// playback is always started *outside* it — a non-recursive NSLock held
+    /// across a callback that can re-enter is a deadlock waiting for a bad
+    /// moment, and a bad moment here is mid-set.
     func enqueue(_ prompt: Prompt) {
         guard isEnabled else { return }
 
         queueLock.lock()
-        defer { queueLock.unlock() }
 
-        guard !spokenEventIds.contains(prompt.eventId) else { return }
+        guard !spokenEventIds.contains(prompt.eventId),
+              !queue.contains(where: { $0.eventId == prompt.eventId }) else {
+            queueLock.unlock()
+            return
+        }
         if let expires = prompt.expiresAt, expires < Date() {
+            queueLock.unlock()
             log.notice("Dropping expired coaching \(prompt.eventId, privacy: .public)")
             observer?(prompt.eventId, "dropped", "expired")
             return
         }
-        guard !queue.contains(where: { $0.eventId == prompt.eventId }) else { return }
 
         if prompt.isCritical {
             // A PR or an approval request outranks routine encouragement; the
@@ -94,13 +100,20 @@ final class WorkoutCoachingAudioCoordinator: NSObject {
         } else {
             queue.append(prompt)
         }
-        drain()
+        queueLock.unlock()
+
+        pump()
     }
 
     /// Stop speaking about a proposal David has already answered.
+    ///
+    /// Drops anything queued for it as well as blocking future arrivals — a
+    /// prompt sitting behind a longer one would otherwise still ask a question
+    /// that has been answered.
     func suppress(proposalId: String) {
         queueLock.lock()
         suppressedProposalIds.insert(proposalId)
+        queue.removeAll { $0.proposalId == proposalId }
         queueLock.unlock()
     }
 
@@ -108,35 +121,54 @@ final class WorkoutCoachingAudioCoordinator: NSObject {
     func cancelAll(reason: String) {
         queueLock.lock()
         queue.removeAll()
+        // Under the lock with everything else that touches it — a stuck
+        // `isSpeaking` would silence coaching for the rest of the workout.
+        isSpeaking = false
         queueLock.unlock()
 
         synthesizer.stopSpeaking(at: .immediate)
         player?.stop()
         player = nil
-        isSpeaking = false
         deactivateSession()
         log.notice("Cancelled coaching audio: \(reason, privacy: .public)")
     }
 
     // MARK: - Playback
 
-    private func drain() {
-        guard !isSpeaking, !queue.isEmpty else { return }
-        let prompt = queue.removeFirst()
+    /// Take the next speakable prompt and start it. Never called under the lock.
+    private func pump() {
+        var next: Prompt?
 
-        // Re-check expiry at the moment of speaking: the prompt may have sat
-        // behind a longer one.
-        if let expires = prompt.expiresAt, expires < Date() {
-            observer?(prompt.eventId, "dropped", "expired")
-            drain()
-            return
+        queueLock.lock()
+        while !isSpeaking, !queue.isEmpty {
+            let candidate = queue.removeFirst()
+            // Re-check at the moment of speaking: it may have sat behind a
+            // longer prompt, or been answered while it waited.
+            if let expires = candidate.expiresAt, expires < Date() {
+                queueLock.unlock()
+                observer?(candidate.eventId, "dropped", "expired")
+                queueLock.lock()
+                continue
+            }
+            if let proposalId = candidate.proposalId, suppressedProposalIds.contains(proposalId) {
+                queueLock.unlock()
+                observer?(candidate.eventId, "dropped", "answered")
+                queueLock.lock()
+                continue
+            }
+            isSpeaking = true
+            spokenEventIds.insert(candidate.eventId)
+            next = candidate
+            break
         }
+        queueLock.unlock()
 
-        isSpeaking = true
-        spokenEventIds.insert(prompt.eventId)
+        guard let prompt = next else { return }
 
         guard activateSession() else {
+            queueLock.lock()
             isSpeaking = false
+            queueLock.unlock()
             observer?(prompt.eventId, "failed", "audio session unavailable")
             return
         }
@@ -176,17 +208,19 @@ final class WorkoutCoachingAudioCoordinator: NSObject {
     private var currentEventId: String?
 
     private func finish(_ eventId: String?, error: String?) {
+        queueLock.lock()
         isSpeaking = false
+        queueLock.unlock()
+
         player = nil
         currentEventId = nil
+        // Deactivating between prompts rather than at the end of the workout is
+        // what actually gives YouTube Music back (§10.2).
         deactivateSession()
         if let eventId {
             observer?(eventId, error == nil ? "finished" : "failed", error)
         }
-        queueLock.lock()
-        let more = !queue.isEmpty
-        queueLock.unlock()
-        if more { drain() }
+        pump()
     }
 
     // MARK: - AVAudioSession

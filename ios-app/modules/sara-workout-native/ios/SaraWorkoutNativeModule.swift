@@ -136,6 +136,7 @@ public class SaraWorkoutNativeModule: Module {
             text: String,
             priority: String,
             expiresAtEpochMs: Double?,
+            proposalId: String?,
             audioBase64: String?
         ) -> Bool in
             guard #available(iOS 17.0, *) else { return false }
@@ -146,6 +147,9 @@ public class SaraWorkoutNativeModule: Module {
                 text: text,
                 priority: priority,
                 expiresAt: expires,
+                // Carried so a prompt queued behind a longer one can be dropped
+                // the moment David answers the question it is about (§10.4).
+                proposalId: proposalId,
                 audioData: data
             ))
             return true

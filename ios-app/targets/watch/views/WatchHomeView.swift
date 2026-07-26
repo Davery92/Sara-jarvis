@@ -9,7 +9,6 @@ import SwiftUI
 ///
 /// This is not a Fitness dashboard. Nutrition, recovery, cardio and progress
 /// stay on the phone; the Watch exists to start and control training (§8.1).
-@available(watchOS 10.0, *)
 struct WatchHomeView: View {
     @EnvironmentObject private var manager: WorkoutManager
     @State private var showDiagnostics = false
@@ -114,7 +113,6 @@ struct WatchHomeView: View {
     }
 }
 
-@available(watchOS 10.0, *)
 private struct TemplateRow: View {
     let template: WatchCatalog.TemplateSummary
     let emphasised: Bool

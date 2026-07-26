@@ -212,6 +212,10 @@ class WatchWorkoutBridge {
         pr: result.pr ?? null,
         rest_seconds: result.rest_seconds ?? 0,
         proposal: result.proposal ?? null,
+        // Only `complete` produces one. The Watch shows its summary screen off
+        // the back of this, so it has to travel with the acknowledgement
+        // rather than waiting for the HealthKit round trip.
+        summary: (result as { summary?: unknown }).summary ?? null,
       });
     } catch (e: any) {
       const detail = e?.response?.data?.detail;

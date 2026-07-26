@@ -12,7 +12,6 @@ import HealthKit
 /// Advanced/System rather than the main flow (§15) — when a workout misbehaves
 /// mid-session, "is the mirror connected and how many commands are pending" is
 /// the first thing worth seeing.
-@available(watchOS 10.0, *)
 struct WatchDiagnosticsView: View {
     @EnvironmentObject private var manager: WorkoutManager
     @State private var authorized: Bool?

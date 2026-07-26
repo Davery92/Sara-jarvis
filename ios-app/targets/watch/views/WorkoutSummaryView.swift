@@ -9,7 +9,6 @@ import SwiftUI
 ///
 /// Detailed history and editing stay on the phone. This screen exists to say
 /// "that's done, here's what it was" and get off the wrist.
-@available(watchOS 10.0, *)
 struct WorkoutSummaryView: View {
     let summary: WatchWorkoutSummary
 

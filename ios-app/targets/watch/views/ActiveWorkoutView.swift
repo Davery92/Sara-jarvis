@@ -11,7 +11,6 @@ import SwiftUI
 /// They are seeded from `approvedWeight`, never `calculatedSuggestion`: Sara's
 /// newer recommendation is a proposal, and pre-filling it would turn tapping
 /// Log Set into silent consent (§6.8, §11.2).
-@available(watchOS 10.0, *)
 struct ActiveWorkoutView: View {
     @EnvironmentObject private var manager: WorkoutManager
 
@@ -39,7 +38,10 @@ struct ActiveWorkoutView: View {
                 setScreen
             }
         }
-        .onAppear(perform: seedIfNeeded)
+        // Called, not referenced: `seedIfNeeded` has a defaulted parameter, and
+        // a function used as a value keeps its full `(Bool) -> Void` type
+        // rather than picking up the default.
+        .onAppear { seedIfNeeded() }
         .onChange(of: projection?.cursor.exerciseIndex) { _, _ in seedIfNeeded(force: true) }
         .onChange(of: projection?.cursor.setIndex) { _, _ in seedIfNeeded(force: true) }
         .sheet(isPresented: $showExercises) { ExerciseListView() }
