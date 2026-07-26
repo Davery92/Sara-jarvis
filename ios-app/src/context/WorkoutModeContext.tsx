@@ -2,6 +2,27 @@ import React, { createContext, useContext, useState, useEffect, useCallback, use
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { fitnessService, ActiveWorkoutSession, LogSetParams, RestTimerStatus } from '../services/fitness';
 import { startEvent, updateEvent, endEvent } from '../services/eventActivity';
+import { watchWorkout } from '../services/watchWorkout';
+import { workoutCoordinator } from '../services/workoutCoordinator';
+import { workoutCoaching } from '../services/workoutCoaching';
+import type { CoachingEvent, LiveMetrics, WorkoutProposal } from '../services/workoutContracts';
+
+/**
+ * Quiet device state for Workout Mode (plan §9.3).
+ *
+ * Shown only when it tells David something he can act on. "Watch tracking" and
+ * a heart rate are reassurance; transport vocabulary in a normal success state
+ * is noise that trains him to ignore the one message that matters.
+ */
+export interface WatchWorkoutStatus {
+  /** The Watch has a live HealthKit session mirrored here. */
+  tracking: boolean;
+  heartRate: number | null;
+  activeEnergyKcal: number | null;
+  /** Commands issued but not yet durably accepted. */
+  pending: number;
+  reconnecting: boolean;
+}
 
 interface WorkoutModeContextType {
   // State
@@ -10,6 +31,17 @@ interface WorkoutModeContextType {
   isLoading: boolean;
   error: string | null;
   restTimer: RestTimerStatus | null;
+
+  // Cross-device (Apple Watch) — additive; nothing below is removed.
+  watch: WatchWorkoutStatus;
+  /** Sara's recommendation awaiting a decision. Never applied on its own. */
+  pendingProposal: WorkoutProposal | null;
+  /** The coaching sentence currently being said, for the on-screen line (§9.5). */
+  coaching: CoachingEvent | null;
+  approveProposal: (proposalId: string) => Promise<void>;
+  rejectProposal: (proposalId: string) => Promise<void>;
+  /** Retry bringing the Watch into a phone-started workout (§4.3). */
+  retryWatch: () => Promise<void>;
 
   // Actions
   startWorkout: (templateId: string) => Promise<ActiveWorkoutSession | null>;
@@ -49,6 +81,43 @@ export function WorkoutModeProvider({ children }: { children: React.ReactNode })
   // Local timer tracking (independent of session refresh)
   const localTimerRef = useRef<{ startTime: number; duration: number } | null>(null);
 
+  // ── Cross-device state (§9.2, §9.3, §9.5) ───────────────────────────────
+  const [watch, setWatch] = useState<WatchWorkoutStatus>({
+    tracking: false, heartRate: null, activeEnergyKcal: null, pending: 0, reconnecting: false,
+  });
+  const [pendingProposal, setPendingProposal] = useState<WorkoutProposal | null>(null);
+  const [coaching, setCoaching] = useState<CoachingEvent | null>(null);
+
+  // Mirror/metrics/queue depth all feed one status object so the UI has a
+  // single thing to render rather than three racing booleans.
+  useEffect(() => {
+    const unsubMirror = watchWorkout.onMirrorState((state) => {
+      setWatch(prev => ({
+        ...prev,
+        tracking: state.mirroring && state.state === 'running',
+        reconnecting: state.mirroring && state.state !== 'running',
+      }));
+    });
+    const unsubMetrics = watchWorkout.onLiveMetrics((metrics: LiveMetrics | null) => {
+      setWatch(prev => ({
+        ...prev,
+        heartRate: metrics?.heart_rate ?? null,
+        activeEnergyKcal: metrics?.active_energy_kcal ?? null,
+      }));
+    });
+    const unsubCoordinator = workoutCoordinator.subscribe((state) => {
+      setWatch(prev => ({ ...prev, pending: state.pendingCount }));
+      setPendingProposal(state.projection?.pending_proposal ?? null);
+    });
+    const unsubCoaching = workoutCoaching.onDisplay(setCoaching);
+    return () => {
+      unsubMirror();
+      unsubMetrics();
+      unsubCoordinator();
+      unsubCoaching();
+    };
+  }, []);
+
   // Drive the workout Live Activity (count-up) off the active session.
   const workoutActivityRef = useRef<string | null>(null);
   useEffect(() => {
@@ -71,6 +140,41 @@ export function WorkoutModeProvider({ children }: { children: React.ReactNode })
       workoutActivityRef.current = null;
     }
   }, [session]);
+
+  /**
+   * Push the canonical state out to the Watch and keep the coordinator's copy
+   * current after a phone-originated change (§4.4).
+   *
+   * `sync` is what actually re-reads the projection — the legacy endpoints
+   * return their own older shape — and `broadcast` is a no-op when no Watch is
+   * mirrored, so this is safe to call unconditionally.
+   */
+  const syncWatch = useCallback(async () => {
+    try {
+      const state = await workoutCoordinator.sync();
+      await watchWorkout.broadcast(state.projection);
+    } catch {
+      // Best effort: the phone workout is unaffected by a Watch that isn't
+      // listening.
+    }
+  }, []);
+
+  // Coaching runs for the length of the workout and stops with it, so a
+  // sentence about the last set can never arrive after the summary (§10.4).
+  const coachingActiveRef = useRef(false);
+  useEffect(() => {
+    const active = session?.status === 'active';
+    if (active && !coachingActiveRef.current) {
+      coachingActiveRef.current = true;
+      void fitnessService
+        .v2Policy()
+        .then(({ policy }) => workoutCoaching.start(policy))
+        .catch(() => workoutCoaching.start());
+    } else if (!active && coachingActiveRef.current) {
+      coachingActiveRef.current = false;
+      workoutCoaching.stop();
+    }
+  }, [session?.status]);
 
   // Check for active session on mount
   useEffect(() => {
@@ -191,6 +295,12 @@ export function WorkoutModeProvider({ children }: { children: React.ReactNode })
       if (result.session?.id) {
         await AsyncStorage.setItem(STORAGE_KEY, result.session.id);
       }
+      // Bring the Watch into the same workout so David doesn't have to start
+      // Apple's Workout app by hand (§4.3). Deliberately not awaited and never
+      // fatal: the backend session already exists, so a Watch that won't wake
+      // costs heart rate, not the workout.
+      void watchWorkout.launchWatch('strength');
+      void syncWatch();
       return result.session;
     } catch (err: any) {
       console.error('Failed to start workout:', err);
@@ -207,6 +317,14 @@ export function WorkoutModeProvider({ children }: { children: React.ReactNode })
       const result = await fitnessService.logWorkoutSet(params);
       // Refresh session to get updated state
       await refreshSession();
+      // The set is durable; the Watch needs the new cursor and set count now,
+      // not on its next poll.
+      void syncWatch();
+      // Sara may recommend a change off the back of this set — surfaced as
+      // Approve / Keep current, never applied (§9.5, §11.2).
+      if ((result as any).proposal) {
+        setPendingProposal((result as any).proposal as WorkoutProposal);
+      }
       return {
         success: result.success,
         coaching_feedback: result.coaching_feedback,
@@ -225,6 +343,7 @@ export function WorkoutModeProvider({ children }: { children: React.ReactNode })
       setError(null);
       await fitnessService.skipExercise();
       await refreshSession();
+      void syncWatch();
     } catch (err: any) {
       console.error('Failed to skip exercise:', err);
       setError(err.message);
@@ -239,6 +358,7 @@ export function WorkoutModeProvider({ children }: { children: React.ReactNode })
       setSession(prev => prev ? { ...prev, current_exercise_index: exerciseIndex } : prev);
       await fitnessService.selectExercise(exerciseIndex);
       await refreshSession();
+      void syncWatch();
     } catch (err: any) {
       console.error('Failed to select exercise:', err);
       setError(err.message);
@@ -251,6 +371,7 @@ export function WorkoutModeProvider({ children }: { children: React.ReactNode })
       setError(null);
       await fitnessService.setExerciseVariant(exerciseIndex, variant);
       await refreshSession();
+      void syncWatch();
     } catch (err: any) {
       console.error('Failed to set exercise variant:', err);
       setError(err.message);
@@ -309,6 +430,11 @@ export function WorkoutModeProvider({ children }: { children: React.ReactNode })
       const result = await fitnessService.completeWorkoutSession();
       setSession(null);
       await AsyncStorage.removeItem(STORAGE_KEY);
+      // Both devices end together: leaving the Watch's HealthKit session
+      // running would keep burning battery and recording a workout that Sara
+      // has already closed (§4.5 step 7).
+      await watchWorkout.endWatchWorkout('completed on phone');
+      workoutCoordinator.reset();
       return { summary: result.summary };
     } catch (err: any) {
       console.error('Failed to complete workout:', err);
@@ -334,6 +460,10 @@ export function WorkoutModeProvider({ children }: { children: React.ReactNode })
       await fitnessService.abandonWorkoutSession();
       setSession(null);
       await AsyncStorage.removeItem(STORAGE_KEY);
+      // Abandonment is broadcast, not inferred — the Watch must stop tracking
+      // a workout whose sets have just been deleted (§4.6).
+      await watchWorkout.endWatchWorkout('abandoned on phone');
+      workoutCoordinator.reset();
     } catch (err: any) {
       console.error('Failed to abandon workout:', err);
       setError(err.message);
@@ -345,6 +475,42 @@ export function WorkoutModeProvider({ children }: { children: React.ReactNode })
       setIsLoading(false);
     }
   };
+
+  // ── Approval boundary (§11.3) ───────────────────────────────────────────
+
+  /**
+   * Approve or reject exactly one recommendation.
+   *
+   * Both go through the coordinator's idempotent command path, so a tap lost
+   * in flight resolves once when it replays. The proposal is cleared locally
+   * either way — and coaching is told to stop talking about it, because
+   * "I recommend dropping to 60" spoken after the answer is worse than
+   * silence (§10.4).
+   */
+  const resolveProposal = useCallback(async (proposalId: string, approve: boolean) => {
+    workoutCoaching.markProposalResolved(proposalId);
+    setPendingProposal(null);
+    try {
+      await workoutCoordinator.resolveProposal(proposalId, approve, 'phone');
+      await refreshSession();
+      await syncWatch();
+    } catch (err: any) {
+      console.error('Failed to resolve proposal:', err);
+      setError(err.message);
+    }
+  }, [refreshSession, syncWatch]);
+
+  const approveProposal = useCallback(
+    (proposalId: string) => resolveProposal(proposalId, true), [resolveProposal]
+  );
+  const rejectProposal = useCallback(
+    (proposalId: string) => resolveProposal(proposalId, false), [resolveProposal]
+  );
+
+  /** Ask the Watch again after a failed launch — §4.3's "Retry Watch". */
+  const retryWatch = useCallback(async () => {
+    await watchWorkout.launchWatch('strength');
+  }, []);
 
   // Computed values
   const currentExercise = session?.workout_snapshot?.exercises?.[session.current_exercise_index] || null;
@@ -364,6 +530,12 @@ export function WorkoutModeProvider({ children }: { children: React.ReactNode })
     isLoading,
     error,
     restTimer,
+    watch,
+    pendingProposal,
+    coaching,
+    approveProposal,
+    rejectProposal,
+    retryWatch,
     startWorkout,
     logSet,
     skipExercise,

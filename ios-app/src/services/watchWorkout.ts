@@ -141,6 +141,11 @@ class WatchWorkoutBridge {
       case 'watch_recovered_session':
         await this.handleWatchRecovered(envelope);
         break;
+      case 'projection_requested':
+        // The Watch opened its exercise list and needs the full array the
+        // per-set messages leave out.
+        await this.reply('projection_updated', workoutCoordinator.snapshot().projection, {}, { full: true });
+        break;
       default:
         this.note('unknown_kind', String(envelope.kind));
     }
@@ -275,11 +280,12 @@ class WatchWorkoutBridge {
   private async reply(
     kind: string,
     projection: WorkoutProjection | null,
-    extra: Record<string, unknown> = {}
+    extra: Record<string, unknown> = {},
+    opts: { full?: boolean } = {}
   ): Promise<void> {
     const envelope = buildEnvelope(kind as any, projection?.session_id ?? null, {
       ...extra,
-      projection: projection ? this.compact(projection) : null,
+      projection: projection ? (opts.full ? projection : this.compact(projection)) : null,
     });
     try {
       await sendWorkoutMessage(envelope);

@@ -46,7 +46,14 @@ struct WatchRootView: View {
 
     var body: some View {
         if #available(watchOS 10.0, *) {
-            WatchDiagnosticsView()
+            // A workout in progress takes the whole screen. Raising a wrist
+            // mid-set to find a menu instead of "Log Set" is the failure this
+            // companion exists to avoid (§8.3).
+            if manager.projection?.status == "active" || manager.completion != nil {
+                NavigationStack { ActiveWorkoutView() }
+            } else {
+                WatchHomeView()
+            }
         } else {
             VStack(spacing: 8) {
                 Text("Sara").font(.headline)

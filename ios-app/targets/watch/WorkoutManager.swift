@@ -29,6 +29,10 @@ public final class WorkoutManager: NSObject, ObservableObject {
     @Published public private(set) var pendingCommandCount = 0
     @Published public private(set) var lastError: String?
     @Published public private(set) var coaching: WorkoutCoachingEvent?
+    /// Last catalog the phone pushed. Lets the home screen render offline (§7.5).
+    @Published public private(set) var catalog: WatchCatalog?
+    /// Summary shown after Finish, kept until dismissed.
+    @Published public private(set) var completion: WatchWorkoutSummary?
 
     /// Local optimism while the backend decides. Never a second Sara session —
     /// the Watch may show "Starting…", it may not invent a workout (§4.2).
@@ -42,7 +46,14 @@ public final class WorkoutManager: NSObject, ObservableObject {
 
     private let queue = WorkoutCommandQueue()
     private let recoveryStore = WatchWorkoutRecoveryStore()
+    private let catalogStore = WatchCatalogStore()
     private let log = Logger(subsystem: "cloud.avery.sara-ios.watch", category: "WorkoutManager")
+
+    /// Rest countdown state, so the rest screen and its haptics don't depend on
+    /// a message arriving at exactly the right second.
+    @Published public private(set) var restRemaining: Int = 0
+    private var restTimer: Timer?
+    private var restWarningFired = false
 
     /// Cross-device messages are throttled independently of the 1 Hz UI so a
     /// long session does not burn the radio (and the battery) on telemetry
@@ -52,6 +63,13 @@ public final class WorkoutManager: NSObject, ObservableObject {
     private var elapsedTimer: Timer?
 
     public var pendingCommands: [WorkoutCommandQueue.Entry] { queue.pending }
+
+    public override init() {
+        super.init()
+        // Last catalog the phone pushed, so the home screen has something to
+        // show before (or without) a fresh sync.
+        catalog = catalogStore.load()
+    }
 
     // MARK: - Authorization
 
@@ -229,6 +247,15 @@ public final class WorkoutManager: NSObject, ObservableObject {
     public func skipExercise() { issue(.skipExercise) }
     public func stopRest() { issue(.restStop) }
 
+    /// Ask the phone for the uncompacted projection.
+    ///
+    /// Per-set messages drop the exercise array to keep them small; the jump
+    /// screen is the one place that needs it, so it asks rather than every set
+    /// paying for it.
+    public func requestFullProjection() {
+        send(.projectionRequested, payload: [:], sessionId: projection?.sessionId)
+    }
+
     public func resolve(proposal: WorkoutProposal, approve: Bool) {
         issue(approve ? .approveProposal : .rejectProposal,
               payload: ["proposal_id": .string(proposal.proposalId)])
@@ -304,8 +331,23 @@ public final class WorkoutManager: NSObject, ObservableObject {
                 queue.acknowledge(commandId: commandId)
                 refreshPendingCount()
             }
+            // A PR earns its own haptic — it is the one moment mid-workout
+            // worth interrupting for (§8.4).
+            if let pr = envelope.payload["pr"]?.objectValue, !pr.isEmpty {
+                WatchHaptics.personalRecord()
+            }
             applyProjection(from: envelope)
             isStarting = false
+
+        case .catalogUpdated:
+            do {
+                let data = try WorkoutWire.encoder.encode(JSONValue.object(envelope.payload))
+                let incoming = try WorkoutWire.decoder.decode(WatchCatalog.self, from: data)
+                catalog = incoming
+                catalogStore.save(incoming)
+            } catch {
+                log.error("Catalog decode failed: \(error.localizedDescription, privacy: .public)")
+            }
 
         case .commandRejected:
             // A rejected command will never apply — retrying forever would
@@ -331,9 +373,15 @@ public final class WorkoutManager: NSObject, ObservableObject {
             }
 
         case .proposalCreated, .proposalResolved:
+            // Distinct from every other haptic: an approval request is the only
+            // buzz that means "Sara is waiting on you" (§8.4).
+            if envelope.kind == .proposalCreated { WatchHaptics.approvalRequested() }
             applyProjection(from: envelope)
 
         case .finishConfirmed:
+            if let summary = try? WorkoutWire.decodePayload(WatchWorkoutSummary.self, from: envelope) {
+                completion = summary
+            }
             Task { await finalizeHealthKit(discard: false) }
 
         case .unknown(let raw):
@@ -358,9 +406,63 @@ public final class WorkoutManager: NSObject, ObservableObject {
             }
             projection = incoming
             persistRecovery(projection: incoming)
+            syncRestTimer(with: incoming.rest)
         } catch {
             log.error("Projection decode failed: \(error.localizedDescription, privacy: .public)")
         }
+    }
+
+    // MARK: - Rest countdown (§8.4)
+
+    /// Drive the countdown locally from the backend's start time.
+    ///
+    /// The projection says *when* rest started and how long it runs; ticking it
+    /// here rather than waiting for messages means the number on the wrist is
+    /// right even when the phone is in a bag across the gym.
+    private func syncRestTimer(with rest: WorkoutRestState) {
+        guard rest.active,
+              let startedAt = rest.startedAt.flatMap(ISO8601DateFormatter.saraDate(from:)),
+              let duration = rest.durationSeconds else {
+            stopRestTimer()
+            return
+        }
+        let remaining = Int(Double(duration) - Date().timeIntervalSince(startedAt))
+        guard remaining > 0 else {
+            stopRestTimer()
+            return
+        }
+        restRemaining = remaining
+        restWarningFired = remaining <= 10
+        guard restTimer == nil else { return }
+        restTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.tickRest(startedAt: startedAt, duration: duration) }
+        }
+    }
+
+    private func tickRest(startedAt: Date, duration: Int) {
+        let remaining = Int(Double(duration) - Date().timeIntervalSince(startedAt))
+        restRemaining = max(0, remaining)
+
+        let warnAt10 = catalog?.policy?.adaptiveRestEnabled ?? true
+        if warnAt10, !restWarningFired, remaining <= 10, remaining > 0 {
+            restWarningFired = true
+            WatchHaptics.restWarning()
+        }
+        if remaining <= 0 {
+            WatchHaptics.restComplete()
+            stopRestTimer()
+        }
+    }
+
+    private func stopRestTimer() {
+        restTimer?.invalidate()
+        restTimer = nil
+        restRemaining = 0
+        restWarningFired = false
+    }
+
+    public func dismissCompletion() {
+        completion = nil
     }
 
     /// The backend refused our Start because another workout is active. The
@@ -419,6 +521,7 @@ public final class WorkoutManager: NSObject, ObservableObject {
         heartRate = 0
         activeEnergy = 0
         stopElapsedTimer()
+        stopRestTimer()
         if discardingHealthKit, let sessionId = projection?.sessionId {
             queue.clear(sessionId: sessionId)
         }

@@ -6,8 +6,9 @@ import Foundation
 // the backend say to each other. It is duplicated verbatim into
 // `modules/sara-workout-native/ios/` because the Watch app and the Expo module
 // are separate compilation units with no shared framework;
-// `ios-app/__tests__/workoutWireParity.test.ts` fails the build if the two
-// copies or the TypeScript mirror drift apart.
+// `ios-app/scripts/check-workout-contract-parity.mjs` compares this against
+// its copy, the TypeScript mirror and the Python service, and fails when they
+// drift apart.
 //
 // Two rules drive every decision here:
 //
@@ -387,6 +388,10 @@ public enum WireMessageKind: RawRepresentable, Codable, Equatable {
     case healthkitResumed
     case healthkitFinished
     case watchRecoveredSession
+    /// Ask for the uncompacted projection. Per-set messages omit the exercise
+    /// list to keep the radio quiet; the Watch asks explicitly when it opens
+    /// the jump screen.
+    case projectionRequested
     // iPhone -> Watch
     case startAccepted
     case startConflict
@@ -412,6 +417,7 @@ public enum WireMessageKind: RawRepresentable, Codable, Equatable {
         case "healthkit_resumed": self = .healthkitResumed
         case "healthkit_finished": self = .healthkitFinished
         case "watch_recovered_session": self = .watchRecoveredSession
+        case "projection_requested": self = .projectionRequested
         case "start_accepted": self = .startAccepted
         case "start_conflict": self = .startConflict
         case "command_accepted": self = .commandAccepted
@@ -436,6 +442,7 @@ public enum WireMessageKind: RawRepresentable, Codable, Equatable {
         case .healthkitResumed: return "healthkit_resumed"
         case .healthkitFinished: return "healthkit_finished"
         case .watchRecoveredSession: return "watch_recovered_session"
+        case .projectionRequested: return "projection_requested"
         case .startAccepted: return "start_accepted"
         case .startConflict: return "start_conflict"
         case .commandAccepted: return "command_accepted"

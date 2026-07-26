@@ -188,6 +188,12 @@ export const WATCH_TO_PHONE_KINDS = [
   'healthkit_resumed',
   'healthkit_finished',
   'watch_recovered_session',
+  /**
+   * Ask for the uncompacted projection. Per-set messages drop the exercise
+   * list to keep the radio quiet; the Watch asks explicitly when it opens the
+   * jump screen.
+   */
+  'projection_requested',
 ] as const;
 
 export const PHONE_TO_WATCH_KINDS = [

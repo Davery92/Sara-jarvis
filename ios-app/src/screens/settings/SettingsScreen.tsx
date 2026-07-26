@@ -29,6 +29,7 @@ import ProfileSection from '../../components/settings/ProfileSection';
 import MemoryListItem from '../../components/settings/MemoryListItem';
 import SchedulesSection from '../../components/settings/SchedulesSection';
 import TunablesSection from '../../components/settings/TunablesSection';
+import WorkoutCoachingSection from '../../components/settings/WorkoutCoachingSection';
 import { colors, spacing, fontSizes, borderRadius } from '../../styles/theme';
 import { iosCalendarSyncService, IOSCalendar } from '../../services/iosCalendarSync';
 import { isLocationTrackingEnabled, setLocationTrackingEnabled } from '../../services/locationTracking';
@@ -930,6 +931,10 @@ export default function SettingsScreen({ navigation }: Props) {
       </View>
 
       {/* Scheduled Jobs (DB-backed Celery beat) */}
+      {/* Standing approvals for workouts — what Sara may do without asking
+          each time. Not ordinary preferences (§6.9). */}
+      <WorkoutCoachingSection />
+
       <SchedulesSection />
 
       {/* Behavior Tunables (cooldowns, ACS thresholds, brief tone) */}

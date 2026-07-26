@@ -14,6 +14,8 @@ import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { Ionicons } from '@expo/vector-icons';
 import ChatScreen from '../chat/ChatScreen';
 import WorkoutPanel from '../../components/fitness/WorkoutPanel';
+import WatchWorkoutStatusBar from '../../components/fitness/WatchWorkoutStatusBar';
+import WorkoutProposalCard from '../../components/fitness/WorkoutProposalCard';
 import { useWorkoutMode } from '../../context/WorkoutModeContext';
 import { RootStackParamList } from '../../types/navigation';
 import { colors, spacing, borderRadius, fontSizes, fontWeights } from '../../styles/theme';
@@ -184,6 +186,13 @@ export default function WorkoutModeScreen() {
             />
           </TouchableOpacity>
         </View>
+
+        {/* Device state, then anything Sara is saying or asking. Both sit above
+            the panel so they're readable without scrolling mid-set, and the
+            proposal stays put until answered rather than fading like coaching
+            (§9.3, §9.5). */}
+        <WatchWorkoutStatusBar />
+        <WorkoutProposalCard />
 
         {/* Workout Panel — fills the screen while capturing; the ⋮ collapses it to
             a bar and reveals Sara's coaching chat. */}

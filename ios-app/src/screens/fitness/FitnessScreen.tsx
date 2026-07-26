@@ -37,6 +37,7 @@ import { MacroRings, RecoveryScoreCard, StatTile, MuscleMap, musclesForWorkout }
 import { computeBaseline, computeReadinessScore } from '../../utils/recovery';
 import { computePRs } from '../../utils/fitnessStats';
 import { useWorkoutMode } from '../../context/WorkoutModeContext';
+import ActiveWorkoutBanner from '../../components/fitness/ActiveWorkoutBanner';
 import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
 import { Ionicons } from '@expo/vector-icons';
 import { navigateToChat } from '../../services/navigation';
@@ -475,6 +476,11 @@ export default function FitnessScreen({ navigation }: Props) {
         contentContainerStyle={styles.dashboardContent}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />}
       >
+        {/* A workout started on the Watch has to be one obvious tap away the
+            moment David opens the app — without the app ever forcing itself
+            to the foreground mid-set (§9.2). */}
+        <ActiveWorkoutBanner />
+
         {/* Greeting */}
         <View style={styles.greetingRow}>
           <View style={{ flex: 1 }}>
