@@ -5297,10 +5297,15 @@ async def start_active_workout(
     """
     Start an active workout session for real-time Sara coaching.
 
-    - Ends any existing active session (marks as abandoned)
     - Creates new session with workout snapshot including weight suggestions
     - Returns session with full exercise plan
+
+    With WORKOUT_COMMAND_V2_ENABLED off this still implicitly abandons any
+    running session, as it always has. With it on, a different active workout
+    is a 409 the user resolves with Resume or End — a second controller (the
+    Watch) must not be able to wipe a workout mid-set (§6.6).
     """
+    from app.services.workout_command_service import WorkoutConflict
     try:
         result = await workout_session_service.start_workout(
             user_id=user_id,
@@ -5308,6 +5313,10 @@ async def start_active_workout(
             db=db
         )
         return {"session": result}
+    except WorkoutConflict as c:
+        raise HTTPException(status_code=409, detail={
+            "code": c.code, "message": c.message, "projection": c.projection,
+        })
     except HTTPException:
         raise
     except Exception as e:
@@ -5477,15 +5486,9 @@ async def manage_rest_timer(
                 db=db
             )
         elif request.action == "stop":
-            # Stop timer by setting null values
-            update_query = text("""
-                UPDATE active_workout_session
-                SET rest_timer_started_at = NULL, rest_timer_duration_seconds = NULL
-                WHERE user_id = :user_id AND status = 'active'
-            """)
-            db.execute(update_query, {"user_id": user_id})
-            db.commit()
-            result = {"message": "Rest timer stopped"}
+            # Routed through the command service too, so stopping rest on the
+            # phone bumps the session version and the Watch sees it (§4.4).
+            result = await workout_session_service.stop_rest_timer(user_id, db)
         else:
             raise HTTPException(status_code=400, detail="Invalid action. Use 'start' or 'stop'")
 
@@ -5516,8 +5519,19 @@ async def get_rest_timer_status(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class CompleteWorkoutRequest(BaseModel):
+    """Optional body for completing a workout.
+
+    The Watch supplies the HealthKit workout UUID it just finalized so the
+    physiological record is bound to this exact session instead of being
+    matched by the same-day heuristic (§4.5).
+    """
+    healthkit_workout_uuid: Optional[str] = None
+
+
 @router.post("/workout-session/complete")
 async def complete_active_workout(
+    request: Optional[CompleteWorkoutRequest] = None,
     user_id: str = Depends(get_current_user_id),
     db: Session = Depends(get_db)
 ):
@@ -5528,7 +5542,10 @@ async def complete_active_workout(
     - Returns workout summary (total volume, sets, duration, PRs)
     """
     try:
-        result = await workout_session_service.complete_workout(user_id, db)
+        result = await workout_session_service.complete_workout(
+            user_id, db,
+            healthkit_workout_uuid=(request.healthkit_workout_uuid if request else None),
+        )
 
         summary = (result or {}).get("summary") if isinstance(result, dict) else None
         _emit_domain_event_safe(EventType.WORKOUT_COMPLETED, user_id, {

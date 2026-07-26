@@ -558,6 +558,40 @@ class BatchWorkoutsResponse(BaseModel):
     duplicate_count: int
 
 
+# Metadata key the Watch stamps onto its HKWorkout so the physiological record
+# names the Sara session it belongs to (§6.4). Anything else is a workout Sara
+# does not own — a walk, a bike ride — and stays unlinked.
+SARA_SESSION_METADATA_KEY = "com.avery.sara.session_id"
+
+
+def _resolve_sara_session(db: Session, user_id: str, w: "WorkoutInput") -> Optional[str]:
+    """Which Sara workout, if any, this HealthKit workout is the body of.
+
+    Linking order per §6.4 — exact metadata first, then a UUID the session
+    already recorded when the Watch finished. The same-day strength heuristic
+    is deliberately NOT here: it stays a completion-time fallback in
+    `workout_session_service._meld_external_workout` so a guess can never be
+    written into the durable link.
+    """
+    meta = w.workout_metadata or {}
+    claimed = meta.get(SARA_SESSION_METADATA_KEY) or meta.get("sara_session_id")
+    if claimed:
+        # Verify it is really this user's session before trusting a client value.
+        row = db.execute(text(
+            "SELECT id FROM active_workout_session WHERE id = :sid AND user_id = :uid"
+        ), {"sid": str(claimed), "uid": user_id}).fetchone()
+        if row:
+            return row.id
+        logger.warning(f"[health] HK workout claimed unknown Sara session {claimed}")
+
+    row = db.execute(text("""
+        SELECT id FROM active_workout_session
+        WHERE user_id = :uid AND healthkit_workout_uuid = :hk
+        ORDER BY started_at DESC LIMIT 1
+    """), {"uid": user_id, "hk": w.external_id}).fetchone()
+    return row.id if row else None
+
+
 @router.post("/workouts/batch", response_model=BatchWorkoutsResponse)
 async def ingest_workouts_batch(
     request: BatchWorkoutsRequest,
@@ -574,22 +608,28 @@ async def ingest_workouts_batch(
             workout_id = str(uuid.uuid4())
             hr_zones_json = json.dumps(w.hr_zones) if w.hr_zones else None
             metadata_json = json.dumps(w.workout_metadata) if w.workout_metadata else None
+            sara_session_id = _resolve_sara_session(db, user_id, w)
             result = db.execute(text("""
                 INSERT INTO external_workout (
                     id, user_id, source, external_id, activity_type,
                     started_at, ended_at, duration_seconds,
                     total_energy_kcal, total_distance_m,
                     avg_heart_rate, max_heart_rate, min_heart_rate,
-                    hr_zones, workout_metadata
+                    hr_zones, workout_metadata, sara_session_id
                 ) VALUES (
                     :id, :user_id, :source, :external_id, :activity_type,
                     :started_at, :ended_at, :duration_seconds,
                     :total_energy_kcal, :total_distance_m,
                     :avg_hr, :max_hr, :min_hr,
-                    CAST(:hr_zones AS jsonb), CAST(:meta AS jsonb)
+                    CAST(:hr_zones AS jsonb), CAST(:meta AS jsonb), :sara_session_id
                 )
-                ON CONFLICT (user_id, source, external_id) DO NOTHING
-                RETURNING id
+                ON CONFLICT (user_id, source, external_id) DO UPDATE
+                    -- A re-sync must be able to attach the link it lacked the
+                    -- first time, without ever clearing one already made.
+                    SET sara_session_id = COALESCE(
+                        external_workout.sara_session_id, EXCLUDED.sara_session_id
+                    )
+                RETURNING id, (xmax = 0) AS was_insert
             """), {
                 "id": workout_id,
                 "user_id": user_id,
@@ -606,8 +646,10 @@ async def ingest_workouts_batch(
                 "min_hr": w.min_heart_rate,
                 "hr_zones": hr_zones_json,
                 "meta": metadata_json,
+                "sara_session_id": sara_session_id,
             })
-            if result.fetchone():
+            row = result.fetchone()
+            if row is not None and row.was_insert:
                 inserted += 1
             else:
                 duplicates += 1
@@ -638,7 +680,7 @@ async def get_recent_external_workouts(
         SELECT id, source, external_id, activity_type, started_at, ended_at,
                duration_seconds, total_energy_kcal, total_distance_m,
                avg_heart_rate, max_heart_rate, min_heart_rate,
-               hr_zones, workout_metadata
+               hr_zones, workout_metadata, sara_session_id
         FROM external_workout
         WHERE user_id = :user_id AND started_at >= :cutoff
     """
@@ -667,6 +709,10 @@ async def get_recent_external_workouts(
                 "min_heart_rate": row.min_heart_rate,
                 "hr_zones": row.hr_zones,
                 "workout_metadata": row.workout_metadata,
+                # Non-null means this is the physiological body of a Sara
+                # strength session, not a separate workout — callers that
+                # count workouts must not count it twice (§6.4).
+                "sara_session_id": row.sara_session_id,
             })
         return {"workouts": workouts, "count": len(workouts)}
     except Exception as e:

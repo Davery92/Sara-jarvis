@@ -5610,6 +5610,18 @@ try:
 except Exception as e:
     logger.error(f"❌ Fitness routes failed to load: {e}")
 
+# Include versioned cross-device workout routes (Apple Watch + iPhone).
+# Separate module from fitness.py so the Watch contract stays reviewable on its
+# own; it shares the same auth dependency and command service.
+try:
+    from app.routes.workout_v2 import router as workout_v2_router
+    app.include_router(
+        workout_v2_router, prefix="/api/fitness/workout-session/v2", tags=["Workout v2"]
+    )
+    logger.info("✅ Workout v2 routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Workout v2 routes failed to load: {e}")
+
 # Include Cardio routes (cardio tracker + Tabata interval timer)
 try:
     from app.routes.cardio import router as cardio_router

@@ -35,6 +35,14 @@ class Flag(str, Enum):
     SINGULAR_ACTIONS = "SINGULAR_ACTIONS"
     LEGACY_COGNITION_SHADOW = "LEGACY_COGNITION_SHADOW"
 
+    # Apple Watch / cross-device workout (SARA_APPLE_WATCH_FITNESS_IMPLEMENTATION_PLAN §13 P0).
+    # All three default OFF: the v2 command path, the Watch surface, and native
+    # coaching audio each roll out independently, and flipping any of them off
+    # must leave the existing phone workout untouched (§16.2 rollback).
+    WATCH_WORKOUT_ENABLED = "WATCH_WORKOUT_ENABLED"
+    WORKOUT_COMMAND_V2_ENABLED = "WORKOUT_COMMAND_V2_ENABLED"
+    WORKOUT_COACHING_AUDIO_ENABLED = "WORKOUT_COACHING_AUDIO_ENABLED"
+
 
 ALL_FLAGS: List[str] = [f.value for f in Flag]
 _TRUE_VALUES = {"1", "true", "yes", "on"}
