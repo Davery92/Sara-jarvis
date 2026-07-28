@@ -112,6 +112,16 @@ async def brief_patch(
     - close: remove the item (list sections) or clear the dict.
     - move: remove from `section`, insert into `target_section` — the
       zone-migration primitive (AHEAD -> HAPPENED once an event has passed).
+
+    No-op guard: the 5-min sweep re-patches every calendar/thread/email
+    item unconditionally on every cycle (it doesn't know in advance
+    whether anything changed) — without this, a stable brief racked up
+    ~136 identical patch_log rows per item and 2500+ version bumps in
+    under a day, drowning genuinely new patches in re-patch noise and
+    burning a DB write every 5 minutes forever. add/update/close are
+    skipped entirely (no version bump, no patch_log row) when they
+    wouldn't actually change anything. move always writes — it's a state
+    transition (source removal + dest insertion), not a value repeat.
     """
     if op not in ("add", "update", "close", "move"):
         raise ValueError(f"unknown brief_patch op: {op!r}")
@@ -122,17 +132,23 @@ async def brief_patch(
     sections = state["sections"]
 
     if section in DICT_SECTIONS:
-        if op == "close":
-            sections[section] = {}
-        else:
-            sections[section] = {**sections.get(section, {}), **(content or {})}
+        current = sections.get(section, {})
+        new_value = {} if op == "close" else {**current, **(content or {})}
+        if new_value == current:
+            return
+        sections[section] = new_value
     else:
-        items: List[Dict[str, Any]] = [
-            i for i in sections.get(section, []) if i.get("key") != item_key
-        ]
+        existing_items = sections.get(section, [])
+        existing_item = next((i for i in existing_items if i.get("key") == item_key), None)
+        items = [i for i in existing_items if i.get("key") != item_key]
+
         if op in ("add", "update"):
-            items.insert(0, {"key": item_key, **(content or {})})
+            new_item = {"key": item_key, **(content or {})}
+            if existing_item == new_item:
+                return
+            items.insert(0, new_item)
             items = items[:_SECTION_CAP]
+            sections[section] = items
         elif op == "move":
             dest = target_section or "happened"
             if dest not in LIST_SECTIONS:
@@ -140,8 +156,11 @@ async def brief_patch(
             dest_items = [i for i in sections.get(dest, []) if i.get("key") != item_key]
             dest_items.insert(0, {"key": item_key, **(content or {})})
             sections[dest] = dest_items[:_SECTION_CAP]
-        # 'close' just drops the item — already filtered out above.
-        sections[section] = items
+            sections[section] = items
+        else:  # close
+            if existing_item is None:
+                return
+            sections[section] = items
 
     sections_json = json.dumps(sections)
     await db.execute(text("""
