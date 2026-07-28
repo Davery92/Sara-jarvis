@@ -29,7 +29,15 @@ export interface LastSessionSummary {
 export interface ProjectionExercise {
   name: string | null;
   variant: string | null;
+  /**
+   * Working sets this workout is actually asking for. Moves when David adds
+   * or removes a set; `prescribed_sets` never does. Showing both is what makes
+   * "4 sets (3 prescribed)" honest rather than a silent plan rewrite (§6.2).
+   */
   target_sets: number | null;
+  prescribed_sets?: number | null;
+  /** Drop segments logged under this exercise. Volume, not completion (§4.4). */
+  completed_drop_segments?: number | null;
   /** Free text like "8-10" — the backend owns rep ranges, not the client. */
   target_reps: string | null;
   target_rpe: number | null;
@@ -61,6 +69,35 @@ export interface WorkoutProposal {
   expires_at: string | null;
 }
 
+/**
+ * One row of what actually happened, as opposed to what was planned.
+ *
+ * `set_kind` is the whole point: a template's `set_technique` says what Sara
+ * asked for, this says what David did. Conflating them is why drop sets used
+ * to read as regressions (§6.1).
+ */
+export interface PerformedSet {
+  id: string;
+  exercise: string;
+  set_index: number;
+  weight: number | null;
+  reps: number | null;
+  rpe: number | null;
+  notes: string | null;
+  is_pr: boolean;
+  set_kind: 'working' | 'warmup' | 'drop';
+  parent_set_id: string | null;
+  /** Shared by a working set and every drop segment hanging off it. */
+  set_group_id: string | null;
+  /** 0 for the working set, 1..n for its drops, in performed order. */
+  group_sequence: number;
+  counts_toward_target: boolean;
+  voided: boolean;
+  void_reason: string | null;
+  revised_from_set_id: string | null;
+  logged_at: string | null;
+}
+
 export interface WorkoutProjection {
   schema_version: number;
   session_id: string;
@@ -72,6 +109,11 @@ export interface WorkoutProjection {
   cursor: { exercise_index: number; set_index: number };
   progress: { completed_sets: number; total_sets: number; total_volume: number };
   current_exercise: ProjectionExercise | null;
+  /**
+   * Sets actually logged. The compact (Watch) form carries only the current
+   * exercise's, which is all Undo and the "last set" line need.
+   */
+  performed_sets: PerformedSet[];
   /** Absent in the compact form sent to the Watch. */
   exercises?: ProjectionExercise[];
   rest: { active: boolean; started_at: string | null; duration_seconds: number | null };
@@ -90,6 +132,14 @@ export interface WorkoutProjection {
 
 export type WorkoutCommandKind =
   | 'log_set'
+  // Flexible sets (§6.3). A direct David tap applies immediately, and an
+  // approved Sara proposal runs these exact same handlers, so there is no
+  // second path where a recommendation could do more than it showed.
+  | 'add_set'
+  | 'remove_unlogged_set'
+  | 'log_drop_segment'
+  | 'revise_set'
+  | 'void_set'
   | 'select_exercise'
   | 'set_variant'
   | 'skip_exercise'
@@ -148,6 +198,14 @@ export type WorkoutConflictCode =
   | 'session_mismatch'
   | 'no_active_session'
   | 'proposal_stale'
+  /** The set an edit/undo named is gone — reconcile, don't retry. */
+  | 'set_not_found'
+  /** Nothing left to give back: every remaining target set is already logged. */
+  | 'target_floor'
+  /** A drop segment was sent with no working set to hang off. */
+  | 'no_parent_set'
+  /** Reclassifying into a drop needs an undo + re-log, not an edit. */
+  | 'set_kind_change'
   | 'unsupported_schema_version';
 
 export interface WorkoutConflictDetail {
@@ -238,6 +296,7 @@ export interface WorkoutPolicy {
 export interface WatchCatalog {
   schema_version: number;
   generated_at: string;
+  generated_for_date: string;
   today_template_id: string | null;
   templates: Array<{
     id: string;
@@ -323,10 +382,42 @@ export function isNewerProjection(
   return incoming.version >= current.version;
 }
 
-/** The one-line "65 → 60 lb" a proposal screen shows. */
+/**
+ * The one line an approval screen shows.
+ *
+ * Every proposal has to be answerable from this sentence alone — on a wrist,
+ * between sets. A proposal that renders as null is one David would be asked to
+ * approve blind, so each kind gets an explicit phrasing rather than a fallback.
+ */
 export function describeProposal(proposal: WorkoutProposal): string | null {
-  const current = proposal.current_value?.weight;
-  const proposed = proposal.proposed_value?.weight;
-  if (typeof current !== 'number' || typeof proposed !== 'number') return null;
-  return `${current} → ${proposed} lb`;
+  const current = proposal.current_value ?? {};
+  const proposed = proposal.proposed_value ?? {};
+
+  if (proposal.kind === 'add_working_set' || proposal.kind === 'reduce_current_target_sets') {
+    const from = current.target_sets;
+    const to = proposed.target_sets;
+    if (typeof from === 'number' && typeof to === 'number') {
+      return `${from} → ${to} sets`;
+    }
+    return proposal.kind === 'add_working_set' ? 'One more set' : 'One set fewer';
+  }
+
+  if (proposal.kind === 'template_set_count') {
+    const from = current.sets;
+    const to = proposed.sets;
+    if (typeof from === 'number' && typeof to === 'number') {
+      return `${from} → ${to} sets, every week`;
+    }
+    return 'Change the plan';
+  }
+
+  if (proposal.kind === 'perform_drop_set') {
+    const weight = proposed.weight;
+    return typeof weight === 'number' ? `Drop to ${weight} lb` : 'Add a drop set';
+  }
+
+  const from = current.weight;
+  const to = proposed.weight;
+  if (typeof from !== 'number' || typeof to !== 'number') return null;
+  return `${from} → ${to} lb`;
 }

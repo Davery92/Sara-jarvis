@@ -12,6 +12,7 @@ import SwiftUI
 /// on the other side of the gym.
 struct RestView: View {
     @EnvironmentObject private var manager: WorkoutManager
+    @State private var showUndoConfirm = false
 
     private var projection: WorkoutProjection? { manager.projection }
     private var exercise: WorkoutExercise? { projection?.currentExercise }
@@ -49,11 +50,57 @@ struct RestView: View {
                     }
                 }
 
+                setActions
+
                 Button("Skip rest") { manager.stopRest() }
                     .font(.caption2)
                     .buttonStyle(.bordered)
             }
             .padding(.horizontal, 4)
+        }
+        .confirmationDialog("Undo last set?", isPresented: $showUndoConfirm) {
+            Button("Undo", role: .destructive) { manager.undoLastSet() }
+            Button("Keep it", role: .cancel) {}
+        } message: {
+            if let last = manager.lastLoggedSet {
+                Text("\(Int(last.weight ?? 0)) × \(last.reps ?? 0) stops counting toward progress, volume and PRs.")
+            }
+        }
+    }
+
+    /// Add Drop / Add Set / Undo (§7.2).
+    ///
+    /// Rest is where these belong: it is the one moment David is looking at the
+    /// Watch by choice, and each of them is a decision about the set he just
+    /// did. Anything more elaborate — editing an arbitrary earlier set — stays
+    /// on the phone; a wrist is for fast operations, not spreadsheet editing.
+    @ViewBuilder
+    private var setActions: some View {
+        HStack(spacing: 4) {
+            NavigationLink {
+                DropSetView()
+            } label: {
+                Text("Drop")
+                    .font(.caption2)
+            }
+            .disabled(manager.activeDropParent == nil)
+
+            Button("+ Set") { manager.addWorkingSet(afterLastSet: true) }
+                .font(.caption2)
+                .buttonStyle(.bordered)
+
+            Button("Undo") { showUndoConfirm = true }
+                .font(.caption2)
+                .buttonStyle(.bordered)
+                .disabled(manager.lastLoggedSet == nil)
+        }
+
+        if let exercise, let target = exercise.targetSets, let prescribed = exercise.prescribedSets,
+           target != prescribed {
+            // The honest line: the extra set is today's, not the program's.
+            Text("\(target) sets today · \(prescribed) prescribed")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
         }
     }
 

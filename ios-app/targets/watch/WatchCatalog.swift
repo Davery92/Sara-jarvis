@@ -33,6 +33,7 @@ public struct WatchCatalog: Codable, Equatable {
 
     public let schemaVersion: Int
     public let generatedAt: String
+    public let generatedForDate: String?
     public let todayTemplateId: String?
     public let templates: [TemplateSummary]
     public let policy: WatchWorkoutPolicy?
@@ -41,13 +42,25 @@ public struct WatchCatalog: Codable, Equatable {
         case templates, policy
         case schemaVersion = "schema_version"
         case generatedAt = "generated_at"
+        case generatedForDate = "generated_for_date"
         case todayTemplateId = "today_template_id"
     }
 
-    /// Today's workout, when the phone knew of one. Falls back to the most
-    /// recently updated template so the home screen is never empty.
+    /// Only label a template "Today" when the backend selected it for the
+    /// Watch's current local date. A stale cache remains usable under Other
+    /// Workouts but must not turn yesterday's workout into today's plan.
     public var todayTemplate: TemplateSummary? {
-        templates.first { $0.id == todayTemplateId } ?? templates.first
+        let components = Calendar.current.dateComponents([.year, .month, .day], from: Date())
+        guard
+            let year = components.year,
+            let month = components.month,
+            let day = components.day,
+            generatedForDate == String(format: "%04d-%02d-%02d", year, month, day),
+            let todayTemplateId
+        else {
+            return nil
+        }
+        return templates.first { $0.id == todayTemplateId }
     }
 
     public var others: [TemplateSummary] {

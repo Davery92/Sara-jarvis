@@ -6,6 +6,7 @@ import {
   endMirroredWorkout,
   isAvailable,
   sendWorkoutMessage,
+  updateWatchApplicationContext,
   startWorkoutOnWatch,
   HKActivityType,
   HKLocationType,
@@ -53,6 +54,12 @@ class WatchWorkoutBridge {
   private diagnostics: Diagnostic[] = [];
   private metricsListeners = new Set<(m: LiveMetrics | null) => void>();
   private mirrorListeners = new Set<(s: MirrorStateEvent) => void>();
+  /**
+   * The Watch has spoken to us over WatchConnectivity at least once this
+   * launch. That is proof a Watch exists and is running Sara, independent of
+   * whether HealthKit mirroring ever attached (§5.3).
+   */
+  private sawConnectivityMessage = false;
 
   /**
    * Wire up native listeners. Call once, after authentication.
@@ -113,6 +120,10 @@ class WatchWorkoutBridge {
       // correct; guessing at the payload is how you log the wrong weight.
       this.note('schema_mismatch', `watch speaks v${event.schemaVersion}, phone v${WORKOUT_SCHEMA_VERSION}`);
       return;
+    }
+
+    if (event.transport === 'watchConnectivity') {
+      this.sawConnectivityMessage = true;
     }
 
     let envelope: WireEnvelope;
@@ -292,7 +303,10 @@ class WatchWorkoutBridge {
       projection: projection ? (opts.full ? projection : this.compact(projection)) : null,
     });
     try {
-      await sendWorkoutMessage(envelope);
+      // Every reply is a state change the Watch must eventually see — a
+      // `start_accepted` that only travels while the Watch is reachable leaves
+      // it stuck on "Connecting to Sara" (§5.3).
+      await sendWorkoutMessage(envelope, true);
     } catch (e: any) {
       this.note('send_failed', `${kind}: ${e?.message}`);
     }
@@ -308,12 +322,25 @@ class WatchWorkoutBridge {
    */
   private compact(projection: WorkoutProjection): WorkoutProjection {
     const { exercises, ...rest } = projection;
-    return rest as WorkoutProjection;
+    return {
+      ...rest,
+      // Matches the backend's own compact form: the wrist needs Undo and the
+      // "last set" line, not an hour of history. Left unbounded, a long
+      // session would grow every projection message for a list nobody scrolls.
+      performed_sets: (projection.performed_sets ?? []).slice(-12),
+    } as WorkoutProjection;
   }
 
-  /** Push a projection to the Watch after a phone-originated change (§4.4). */
+  /**
+   * Push a projection to the Watch after a phone-originated change (§4.4).
+   *
+   * Deliberately NOT gated on `mirroring`: the Watch can be running a workout
+   * it started over WatchConnectivity with no mirror attached, and gating here
+   * is what used to make an add-set on the phone invisible on the wrist. The
+   * native transport is a no-op when there is genuinely no Watch.
+   */
   async broadcast(projection: WorkoutProjection | null): Promise<void> {
-    if (!this.mirrorState.mirroring) return;
+    if (!this.hasWatch) return;
     await this.reply('projection_updated', projection);
   }
 
@@ -324,9 +351,22 @@ class WatchWorkoutBridge {
     expires_at: string | null;
     proposal_id: string | null;
   }): Promise<void> {
-    if (!this.mirrorState.mirroring) return;
+    if (!this.hasWatch) return;
     const envelope = buildEnvelope('coaching_event', workoutCoordinator.sessionId, event as any);
-    await sendWorkoutMessage(envelope).catch(() => undefined);
+    // Coaching expires; a sentence delivered after the set it describes is
+    // worse than silence, so it never enters the durable queue (§10.4).
+    await sendWorkoutMessage(envelope, false).catch(() => undefined);
+  }
+
+  /**
+   * Whether there is any point talking to a Watch at all.
+   *
+   * True when a mirror is attached OR the Watch has been talking to us over
+   * WatchConnectivity — which is the case the old `mirroring`-only check
+   * missed entirely.
+   */
+  private get hasWatch(): boolean {
+    return this.mirrorState.mirroring || this.sawConnectivityMessage;
   }
 
   // ── Phone-originated start (§4.3) ───────────────────────────────────────
@@ -391,10 +431,9 @@ class WatchWorkoutBridge {
 
   /** Refresh the Watch's cached template catalog (§7.5). */
   async syncCatalog(): Promise<void> {
-    if (!this.mirrorState.mirroring) return;
     try {
       const catalog = await fitnessService.v2Catalog();
-      await sendWorkoutMessage(
+      await updateWatchApplicationContext(
         buildEnvelope('catalog_updated', catalog.active_projection?.session_id ?? null, catalog as any)
       );
     } catch (e: any) {

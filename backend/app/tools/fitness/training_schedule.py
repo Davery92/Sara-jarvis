@@ -7,6 +7,11 @@ from app.tools.base import BaseTool, ToolResult
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from app.db.session import get_db
+from app.core.timezone import today as local_today
+from app.services.phase_resolution import (
+    get_effective_phase,
+    reconcile_active_program_phase_statuses,
+)
 from datetime import date, datetime, timedelta
 import json
 import uuid
@@ -94,13 +99,18 @@ Actions:
             db.close()
 
     def _view_schedule(self, db: Session, user_id: str) -> ToolResult:
+        effective = reconcile_active_program_phase_statuses(db, user_id, local_today())
+        db.commit()
         rows = db.execute(text("""
             SELECT t.id, t.name, t.scheduled_days, p.name as phase_name, p.status as phase_status
             FROM fitness_template t
             LEFT JOIN fitness_phase p ON t.phase_id = p.id
             WHERE t.user_id = :uid
-            ORDER BY p.status = 'active' DESC NULLS LAST, t.name
-        """), {"uid": user_id}).fetchall()
+            ORDER BY t.phase_id = CAST(:phase_id AS VARCHAR) DESC NULLS LAST, t.name
+        """), {
+            "uid": user_id,
+            "phase_id": effective["id"] if effective else None,
+        }).fetchall()
 
         templates = []
         for row in rows:
@@ -132,13 +142,20 @@ Actions:
         if from_day not in VALID_DAYS or to_day not in VALID_DAYS:
             return ToolResult(success=False, message=f"Invalid day names. Use: {', '.join(sorted(VALID_DAYS))}", data=None)
 
-        # Get all templates for active phases
+        # A program's dated phase is authoritative; status can be stale at a
+        # block boundary until a read reconciles it.
+        effective = get_effective_phase(db, user_id, local_today())
+        if not effective:
+            return ToolResult(
+                success=True,
+                message=f"No current phase templates have {from_day} in their schedule - nothing to swap",
+                data={"updated": []},
+            )
         rows = db.execute(text("""
             SELECT t.id, t.name, t.scheduled_days
             FROM fitness_template t
-            JOIN fitness_phase p ON t.phase_id = p.id
-            WHERE t.user_id = :uid AND p.status = 'active'
-        """), {"uid": user_id}).fetchall()
+            WHERE t.user_id = :uid AND t.phase_id = :phase_id
+        """), {"uid": user_id, "phase_id": effective["id"]}).fetchall()
 
         updated = []
         for row in rows:
@@ -165,7 +182,7 @@ Actions:
             )
 
         # Also update any future workout_sessions: move sessions from from_day to to_day
-        today = date.today()
+        today = local_today()
         # Get day-of-week numbers (0=Monday)
         day_names = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
         from_dow = day_names.index(from_day)

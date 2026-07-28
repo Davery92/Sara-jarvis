@@ -978,6 +978,8 @@ These decisions are authoritative for implementation:
 
 8. **Sole user:** The application is solely for David. Product behavior, policies, prompts, schedules, and interfaces should optimize for that fact. Existing `user_id` boundaries can remain for data integrity, but multi-user product requirements must not complicate the design.
 
+9. **Independent VM use:** Sara has independent control of her permanent VM for approved work. Normal use of its compute, storage, network research tools, installed software, files, sessions, and reversible local changes requires no additional approval. Provisioning or destroying separate Proxmox guests remains an external infrastructure action.
+
 ## 13. First Implementation Slice
 
 The first pull request on `feat/singular-sara-core` should be deliberately non-visual:

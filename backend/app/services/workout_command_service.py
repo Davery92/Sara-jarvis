@@ -42,6 +42,8 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.core.timezone import today as local_today
+
 logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
@@ -53,6 +55,14 @@ COACHING_TTL_SECONDS = 90
 
 MUTATING_KINDS = {
     "log_set",
+    # Flexible-set commands (2026-07-27 plan §6.3). All of them derive state
+    # through `workout_recalc` rather than patching counters, so add / drop /
+    # revise / void can never disagree about what the workout contains.
+    "add_set",
+    "remove_unlogged_set",
+    "log_drop_segment",
+    "revise_set",
+    "void_set",
     "select_exercise",
     "set_variant",
     "skip_exercise",
@@ -155,11 +165,14 @@ class WorkoutCommandService:
         return s
 
     def _name_counts(self, db: Session, session_id: str) -> Dict[str, int]:
-        rows = db.execute(text("""
-            SELECT exercise_id, COUNT(*) AS c FROM workout_log
-            WHERE active_session_id = :sid GROUP BY exercise_id
-        """), {"sid": session_id}).fetchall()
-        return {r.exercise_id: int(r.c) for r in rows}
+        """Working sets per exercise — the completion arithmetic.
+
+        Drop segments, warm-ups and voided rows are excluded here rather than
+        at each call site: a three-segment drop set is still one working set
+        done, and a set David undid is none (§4.4).
+        """
+        from app.services.workout_recalc import working_counts
+        return working_counts(db, session_id)
 
     def projection(
         self, db: Session, session: Optional[Dict[str, Any]], *, compact: bool = False
@@ -173,15 +186,21 @@ class WorkoutCommandService:
         if not session:
             return None
 
+        from app.services.workout_recalc import (
+            drop_counts, effective_name, load_session_sets, target_sets_for, total_target_sets,
+        )
         from app.services.workout_session_service import workout_session_service as legacy
 
         snap = session.get("workout_snapshot") or {}
         exercises: List[Dict[str, Any]] = snap.get("exercises") or []
         counts = self._name_counts(db, session["id"])
+        drops = drop_counts(db, session["id"])
+        performed = load_session_sets(db, session["id"])
 
         for ex in exercises:
-            target = ex.get("sets", 0) or 0
-            ex["completed_sets"] = min(counts.get(legacy._effective_name(ex), 0), target)
+            name = effective_name(ex)
+            ex["completed_sets"] = min(counts.get(name, 0), target_sets_for(ex))
+            ex["completed_drop_segments"] = drops.get(name, 0)
             # Older sessions predate the approved/calculated split — treat the
             # value they were started with as already approved.
             ex.setdefault("approved_weight", ex.get("suggested_weight"))
@@ -215,10 +234,22 @@ class WorkoutCommandService:
             },
             "progress": {
                 "completed_sets": session.get("total_sets_completed") or 0,
-                "total_sets": snap.get("total_sets") or sum((e.get("sets") or 0) for e in exercises),
+                # Effective targets, not the template's — an extra set David
+                # added has to show up in "3 of 13" or the bar lies (§6.2).
+                "total_sets": total_target_sets(exercises) or (snap.get("total_sets") or 0),
                 "total_volume": session.get("total_volume") or 0.0,
             },
             "current_exercise": _exercise_view(cur) if cur else None,
+            # What was actually performed, so Undo / View-Edit and the Watch's
+            # "last set" line read from the same list rather than each device
+            # keeping its own.
+            #
+            # The compact form carries the most recent sets of the *session*,
+            # not of the current exercise: finishing an exercise advances the
+            # cursor, and "Undo" or "Add Drop" on the wrist still mean the set
+            # just performed. Scoping by cursor would disable both at exactly
+            # the moment they are most likely to be wanted.
+            "performed_sets": performed[-12:] if compact else performed,
             "rest": {
                 "active": rest_active,
                 "started_at": _iso(rest_started),
@@ -556,7 +587,7 @@ class WorkoutCommandService:
 
             # Coaching happens strictly after the commit (§6.7): the set is
             # already durable, so a hung LLM cannot make Log Set look broken.
-            if kind == "log_set":
+            if kind in ("log_set", "log_drop_segment"):
                 self._schedule_coaching(user_id, session["id"], extra)
             return result
 
@@ -582,6 +613,16 @@ class WorkoutCommandService:
     ) -> Dict[str, Any]:
         if kind == "log_set":
             return await self._apply_log_set(db, session, payload, command_id)
+        if kind == "add_set":
+            return self._apply_add_set(db, session, payload)
+        if kind == "remove_unlogged_set":
+            return self._apply_remove_unlogged_set(db, session, payload)
+        if kind == "log_drop_segment":
+            return await self._apply_log_drop_segment(db, session, payload, command_id)
+        if kind == "revise_set":
+            return await self._apply_revise_set(db, session, payload, command_id)
+        if kind == "void_set":
+            return self._apply_void_set(db, session, payload)
         if kind == "select_exercise":
             return self._apply_select_exercise(db, session, payload)
         if kind == "set_variant":
@@ -645,6 +686,9 @@ class WorkoutCommandService:
     async def _apply_log_set(
         self, db: Session, session: Dict[str, Any], payload: Dict[str, Any], command_id: str
     ) -> Dict[str, Any]:
+        from app.services.workout_recalc import (
+            effective_name, recalculate_session, target_sets_for,
+        )
         from app.services.workout_session_service import workout_session_service as legacy
 
         snap = session["workout_snapshot"]
@@ -658,9 +702,14 @@ class WorkoutCommandService:
             raise WorkoutConflict("session_mismatch", "That exercise is no longer in this workout.")
 
         ex = exercises[ex_idx]
-        base_name = ex["name"]
-        exercise_name = legacy._effective_name(ex)
-        target_sets = ex.get("sets") or 0
+        exercise_name = effective_name(ex)
+        target_sets = target_sets_for(ex)
+
+        # A warm-up is real work that must not consume a prescribed slot or
+        # drive progression (§4.4). Anything else is a working set.
+        set_kind = (payload.get("set_kind") or "working").strip().lower()
+        if set_kind not in ("working", "warmup"):
+            raise ValueError(f"log_set cannot write a {set_kind!r} set; use log_drop_segment")
 
         rpe = payload.get("rpe")
         effort = (payload.get("effort") or payload.get("rpe_feeling") or "").strip().lower()
@@ -679,67 +728,39 @@ class WorkoutCommandService:
         set_index = min(counts_before.get(exercise_name, 0), max(target_sets - 1, 0))
 
         log_id = str(uuid.uuid4())
-        variant = (ex.get("variant") or "").strip() or None
-        flags = json.dumps({"base_exercise": base_name, "variant": variant}) if variant else None
-        db.execute(text("""
-            INSERT INTO workout_log (
-                id, workout_id, user_id, exercise_id, set_index, weight, reps, rpe, notes,
-                session_date, session_time, active_session_id, flags, command_id
-            ) VALUES (
-                :id, :wid, :uid, :ex, :si, :w, :r, :rpe, :notes,
-                :sdate, :stime, :sid, CAST(:flags AS json), :cid
-            )
-        """), {
-            "id": log_id, "wid": session["id"], "uid": session["user_id"],
-            "ex": exercise_name, "si": set_index + 1,
-            "w": weight, "r": reps, "rpe": rpe, "notes": payload.get("notes"),
-            "sdate": date.today(),
-            # Real UTC instant — the container runs in ET, so a naive now()
-            # would land 4-5h early and break the Watch time-overlap meld.
-            "stime": datetime.now(timezone.utc),
-            "sid": session["id"], "flags": flags, "cid": command_id,
-        })
+        self._insert_set(
+            db, session, ex, log_id,
+            exercise_name=exercise_name,
+            set_index=set_index + 1,
+            weight=weight, reps=reps, rpe=rpe, notes=payload.get("notes"),
+            set_kind=set_kind,
+            # A working set opens its own group; drop segments join it later by
+            # quoting this id, which is why it is minted even when no drop ever
+            # follows.
+            set_group_id=log_id,
+            group_sequence=0,
+            counts_toward_target=(set_kind == "working"),
+            command_id=command_id,
+        )
 
-        # Cursor is derived from what is actually logged, never from an
-        # incrementing pointer — that is what supports doing exercises in any
-        # order and returning to a skipped machine.
-        counts = self._name_counts(db, session["id"])
-        done = legacy._completed_for(exercises, counts, ex_idx)
-        exercise_complete = done >= (target_sets or 0)
-
-        new_ex_idx, new_set_idx = ex_idx, done
-        workout_complete, next_idx = False, None
-        if exercise_complete:
-            next_idx = legacy._next_incomplete_index(exercises, counts, ex_idx)
-            if next_idx is None:
-                workout_complete = True
-            else:
-                new_ex_idx = next_idx
-                new_set_idx = legacy._completed_for(exercises, counts, next_idx)
-
-        volume = Decimal(str(weight)) * Decimal(str(reps))
-        db.execute(text("""
-            UPDATE active_workout_session
-            SET current_exercise_index = :ei, current_set_index = :si,
-                total_sets_completed = total_sets_completed + 1,
-                total_volume = total_volume + :vol
-            WHERE id = :sid
-        """), {"ei": new_ex_idx, "si": new_set_idx, "vol": volume, "sid": session["id"]})
+        # Everything downstream is derived, never patched (§6.4) — the same
+        # code path a void or a revision takes, so the three can never disagree
+        # about what the workout contains.
+        state = recalculate_session(
+            db, session["id"], snapshot=snap, prefer_exercise_index=ex_idx
+        )
+        counts = state["counts"]
+        done = min(counts.get(exercise_name, 0), target_sets)
+        exercise_complete = done >= target_sets
+        workout_complete = state["workout_complete"]
+        new_ex_idx = state["cursor_exercise_index"]
 
         # Deterministic, immediately-known facts (§6.7 step 2) — PR and rest
         # length need no LLM, so they ride back on the acknowledgement.
+        # A warm-up never sets a PR: it is submaximal by definition.
         pr_result = None
-        try:
-            if weight and reps and float(weight) > 0 and int(reps) > 0:
-                from app.routes.fitness import check_and_record_pr
-                pr_result = await check_and_record_pr(
-                    db=db, user_id=session["user_id"], exercise_name=exercise_name,
-                    weight=weight, reps=reps, achieved_at=date.today(), workout_set_id=log_id,
-                )
-                if pr_result and pr_result.get("is_pr"):
-                    db.execute(text("UPDATE workout_log SET is_pr = true WHERE id = :id"), {"id": log_id})
-        except Exception as e:
-            logger.warning(f"[WorkoutCommand] PR check failed (non-fatal): {e}")
+        if set_kind == "working":
+            pr_result = await self._record_pr(db, session["user_id"], exercise_name, weight, reps, log_id)
 
         policy = self.get_policy(db, session["user_id"])
         rest_seconds = 0
@@ -776,6 +797,455 @@ class WorkoutCommandService:
             "workout_complete": workout_complete,
             "next_exercise_index": None if workout_complete else new_ex_idx,
             "proposal": proposal,
+        }
+
+    # ── Set writing primitives ──────────────────────────────────────────
+
+    def _insert_set(
+        self, db: Session, session: Dict[str, Any], exercise: Dict[str, Any], log_id: str, *,
+        exercise_name: str, set_index: int, weight: Any, reps: Any, rpe: Optional[int],
+        notes: Optional[str], set_kind: str, set_group_id: str, group_sequence: int,
+        counts_toward_target: bool, command_id: Optional[str],
+        parent_set_id: Optional[str] = None, revised_from_set_id: Optional[str] = None,
+    ) -> None:
+        """Write one performed set. The only place `workout_log` rows are born.
+
+        Kept as a single function so the structured columns (§6.1) can never be
+        half-populated by a new command that forgets one of them — a row with a
+        null `set_kind` would silently count as working.
+        """
+        variant = (exercise.get("variant") or "").strip() or None
+        flags = json.dumps({"base_exercise": exercise.get("name"), "variant": variant}) if variant else None
+        db.execute(text("""
+            INSERT INTO workout_log (
+                id, workout_id, user_id, exercise_id, set_index, weight, reps, rpe, notes,
+                session_date, session_time, active_session_id, flags, command_id,
+                set_kind, parent_set_id, set_group_id, group_sequence,
+                counts_toward_target, revised_from_set_id
+            ) VALUES (
+                :id, :wid, :uid, :ex, :si, :w, :r, :rpe, :notes,
+                :sdate, :stime, :sid, CAST(:flags AS json), :cid,
+                :kind, :parent, :grp, :seq, :counts, :revised
+            )
+        """), {
+            "id": log_id, "wid": session["id"], "uid": session["user_id"],
+            "ex": exercise_name, "si": set_index,
+            "w": weight, "r": reps, "rpe": rpe, "notes": notes,
+            "sdate": date.today(),
+            # Real UTC instant — the container runs in ET, so a naive now()
+            # would land 4-5h early and break the Watch time-overlap meld.
+            "stime": datetime.now(timezone.utc),
+            "sid": session["id"], "flags": flags, "cid": command_id,
+            "kind": set_kind, "parent": parent_set_id, "grp": set_group_id,
+            "seq": group_sequence, "counts": counts_toward_target,
+            "revised": revised_from_set_id,
+        })
+
+    async def _record_pr(
+        self, db: Session, user_id: str, exercise_name: str, weight: Any, reps: Any, log_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """PR check for one set. Never fatal — a failed check costs a badge."""
+        try:
+            if not (weight and reps and float(weight) > 0 and int(reps) > 0):
+                return None
+            from app.routes.fitness import check_and_record_pr
+            result = await check_and_record_pr(
+                db=db, user_id=user_id, exercise_name=exercise_name,
+                weight=weight, reps=reps, achieved_at=date.today(), workout_set_id=log_id,
+            )
+            if result and result.get("is_pr"):
+                db.execute(text("UPDATE workout_log SET is_pr = true WHERE id = :id"), {"id": log_id})
+            return result
+        except Exception as e:
+            logger.warning(f"[WorkoutCommand] PR check failed (non-fatal): {e}")
+            return None
+
+    def _load_set(self, db: Session, session: Dict[str, Any], set_id: str) -> Dict[str, Any]:
+        """One performed set, proven to belong to this session and user.
+
+        Both checks matter: a set id is client-supplied, and a command minted
+        against a previous workout must not reach into it.
+        """
+        row = db.execute(text("""
+            SELECT id, user_id, active_session_id, exercise_id, set_index, weight, reps, rpe,
+                   notes, is_pr, set_kind, parent_set_id, set_group_id, group_sequence,
+                   counts_toward_target, voided_at
+            FROM workout_log
+            WHERE id = :id FOR UPDATE
+        """), {"id": set_id}).fetchone()
+        if not row or row.user_id != session["user_id"]:
+            raise WorkoutConflict("set_not_found", "That set is no longer in this workout.")
+        if str(row.active_session_id or "") != str(session["id"]):
+            raise WorkoutConflict("set_not_found", "That set belongs to a different workout.")
+        return dict(row._mapping)
+
+    @staticmethod
+    def _exercise_at(session: Dict[str, Any], payload: Dict[str, Any]) -> tuple:
+        """Resolve (index, exercise) from a payload, defaulting to the cursor."""
+        exercises = session["workout_snapshot"].get("exercises") or []
+        raw = payload.get("exercise_index")
+        idx = session["current_exercise_index"] if raw is None else int(raw)
+        if idx < 0 or idx >= len(exercises):
+            raise WorkoutConflict("session_mismatch", "That exercise is no longer in this workout.")
+        return idx, exercises[idx]
+
+    # ── Flexible sets (§6.3) ────────────────────────────────────────────
+
+    def _apply_add_set(self, db: Session, session: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Raise the working-set target for one exercise, this workout only.
+
+        `sets_added` is a separate field from `sets` on purpose: the template's
+        prescription stays intact and visible, so the UI can say "4 sets
+        (3 prescribed)" and the post-workout question "make this permanent?"
+        remains a real question (§4.3).
+        """
+        from app.services.workout_recalc import effective_name, recalculate_session, target_sets_for
+
+        # `after_set_id` is how the Watch says "one more of what I just did".
+        # Its rest screen appears after the cursor has already advanced past a
+        # finished exercise, so reading the cursor there would add the set to
+        # the next lift instead.
+        after_set_id = payload.get("after_set_id")
+        if after_set_id and payload.get("exercise_index") is None:
+            anchor = self._load_set(db, session, str(after_set_id))
+            exercises = session["workout_snapshot"].get("exercises") or []
+            found = next(
+                (i for i, e in enumerate(exercises) if effective_name(e) == anchor["exercise_id"]),
+                None,
+            )
+            if found is None:
+                raise WorkoutConflict("session_mismatch", "That exercise is no longer in this workout.")
+            idx, ex = found, exercises[found]
+        else:
+            idx, ex = self._exercise_at(session, payload)
+
+        try:
+            count = int(payload.get("count", 1) or 1)
+        except (TypeError, ValueError):
+            count = 1
+        # Bounded on purpose: this is "one more set", not a way to rewrite the
+        # workout from a wrist.
+        count = max(1, min(count, 5))
+
+        snap = session["workout_snapshot"]
+        ex["sets_added"] = int(ex.get("sets_added") or 0) + count
+        db.execute(text("""
+            UPDATE active_workout_session SET workout_snapshot = CAST(:snap AS jsonb) WHERE id = :sid
+        """), {"snap": json.dumps(snap), "sid": session["id"]})
+
+        # Reopening a finished exercise is the point of Add Set after the fact:
+        # the cursor has to come back to it, or David taps Add Set and nothing
+        # visible happens.
+        state = recalculate_session(db, session["id"], snapshot=snap, prefer_exercise_index=idx)
+        return {
+            "exercise_index": idx,
+            "target_sets": target_sets_for(ex),
+            "prescribed_sets": ex.get("sets"),
+            "added": count,
+            "cursor_exercise_index": state["cursor_exercise_index"],
+        }
+
+    def _apply_remove_unlogged_set(
+        self, db: Session, session: Dict[str, Any], payload: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Give back a target set that has not been performed.
+
+        Refuses to go below what is already logged (that would need Void) and,
+        without an explicit `below_prescribed`, below the template's number —
+        quietly shrinking the prescription is a programming change, not an
+        in-session adjustment (§6.3).
+        """
+        from app.services.workout_recalc import (
+            effective_name, prescribed_sets_for, recalculate_session, target_sets_for,
+        )
+
+        idx, ex = self._exercise_at(session, payload)
+        try:
+            count = max(1, min(int(payload.get("count", 1) or 1), 5))
+        except (TypeError, ValueError):
+            count = 1
+
+        logged = self._name_counts(db, session["id"]).get(effective_name(ex), 0)
+        current = target_sets_for(ex)
+        floor = logged
+        if not payload.get("below_prescribed"):
+            floor = max(floor, prescribed_sets_for(ex))
+        new_target = max(floor, current - count)
+        if new_target == current:
+            raise WorkoutConflict(
+                "target_floor",
+                "There are no unlogged sets left to remove on that exercise.",
+            )
+
+        snap = session["workout_snapshot"]
+        ex["sets_added"] = new_target - prescribed_sets_for(ex)
+        db.execute(text("""
+            UPDATE active_workout_session SET workout_snapshot = CAST(:snap AS jsonb) WHERE id = :sid
+        """), {"snap": json.dumps(snap), "sid": session["id"]})
+        state = recalculate_session(db, session["id"], snapshot=snap, prefer_exercise_index=idx)
+        return {
+            "exercise_index": idx,
+            "target_sets": new_target,
+            "removed": current - new_target,
+            "workout_complete": state["workout_complete"],
+        }
+
+    def _resolve_drop_parent(
+        self, db: Session, session: Dict[str, Any], payload: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """The working set a new drop segment hangs off.
+
+        Three ways of saying it, in decreasing specificity, because the devices
+        genuinely know different amounts: the phone's history editor names the
+        set, the Watch's rest screen means "the one I just did", and a chat
+        command may only name the exercise.
+        """
+        from app.services.workout_recalc import effective_name
+
+        parent_id = payload.get("parent_set_id")
+        if parent_id:
+            return self._load_set(db, session, str(parent_id))
+
+        sql = """
+            SELECT id, exercise_id, weight, reps, set_index, set_group_id, voided_at
+            FROM workout_log
+            WHERE active_session_id = :sid AND voided_at IS NULL AND set_kind = 'working'
+        """
+        params: Dict[str, Any] = {"sid": session["id"]}
+        raw_index = payload.get("exercise_index")
+        if raw_index is not None:
+            exercises = session["workout_snapshot"].get("exercises") or []
+            idx = int(raw_index)
+            if idx < 0 or idx >= len(exercises):
+                raise WorkoutConflict("session_mismatch", "That exercise is no longer in this workout.")
+            sql += " AND exercise_id = :ex"
+            params["ex"] = effective_name(exercises[idx])
+        sql += " ORDER BY created_at DESC LIMIT 1"
+
+        row = db.execute(text(sql), params).fetchone()
+        if not row:
+            raise WorkoutConflict(
+                "no_parent_set",
+                "Log the working set first — a drop set hangs off one.",
+            )
+        return dict(row._mapping)
+
+    async def _apply_log_drop_segment(
+        self, db: Session, session: Dict[str, Any], payload: Dict[str, Any], command_id: str
+    ) -> Dict[str, Any]:
+        """Log one weight reduction under an existing working set (§6.3).
+
+        Adds volume and history; does not advance the working-set cursor and
+        does not start a rest timer — a drop set is one continuous effort, and
+        a 2-minute countdown between segments would be actively wrong.
+        """
+        from app.services.workout_recalc import effective_name, recalculate_session
+
+        parent = self._resolve_drop_parent(db, session, payload)
+        if parent.get("voided_at") is not None:
+            raise WorkoutConflict("set_not_found", "That working set was undone.")
+
+        # The exercise is whichever one the parent set belongs to, not wherever
+        # the cursor happens to be. Finishing an exercise moves the cursor on,
+        # and "Add Drop" on the rest screen still means "off the set I just
+        # did" — reading the cursor there would attach it to the next lift.
+        exercise_name = parent["exercise_id"]
+        exercises = session["workout_snapshot"].get("exercises") or []
+        idx = next(
+            (i for i, e in enumerate(exercises) if effective_name(e) == exercise_name),
+            None,
+        )
+        if idx is None:
+            raise WorkoutConflict("session_mismatch", "That exercise is no longer in this workout.")
+        ex = exercises[idx]
+
+        group_id = parent.get("set_group_id") or parent["id"]
+        next_seq = db.execute(text("""
+            SELECT COALESCE(MAX(group_sequence), 0) + 1 FROM workout_log
+            WHERE set_group_id = :grp AND voided_at IS NULL
+        """), {"grp": group_id}).scalar() or 1
+
+        weight = payload.get("weight")
+        if weight is None:
+            raise ValueError("log_drop_segment requires a weight")
+        reps = payload.get("reps")
+        if reps is None:
+            raise ValueError("log_drop_segment requires reps")
+
+        rpe = payload.get("rpe")
+        effort = (payload.get("effort") or "").strip().lower()
+        if rpe is None and effort:
+            rpe = EFFORT_RPE.get(effort, 7)
+
+        log_id = str(uuid.uuid4())
+        self._insert_set(
+            db, session, ex, log_id,
+            exercise_name=exercise_name,
+            # Shares the parent's ordinal: this is set 2's second segment, not
+            # set 3.
+            set_index=parent.get("set_index") or 1,
+            weight=weight, reps=reps, rpe=rpe, notes=payload.get("notes"),
+            set_kind="drop",
+            set_group_id=group_id,
+            group_sequence=int(next_seq),
+            counts_toward_target=False,
+            command_id=command_id,
+            parent_set_id=parent["id"],
+        )
+
+        # Volume moves, completion does not.
+        state = recalculate_session(
+            db, session["id"], snapshot=session["workout_snapshot"], prefer_exercise_index=idx
+        )
+        # A drop segment is submaximal by design, so it never claims a PR and
+        # never triggers the "you regressed" weight proposal (§8).
+        return {
+            "logged": {
+                "id": log_id, "exercise": exercise_name, "exercise_index": idx,
+                "set_kind": "drop", "set_group_id": group_id, "parent_set_id": parent["id"],
+                "segment": int(next_seq),
+                "weight": float(weight), "reps": int(reps), "rpe": rpe,
+            },
+            "rest_seconds": 0,
+            "total_volume": state["total_volume"],
+            "workout_complete": False,
+        }
+
+    async def _apply_revise_set(
+        self, db: Session, session: Dict[str, Any], payload: Dict[str, Any], command_id: str
+    ) -> Dict[str, Any]:
+        """Correct a logged set in place, recomputing everything it fed.
+
+        The PR derived from the old numbers is withdrawn before the new numbers
+        are checked, so correcting 225 down to 135 cannot leave a personal
+        record standing on a set that did not happen (§6.3, §12.7).
+        """
+        from app.services.workout_recalc import recalculate_session, withdraw_prs_for_set
+
+        set_id = payload.get("set_id")
+        if not set_id:
+            raise ValueError("revise_set requires set_id")
+        existing = self._load_set(db, session, str(set_id))
+        if existing.get("voided_at") is not None:
+            raise WorkoutConflict("set_not_found", "That set was already undone.")
+
+        weight = payload.get("weight", existing["weight"])
+        reps = payload.get("reps", existing["reps"])
+        notes = payload.get("notes", existing["notes"])
+        rpe = payload.get("rpe")
+        effort = (payload.get("effort") or "").strip().lower()
+        if rpe is None and effort:
+            rpe = EFFORT_RPE.get(effort, 7)
+        if rpe is None:
+            rpe = existing["rpe"]
+
+        kind = (payload.get("set_kind") or existing["set_kind"] or "working").strip().lower()
+        if kind not in ("working", "warmup", "drop"):
+            raise ValueError(f"unknown set_kind {kind!r}")
+        # A drop segment without a parent would be an orphan the group view
+        # cannot render, so reclassification into `drop` is refused here and
+        # done by voiding and re-logging instead.
+        if kind == "drop" and not existing.get("parent_set_id"):
+            raise WorkoutConflict(
+                "set_kind_change",
+                "Undo this set and log it as a drop segment instead.",
+            )
+
+        withdraw_prs_for_set(db, session["user_id"], existing["id"])
+        db.execute(text("""
+            UPDATE workout_log
+            SET weight = :w, reps = :r, rpe = :rpe, notes = :notes,
+                set_kind = :kind, counts_toward_target = :counts,
+                revised_from_set_id = COALESCE(revised_from_set_id, :self)
+            WHERE id = :id
+        """), {
+            "w": weight, "r": reps, "rpe": rpe, "notes": notes,
+            "kind": kind, "counts": kind == "working",
+            "self": existing["id"], "id": existing["id"],
+        })
+
+        pr_result = None
+        if kind == "working":
+            pr_result = await self._record_pr(
+                db, session["user_id"], existing["exercise_id"], weight, reps, existing["id"]
+            )
+
+        state = recalculate_session(db, session["id"], snapshot=session["workout_snapshot"])
+        return {
+            "revised": {
+                "id": existing["id"], "exercise": existing["exercise_id"],
+                "weight": float(weight) if weight is not None else None,
+                "reps": int(reps) if reps is not None else None,
+                "rpe": rpe, "set_kind": kind,
+            },
+            "pr": pr_result if (pr_result and pr_result.get("is_pr")) else None,
+            "total_volume": state["total_volume"],
+            "workout_complete": state["workout_complete"],
+        }
+
+    def _apply_void_set(self, db: Session, session: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Strike a set from everything that counts, keeping the record of it.
+
+        Voiding a working set voids its drop segments too: they were performed
+        as part of that set, and leaving them behind would attribute real work
+        to a set David has just said did not happen.
+        """
+        from app.services.workout_recalc import recalculate_session, withdraw_prs_for_set
+
+        set_id = payload.get("set_id")
+        if not set_id:
+            # "Undo" on the wrist means the last thing logged, whatever it was.
+            row = db.execute(text("""
+                SELECT id FROM workout_log
+                WHERE active_session_id = :sid AND voided_at IS NULL
+                ORDER BY created_at DESC LIMIT 1
+            """), {"sid": session["id"]}).fetchone()
+            if not row:
+                raise WorkoutConflict("set_not_found", "There is nothing to undo yet.")
+            set_id = row.id
+
+        existing = self._load_set(db, session, str(set_id))
+        if existing.get("voided_at") is not None:
+            # Idempotent by nature: a retried Undo should settle, not fail.
+            return {"voided": {"id": existing["id"], "already": True}}
+
+        reason = (payload.get("reason") or "user_undo")[:120]
+        ids = [existing["id"]]
+        if existing["set_kind"] == "working" and existing.get("set_group_id"):
+            child_rows = db.execute(text("""
+                SELECT id FROM workout_log
+                WHERE set_group_id = :grp AND id <> :id AND voided_at IS NULL
+            """), {"grp": existing["set_group_id"], "id": existing["id"]}).fetchall()
+            ids.extend(r.id for r in child_rows)
+
+        for row_id in ids:
+            withdraw_prs_for_set(db, session["user_id"], row_id)
+        db.execute(text("""
+            UPDATE workout_log
+            SET voided_at = NOW(), void_reason = :reason, counts_toward_target = false
+            WHERE id = ANY(:ids)
+        """), {"reason": reason, "ids": ids})
+
+        # Any recommendation derived from the struck set is now advice about a
+        # set that did not happen (§6.4 "pending coaching that became stale").
+        db.execute(text("""
+            UPDATE workout_adjustment_proposal
+            SET status = 'superseded', resolved_at = NOW()
+            WHERE session_id = :sid AND status = 'pending' AND kind = 'next_set_weight'
+        """), {"sid": session["id"]})
+
+        state = recalculate_session(db, session["id"], snapshot=session["workout_snapshot"])
+        return {
+            "voided": {
+                "id": existing["id"],
+                "exercise": existing["exercise_id"],
+                "set_kind": existing["set_kind"],
+                "drop_segments_voided": len(ids) - 1,
+                "reason": reason,
+            },
+            "total_volume": state["total_volume"],
+            "cursor_exercise_index": state["cursor_exercise_index"],
+            "workout_complete": state["workout_complete"],
         }
 
     def _apply_select_exercise(self, db: Session, session: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -913,6 +1383,7 @@ class WorkoutCommandService:
         # Post-workout progression is a proposal for *next* time, approved out
         # of the gym rather than at the next start (§6.8).
         self._create_next_session_proposals(db, session)
+        self._create_permanent_set_proposals(db, session)
 
         heart_rate = self._linked_heart_rate(db, session, hk_uuid) or legacy._meld_external_workout(
             db, session["user_id"], started, now
@@ -1090,6 +1561,64 @@ class WorkoutCommandService:
             evidence={"target_rpe": target_rpe, "reported_rpe": rpe, "completed_reps": reps},
         )
 
+    # Recommendations Sara may make about the *shape* of the current workout
+    # (§8). Each one maps to exactly one command David could have issued
+    # himself, which is what keeps approval meaningful: there is no proposal
+    # kind that can do something a direct tap cannot.
+    EXTRA_WORK_KINDS = {
+        "add_working_set": "Add one more set",
+        "perform_drop_set": "Finish with a drop set",
+        "reduce_current_target_sets": "Cut a set from this exercise",
+    }
+
+    def propose_extra_work(
+        self, db: Session, user_id: str, session_id: str, *, kind: str,
+        exercise_index: int, reason: str, count: int = 1,
+        drop_weight: Optional[float] = None, evidence: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Record a pending recommendation about the live workout.
+
+        Deliberately the only way Sara can influence set structure: she writes
+        a proposal, David answers it, and `_apply_proposed_value` runs the same
+        handler his own tap would have. Nothing here changes the workout.
+        """
+        if kind not in self.EXTRA_WORK_KINDS:
+            raise ValueError(f"unknown extra-work proposal kind {kind!r}")
+
+        session = self._load_by_id(db, session_id)
+        if not session or session["status"] != "active":
+            raise WorkoutConflict("no_active_session", "That workout is no longer running.")
+        exercises = session["workout_snapshot"].get("exercises") or []
+        if exercise_index < 0 or exercise_index >= len(exercises):
+            raise WorkoutConflict("proposal_stale", "That exercise is no longer in this workout.")
+
+        from app.services.workout_recalc import target_sets_for
+        ex = exercises[exercise_index]
+        current: Dict[str, Any] = {"target_sets": target_sets_for(ex)}
+        proposed: Dict[str, Any] = {"count": max(1, int(count))}
+        if kind == "add_working_set":
+            proposed["target_sets"] = target_sets_for(ex) + max(1, int(count))
+        elif kind == "reduce_current_target_sets":
+            proposed["target_sets"] = max(0, target_sets_for(ex) - max(1, int(count)))
+        elif kind == "perform_drop_set":
+            approved = ex.get("approved_weight") or ex.get("suggested_weight")
+            current = {"weight": approved}
+            # A suggested starting weight, not a plan: David sets the real one
+            # on the entry screen (§7.1 "pre-fills as a convenience").
+            proposed["weight"] = drop_weight if drop_weight is not None else (
+                round(float(approved) * 0.7 / 5) * 5 if approved else None
+            )
+
+        return self._create_proposal(
+            db, user_id, session_id,
+            kind=kind,
+            scope={"exercise_index": exercise_index},
+            current_value=current,
+            proposed_value=proposed,
+            reason=reason or self.EXTRA_WORK_KINDS[kind],
+            evidence=evidence,
+        )
+
     def _approved_next_session_weights(self, db: Session, user_id: str) -> Dict[str, float]:
         """Progressions David approved out of the gym, by exercise name (§6.8).
 
@@ -1145,6 +1674,76 @@ class WorkoutCommandService:
                 evidence={"last_session": suggestion.get("last_session")},
                 ttl_seconds=None,
             )
+
+    def _create_permanent_set_proposals(self, db: Session, session: Dict[str, Any]) -> None:
+        """Ask, after the fact, whether a set added today should stick (§4.3).
+
+        Adding a set mid-workout deliberately changes nothing beyond that
+        workout. But doing it every week is a programming signal, and silently
+        discarding it forever would make David re-add the set every session.
+        So the question gets asked once, out of the gym, as its own approval —
+        never folded into the in-session tap that started it.
+        """
+        if not _v2_enabled():
+            return
+        snap = session["workout_snapshot"]
+        template_id = session.get("template_id")
+        if not template_id:
+            return
+        for ex in (snap.get("exercises") or []):
+            try:
+                added = int(ex.get("sets_added") or 0)
+            except (TypeError, ValueError):
+                continue
+            if added == 0:
+                continue
+            base = ex.get("sets") or 0
+            self._create_proposal(
+                db, session["user_id"], None,
+                kind="template_set_count",
+                scope={"template_id": template_id, "exercise": ex.get("name")},
+                current_value={"sets": base},
+                proposed_value={"sets": base + added},
+                reason=(
+                    f"You did {base + added} sets of {ex.get('name')} instead of {base}. "
+                    "Make that the plan from now on?"
+                ),
+                evidence={"session_id": session["id"], "sets_added": added},
+                ttl_seconds=None,
+            )
+
+    def _apply_permanent_set_count(self, db: Session, scope: Dict[str, Any], proposed: Dict[str, Any]) -> bool:
+        """Write an approved set count back into the template.
+
+        The only place in this service that edits a `fitness_template`, and it
+        is reachable only through an explicit post-workout approval.
+        """
+        template_id, name = scope.get("template_id"), scope.get("exercise")
+        sets = proposed.get("sets")
+        if not template_id or not name or sets is None:
+            return False
+
+        row = db.execute(text(
+            "SELECT exercises FROM fitness_template WHERE id = :tid"
+        ), {"tid": template_id}).fetchone()
+        if not row:
+            raise WorkoutConflict("proposal_stale", "That workout template no longer exists.")
+
+        raw = row.exercises or "[]"
+        specs = json.loads(raw) if isinstance(raw, str) else (raw or [])
+        changed = False
+        for spec in specs:
+            if spec.get("name") == name:
+                spec["sets"] = int(sets)
+                changed = True
+        if not changed:
+            raise WorkoutConflict("proposal_stale", "That exercise is no longer in the template.")
+
+        db.execute(text("""
+            UPDATE fitness_template SET exercises = CAST(:ex AS jsonb), updated_at = NOW()
+            WHERE id = :tid
+        """), {"ex": json.dumps(specs), "tid": template_id})
+        return True
 
     def _apply_resolve_proposal(
         self, db: Session, session: Optional[Dict[str, Any]], user_id: str,
@@ -1218,6 +1817,34 @@ class WorkoutCommandService:
             # Nothing to mutate in *this* session — the approval is the record,
             # and `_approved_next_session_weights` turns it into the next
             # workout's prescription (then retires it).
+            return True
+
+        # ── Flexible-set proposals (2026-07-27 plan §8) ──────────────────
+        # Approving one applies exactly the mutation that was shown, through
+        # the same handler a direct David tap uses. There is no second code
+        # path where Sara could apply something adjacent to what she proposed.
+        if row.kind in ("add_working_set", "reduce_current_target_sets"):
+            if session is None:
+                raise WorkoutConflict("proposal_stale", "That workout is no longer running.")
+            payload = {
+                "exercise_index": scope.get("exercise_index"),
+                "count": proposed.get("count", 1),
+            }
+            if row.kind == "add_working_set":
+                self._apply_add_set(db, session, payload)
+            else:
+                self._apply_remove_unlogged_set(db, session, payload)
+            return True
+
+        if row.kind == "template_set_count":
+            # The one proposal here that outlives the session: it edits the
+            # program. Deliberately unreachable from any in-session control.
+            return self._apply_permanent_set_count(db, scope, proposed)
+
+        if row.kind == "perform_drop_set":
+            # Sara cannot perform a drop set; approving one is consent to be
+            # offered the entry screen seeded with her numbers. The set itself
+            # still arrives as a `log_drop_segment` David issues (§4.2).
             return True
 
         logger.warning(f"[WorkoutCommand] no applicator for proposal kind {row.kind}")
@@ -1337,6 +1964,7 @@ class WorkoutCommandService:
             session = self._load_by_id(db, session_id)
             if not session or session["status"] != "active":
                 return
+            from app.services.workout_recalc import target_sets_for
             exercises = session["workout_snapshot"].get("exercises") or []
             entry = logged.get("logged") or {}
             ex_idx = entry.get("exercise_index") or 0
@@ -1345,7 +1973,9 @@ class WorkoutCommandService:
             feedback = await legacy._generate_set_feedback(
                 exercise_name=entry.get("exercise") or "",
                 set_number=entry.get("set_number") or 1,
-                total_sets=ex.get("sets") or 0,
+                # Effective target — "set 4 of 3" is what David would read if
+                # coaching used the untouched prescription after an Add Set.
+                total_sets=target_sets_for(ex),
                 weight=entry.get("weight") or 0,
                 reps=entry.get("reps") or 0,
                 rpe=entry.get("rpe"),
@@ -1354,6 +1984,10 @@ class WorkoutCommandService:
                 workout_complete=bool(logged.get("workout_complete")),
                 next_exercise=exercises[nxt_idx] if isinstance(nxt_idx, int) and nxt_idx < len(exercises) else None,
                 rest_seconds=logged.get("rest_seconds") or 0,
+                # Without this the model is handed "95 lbs, suggested 135" with
+                # no explanation and reliably calls a drop segment a bad set.
+                set_kind=entry.get("set_kind") or "working",
+                drop_segment=entry.get("segment"),
             )
             policy = self.get_policy(db, user_id)
             proposal = logged.get("proposal")
@@ -1410,15 +2044,31 @@ class WorkoutCommandService:
         Deliberately thin: enough to render a pre-start summary, never enough
         to build a competing workout snapshot — the backend still owns that.
         """
+        from app.services.phase_resolution import get_effective_phase
         from app.services.training_day import is_training_day
 
+        catalog_date = local_today()
+        effective_phase = get_effective_phase(db, user_id, catalog_date)
+        effective_phase_id = effective_phase["id"] if effective_phase else None
         rows = db.execute(text("""
             SELECT id, name, exercises, scheduled_days
             FROM fitness_template
             WHERE user_id = :uid
-            ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST
+              AND (
+                (CAST(:phase_id AS VARCHAR) IS NOT NULL AND phase_id = CAST(:phase_id AS VARCHAR))
+                OR phase_id IS NULL
+              )
+            ORDER BY
+              CASE WHEN phase_id = CAST(:phase_id AS VARCHAR) THEN 0 ELSE 1 END,
+              order_in_phase ASC NULLS LAST,
+              updated_at DESC NULLS LAST,
+              created_at DESC NULLS LAST
             LIMIT :lim
-        """), {"uid": user_id, "lim": limit}).fetchall()
+        """), {
+            "uid": user_id,
+            "phase_id": effective_phase_id,
+            "lim": limit,
+        }).fetchall()
 
         templates = []
         for r in rows:
@@ -1437,7 +2087,7 @@ class WorkoutCommandService:
 
         today_template_id = None
         try:
-            today = is_training_day(db, user_id, date.today())
+            today = is_training_day(db, user_id, catalog_date)
             if isinstance(today, dict):
                 today_template_id = today.get("template_id")
         except Exception as e:
@@ -1450,6 +2100,7 @@ class WorkoutCommandService:
         return {
             "schema_version": SCHEMA_VERSION,
             "generated_at": datetime.now(timezone.utc).isoformat(),
+            "generated_for_date": catalog_date.isoformat(),
             "today_template_id": today_template_id,
             "templates": templates,
             "active_projection": (
@@ -1566,10 +2217,18 @@ def _last_approved_weight(last_session: Optional[Dict[str, Any]]) -> Optional[fl
 
 
 def _exercise_view(ex: Dict[str, Any]) -> Dict[str, Any]:
+    from app.services.workout_recalc import prescribed_sets_for, target_sets_for
+
     return {
         "name": ex.get("name"),
         "variant": ex.get("variant"),
-        "target_sets": ex.get("sets"),
+        # `target_sets` is what this workout is actually asking for and moves
+        # when David adds a set; `prescribed_sets` is the template's number and
+        # never moves. Showing both is what makes "4 sets (3 prescribed)"
+        # honest instead of quietly rewriting the plan (§6.2, §7.1).
+        "target_sets": target_sets_for(ex),
+        "prescribed_sets": prescribed_sets_for(ex),
+        "completed_drop_segments": ex.get("completed_drop_segments", 0),
         "target_reps": ex.get("reps"),
         "target_rpe": ex.get("rpe_target"),
         "approved_weight": ex.get("approved_weight", ex.get("suggested_weight")),

@@ -887,27 +887,12 @@ for superseded episodes, and the Neo4j ActionItem bloat flagged in the June audi
 nodes — verify it was actually cleaned). Default: 90-day raw retention, aggregates kept
 forever, documented in one retention table in the code.
 
-## Post-implementation punch list (found 2026-07-20, after the build)
-
-**P1. The confident no-op — Sara claimed an action she couldn't perform.** On 07-19 at 12:03Z
-David told Sara "remove it from your acs interest areas and forget it" (the Python JIT
-topic); Sara replied "Done." The `react_to_interest` tool didn't deploy until 18:13Z — she
-had no tool to do it, said Done anyway, and `sara_interest` still showed `blocked=false,
-strikes=0, weight=3.0`, so the daemon kept researching JIT and attempting pings for another
-day. *Data fixed by hand 07-20 (blocked=true).* The systemic fix: (a) chat prompt rule +
-directive — Sara NEVER confirms an action unless a tool call actually succeeded this turn;
-if no tool matches, she says she can't do it yet; (b) Phase 9.3 verification habit covers
-the agent side. This failure mode — fluent confirmation with zero effect — is the single
-most trust-corrosive bug the product can have.
-
-**P2. Email→event cross-reference fans out and repeats.**
-`proactive_intelligence.py:85-109` loops per *event*, so one email matching three "Risk
-Ninja" events sent three notifications in 13 seconds (07-20 13:44), and the per-pair dedup
-key (`xref:email:X:event:Y`) plus 2h cooldown let a pair re-fire at 15:44. Fix: invert the
-grouping — ONE insight per email listing all matched events ("Jim's email relates to 3
-upcoming Risk Ninja events: Mon 2PM, Tue 9:30, Wed 10AM"), dedup key `xref:email:{id}`
-only, and notify **once per email lifetime** (skip if any notification with that email's
-topic prefix was ever sent — the connection only needs making once).
+## Post-implementation punch list — MOVED
+This section has moved to `SARA_PUNCH_LIST.md` (repo root), the living punch-list doc.
+Status at move time (2026-07-21): P1 (confident no-op) CLOSED — data fix + prompt rule
+live; P2 (email→event fan-out) CLOSED — per-email grouping + lifetime dedup live;
+P3 (inbox button must autoload the unified inbox, not ask) OPEN; P4 (stale world model —
+HEARTBEAT.md/PKG asserting ended swim lessons) OPEN, HEARTBEAT.md hand-fixed.
 
 ## Phase 12 — The last mile to "her": what separates a great tool from the dream assistant
 

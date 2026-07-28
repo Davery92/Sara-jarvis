@@ -33,6 +33,11 @@ from app.prompts.fitness_system_prompt import get_fitness_system_prompt
 from app.main_simple import SimpleLLMClient
 from app.tools.registry import ToolRegistry
 from app.services.workout_session_service import workout_session_service
+from app.services.phase_resolution import (
+    annotate_effective_statuses,
+    get_effective_phase,
+    reconcile_active_program_phase_statuses,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -1813,14 +1818,8 @@ async def fitness_chat(
         """), {"user_id": user_id}).fetchone()
         goals = dict(goals_result._mapping) if goals_result else None
 
-        # 3. Get active training phase
-        phase_result = db.execute(text("""
-            SELECT id, name, goal, start_date, end_date, notes
-            FROM fitness_phase
-            WHERE user_id = :user_id AND status = 'active'
-            ORDER BY created_at DESC LIMIT 1
-        """), {"user_id": user_id}).fetchone()
-        active_phase = dict(phase_result._mapping) if phase_result else None
+        # 3. Get the dated phase of the already-approved active program.
+        active_phase = get_effective_phase(db, user_id, local_now().date())
 
         # 4. Get today's scheduled templates
         today_dow = naive_local_now().strftime('%A').lower()
@@ -1828,9 +1827,15 @@ async def fitness_chat(
             SELECT id, name, scheduled_days, exercises, notes
             FROM fitness_template
             WHERE user_id = :user_id
-            AND (:today = ANY(string_to_array(scheduled_days::text, ','))
-                OR scheduled_days::text LIKE :today_pattern)
-        """), {"user_id": user_id, "today": today_dow, "today_pattern": f'%{today_dow}%'}).fetchall()
+              AND (phase_id = :phase_id OR phase_id IS NULL)
+              AND (:today = ANY(string_to_array(scheduled_days::text, ','))
+                  OR scheduled_days::text LIKE :today_pattern)
+        """), {
+            "user_id": user_id,
+            "phase_id": active_phase["id"] if active_phase else None,
+            "today": today_dow,
+            "today_pattern": f'%{today_dow}%',
+        }).fetchall()
         todays_templates = [dict(t._mapping) for t in templates_result]
 
         # 5. Get recent workouts (last 7 days) - grouped by session
@@ -1840,6 +1845,7 @@ async def fitness_chat(
                    STRING_AGG(DISTINCT notes, '; ') as notes
             FROM workout_log
             WHERE user_id = :user_id AND session_date >= :week_ago AND session_date IS NOT NULL
+              AND voided_at IS NULL
             GROUP BY session_date
             ORDER BY session_date DESC LIMIT 10
         """), {"user_id": user_id, "week_ago": week_ago.date()}).fetchall()
@@ -2697,6 +2703,8 @@ async def list_programs(user_id: str = Depends(get_current_user_id), db: Session
 async def get_active_program(user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
     """Get the currently active program with its phases"""
     try:
+        effective = reconcile_active_program_phase_statuses(db, user_id, local_now().date())
+        db.commit()
         program = db.execute(text("""
             SELECT id, name, goal, start_date, end_date, is_active, notes, plan_markdown, created_at, updated_at
             FROM fitness_program
@@ -2717,9 +2725,14 @@ async def get_active_program(user_id: str = Depends(get_current_user_id), db: Se
             ORDER BY order_index ASC, start_date ASC NULLS LAST
         """), {"user_id": user_id, "program_id": program_dict['id']}).fetchall()
 
+        phase_dicts = [dict(row._mapping) for row in phases]
         return {
             "program": program_dict,
-            "phases": [dict(row._mapping) for row in phases]
+            "phases": annotate_effective_statuses(
+                phase_dicts,
+                effective["id"] if effective else None,
+                local_now().date(),
+            ),
         }
     except Exception as e:
         logger.error(f"Failed to get active program: {e}")
@@ -2954,14 +2967,22 @@ PHASE_SELECT_COLS = """
 async def list_phases(user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
     """List all phases for user (hierarchical)"""
     try:
+        effective = reconcile_active_program_phase_statuses(db, user_id, local_now().date())
+        db.commit()
         phases = db.execute(text(f"""
             SELECT {PHASE_SELECT_COLS}
             FROM fitness_phase
             WHERE user_id = :user_id
             ORDER BY program_id NULLS LAST, order_index ASC, start_date DESC NULLS LAST, created_at DESC
         """), {"user_id": user_id}).fetchall()
-
-        return {"phases": [dict(row._mapping) for row in phases]}
+        phase_dicts = [dict(row._mapping) for row in phases]
+        return {
+            "phases": annotate_effective_statuses(
+                phase_dicts,
+                effective["id"] if effective else None,
+                local_now().date(),
+            )
+        }
     except Exception as e:
         logger.error(f"Failed to list phases: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -3147,26 +3168,17 @@ async def get_today_nutrition_target(
     # and roll over hours early/late, mislabeling the day near midnight.
     target_date = on_date or local_now().date()
 
-    # Find the active phase whose date range covers target_date
-    phase_row = db.execute(text(f"""
-        SELECT {PHASE_SELECT_COLS}
-        FROM fitness_phase
-        WHERE user_id = :uid
-          AND start_date IS NOT NULL
-          AND :d >= start_date
-          AND (end_date IS NULL OR :d <= end_date)
-        ORDER BY start_date DESC LIMIT 1
-    """), {"uid": user_id, "d": target_date}).fetchone()
+    # The active program and its dated child phase are the single authority.
+    phase = reconcile_active_program_phase_statuses(db, user_id, target_date)
+    db.commit()
 
-    if not phase_row:
+    if not phase:
         return {
             "date": target_date.isoformat(),
             "is_training_day": False,
             "phase": None,
             "target": None,
         }
-
-    phase = dict(phase_row._mapping)
 
     # Is today a training day? Two independent signals, either one counts:
     #   1. A materialized workout_session exists for the date (created by
@@ -3278,6 +3290,8 @@ async def toggle_training_day(
 async def get_active_phases(user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
     """Get currently active phases with nutrition targets"""
     try:
+        reconcile_active_program_phase_statuses(db, user_id, local_now().date())
+        db.commit()
         phases = db.execute(text(f"""
             SELECT {PHASE_SELECT_COLS}
             FROM fitness_phase
@@ -3508,11 +3522,12 @@ async def list_templates(
             sql += " AND t.phase_id = :phase_id"
             params["phase_id"] = phase_id
         elif active_only:
-            # Filter to only templates from active phase
-            sql += """ AND t.phase_id IN (
-                SELECT id FROM fitness_phase
-                WHERE user_id = :user_id AND status = 'active'
-            )"""
+            effective = get_effective_phase(db, user_id, local_now().date())
+            if effective:
+                sql += " AND t.phase_id = :effective_phase_id"
+                params["effective_phase_id"] = effective["id"]
+            else:
+                sql += " AND 1 = 0"
 
         sql += " ORDER BY t.created_at DESC"
 
@@ -3584,14 +3599,12 @@ async def get_today_template(user_id: str = Depends(get_current_user_id), db: Se
 
         day_of_week = naive_local_now().strftime("%A").lower()
 
-        # First, find the active phase (if any)
-        active_phase = db.execute(text("""
-            SELECT id, name FROM fitness_phase
-            WHERE user_id = :user_id AND status = 'active'
-            LIMIT 1
-        """), {"user_id": user_id}).fetchone()
-
-        active_phase_id = active_phase.id if active_phase else None
+        # Resolve the dated phase of the approved active program.
+        active_phase = reconcile_active_program_phase_statuses(
+            db, user_id, local_now().date()
+        )
+        db.commit()
+        active_phase_id = active_phase["id"] if active_phase else None
 
         templates = db.execute(text("""
             SELECT id, phase_id, name, scheduled_days, exercises, notes
@@ -3624,7 +3637,10 @@ async def get_today_template(user_id: str = Depends(get_current_user_id), db: Se
         return {
             "templates": matching_templates,
             "day_of_week": day_of_week,
-            "active_phase": {"id": active_phase.id, "name": active_phase.name} if active_phase else None
+            "active_phase": {
+                "id": active_phase["id"],
+                "name": active_phase["name"],
+            } if active_phase else None
         }
     except Exception as e:
         logger.error(f"Failed to get today's template: {e}")
@@ -4990,10 +5006,11 @@ async def get_workout_session(
         # Get logged sets for this session
         sets_query = text("""
             SELECT id, exercise_id, set_index, weight, reps, rpe, notes,
+                   set_kind, set_group_id, group_sequence, parent_set_id,
                    COALESCE(session_time, created_at) AS logged_at
             FROM workout_log
-            WHERE session_id = :session_id
-            ORDER BY COALESCE(session_time, created_at)
+            WHERE session_id = :session_id AND voided_at IS NULL
+            ORDER BY COALESCE(session_time, created_at), group_sequence
         """)
         logged_sets = db.execute(sets_query, {"session_id": session_id}).fetchall()
         session_dict['logged_sets'] = [dict(row._mapping) for row in logged_sets]
@@ -5235,10 +5252,12 @@ async def complete_workout_session(
         summary_query = text("""
             SELECT
                 COUNT(DISTINCT exercise_id) as exercises_completed,
-                COUNT(*) as total_sets,
+                -- Working sets only: a three-segment drop set is one set done,
+                -- and volume still counts every segment (§4.4).
+                COUNT(*) FILTER (WHERE COALESCE(counts_toward_target, true)) as total_sets,
                 SUM(weight * reps) as total_volume
             FROM workout_log
-            WHERE session_id = :session_id
+            WHERE session_id = :session_id AND voided_at IS NULL
         """)
         summary = db.execute(summary_query, {"session_id": session_id}).fetchone()
 

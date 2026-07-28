@@ -465,32 +465,48 @@ async function recordSyncAttempt(success: boolean, metricCount: number): Promise
   }
 }
 
+/**
+ * The one health-sync sequence — used by BOTH the background task and the
+ * foreground "Sync Now" button, so there is a single ingest path (metrics →
+ * /api/health/metrics/batch, workouts → /api/health/workouts/batch, recovery →
+ * /api/health/sync-recovery). Do not add a second path; the legacy episode
+ * endpoint (/api/health/sync) is deprecated and no longer called.
+ */
+export async function syncHealthNow(): Promise<{ success: boolean; metricCount: number; workoutCount: number }> {
+  const metrics = await collectHealthMetrics();
+  const success = await syncMetricsToBackend(metrics);
+
+  // HealthKit workouts (Apple Watch runs/walks/etc.) — separate stream from
+  // David's manually-logged strength sessions.
+  let workoutCount = 0;
+  try {
+    const w = await syncWorkoutsToBackend();
+    workoutCount = w.count;
+  } catch (e) {
+    console.log('[BackgroundHealth] Workout sync error (non-fatal):', e);
+  }
+
+  // Update daily_recovery_log (HRV/HR/sleep/weight aggregate) so the recovery
+  // view stays current.
+  try {
+    await healthSyncService.forceSync();
+  } catch (e) {
+    console.log('[BackgroundHealth] Recovery sync error (non-fatal):', e);
+  }
+
+  await recordSyncAttempt(success, metrics.length);
+  return { success, metricCount: metrics.length, workoutCount };
+}
+
 // Define the background task
 TaskManager.defineTask(HEALTH_SYNC_TASK, async () => {
   console.log('[BackgroundHealth] Background task starting...');
 
   try {
-    const metrics = await collectHealthMetrics();
-    const success = await syncMetricsToBackend(metrics);
-
-    // Sync HealthKit workouts (Apple Watch runs/walks/etc.) — separate stream
-    // from David's manually-logged strength sessions.
-    try {
-      await syncWorkoutsToBackend();
-    } catch (e) {
-      console.log('[BackgroundHealth] Workout sync error (non-fatal):', e);
-    }
-
-    // Also update daily_recovery_log (HRV/HR/sleep/weight aggregate) so the
-    // recovery view stays current without depending on the user opening the app.
-    try {
-      await healthSyncService.forceSync();
-    } catch (e) {
-      console.log('[BackgroundHealth] Recovery sync error (non-fatal):', e);
-    }
+    const { success, metricCount } = await syncHealthNow();
 
     // Piggyback a geofence resync so armed location triggers/places stay
-    // current without a dedicated background task of their own.
+    // current without a dedicated background task of their own. Background-only.
     try {
       const { resyncGeofences } = await import('./locationTracking');
       await resyncGeofences();
@@ -498,9 +514,7 @@ TaskManager.defineTask(HEALTH_SYNC_TASK, async () => {
       console.log('[BackgroundHealth] Geofence resync error (non-fatal):', e);
     }
 
-    await recordSyncAttempt(success, metrics.length);
-
-    if (success && metrics.length > 0) {
+    if (success && metricCount > 0) {
       return BackgroundFetch.BackgroundFetchResult.NewData;
     } else if (success) {
       return BackgroundFetch.BackgroundFetchResult.NoData;
@@ -634,6 +648,17 @@ function dailyRowToMetrics(row: Awaited<ReturnType<typeof healthKitService.getDa
   // HRV — full sample series for the day (so anomaly direction is meaningful)
   for (const s of row.hrv_samples) {
     metrics.push({ metric_type: 'hrv', value: s.value, recorded_at: s.startDate, source: 'apple_health', metadata: { backfill: true } });
+  }
+
+  // Continuous heart rate — decimate to ~200/day (matches the live loop's density
+  // budget) so a long window doesn't balloon the payload.
+  for (const s of decimateSamples(row.heart_rate_samples, 200)) {
+    metrics.push({ metric_type: 'heart_rate', value: s.value, recorded_at: s.startDate, source: 'apple_health', metadata: { backfill: true } });
+  }
+
+  // Watch vitals — SpO2, respiratory rate, VO2 max, walking HR, HR recovery
+  for (const v of row.vitals) {
+    metrics.push({ metric_type: v.metric_type, value: v.value, recorded_at: v.startDate, source: 'apple_health', metadata: { backfill: true } });
   }
 
   // Sleep — total + per-stage rows stamped at 6 AM on the date for dedup

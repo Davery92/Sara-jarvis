@@ -73,6 +73,7 @@
         }
       ],
       "@bacons/apple-targets",
+      "./plugins/withSaraSceneLifecycle",
       "./plugins/withSaraAppIntents",
       "./plugins/withXcodeObjectVersion",
       [

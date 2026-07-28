@@ -16,6 +16,7 @@ Everything is created under a throwaway user and torn down afterwards.
 import json
 import os
 import uuid
+from datetime import date
 
 import pytest
 from sqlalchemy import text
@@ -71,6 +72,8 @@ def user_id(pg):
         "DELETE FROM workout WHERE user_id = :uid",
         "DELETE FROM external_workout WHERE user_id = :uid",
         "DELETE FROM fitness_template WHERE user_id = :uid",
+        "DELETE FROM fitness_phase WHERE user_id = :uid",
+        "DELETE FROM fitness_program WHERE user_id = :uid",
         "DELETE FROM app_user WHERE id = :uid",
     ):
         try:
@@ -89,6 +92,36 @@ def _template(pg, user_id, name="Upper A", exercises=None):
            "ex": json.dumps(exercises or TEMPLATE_EXERCISES)})
     pg.commit()
     return tid
+
+
+def _dated_program(pg, user_id):
+    program_id = str(uuid.uuid4())
+    block_1_id = str(uuid.uuid4())
+    block_2_id = str(uuid.uuid4())
+    pg.execute(text("""
+        INSERT INTO fitness_program (
+            id, user_id, name, goal, start_date, end_date, is_active
+        ) VALUES (
+            :id, :uid, 'The Forge', 'recomp', '2026-06-22', '2026-08-30', true
+        )
+    """), {"id": program_id, "uid": user_id})
+    pg.execute(text("""
+        INSERT INTO fitness_phase (
+            id, user_id, program_id, name, order_index,
+            start_date, end_date, status
+        ) VALUES
+            (:b1, :uid, :program_id, 'Block 1', 0,
+             '2026-06-22', '2026-07-26', 'active'),
+            (:b2, :uid, :program_id, 'Block 2', 1,
+             '2026-07-27', '2026-08-30', 'planned')
+    """), {
+        "b1": block_1_id,
+        "b2": block_2_id,
+        "uid": user_id,
+        "program_id": program_id,
+    })
+    pg.commit()
+    return program_id, block_1_id, block_2_id
 
 
 def _envelope(kind, session_id=None, version=None, payload=None, device="phone"):
@@ -613,9 +646,73 @@ async def test_catalog_gives_the_watch_enough_to_start(pg, svc, user_id):
     cat = svc.catalog(pg, user_id)
 
     assert cat["schema_version"] == 1
+    assert cat["generated_for_date"]
+    assert cat["today_template_id"] is None
     assert any(t["name"] == "Upper A" and t["exercise_count"] == 2 for t in cat["templates"])
     assert cat["active_projection"] is None
     assert "rest_range_seconds" in cat["policy"]
+
+
+@requires_pg
+def test_effective_phase_rolls_forward_by_approved_program_dates(pg, user_id):
+    from app.services.phase_resolution import (
+        get_effective_phase,
+        reconcile_active_program_phase_statuses,
+    )
+
+    _, block_1_id, block_2_id = _dated_program(pg, user_id)
+
+    assert get_effective_phase(pg, user_id, date(2026, 7, 26))["id"] == block_1_id
+    assert get_effective_phase(pg, user_id, date(2026, 7, 27))["id"] == block_2_id
+
+    effective = reconcile_active_program_phase_statuses(
+        pg, user_id, date(2026, 7, 27)
+    )
+    pg.commit()
+    statuses = dict(pg.execute(text("""
+        SELECT id, status FROM fitness_phase
+        WHERE user_id = :uid
+    """), {"uid": user_id}).fetchall())
+
+    assert effective["id"] == block_2_id
+    assert statuses[block_1_id] == "completed"
+    assert statuses[block_2_id] == "active"
+
+
+@requires_pg
+def test_watch_catalog_uses_current_block_not_stale_active_status(
+    pg, svc, user_id, monkeypatch
+):
+    _, block_1_id, block_2_id = _dated_program(pg, user_id)
+    block_1_template = str(uuid.uuid4())
+    block_2_template = str(uuid.uuid4())
+    pg.execute(text("""
+        INSERT INTO fitness_template (
+            id, user_id, phase_id, name, scheduled_days, exercises, order_in_phase
+        ) VALUES
+            (:t1, :uid, :b1, 'Block 1 Monday', '["monday"]',
+             CAST(:ex AS jsonb), 0),
+            (:t2, :uid, :b2, 'Block 2 Monday', '["monday"]',
+             CAST(:ex AS jsonb), 0)
+    """), {
+        "t1": block_1_template,
+        "t2": block_2_template,
+        "uid": user_id,
+        "b1": block_1_id,
+        "b2": block_2_id,
+        "ex": json.dumps(TEMPLATE_EXERCISES),
+    })
+    pg.commit()
+    monkeypatch.setattr(
+        "app.services.workout_command_service.local_today",
+        lambda: date(2026, 7, 27),
+    )
+
+    catalog = svc.catalog(pg, user_id)
+
+    assert catalog["generated_for_date"] == "2026-07-27"
+    assert catalog["today_template_id"] == block_2_template
+    assert [t["name"] for t in catalog["templates"]] == ["Block 2 Monday"]
 
 
 @requires_pg

@@ -82,15 +82,35 @@ public class SaraWorkoutNativeModule: Module {
         /// Takes a JSON string rather than a dictionary so the wire contract is
         /// built and validated in exactly one place (the TypeScript models),
         /// with Swift moving opaque bytes.
-        AsyncFunction("sendWorkoutMessage") { (envelopeJSON: String, promise: Promise) in
+        /// `requiresDelivery` picks the transport ladder's floor: true falls
+        /// through to the durable WatchConnectivity queue, false gives up when
+        /// the Watch is unreachable. Projections need the former, live metrics
+        /// need the latter (§5.3).
+        AsyncFunction("sendWorkoutMessage") { (envelopeJSON: String, requiresDelivery: Bool, promise: Promise) in
             guard #available(iOS 17.0, *) else {
                 promise.reject("UNSUPPORTED", "Requires iOS 17 or later")
                 return
             }
-            self.typedCoordinator.send(envelopeJSON: envelopeJSON) { result in
+            self.typedCoordinator.send(
+                envelopeJSON: envelopeJSON,
+                requiresDelivery: requiresDelivery
+            ) { result in
                 switch result {
                 case .success: promise.resolve(true)
                 case .failure(let error): promise.reject("SEND_FAILED", error.localizedDescription)
+                }
+            }
+        }
+
+        AsyncFunction("updateWatchApplicationContext") { (envelopeJSON: String, promise: Promise) in
+            guard #available(iOS 17.0, *) else {
+                promise.reject("UNSUPPORTED", "Requires iOS 17 or later")
+                return
+            }
+            self.typedCoordinator.updateApplicationContext(envelopeJSON: envelopeJSON) { result in
+                switch result {
+                case .success: promise.resolve(true)
+                case .failure(let error): promise.reject("CONTEXT_UPDATE_FAILED", error.localizedDescription)
                 }
             }
         }

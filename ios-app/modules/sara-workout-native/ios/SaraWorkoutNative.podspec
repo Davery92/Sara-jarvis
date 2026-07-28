@@ -19,7 +19,7 @@ Pod::Spec.new do |s|
 
   s.dependency 'ExpoModulesCore'
 
-  s.frameworks = 'HealthKit', 'AVFoundation'
+  s.frameworks = 'HealthKit', 'AVFoundation', 'WatchConnectivity'
 
   s.pod_target_xcconfig = {
     'DEFINES_MODULE' => 'YES',

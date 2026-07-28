@@ -44,4 +44,6 @@ yarn-error.*
 ios-app/targets/*/generated.entitlements
 targets/*/generated.entitlements
 targets/*/Info.plist
+!targets/watch/Info.plist
+!targets/widget/Info.plist
 targets/*/Assets.xcassets/

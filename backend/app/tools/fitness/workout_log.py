@@ -432,6 +432,7 @@ class WorkoutDetailsTool(BaseTool):
                 FROM workout_log wl
                 LEFT JOIN workout w ON wl.workout_id = w.id
                 WHERE {filter_clause}
+                  AND wl.voided_at IS NULL
                 ORDER BY wl.exercise_id, wl.set_index
             """)
 
@@ -571,6 +572,7 @@ class WorkoutStatsTool(BaseTool):
                 WHERE wl.user_id = :user_id
                 AND wl.created_at >= :start_date
                 AND wl.created_at < :end_date
+                AND wl.voided_at IS NULL
             """)
 
             result = db.execute(stats_sql, {

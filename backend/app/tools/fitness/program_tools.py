@@ -553,6 +553,13 @@ class PhaseListTool(BaseTool):
     async def execute(self, user_id: str, program_id: str = None, active_only: bool = False, **kwargs) -> ToolResult:
         db: Session = next(get_db())
         try:
+            if active_only:
+                from app.core.timezone import today as local_today
+                from app.services.phase_resolution import reconcile_active_program_phase_statuses
+
+                reconcile_active_program_phase_statuses(db, user_id, local_today())
+                db.commit()
+
             conditions = ["user_id = :user_id"]
             params = {"user_id": user_id}
 

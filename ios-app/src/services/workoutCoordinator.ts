@@ -320,6 +320,91 @@ class WorkoutCoordinator {
     });
   }
 
+  /**
+   * One more working set on this exercise, this workout only.
+   *
+   * A direct tap is explicit approval for the live session and nothing beyond
+   * it: the template, the program and next week's prescription are untouched
+   * (§4.3). Making it permanent is a separate question asked afterwards.
+   */
+  addWorkingSet(exerciseIndex?: number, count = 1) {
+    return this.issue('add_set', {
+      exercise_index: exerciseIndex ?? this.projection?.cursor.exercise_index,
+      count,
+    });
+  }
+
+  /** Give back a target set that hasn't been performed. Never deletes a log. */
+  removeUnloggedSet(exerciseIndex?: number, count = 1) {
+    return this.issue('remove_unlogged_set', {
+      exercise_index: exerciseIndex ?? this.projection?.cursor.exercise_index,
+      count,
+    });
+  }
+
+  /**
+   * Log one weight reduction under the working set just performed.
+   *
+   * Adds volume and history without consuming a prescribed set, and without
+   * starting a rest timer — a drop set is one continuous effort (§6.3).
+   */
+  logDropSegment(params: {
+    weight: number;
+    reps: number;
+    effort?: string;
+    rpe?: number;
+    notes?: string;
+    parentSetId?: string;
+    exerciseIndex?: number;
+  }) {
+    return this.issue('log_drop_segment', {
+      weight: params.weight,
+      reps: params.reps,
+      effort: params.effort,
+      rpe: params.rpe,
+      notes: params.notes,
+      parent_set_id: params.parentSetId,
+      exercise_index: params.exerciseIndex ?? this.projection?.cursor.exercise_index,
+    });
+  }
+
+  /** Correct a logged set. PRs and totals are recomputed, not patched (§6.4). */
+  reviseSet(setId: string, changes: {
+    weight?: number;
+    reps?: number;
+    rpe?: number;
+    effort?: string;
+    notes?: string;
+    setKind?: 'working' | 'warmup' | 'drop';
+  }) {
+    return this.issue('revise_set', {
+      set_id: setId,
+      weight: changes.weight,
+      reps: changes.reps,
+      rpe: changes.rpe,
+      effort: changes.effort,
+      notes: changes.notes,
+      set_kind: changes.setKind,
+    });
+  }
+
+  /**
+   * Strike a set from everything that counts, keeping the record of it.
+   *
+   * Omitting `setId` undoes the most recent set, which is what the Watch's
+   * one-tap Undo means. Voiding a working set takes its drop segments with it.
+   */
+  voidSet(setId?: string, reason = 'user_undo') {
+    return this.issue('void_set', { set_id: setId, reason });
+  }
+
+  /** Live (non-voided) sets for the current exercise, oldest first. */
+  performedSetsFor(exerciseName: string | null | undefined) {
+    const sets = this.projection?.performed_sets ?? [];
+    if (!exerciseName) return sets.filter((s) => !s.voided);
+    return sets.filter((s) => !s.voided && s.exercise === exerciseName);
+  }
+
   selectExercise(index: number) {
     return this.issue('select_exercise', { exercise_index: index });
   }

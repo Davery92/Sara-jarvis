@@ -437,17 +437,20 @@ class WorkoutHistoryTool(BaseTool):
                        FROM workout_log wl
                        WHERE wl.session_id = ws.id
                          AND COALESCE(wl.skipped, false) = false
+                         AND wl.voided_at IS NULL
                    ), 0) AS sets_completed,
                    COALESCE((
                        SELECT SUM(wl.reps)
                        FROM workout_log wl
                        WHERE wl.session_id = ws.id
                          AND COALESCE(wl.skipped, false) = false
+                         AND wl.voided_at IS NULL
                    ), 0) AS total_reps,
                    COALESCE((
                        SELECT MAX(wl.rpe)
                        FROM workout_log wl
                        WHERE wl.session_id = ws.id
+                         AND wl.voided_at IS NULL
                    ), NULL) AS max_rpe
             FROM workout_sessions ws
             JOIN workout w ON w.id = ws.workout_id

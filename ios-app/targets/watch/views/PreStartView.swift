@@ -65,11 +65,7 @@ struct PreStartView: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(starting || manager.isStarting)
 
-                if let error = manager.lastError {
-                    Text(error)
-                        .font(.caption2)
-                        .foregroundStyle(.orange)
-                }
+                startStatus
             }
             .padding(.horizontal, 4)
         }
@@ -80,6 +76,55 @@ struct PreStartView: View {
                 starting = false
                 dismiss()
             }
+        }
+    }
+
+    /// What is actually happening, and what David can do about it (§5.1, §5.2).
+    ///
+    /// Replaces a bare "Couldn't start the workout": the state machine knows
+    /// which stage failed, so the screen names it and offers only the controls
+    /// that can help. A denied permission gets instructions, not a Retry button
+    /// that would do nothing.
+    @ViewBuilder
+    private var startStatus: some View {
+        let state = manager.startState
+
+        if state.healthKit == .failed || state.saraSession != SaraSessionPhase.none {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(state.headline)
+                    .font(.caption)
+                    .foregroundStyle(state.healthKit == .failed ? .orange : .primary)
+
+                if let detail = state.detail, detail != state.headline {
+                    Text(detail)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+
+                // The Apple workout is running and collecting real physiology
+                // for a session Sara has not confirmed. Never discarded
+                // silently — David chooses (§5.2).
+                if state.isOrphanedHealthKit {
+                    if state.saraSession == .conflict {
+                        Button("Resume Existing") {
+                            Task { await manager.resumeExistingWorkout() }
+                        }
+                        .font(.caption2)
+                    }
+                    if state.isRetryable {
+                        Button("Retry") { manager.retryStart() }
+                            .font(.caption2)
+                    }
+                    Button("End Apple Workout", role: .destructive) {
+                        Task { await manager.discardOrphanStart() }
+                    }
+                    .font(.caption2)
+                }
+            }
+        } else if let error = manager.lastError {
+            Text(error)
+                .font(.caption2)
+                .foregroundStyle(.orange)
         }
     }
 

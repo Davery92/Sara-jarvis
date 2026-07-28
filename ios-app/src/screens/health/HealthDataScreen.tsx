@@ -14,8 +14,7 @@ import { MainTabScreenProps } from '../../types/navigation';
 import { useToast } from '../../context/ToastContext';
 import { colors, fontSizes, spacing } from '../../styles/theme';
 import healthKitService, { HealthData } from '../../services/healthKit';
-import apiClient from '../../services/api';
-import { backfillHistoricalData, BackfillProgress } from '../../services/backgroundHealthSync';
+import { backfillHistoricalData, BackfillProgress, syncHealthNow } from '../../services/backgroundHealthSync';
 
 type Props = MainTabScreenProps<'Health'>;
 
@@ -91,31 +90,14 @@ export default function HealthDataScreen({ navigation }: Props) {
 
     setSyncing(true);
     try {
-      // Get comprehensive health data
-      const today = new Date();
-      const yesterday = new Date(today);
-      yesterday.setDate(yesterday.getDate() - 1);
-
-      const [todayHealth, rangeHealth, weekStats] = await Promise.all([
-        healthKitService.getTodayHealthData(),
-        healthKitService.getHealthDataForRange(yesterday, today),
-        healthKitService.getDailyStats(7),
-      ]);
-
-      // Combine all data
-      const healthPayload = {
-        timestamp: new Date().toISOString(),
-        today: todayHealth,
-        sleep: rangeHealth.sleepAnalysis || [],
-        workouts: rangeHealth.workout || [],
-        weeklyStats: weekStats,
-      };
-
-      // Send to backend
-      await apiClient.post('/api/health/sync', healthPayload);
-
-      setLastSyncTime(new Date().toLocaleTimeString());
-      showToast('success', 'Health data synced successfully!');
+      // Same ingest path as the background sync — metrics + workouts + recovery.
+      const result = await syncHealthNow();
+      if (result.success) {
+        setLastSyncTime(new Date().toLocaleTimeString());
+        showToast('success', `Synced ${result.metricCount} metrics · ${result.workoutCount} workouts`);
+      } else {
+        showToast('error', 'Failed to sync health data to server');
+      }
     } catch (error) {
       console.error('Error syncing health data:', error);
       showToast('error', 'Failed to sync health data to server');

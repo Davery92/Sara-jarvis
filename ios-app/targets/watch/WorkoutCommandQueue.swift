@@ -164,19 +164,25 @@ public struct WatchWorkoutRecoveryState: Codable, Equatable {
     public var healthkitStartedAt: Date?
     public var healthkitActivityType: UInt?
     public var lastProjection: WorkoutProjection?
+    /// A start the backend never answered. Survives relaunch so the Apple
+    /// workout still running on the wrist can be reconnected to Sara with its
+    /// original attempt id rather than becoming a second workout (§5.2).
+    public var pendingStart: WatchPendingStart?
 
     public init(
         sessionId: String? = nil,
         lastAcceptedVersion: Int? = nil,
         healthkitStartedAt: Date? = nil,
         healthkitActivityType: UInt? = nil,
-        lastProjection: WorkoutProjection? = nil
+        lastProjection: WorkoutProjection? = nil,
+        pendingStart: WatchPendingStart? = nil
     ) {
         self.sessionId = sessionId
         self.lastAcceptedVersion = lastAcceptedVersion
         self.healthkitStartedAt = healthkitStartedAt
         self.healthkitActivityType = healthkitActivityType
         self.lastProjection = lastProjection
+        self.pendingStart = pendingStart
     }
 }
 

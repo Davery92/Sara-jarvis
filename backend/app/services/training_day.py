@@ -26,6 +26,8 @@ from typing import Dict
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.services.phase_resolution import get_effective_phase
+
 logger = logging.getLogger(__name__)
 
 
@@ -58,23 +60,16 @@ def is_training_day(db: Session, user_id: str, on_date: date) -> Dict:
         return {"is_training_day": True, "reason": "session_logged",
                 "template_id": None, "template_name": None}
 
-    # 2. Active-phase template scheduled for this weekday.
+    # 2. Effective approved-program phase template scheduled for this weekday.
     weekday = on_date.strftime("%A").lower()
-    active_phase = db.execute(text("""
-        SELECT id, name FROM fitness_phase
-        WHERE user_id = :uid AND status = 'active'
-          AND (start_date IS NULL OR :d >= start_date)
-          AND (end_date IS NULL OR :d <= end_date)
-        ORDER BY start_date DESC NULLS LAST
-        LIMIT 1
-    """), {"uid": user_id, "d": on_date}).fetchone()
+    active_phase = get_effective_phase(db, user_id, on_date)
 
     if active_phase:
         templates = db.execute(text("""
             SELECT id, name, scheduled_days
             FROM fitness_template
             WHERE user_id = :uid AND phase_id = :pid
-        """), {"uid": user_id, "pid": active_phase.id}).fetchall()
+        """), {"uid": user_id, "pid": active_phase["id"]}).fetchall()
         for t in templates:
             if not t.scheduled_days:
                 continue

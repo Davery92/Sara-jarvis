@@ -39,6 +39,10 @@ def fetch_last_session(db: Session, user_id: str, exercise_name: str) -> Optiona
     Scoped strictly to `exercise_name` (matched against workout_log.exercise_id,
     case-insensitive) so a machine variant pulls only its own history. Skipped
     sets are excluded. Returns {date, weights[], reps[], avg_rpe} or None.
+
+    Only *working* sets that still stand feed progression (2026-07-27 plan §8):
+    a drop segment is deliberately lighter and would read as a regression, a
+    warm-up is submaximal by definition, and a set David undid did not happen.
     """
     rows = db.execute(text("""
         SELECT session_date, weight, reps, rpe
@@ -47,6 +51,8 @@ def fetch_last_session(db: Session, user_id: str, exercise_name: str) -> Optiona
           AND LOWER(exercise_id) = LOWER(:name)
           AND session_date IS NOT NULL
           AND COALESCE(skipped, false) = false
+          AND voided_at IS NULL
+          AND COALESCE(set_kind, 'working') = 'working'
         ORDER BY session_date DESC, created_at DESC
         LIMIT 40
     """), {"uid": user_id, "name": exercise_name}).fetchall()
@@ -307,23 +313,25 @@ def get_deload_state(db: Session, user_id: str, on_date: date) -> Dict:
     A phase has an optional `deload_week` (1-indexed week within the phase). If
     the date's week-of-phase matches, is_deload=True with phase context.
     """
-    row = db.execute(text("""
-        SELECT id, name, start_date, end_date, duration_weeks, deload_week
-        FROM fitness_phase
-        WHERE user_id = :user_id
-          AND start_date IS NOT NULL
-          AND :d >= start_date
-          AND (end_date IS NULL OR :d <= end_date)
-        ORDER BY start_date DESC
-        LIMIT 1
-    """), {"user_id": user_id, "d": on_date}).fetchone()
+    from app.services.phase_resolution import get_effective_phase
+    row = get_effective_phase(db, user_id, on_date)
 
     if not row:
         return {"is_deload": False, "phase_id": None, "phase_name": None,
                 "week_of_phase": None, "deload_week": None}
 
-    phase = dict(row._mapping)
-    week_of_phase = ((on_date - phase["start_date"]).days // 7) + 1
+    phase = dict(row)
+    start_date = phase.get("start_date")
+    if not start_date:
+        return {
+            "is_deload": False,
+            "phase_id": phase["id"],
+            "phase_name": phase["name"],
+            "week_of_phase": None,
+            "deload_week": phase.get("deload_week"),
+        }
+
+    week_of_phase = ((on_date - start_date).days // 7) + 1
     deload_week = phase.get("deload_week")
     is_deload = bool(deload_week and week_of_phase == int(deload_week))
 

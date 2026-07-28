@@ -34,6 +34,8 @@ export interface WorkoutMessageEvent {
   schemaVersion: number
   /** False when the peer is on a newer contract — drop, don't guess (§5.3). */
   supported: boolean
+  /** Which channel it arrived on. Diagnostics only — behaviour is identical. */
+  transport?: 'mirror' | 'watchConnectivity'
 }
 
 export interface LiveMetricsEvent {
@@ -54,7 +56,8 @@ interface SaraWorkoutNativeModuleType {
   activate(): boolean
   isSupported(): boolean
   startWorkoutOnWatch(activityType: number, locationType: number): Promise<{ requested: boolean }>
-  sendWorkoutMessage(envelopeJSON: string): Promise<boolean>
+  sendWorkoutMessage(envelopeJSON: string, requiresDelivery: boolean): Promise<boolean>
+  updateWatchApplicationContext(envelopeJSON: string): Promise<boolean>
   getMirroredWorkoutState(): NativeWorkoutState
   endMirroredWorkout(reason: string): Promise<boolean>
   setWorkoutAudioPolicy(enabled: boolean): boolean
@@ -117,9 +120,24 @@ export async function startWorkoutOnWatch(
   return SaraWorkoutNative.startWorkoutOnWatch(activityType, locationType)
 }
 
-export async function sendWorkoutMessage(envelope: unknown): Promise<boolean> {
+/**
+ * Send one envelope to the Watch over the best channel available.
+ *
+ * `requiresDelivery` (default true) lets a mutation fall through to the durable
+ * WatchConnectivity queue when the Watch is briefly unreachable. Pass false for
+ * telemetry, which is worthless late and must never fill that queue (§5.3).
+ */
+export async function sendWorkoutMessage(
+  envelope: unknown,
+  requiresDelivery = true
+): Promise<boolean> {
   if (!SaraWorkoutNative) return false
-  return SaraWorkoutNative.sendWorkoutMessage(JSON.stringify(envelope))
+  return SaraWorkoutNative.sendWorkoutMessage(JSON.stringify(envelope), requiresDelivery)
+}
+
+export async function updateWatchApplicationContext(envelope: unknown): Promise<boolean> {
+  if (!SaraWorkoutNative) return false
+  return SaraWorkoutNative.updateWatchApplicationContext(JSON.stringify(envelope))
 }
 
 export function getMirroredWorkoutState(): NativeWorkoutState {

@@ -27,18 +27,19 @@ struct ProposalView: View {
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.tint)
 
-                if let change = proposal.weightChange {
-                    HStack(spacing: 6) {
-                        Text("\(Int(change.current))")
-                            .foregroundStyle(.secondary)
-                        Image(systemName: "arrow.right")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                        Text("\(Int(change.proposed)) lb")
-                            .fontWeight(.semibold)
-                    }
-                    .font(.title3)
+                // One headline that every proposal kind can produce, including
+                // the set-structure ones. A blank line here would mean
+                // approving something unstated.
+                Text(proposal.headline)
+                    .font(.title3.weight(.semibold))
                     .monospacedDigit()
+
+                if proposal.kind == "perform_drop_set" {
+                    // Approving arms the drop-set screen; it does not log
+                    // anything. Sara cannot perform a set (§4.2).
+                    Text("Approving opens the drop-set entry — you set the real weight.")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
                 }
 
                 if let reason = proposal.reason {

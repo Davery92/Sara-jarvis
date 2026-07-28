@@ -70,6 +70,8 @@ struct ActiveWorkoutView: View {
                 .multilineTextAlignment(.center)
 
             HStack(spacing: 8) {
+                // Effective target, so an added set is immediately reachable
+                // rather than reading "Set 4 of 3" (§7.2).
                 Text("Set \(setNumber) of \(exercise?.targetSets ?? 0)")
                 if manager.heartRate > 0 {
                     Label("\(Int(manager.heartRate))", systemImage: "heart.fill")
@@ -81,6 +83,19 @@ struct ActiveWorkoutView: View {
 
             if let target = exercise?.targetReps {
                 Text("Target \(target) reps")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+
+            if let target = exercise?.targetSets, let prescribed = exercise?.prescribedSets,
+               target != prescribed {
+                Text("\(prescribed) prescribed")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+
+            if let drops = exercise?.completedDropSegments, drops > 0 {
+                Text("\(drops) drop\(drops == 1 ? "" : "s") logged")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }

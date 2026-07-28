@@ -15,6 +15,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useWorkoutMode } from '../../context/WorkoutModeContext';
 import { colors, spacing, borderRadius, fontSizes, fontWeights } from '../../styles/theme';
 import ExercisePickerModal from './ExercisePickerModal';
+import WorkoutSetActions from './WorkoutSetActions';
 
 interface WorkoutPanelProps {
   onCollapse?: () => void;
@@ -179,8 +180,17 @@ export default function WorkoutPanel({ onCollapse, isCollapsed = false, onFinish
     );
   }
 
+  // `sets` is the effective target for today; `prescribed_sets` is what the
+  // program asked for. Saying both when they differ is what keeps an added set
+  // an in-workout adjustment rather than a silent plan rewrite (§7.1).
+  const prescribedSets = (currentExercise as any)?.prescribed_sets;
+  const setsLabel = currentExercise
+    ? (typeof prescribedSets === 'number' && prescribedSets !== currentExercise.sets
+        ? `${currentExercise.sets} (${prescribedSets} prescribed)`
+        : `${currentExercise.sets}`)
+    : '';
   const scheme = currentExercise
-    ? `${currentExercise.sets} × ${currentExercise.reps}${currentExercise.suggested_weight ? ` @ ${currentExercise.suggested_weight} lbs` : ''}`
+    ? `${setsLabel} × ${currentExercise.reps}${currentExercise.suggested_weight ? ` @ ${currentExercise.suggested_weight} lbs` : ''}`
     : '';
   const last = currentExercise?.last_session;
 
@@ -333,6 +343,10 @@ export default function WorkoutPanel({ onCollapse, isCollapsed = false, onFinish
               <Ionicons name="checkmark" size={20} color={colors.background} />
               <Text style={styles.logButtonText}>LOG SET</Text>
             </TouchableOpacity>
+
+            {/* Add Set / Drop Set / Sets / Undo. Subordinate to LOG SET by
+                design: the common path stays one tap (§7.1). */}
+            <WorkoutSetActions />
 
             {/* RPE feedback chips */}
             <View style={styles.feelingRow}>
@@ -656,7 +670,7 @@ const styles = StyleSheet.create({
     color: colors.text,
     fontSize: 11,
     fontWeight: fontWeights.semibold,
-    backgroundColor: colors.surfaceElevated || colors.surface,
+    backgroundColor: colors.assistant.panelRaised,
     paddingHorizontal: 8,
     paddingVertical: 3,
     borderRadius: 6,

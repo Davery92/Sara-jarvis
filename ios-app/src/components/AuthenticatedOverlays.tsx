@@ -232,6 +232,7 @@ export const AuthenticatedOverlays: React.FC = () => {
         await workoutCoordinator.hydrate();
         watchWorkout.start();
         await workoutCoordinator.flush();
+        await watchWorkout.syncCatalog();
       } catch (e) {
         // Never fatal: the phone workout must work with no Watch at all.
         console.log('[AuthenticatedOverlays] Watch workout init skipped:', e);

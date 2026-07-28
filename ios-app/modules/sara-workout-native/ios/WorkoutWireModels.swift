@@ -137,7 +137,13 @@ public struct LastSessionSummary: Codable, Equatable {
 public struct WorkoutExercise: Codable, Equatable {
     public let name: String?
     public let variant: String?
+    /// Working sets this workout is actually asking for. Moves when David adds
+    /// a set; `prescribedSets` never does, so the Watch can show "4 (3
+    /// prescribed)" instead of quietly rewriting the plan (§6.2).
     public let targetSets: Int?
+    public let prescribedSets: Int?
+    /// Drop segments performed under this exercise. Volume, not completion.
+    public let completedDropSegments: Int?
     /// Free text like "8-10", not a number — the backend keeps the range.
     public let targetReps: String?
     public let targetRpe: Double?
@@ -157,6 +163,8 @@ public struct WorkoutExercise: Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case name, variant, notes
         case targetSets = "target_sets"
+        case prescribedSets = "prescribed_sets"
+        case completedDropSegments = "completed_drop_segments"
         case targetReps = "target_reps"
         case targetRpe = "target_rpe"
         case approvedWeight = "approved_weight"
@@ -225,6 +233,79 @@ public struct WorkoutProposal: Codable, Equatable {
               let p = proposedValue?["weight"]?.doubleValue else { return nil }
         return (c, p)
     }
+
+    /// The one line an approval screen renders.
+    ///
+    /// Every kind gets an explicit phrasing rather than a fallback: a proposal
+    /// that renders as nothing is one David would be asked to approve blind,
+    /// on a wrist, between sets.
+    public var headline: String {
+        switch kind {
+        case "add_working_set", "reduce_current_target_sets":
+            if let from = currentValue?["target_sets"]?.doubleValue,
+               let to = proposedValue?["target_sets"]?.doubleValue {
+                return "\(Int(from)) → \(Int(to)) sets"
+            }
+            return kind == "add_working_set" ? "One more set" : "One set fewer"
+        case "perform_drop_set":
+            if let weight = proposedValue?["weight"]?.doubleValue {
+                return "Drop to \(Int(weight)) lb"
+            }
+            return "Add a drop set"
+        default:
+            if let change = weightChange {
+                return "\(Int(change.current)) → \(Int(change.proposed)) lb"
+            }
+            return "A change to this workout"
+        }
+    }
+}
+
+/// One set as actually performed, not as planned (§6.1).
+///
+/// `setKind` is the distinction the old model lacked: a template's
+/// `setTechnique` is what Sara asked for, this is what David did. Without the
+/// split, a drop segment counts as a prescribed set and reads to progression
+/// as a regression.
+public struct PerformedSet: Codable, Equatable, Identifiable {
+    public let id: String
+    public let exercise: String
+    public let setIndex: Int
+    public let weight: Double?
+    public let reps: Int?
+    public let rpe: Int?
+    public let notes: String?
+    public let isPr: Bool
+    /// "working", "warmup" or "drop". A String rather than an enum so a newer
+    /// backend kind degrades to an unfamiliar label instead of failing to
+    /// decode the whole projection mid-workout (§5.3 rule 1).
+    public let setKind: String
+    public let parentSetId: String?
+    /// Shared by a working set and every drop segment hanging off it.
+    public let setGroupId: String?
+    /// 0 for the working set, 1..n for its drops, in performed order.
+    public let groupSequence: Int
+    public let countsTowardTarget: Bool
+    public let voided: Bool
+    public let voidReason: String?
+    public let revisedFromSetId: String?
+    public let loggedAt: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, exercise, weight, reps, rpe, notes, voided
+        case setIndex = "set_index"
+        case isPr = "is_pr"
+        case setKind = "set_kind"
+        case parentSetId = "parent_set_id"
+        case setGroupId = "set_group_id"
+        case groupSequence = "group_sequence"
+        case countsTowardTarget = "counts_toward_target"
+        case voidReason = "void_reason"
+        case revisedFromSetId = "revised_from_set_id"
+        case loggedAt = "logged_at"
+    }
+
+    public var isDropSegment: Bool { setKind == "drop" }
 }
 
 /// The complete renderable state. Both devices draw from this and nothing else.
@@ -239,6 +320,10 @@ public struct WorkoutProjection: Codable, Equatable {
     public let cursor: WorkoutCursor
     public let progress: WorkoutProgress
     public let currentExercise: WorkoutExercise?
+    /// Sets actually logged. The compact form carries only the current
+    /// exercise's — enough for Undo and the "last set" line, which is all the
+    /// wrist needs.
+    public let performedSets: [PerformedSet]?
     /// Absent in the compact form the Watch receives — it renders from
     /// `currentExercise`, and asks for the full list only for the jump screen.
     public let exercises: [WorkoutExercise]?
@@ -254,6 +339,7 @@ public struct WorkoutProjection: Codable, Equatable {
         case startedAt = "started_at"
         case originDevice = "origin_device"
         case currentExercise = "current_exercise"
+        case performedSets = "performed_sets"
         case pendingProposal = "pending_proposal"
         case updatedAt = "updated_at"
     }
@@ -263,6 +349,14 @@ public struct WorkoutProjection: Codable, Equatable {
 
 public enum WorkoutCommandKind: String, Codable {
     case logSet = "log_set"
+    // Flexible sets (2026-07-27 plan §6.3). A direct tap applies immediately;
+    // an approved Sara proposal runs these exact same handlers, so a
+    // recommendation can never do more than the sentence David agreed to.
+    case addSet = "add_set"
+    case removeUnloggedSet = "remove_unlogged_set"
+    case logDropSegment = "log_drop_segment"
+    case reviseSet = "revise_set"
+    case voidSet = "void_set"
     case selectExercise = "select_exercise"
     case setVariant = "set_variant"
     case skipExercise = "skip_exercise"

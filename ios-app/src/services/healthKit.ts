@@ -487,37 +487,6 @@ class HealthKitService {
   }
 
   /**
-   * Get workout samples
-   */
-  async getWorkoutSamples(startDate: Date, endDate: Date): Promise<WorkoutData[]> {
-    if (!this.isAvailable || !this.healthkit) return [];
-
-    try {
-      const result = await this.healthkit.queryWorkoutSamples({
-        limit: 0,
-        filter: {
-          date: {
-            startDate: startDate,
-            endDate: endDate,
-          }
-        }
-      });
-
-      return result.map((workout: any) => ({
-        activityType: workout.workoutActivityType || 'Unknown',
-        duration: workout.duration || 0,
-        calories: workout.totalEnergyBurned || 0,
-        distance: workout.totalDistance,
-        startDate: workout.startDate,
-        endDate: workout.endDate,
-      }));
-    } catch (error) {
-      console.log('[HealthKit] Error getting workouts:', error);
-      return [];
-    }
-  }
-
-  /**
    * Calculate total sleep hours from sleep samples
    * Filters for actual sleep stages, merges overlapping intervals, and calculates duration
    * @param samples Array of sleep samples from getSleepSamples()
@@ -625,25 +594,6 @@ class HealthKitService {
       restingHeartRate: restingHeartRate || undefined,
       heartRateVariability: hrv || undefined,
       weight: weight || undefined,
-    };
-  }
-
-  /**
-   * Get health data for a date range
-   */
-  async getHealthDataForRange(startDate: Date, endDate: Date): Promise<HealthData> {
-    if (!this.isAvailable) {
-      return {};
-    }
-
-    const [sleepAnalysis, workout] = await Promise.all([
-      this.getSleepSamples(startDate, endDate),
-      this.getWorkoutSamples(startDate, endDate),
-    ]);
-
-    return {
-      sleepAnalysis,
-      workout,
     };
   }
 
@@ -765,6 +715,53 @@ class HealthKitService {
     const r = await this._latestQuantity(HK_IDENTIFIERS.heartRateRecoveryOneMinute);
     if (!r) return null;
     return { value: Math.round(r.value), recordedAt: r.startDate };
+  }
+
+  /**
+   * All quantity samples for a watch-derived type in a window, normalized to
+   * match the live collectors exactly (so backfilled rows are indistinguishable
+   * from forward rows and dedupe cleanly). heart_rate is high-frequency — the
+   * caller decimates. The rest (SpO2/respiratory/VO2/walking-HR/HR-recovery)
+   * are sparse and returned whole. Used only by the one-time historical backfill.
+   */
+  async getBackfillSamples(
+    kind: 'heart_rate' | 'spo2' | 'respiratory_rate' | 'vo2_max' | 'walking_hr_avg' | 'hr_recovery_1min',
+    start: Date,
+    end: Date,
+  ): Promise<Array<{ value: number; startDate: string }>> {
+    if (!this.isAvailable || !this.healthkit) return [];
+    const idMap: Record<string, string> = {
+      heart_rate: HK_IDENTIFIERS.heartRate,
+      spo2: HK_IDENTIFIERS.oxygenSaturation,
+      respiratory_rate: HK_IDENTIFIERS.respiratoryRate,
+      vo2_max: HK_IDENTIFIERS.vo2Max,
+      walking_hr_avg: HK_IDENTIFIERS.walkingHeartRateAverage,
+      hr_recovery_1min: HK_IDENTIFIERS.heartRateRecoveryOneMinute,
+    };
+    const identifier = idMap[kind];
+    if (!identifier) return [];
+    try {
+      const result = await this.healthkit.queryQuantitySamples(identifier, {
+        limit: 0,
+        ascending: true,
+        filter: { date: { startDate: start, endDate: end } },
+      });
+      return result.map((s: any) => {
+        let v = s.quantity;
+        if (kind === 'spo2') v = v <= 1 ? v * 100 : v; // HK fraction → percent (matches getLatestSpO2)
+        // heart_rate stays raw (matches the live loop); bpm-ish types round to int; rest to 0.1
+        const value =
+          kind === 'heart_rate'
+            ? v
+            : kind === 'walking_hr_avg' || kind === 'hr_recovery_1min'
+              ? Math.round(v)
+              : Math.round(v * 10) / 10;
+        return { value, startDate: s.startDate };
+      });
+    } catch (error) {
+      console.log(`[HealthKit] Error getting backfill samples for ${kind}:`, error);
+      return [];
+    }
   }
 
   /** Stand minutes today (from Apple Stand Time). */
@@ -1060,6 +1057,8 @@ class HealthKitService {
     resting_hr: number | null;
     hrv_avg: number | null;
     hrv_samples: Array<{ value: number; startDate: string }>;
+    heart_rate_samples: Array<{ value: number; startDate: string }>;
+    vitals: Array<{ metric_type: string; value: number; startDate: string }>;
     weight_lb: number | null;
     sleep: {
       total_asleep_hours: number;
@@ -1121,6 +1120,25 @@ class HealthKitService {
         const hrvAvg = hrvSamples.length
           ? Math.round(hrvSamples.reduce((s, x) => s + x.value, 0) / hrvSamples.length)
           : null;
+
+        // Watch-derived streams that only the raw-sample collectors emit — the
+        // exact cohort that goes dark when an older build stops uploading them.
+        // heart_rate is decimated downstream; the vitals are sparse.
+        const [heartRateSamples, spo2S, respS, vo2S, walkHrS, hrRecS] = await Promise.all([
+          this.getBackfillSamples('heart_rate', dayStart, dayEnd),
+          this.getBackfillSamples('spo2', dayStart, dayEnd),
+          this.getBackfillSamples('respiratory_rate', dayStart, dayEnd),
+          this.getBackfillSamples('vo2_max', dayStart, dayEnd),
+          this.getBackfillSamples('walking_hr_avg', dayStart, dayEnd),
+          this.getBackfillSamples('hr_recovery_1min', dayStart, dayEnd),
+        ]);
+        const vitals = [
+          ...spo2S.map((s) => ({ metric_type: 'spo2', ...s })),
+          ...respS.map((s) => ({ metric_type: 'respiratory_rate', ...s })),
+          ...vo2S.map((s) => ({ metric_type: 'vo2_max', ...s })),
+          ...walkHrS.map((s) => ({ metric_type: 'walking_hr_avg', ...s })),
+          ...hrRecS.map((s) => ({ metric_type: 'hr_recovery_1min', ...s })),
+        ];
 
         // Weight — latest sample
         let weightLb: number | null = null;
@@ -1193,6 +1211,8 @@ class HealthKitService {
           resting_hr: restingHR,
           hrv_avg: hrvAvg,
           hrv_samples: hrvSamples,
+          heart_rate_samples: heartRateSamples,
+          vitals,
           weight_lb: weightLb,
           sleep,
         });

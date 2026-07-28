@@ -53,7 +53,10 @@ def _conflict(c: WorkoutConflict) -> HTTPException:
     The active projection rides along so the Watch can immediately offer
     Resume / End without a second round trip (§4.2 step 8).
     """
-    status = 409 if c.code != "no_active_session" else 404
+    # 404 for "the thing you named is gone", 409 for "the state moved under
+    # you" — the client branches differently: one is a stale reference to
+    # reconcile away, the other is a retry-after-refresh.
+    status = 404 if c.code in ("no_active_session", "set_not_found") else 409
     return HTTPException(status_code=status, detail={
         "code": c.code,
         "message": c.message,

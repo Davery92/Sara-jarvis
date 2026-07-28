@@ -96,6 +96,37 @@ struct WatchHomeView: View {
     /// the one message that matters.
     @ViewBuilder
     private var problemSection: some View {
+        // An Apple workout running with no Sara session behind it is the one
+        // state that must never be silent: real physiology is being collected
+        // for a workout the backend has not acknowledged (§5.2).
+        if manager.startState.isOrphanedHealthKit {
+            Section {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(manager.startState.headline)
+                        .font(.footnote.weight(.semibold))
+                    if let detail = manager.startState.detail {
+                        Text(detail)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    if manager.startState.saraSession == .conflict {
+                        Button("Resume Existing") {
+                            Task { await manager.resumeExistingWorkout() }
+                        }
+                        .font(.caption2)
+                    }
+                    if manager.startState.isRetryable {
+                        Button("Retry") { manager.retryStart() }
+                            .font(.caption2)
+                    }
+                    Button("End Apple Workout", role: .destructive) {
+                        Task { await manager.discardOrphanStart() }
+                    }
+                    .font(.caption2)
+                }
+            }
+        }
+
         if manager.pendingCommandCount > 0 {
             Section {
                 Label("\(manager.pendingCommandCount) waiting to sync", systemImage: "arrow.triangle.2.circlepath")

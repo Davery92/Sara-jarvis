@@ -175,6 +175,7 @@ def collect_activity(db: Session, user_id: str, ws: date, we: date) -> ActivityS
             FROM workout_log
             WHERE user_id = :uid AND session_date BETWEEN :ws AND :we
               AND COALESCE(skipped, false) = false
+              AND voided_at IS NULL
             ORDER BY session_date ASC, set_index ASC
         """),
         {"uid": user_id, "ws": ws, "we": we},

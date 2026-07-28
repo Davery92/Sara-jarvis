@@ -27,14 +27,14 @@ class WorkoutSessionService:
     """Manages active workout sessions for real-time coaching"""
 
     def _name_counts(self, session_id: str, db: Session) -> Dict[str, int]:
-        """Logged-set counts per exercise name for a session (from workout_log)."""
-        rows = db.execute(text("""
-            SELECT exercise_id, COUNT(*) AS c
-            FROM workout_log
-            WHERE active_session_id = :sid
-            GROUP BY exercise_id
-        """), {"sid": session_id}).fetchall()
-        return {r.exercise_id: int(r.c) for r in rows}
+        """Live working-set counts per exercise name (from `workout_log`).
+
+        Warm-ups, drop segments and undone sets are excluded — the single
+        definition of "how many sets are done" lives in `workout_recalc`
+        (2026-07-27 plan §6.4) so this and the v2 service cannot diverge.
+        """
+        from app.services.workout_recalc import working_counts
+        return working_counts(db, session_id)
 
     def _effective_name(self, ex: Dict) -> str:
         """The exercise identity used for logging + history.
@@ -43,16 +43,18 @@ class WorkoutSessionService:
         Squat" for a "Squat" slot), that variant becomes the identity so its
         weights are tracked separately and don't corrupt the base lift's history.
         """
-        variant = (ex.get("variant") or "").strip()
-        return variant or ex.get("name") or ""
+        from app.services.workout_recalc import effective_name
+        return effective_name(ex)
 
     def _completed_for(self, exercises: List[Dict], name_counts: Dict[str, int], idx: int) -> int:
-        """Completed sets for the exercise at idx, capped at its target sets."""
-        if idx < 0 or idx >= len(exercises):
-            return 0
-        ex = exercises[idx]
-        target = ex.get("sets", 0) or 0
-        return min(name_counts.get(self._effective_name(ex), 0), target)
+        """Completed working sets at idx, capped at its *effective* target.
+
+        Effective, not prescribed: a set David added during this workout has to
+        be reachable, or Add Set would leave the cursor thinking the exercise
+        was already finished.
+        """
+        from app.services.workout_recalc import completed_for
+        return completed_for(exercises, name_counts, idx)
 
     def _compute_suggestion(
         self, user_id: str, exercise_name: str, target_reps: Any, is_deload: bool, db: Session
@@ -91,13 +93,8 @@ class WorkoutSessionService:
         Returns None when every exercise has hit its target — i.e. workout done.
         Wrapping is what lets a skipped or earlier exercise be resumed later.
         """
-        n = len(exercises)
-        for step in range(1, n + 1):
-            j = (from_idx + step) % n
-            target = exercises[j].get("sets", 0) or 0
-            if self._completed_for(exercises, name_counts, j) < target:
-                return j
-        return None
+        from app.services.workout_recalc import next_incomplete_index
+        return next_incomplete_index(exercises, name_counts, from_idx)
 
     async def start_workout(
         self,
@@ -184,12 +181,17 @@ class WorkoutSessionService:
             session["rest_timer_started_at"] = session["rest_timer_started_at"].isoformat() if session["rest_timer_started_at"] else None
             session["total_volume"] = float(session["total_volume"]) if session["total_volume"] else 0
 
-            # Get sets logged in this session
+            # Sets logged in this session, including their kind and grouping so
+            # the phone can render a drop-set series as one working set rather
+            # than three (2026-07-27 plan §6.1). Voided rows come along with an
+            # explicit flag: View/Edit shows them struck, nothing counts them.
             sets_logged = db.execute(text("""
-                SELECT exercise_id, set_index, weight, reps, rpe, notes, created_at
+                SELECT id, exercise_id, set_index, weight, reps, rpe, notes, created_at,
+                       set_kind, parent_set_id, set_group_id, group_sequence,
+                       counts_toward_target, voided_at, void_reason, is_pr
                 FROM workout_log
                 WHERE active_session_id = :session_id
-                ORDER BY created_at ASC
+                ORDER BY created_at ASC, group_sequence ASC
             """), {"session_id": session["id"]}).fetchall()
 
             session["sets_logged"] = []
@@ -198,18 +200,39 @@ class WorkoutSessionService:
                 # Serialize datetime
                 if log_entry.get("created_at"):
                     log_entry["created_at"] = log_entry["created_at"].isoformat()
+                log_entry["voided"] = log_entry.pop("voided_at", None) is not None
                 session["sets_logged"].append(log_entry)
 
             # Annotate each snapshot exercise with how many sets are already logged,
             # so the client can show completion / partial progress regardless of the
             # order exercises were done in (the cursor alone no longer implies "done").
+            from app.services.workout_recalc import (
+                effective_name, prescribed_sets_for, target_sets_for,
+            )
             name_counts: Dict[str, int] = {}
+            drop_counts: Dict[str, int] = {}
             for entry in session["sets_logged"]:
+                if entry.get("voided"):
+                    continue
                 ex_name = entry.get("exercise_id")
-                name_counts[ex_name] = name_counts.get(ex_name, 0) + 1
+                if entry.get("counts_toward_target"):
+                    name_counts[ex_name] = name_counts.get(ex_name, 0) + 1
+                if entry.get("set_kind") == "drop":
+                    drop_counts[ex_name] = drop_counts.get(ex_name, 0) + 1
             for ex in (session["workout_snapshot"].get("exercises") or []):
-                target = ex.get("sets", 0) or 0
-                ex["completed_sets"] = min(name_counts.get(self._effective_name(ex), 0), target)
+                name = effective_name(ex)
+                # Read both before writing either: `sets` is an input to
+                # `target_sets_for`, and overwriting it first would fold
+                # `sets_added` in twice.
+                prescribed = prescribed_sets_for(ex)
+                effective = target_sets_for(ex)
+                ex["completed_sets"] = min(name_counts.get(name, 0), effective)
+                ex["completed_drop_segments"] = drop_counts.get(name, 0)
+                # The phone's existing panel reads `sets`; keep it the number of
+                # sets to actually do, and expose the untouched prescription
+                # alongside it so "4 sets (3 prescribed)" stays derivable.
+                ex["prescribed_sets"] = prescribed
+                ex["sets"] = effective
 
             return session
 
@@ -349,14 +372,25 @@ class WorkoutSessionService:
         is_last_set: bool,
         workout_complete: bool,
         next_exercise: Optional[Dict],
-        rest_seconds: int
+        rest_seconds: int,
+        set_kind: str = "working",
+        drop_segment: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """Generate AI coaching feedback for a logged set using local LLM."""
+        """Generate AI coaching feedback for a logged set using local LLM.
+
+        `set_kind` matters more than it looks. A drop segment and a warm-up are
+        both intentionally lighter than the working weight, and an LLM told only
+        "135 lbs, suggested 185" will read either as a bad set and say so
+        (2026-07-27 plan §8). It is told what the set was for instead.
+        """
 
         weight_adjustment = None
 
-        # Determine weight adjustment based on RPE
-        if rpe:
+        # Determine weight adjustment based on RPE. Only a working set can move
+        # the prescription: a warm-up is submaximal by design and a drop segment
+        # is deliberately below the working weight, so neither is evidence about
+        # what David should be lifting.
+        if rpe and set_kind == "working":
             if rpe <= 6:
                 weight_adjustment = 5
             elif rpe >= 9:
@@ -372,7 +406,19 @@ Current situation:
 - RPE (effort 1-10): {rpe if rpe else 'not provided'}
 - Suggested weight was: {suggested_weight}lbs
 """
-        if workout_complete:
+        if set_kind == "drop":
+            context += (
+                f"\nThis was DROP SEGMENT {drop_segment or 1} of a drop set — the lighter weight is"
+                " intentional and part of the technique. Do NOT treat it as a regression, a failed"
+                " set, or a reason to change the working weight. Acknowledge the effort and say"
+                " whether to drop again or rack it."
+            )
+        elif set_kind == "warmup":
+            context += (
+                "\nThis was a WARM-UP set. It does not count toward the prescribed sets and is"
+                " meant to be easy. Do NOT comment on the weight being low or suggest changes."
+            )
+        elif workout_complete:
             context += "\nThis was the FINAL set of the workout! Congratulate them on finishing."
         elif is_last_set:
             next_name = next_exercise["name"] if next_exercise else "cooldown"
@@ -415,13 +461,13 @@ Current situation:
                             or "you are sara" in low or "current situation" in low
                             or "coaching message" in low or "respond with" in low):
                         logger.warning("[WorkoutCoaching] discarding echoed/empty LLM output, using fallback")
-                        feedback_text = self._fallback_feedback(exercise_name, set_number, total_sets, rpe, workout_complete, is_last_set, next_exercise, rest_seconds)
+                        feedback_text = self._fallback_feedback(exercise_name, set_number, total_sets, rpe, workout_complete, is_last_set, next_exercise, rest_seconds, set_kind, drop_segment)
                 else:
                     logger.warning(f"[WorkoutCoaching] LLM returned {response.status_code}, using fallback")
-                    feedback_text = self._fallback_feedback(exercise_name, set_number, total_sets, rpe, workout_complete, is_last_set, next_exercise, rest_seconds)
+                    feedback_text = self._fallback_feedback(exercise_name, set_number, total_sets, rpe, workout_complete, is_last_set, next_exercise, rest_seconds, set_kind, drop_segment)
         except Exception as e:
             logger.warning(f"[WorkoutCoaching] LLM failed: {e}, using fallback")
-            feedback_text = self._fallback_feedback(exercise_name, set_number, total_sets, rpe, workout_complete, is_last_set, next_exercise, rest_seconds)
+            feedback_text = self._fallback_feedback(exercise_name, set_number, total_sets, rpe, workout_complete, is_last_set, next_exercise, rest_seconds, set_kind, drop_segment)
 
         return {
             "text": feedback_text,
@@ -439,9 +485,18 @@ Current situation:
         workout_complete: bool,
         is_last_set: bool,
         next_exercise: Optional[Dict],
-        rest_seconds: int
+        rest_seconds: int,
+        set_kind: str = "working",
+        drop_segment: Optional[int] = None,
     ) -> str:
         """Simple fallback feedback if LLM is unavailable."""
+        # Kind first: the RPE branches below would tell David to add weight
+        # after a warm-up, or to drop 5 lbs after a set that was already a
+        # deliberate drop (2026-07-27 plan §8).
+        if set_kind == "drop":
+            return f"Drop {drop_segment or 1} logged. Go again or rack it."
+        if set_kind == "warmup":
+            return "Warm-up logged — doesn't count toward your sets."
         if workout_complete:
             return "Great workout! You crushed it. Time to recover."
         elif is_last_set:
@@ -683,7 +738,10 @@ Current situation:
             now = datetime.now(timezone.utc)
             elapsed_minutes = int((now - started).total_seconds() / 60)
 
-            total_sets = snapshot.get("total_sets", 0)
+            # Effective targets, so an added set is reflected in what Sara
+            # tells David is left (2026-07-27 plan §6.2).
+            from app.services.workout_recalc import target_sets_for
+            total_sets = sum(target_sets_for(e) for e in exercises) or snapshot.get("total_sets", 0)
             progress_pct = int((session["total_sets_completed"] / total_sets * 100)) if total_sets > 0 else 0
 
             lines = [
@@ -697,7 +755,13 @@ Current situation:
             if current_ex_idx < len(exercises):
                 current_ex = exercises[current_ex_idx]
                 lines.append(f"### Current Exercise: {current_ex['name']}")
-                lines.append(f"- **Set**: {current_set_idx + 1} of {current_ex['sets']}")
+                set_line = f"- **Set**: {current_set_idx + 1} of {current_ex['sets']}"
+                prescribed = current_ex.get("prescribed_sets")
+                if prescribed is not None and prescribed != current_ex["sets"]:
+                    # Say when the number differs from the program, so Sara
+                    # never presents an in-session addition as the plan (§4.3).
+                    set_line += f" ({prescribed} prescribed, adjusted for today only)"
+                lines.append(set_line)
                 lines.append(f"- **Target**: {current_ex['reps']} reps @ RPE {current_ex.get('rpe_target', 7)}")
 
                 if current_ex.get("suggested_weight"):
@@ -714,11 +778,22 @@ Current situation:
                 lines.append("### Workout Complete!")
 
             # Last set logged
-            if sets_logged:
-                last_set = sets_logged[-1]
+            live_sets = [s for s in sets_logged if not s.get("voided")]
+            if live_sets:
+                last_set = live_sets[-1]
+                # Label the kind. Without it Sara reads a 95 lb drop segment
+                # after a 135 lb working set as a regression and says so (§8).
+                kind = last_set.get("set_kind") or "working"
+                label = {
+                    "drop": f"Drop segment {last_set.get('group_sequence') or 1} (intentionally lighter)",
+                    "warmup": "Warm-up (doesn't count toward sets)",
+                }.get(kind, "Last Set Logged")
                 lines.append("")
-                lines.append(f"### Last Set Logged: {last_set['exercise_id']} - {last_set['weight']}lbs x {last_set['reps']}" +
+                lines.append(f"### {label}: {last_set['exercise_id']} - {last_set['weight']}lbs x {last_set['reps']}" +
                            (f" @ RPE {last_set['rpe']}" if last_set.get('rpe') else ""))
+                voided = [s for s in sets_logged if s.get("voided")]
+                if voided:
+                    lines.append(f"- {len(voided)} set(s) undone this workout — they count toward nothing.")
 
             # Rest timer
             timer_status = await self.get_rest_timer_status(user_id, db)
@@ -732,7 +807,7 @@ Current situation:
                 lines.append("")
                 lines.append("### Up Next:")
                 for i, ex in enumerate(remaining_exercises, 1):
-                    lines.append(f"{i}. {ex['name']} ({ex['sets']} sets)")
+                    lines.append(f"{i}. {ex['name']} ({target_sets_for(ex)} sets)")
 
             return "\n".join(lines)
 

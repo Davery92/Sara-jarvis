@@ -1,5 +1,16 @@
 import SwiftUI
 import HealthKit
+import WatchKit
+
+final class SaraWatchExtensionDelegate: NSObject, WKApplicationDelegate {
+    func handle(_ workoutConfiguration: HKWorkoutConfiguration) {
+        Task { @MainActor in
+            await WorkoutManager.shared.startWorkoutFromPhone(
+                configuration: workoutConfiguration
+            )
+        }
+    }
+}
 
 /// Sara on the wrist (plan §7.1, §8).
 ///
@@ -15,7 +26,9 @@ import HealthKit
 @main
 @MainActor
 struct SaraWatchApp: App {
-    @StateObject private var workoutManager = WorkoutManager()
+    @WKApplicationDelegateAdaptor(SaraWatchExtensionDelegate.self)
+    private var extensionDelegate
+    @StateObject private var workoutManager = WorkoutManager.shared
 
     var body: some Scene {
         WindowGroup {

@@ -11,6 +11,7 @@ import json
 import re
 from datetime import datetime, date, timedelta, timezone as dt_timezone
 from app.core.timezone import now as local_now, today as local_today, USER_TIMEZONE
+from app.services.phase_resolution import get_effective_phase
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, asdict
@@ -1581,6 +1582,7 @@ Synthesized summary:"""
                 WHERE user_id = :user_id
                   AND session_date = :yesterday
                   AND skipped = false
+                  AND voided_at IS NULL
                 ORDER BY created_at
             """), {"user_id": user_id, "yesterday": yesterday_str}).fetchall()
 
@@ -1696,12 +1698,8 @@ Synthesized summary:"""
             today = local_today()
             day_of_week = today.strftime("%A").lower()
 
-            # Find active phase
-            active_phase = db.execute(text("""
-                SELECT id, name FROM fitness_phase
-                WHERE user_id = :user_id AND status = 'active'
-                LIMIT 1
-            """), {"user_id": user_id}).fetchone()
+            # Use the dated phase of the approved active program.
+            active_phase = get_effective_phase(db, user_id, today)
 
             if not active_phase:
                 return {
@@ -1714,7 +1712,7 @@ Synthesized summary:"""
                 SELECT id, name, exercises, scheduled_days, notes
                 FROM fitness_template
                 WHERE user_id = :user_id AND phase_id = :phase_id
-            """), {"user_id": user_id, "phase_id": active_phase.id}).fetchall()
+            """), {"user_id": user_id, "phase_id": active_phase["id"]}).fetchall()
 
             today_template = None
             for t in templates:
@@ -1815,6 +1813,7 @@ Synthesized summary:"""
                   AND session_date = :yesterday
                   AND weight IS NOT NULL
                   AND skipped = false
+                  AND voided_at IS NULL
                 GROUP BY exercise_id
             """), {"user_id": user_id, "yesterday": yesterday_str}).fetchall()
 
@@ -1832,6 +1831,7 @@ Synthesized summary:"""
                       AND session_date < :yesterday
                       AND weight IS NOT NULL
                       AND skipped = false
+                      AND voided_at IS NULL
                 """), {"user_id": user_id, "exercise_id": lift.exercise_id, "yesterday": yesterday_str}).fetchone()
 
                 if all_time and all_time.max_weight:
@@ -1864,6 +1864,7 @@ Synthesized summary:"""
                 WHERE user_id = :user_id
                   AND session_date >= :two_weeks_ago
                   AND skipped = false
+                  AND voided_at IS NULL
                 ORDER BY session_date DESC
             """), {"user_id": user_id, "two_weeks_ago": two_weeks_ago}).fetchall()
 
@@ -2022,6 +2023,7 @@ Synthesized summary:"""
                       AND session_date >= :four_weeks_ago
                       AND weight IS NOT NULL
                       AND skipped = false
+                      AND voided_at IS NULL
                 """), {"user_id": user_id, "pattern": f"%{lift_pattern}%", "four_weeks_ago": four_weeks_ago}).fetchone()
 
                 # Get older max (4-8 weeks ago)
@@ -2034,6 +2036,7 @@ Synthesized summary:"""
                       AND session_date < :four_weeks_ago
                       AND weight IS NOT NULL
                       AND skipped = false
+                      AND voided_at IS NULL
                 """), {"user_id": user_id, "pattern": f"%{lift_pattern}%",
                        "eight_weeks_ago": eight_weeks_ago, "four_weeks_ago": four_weeks_ago}).fetchone()
 
@@ -2120,12 +2123,8 @@ Synthesized summary:"""
                 WHERE user_id = :user_id AND log_date = :today
             """), {"user_id": user_id, "today": today_str}).fetchone()
 
-            # Find active phase
-            active_phase = db.execute(text("""
-                SELECT id, name, goal FROM fitness_phase
-                WHERE user_id = :user_id AND status = 'active'
-                LIMIT 1
-            """), {"user_id": user_id}).fetchone()
+            # Use the dated phase of the approved active program.
+            active_phase = get_effective_phase(db, user_id, today)
 
             # Find today's scheduled template
             template = None
@@ -2134,7 +2133,7 @@ Synthesized summary:"""
                 templates = db.execute(text("""
                     SELECT id, name, exercises, notes, scheduled_days FROM fitness_template
                     WHERE user_id = :user_id AND phase_id = :phase_id
-                """), {"user_id": user_id, "phase_id": active_phase.id}).fetchall()
+                """), {"user_id": user_id, "phase_id": active_phase["id"]}).fetchall()
 
                 for t in templates:
                     if t.scheduled_days:
@@ -2156,6 +2155,8 @@ Synthesized summary:"""
                         FROM workout_log
                         WHERE user_id = :user_id
                         AND exercise_id = :exercise_name
+                        AND voided_at IS NULL
+                        AND COALESCE(set_kind, 'working') = 'working'
                         ORDER BY session_date DESC, created_at DESC
                         LIMIT 4
                     """), {"user_id": user_id, "exercise_name": exercise_name}).fetchall()
@@ -2254,7 +2255,7 @@ Synthesized summary:"""
                 # Header
                 recovery_text = f"## Today's Workout: {template.name}\n"
                 if active_phase:
-                    recovery_text += f"*Phase: {active_phase.name}*\n\n"
+                    recovery_text += f"*Phase: {active_phase['name']}*\n\n"
 
                 # Recovery status
                 if recovery:

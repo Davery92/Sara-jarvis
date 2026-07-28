@@ -13,6 +13,9 @@ from typing import Optional
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.core.timezone import today as local_today
+from app.services.phase_resolution import get_effective_phase
+
 logger = logging.getLogger(__name__)
 
 
@@ -23,24 +26,10 @@ async def get_fitness_context(user_id: str, db: Session) -> Optional[str]:
     Returns None if no active phase/goals exist (user has no fitness plan).
     """
     try:
-        today = date.today()
+        today = local_today()
 
-        # 1. Get active phase with carb cycling targets
-        phase_row = db.execute(text("""
-            SELECT id, name, goal,
-                   calories_target, protein_target, carbs_target, fat_target,
-                   calories_training_day, calories_rest_day,
-                   carbs_training_day, carbs_rest_day,
-                   fat_training_day, fat_rest_day,
-                   daily_steps_target, deload_week, start_date
-            FROM fitness_phase
-            WHERE user_id = :uid
-              AND status = 'active'
-              AND start_date IS NOT NULL
-              AND :d >= start_date
-              AND (end_date IS NULL OR :d <= end_date)
-            ORDER BY start_date DESC LIMIT 1
-        """), {"uid": user_id, "d": today}).fetchone()
+        # 1. Resolve the dated phase of the approved active program.
+        phase_row = get_effective_phase(db, user_id, today)
 
         # Fall back to fitness_goals if no active phase
         if not phase_row:
@@ -60,7 +49,7 @@ async def get_fitness_context(user_id: str, db: Session) -> Optional[str]:
             phase_name = None
             is_training = False
         else:
-            phase = dict(phase_row._mapping)
+            phase = dict(phase_row)
             phase_name = phase["name"]
 
             # Determine training vs rest day — shared definition so this never

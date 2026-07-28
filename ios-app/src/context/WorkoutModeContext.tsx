@@ -5,7 +5,12 @@ import { startEvent, updateEvent, endEvent } from '../services/eventActivity';
 import { watchWorkout } from '../services/watchWorkout';
 import { workoutCoordinator } from '../services/workoutCoordinator';
 import { workoutCoaching } from '../services/workoutCoaching';
-import type { CoachingEvent, LiveMetrics, WorkoutProposal } from '../services/workoutContracts';
+import type {
+  CoachingEvent,
+  LiveMetrics,
+  PerformedSet,
+  WorkoutProposal,
+} from '../services/workoutContracts';
 
 /**
  * Quiet device state for Workout Mode (plan §9.3).
@@ -42,6 +47,35 @@ interface WorkoutModeContextType {
   rejectProposal: (proposalId: string) => Promise<void>;
   /** Retry bringing the Watch into a phone-started workout (§4.3). */
   retryWatch: () => Promise<void>;
+
+  // ── Flexible sets (2026-07-27 plan §7.1) ───────────────────────────────
+  //
+  // Each of these applies to the LIVE workout only. None of them touches the
+  // template, the program, or next week's prescription — that needs a separate
+  // approval after the workout (§4.3).
+  /** Sets performed in this session, newest last. Voided rows included, flagged. */
+  performedSets: PerformedSet[];
+  /** One more working set on an exercise: "3 sets" becomes "4 sets (3 prescribed)". */
+  addWorkingSet: (exerciseIndex?: number) => Promise<void>;
+  /** Give back a target set that hasn't been performed. Never deletes a log. */
+  removeUnloggedSet: (exerciseIndex?: number) => Promise<void>;
+  /** Log one drop-set segment under the working set just performed. */
+  logDropSegment: (params: {
+    weight: number;
+    reps: number;
+    effort?: string;
+    parentSetId?: string;
+  }) => Promise<void>;
+  /** Correct a logged set. Volume, PRs and progress are recomputed. */
+  reviseSet: (setId: string, changes: {
+    weight?: number;
+    reps?: number;
+    effort?: string;
+    notes?: string;
+    setKind?: 'working' | 'warmup' | 'drop';
+  }) => Promise<void>;
+  /** Undo a set — the last one when no id is given. */
+  voidSet: (setId?: string) => Promise<void>;
 
   // Actions
   startWorkout: (templateId: string) => Promise<ActiveWorkoutSession | null>;
@@ -87,6 +121,7 @@ export function WorkoutModeProvider({ children }: { children: React.ReactNode })
   });
   const [pendingProposal, setPendingProposal] = useState<WorkoutProposal | null>(null);
   const [coaching, setCoaching] = useState<CoachingEvent | null>(null);
+  const [performedSets, setPerformedSets] = useState<PerformedSet[]>([]);
 
   // Mirror/metrics/queue depth all feed one status object so the UI has a
   // single thing to render rather than three racing booleans.
@@ -108,6 +143,10 @@ export function WorkoutModeProvider({ children }: { children: React.ReactNode })
     const unsubCoordinator = workoutCoordinator.subscribe((state) => {
       setWatch(prev => ({ ...prev, pending: state.pendingCount }));
       setPendingProposal(state.projection?.pending_proposal ?? null);
+      // The canonical set list. Sourced from the projection rather than kept
+      // locally so a set added on the Watch shows up here without the phone
+      // having to reconstruct it (§7.3).
+      setPerformedSets(state.projection?.performed_sets ?? []);
     });
     const unsubCoaching = workoutCoaching.onDisplay(setCoaching);
     return () => {
@@ -175,6 +214,17 @@ export function WorkoutModeProvider({ children }: { children: React.ReactNode })
       workoutCoaching.stop();
     }
   }, [session?.status]);
+
+  // Pull the canonical projection whenever a workout becomes active.
+  //
+  // Without this, the coordinator can come back from disk holding a projection
+  // from a previous launch, and the first Add Set of the session would stamp a
+  // stale `expected_version` — a conflict David has to retry through for no
+  // reason (§7.3 "reconcile to the server projection").
+  useEffect(() => {
+    if (session?.status !== 'active') return;
+    void workoutCoordinator.hydrate().then(() => workoutCoordinator.sync());
+  }, [session?.id, session?.status]);
 
   // Check for active session on mount
   useEffect(() => {
@@ -476,6 +526,62 @@ export function WorkoutModeProvider({ children }: { children: React.ReactNode })
     }
   };
 
+  // ── Flexible sets (2026-07-27 plan §7.1) ────────────────────────────────
+
+  /**
+   * Run one canonical set command and reconcile every surface behind it.
+   *
+   * All five go through `workoutCoordinator`, i.e. the exact path a Watch tap
+   * takes, so add/drop/undo can never mean something different depending on
+   * which device issued them. The legacy session refresh is what updates the
+   * existing panel; `syncWatch` is what puts the new target on the wrist.
+   */
+  const runSetCommand = useCallback(async (
+    label: string,
+    run: () => Promise<any>
+  ): Promise<void> => {
+    try {
+      setError(null);
+      const result = await run();
+      if (result && 'conflict' in result) {
+        setError(result.conflict.message);
+      }
+      await refreshSession();
+      await syncWatch();
+    } catch (err: any) {
+      console.error(`Failed to ${label}:`, err);
+      setError(err?.response?.data?.detail?.message ?? err.message);
+    }
+  }, [refreshSession, syncWatch]);
+
+  const addWorkingSet = useCallback((exerciseIndex?: number) =>
+    runSetCommand('add set', () => workoutCoordinator.addWorkingSet(exerciseIndex)),
+    [runSetCommand]
+  );
+
+  const removeUnloggedSet = useCallback((exerciseIndex?: number) =>
+    runSetCommand('remove set', () => workoutCoordinator.removeUnloggedSet(exerciseIndex)),
+    [runSetCommand]
+  );
+
+  const logDropSegment = useCallback((params: {
+    weight: number; reps: number; effort?: string; parentSetId?: string;
+  }) => runSetCommand('log drop segment', () => workoutCoordinator.logDropSegment(params)),
+    [runSetCommand]
+  );
+
+  const reviseSet = useCallback((setId: string, changes: {
+    weight?: number; reps?: number; effort?: string; notes?: string;
+    setKind?: 'working' | 'warmup' | 'drop';
+  }) => runSetCommand('revise set', () => workoutCoordinator.reviseSet(setId, changes)),
+    [runSetCommand]
+  );
+
+  const voidSet = useCallback((setId?: string) =>
+    runSetCommand('undo set', () => workoutCoordinator.voidSet(setId)),
+    [runSetCommand]
+  );
+
   // ── Approval boundary (§11.3) ───────────────────────────────────────────
 
   /**
@@ -536,6 +642,12 @@ export function WorkoutModeProvider({ children }: { children: React.ReactNode })
     approveProposal,
     rejectProposal,
     retryWatch,
+    performedSets,
+    addWorkingSet,
+    removeUnloggedSet,
+    logDropSegment,
+    reviseSet,
+    voidSet,
     startWorkout,
     logSet,
     skipExercise,

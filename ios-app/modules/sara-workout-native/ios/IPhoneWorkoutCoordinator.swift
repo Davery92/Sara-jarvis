@@ -1,6 +1,7 @@
 import Foundation
 import HealthKit
 import os
+import WatchConnectivity
 
 /// iPhone side of Apple's multidevice workout model (plan §7.2, §7.4).
 ///
@@ -31,6 +32,7 @@ final class IPhoneWorkoutCoordinator: NSObject {
     typealias Emitter = (Event, [String: Any]) -> Void
 
     private let healthStore = HKHealthStore()
+    private let connectivitySession = WCSession.isSupported() ? WCSession.default : nil
     private let log = Logger(subsystem: "cloud.avery.sara-ios", category: "WorkoutMirror")
     private let stateQueue = DispatchQueue(label: "cloud.avery.sara.workout.mirror")
 
@@ -44,7 +46,12 @@ final class IPhoneWorkoutCoordinator: NSObject {
     /// David is about to log has no session. Bounded so a long background
     /// stretch cannot grow without limit.
     private var pendingMessages: [[String: Any]] = []
+    private var pendingApplicationContext: [String: Any]?
     private static let maxPendingMessages = 64
+
+    /// Key both sides wrap a workout envelope in, whichever WatchConnectivity
+    /// shape carries it. Matches `WorkoutWireTransport.envelopeKey` on the Watch.
+    static let envelopeKey = "workoutEnvelope"
 
     private(set) var isMirroring = false {
         didSet {
@@ -59,6 +66,9 @@ final class IPhoneWorkoutCoordinator: NSObject {
     func activate(emitter: @escaping Emitter) {
         self.emit = emitter
         flushPending()
+
+        connectivitySession?.delegate = self
+        connectivitySession?.activate()
 
         healthStore.workoutSessionMirroringStartHandler = { [weak self] session in
             guard let self else { return }
@@ -110,18 +120,100 @@ final class IPhoneWorkoutCoordinator: NSObject {
 
     // MARK: - Messaging
 
-    func send(envelopeJSON: String, completion: @escaping (Result<Void, Error>) -> Void) {
-        let session: HKWorkoutSession? = stateQueue.sync { mirroredSession }
-        guard let session else {
-            completion(.failure(WorkoutMirrorError.noMirroredSession))
-            return
-        }
+    /// Reply to the Watch over the best channel available (plan §5.3).
+    ///
+    /// Same three-channel ladder the Watch uses, for the same reason: the Watch
+    /// can perfectly well have started a workout over WatchConnectivity with no
+    /// mirror attached, and a reply that can only travel through the mirror
+    /// would leave it stuck on "Connecting to Sara" forever.
+    ///
+    /// `requiresDelivery` distinguishes a projection (must arrive) from
+    /// telemetry (worthless late, must never fill the durable queue).
+    func send(
+        envelopeJSON: String,
+        requiresDelivery: Bool,
+        completion: @escaping (Result<Void, Error>) -> Void
+    ) {
         guard let data = envelopeJSON.data(using: .utf8) else {
             completion(.failure(WorkoutMirrorError.encodingFailed))
             return
         }
-        session.sendToRemoteWorkoutSession(data: data) { _, error in
-            if let error { completion(.failure(error)) } else { completion(.success(())) }
+
+        let session: HKWorkoutSession? = stateQueue.sync { mirroredSession }
+        if let session, session.state == .running || session.state == .paused {
+            session.sendToRemoteWorkoutSession(data: data) { _, error in
+                if let error { completion(.failure(error)) } else { completion(.success(())) }
+            }
+            return
+        }
+
+        guard let connectivitySession, connectivitySession.activationState == .activated else {
+            completion(.failure(WorkoutMirrorError.noMirroredSession))
+            return
+        }
+        let payload: [String: Any] = [Self.envelopeKey: envelopeJSON]
+
+        if connectivitySession.isReachable {
+            connectivitySession.sendMessage(payload, replyHandler: nil) { [weak self] error in
+                // Reachability can lapse between the check and the send. A
+                // projection must not be lost to that race, so it falls through
+                // to the durable queue — the completion has already resolved,
+                // because the caller's job (hand it to the transport) is done.
+                self?.log.error("Interactive reply failed: \(error.localizedDescription, privacy: .public)")
+                if requiresDelivery {
+                    connectivitySession.transferUserInfo(payload)
+                }
+            }
+            completion(.success(()))
+            return
+        }
+
+        guard requiresDelivery else {
+            completion(.failure(WorkoutMirrorError.watchUnreachable))
+            return
+        }
+        connectivitySession.transferUserInfo(payload)
+        completion(.success(()))
+    }
+
+    /// Persist the latest pre-workout state for delivery through WatchConnectivity.
+    /// Application context exists before a workout and retains only the newest catalog.
+    func updateApplicationContext(
+        envelopeJSON: String,
+        completion: @escaping (Result<Void, Error>) -> Void
+    ) {
+        guard let connectivitySession else {
+            completion(.failure(WorkoutMirrorError.watchConnectivityUnavailable))
+            return
+        }
+        let context: [String: Any] = [
+            "workoutEnvelope": envelopeJSON,
+            "sentAt": Date().timeIntervalSince1970,
+        ]
+        guard connectivitySession.activationState == .activated else {
+            stateQueue.sync { pendingApplicationContext = context }
+            connectivitySession.activate()
+            completion(.success(()))
+            return
+        }
+        do {
+            try connectivitySession.updateApplicationContext(context)
+            completion(.success(()))
+        } catch {
+            completion(.failure(error))
+        }
+    }
+
+    private func flushPendingApplicationContext(to session: WCSession) {
+        let context: [String: Any]? = stateQueue.sync {
+            defer { pendingApplicationContext = nil }
+            return pendingApplicationContext
+        }
+        guard let context else { return }
+        do {
+            try session.updateApplicationContext(context)
+        } catch {
+            log.error("Queued Watch context failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -187,6 +279,84 @@ final class IPhoneWorkoutCoordinator: NSObject {
     }
 }
 
+// MARK: - WCSessionDelegate
+
+@available(iOS 17.0, *)
+extension IPhoneWorkoutCoordinator: WCSessionDelegate {
+    func session(
+        _ session: WCSession,
+        activationDidCompleteWith activationState: WCSessionActivationState,
+        error: Error?
+    ) {
+        if let error {
+            log.error("WatchConnectivity activation failed: \(error.localizedDescription, privacy: .public)")
+        } else {
+            log.notice("WatchConnectivity activated: \(activationState.rawValue)")
+            if activationState == .activated {
+                flushPendingApplicationContext(to: session)
+            }
+        }
+    }
+
+    func sessionDidBecomeInactive(_ session: WCSession) {}
+
+    func sessionDidDeactivate(_ session: WCSession) {
+        session.activate()
+    }
+
+    // MARK: - Inbound WatchConnectivity (§5.3)
+    //
+    // The Watch reaches the phone through three channels, and until now the
+    // phone only listened on one of them (the mirrored HealthKit session). That
+    // is why a Watch start with no mirror produced nothing at all on this side:
+    // the message was sent, and there was no delegate method to receive it.
+
+    /// Interactive message — the Watch is reachable right now.
+    func session(_ session: WCSession, didReceiveMessage message: [String: Any]) {
+        route(message)
+    }
+
+    /// Interactive message with a reply handler. Answered immediately so the
+    /// Watch's send does not time out; the real reply travels as its own
+    /// envelope once the backend has answered.
+    func session(
+        _ session: WCSession,
+        didReceiveMessage message: [String: Any],
+        replyHandler: @escaping ([String: Any]) -> Void
+    ) {
+        route(message)
+        replyHandler(["received": true])
+    }
+
+    /// Durable transfer — queued by the system while the phone was away.
+    func session(_ session: WCSession, didReceiveUserInfo userInfo: [String: Any]) {
+        route(userInfo)
+    }
+
+    /// Unwrap a WatchConnectivity payload and emit it on the same JS channel
+    /// mirrored messages use, so `watchWorkout.ts` has exactly one handler.
+    private func route(_ payload: [String: Any]) {
+        guard let json = payload[Self.envelopeKey] as? String,
+              let data = json.data(using: .utf8),
+              let envelope = try? WorkoutWire.decode(data) else {
+            log.error("Dropped undecodable WatchConnectivity payload")
+            return
+        }
+        if envelope.kind == .liveMetrics {
+            dispatch(.liveMetrics, ["envelope": json])
+            return
+        }
+        dispatch(.workoutMessage, [
+            "envelope": json,
+            "kind": envelope.kind.rawValue,
+            "sessionId": envelope.sessionId as Any,
+            "schemaVersion": envelope.schemaVersion,
+            "supported": envelope.isSupportedSchema,
+            "transport": "watchConnectivity",
+        ])
+    }
+}
+
 // MARK: - HKWorkoutSessionDelegate
 
 @available(iOS 17.0, *)
@@ -247,6 +417,7 @@ extension IPhoneWorkoutCoordinator: HKWorkoutSessionDelegate {
                 "sessionId": envelope.sessionId as Any,
                 "schemaVersion": envelope.schemaVersion,
                 "supported": envelope.isSupportedSchema,
+                "transport": "mirror",
             ])
         }
     }
@@ -257,13 +428,17 @@ enum WorkoutMirrorError: LocalizedError {
     case watchAppDidNotStart
     case noMirroredSession
     case encodingFailed
+    case watchConnectivityUnavailable
+    case watchUnreachable
 
     var errorDescription: String? {
         switch self {
         case .healthDataUnavailable: return "Health data isn't available on this device."
         case .watchAppDidNotStart: return "Couldn't wake Sara on your Watch."
-        case .noMirroredSession: return "No workout is mirrored from the Watch."
+        case .noMirroredSession: return "No way to reach your Watch right now."
         case .encodingFailed: return "Couldn't encode the workout message."
+        case .watchConnectivityUnavailable: return "Watch connectivity isn't available."
+        case .watchUnreachable: return "Your Watch isn't reachable."
         }
     }
 }

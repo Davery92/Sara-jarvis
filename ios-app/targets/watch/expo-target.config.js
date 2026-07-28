@@ -34,7 +34,7 @@ module.exports = {
   colors: {
     $accent: "#14b8a6",
   },
-  frameworks: ["SwiftUI", "HealthKit", "WatchKit"],
+  frameworks: ["SwiftUI", "HealthKit", "WatchKit", "WatchConnectivity"],
   entitlements: {
     // The Watch owns the primary HKWorkoutSession, so it needs its own
     // HealthKit entitlement — the phone's does not cover it (§2.5).

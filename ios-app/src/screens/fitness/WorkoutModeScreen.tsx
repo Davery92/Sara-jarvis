@@ -7,6 +7,7 @@ import {
   KeyboardAvoidingView,
   Platform,
   TouchableOpacity,
+  ScrollView,
   Alert,
 } from 'react-native';
 import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
@@ -16,6 +17,7 @@ import ChatScreen from '../chat/ChatScreen';
 import WorkoutPanel from '../../components/fitness/WorkoutPanel';
 import WatchWorkoutStatusBar from '../../components/fitness/WatchWorkoutStatusBar';
 import WorkoutProposalCard from '../../components/fitness/WorkoutProposalCard';
+import PostWorkoutProposals from '../../components/fitness/PostWorkoutProposals';
 import { useWorkoutMode } from '../../context/WorkoutModeContext';
 import { RootStackParamList } from '../../types/navigation';
 import { colors, spacing, borderRadius, fontSizes, fontWeights } from '../../styles/theme';
@@ -81,7 +83,9 @@ export default function WorkoutModeScreen() {
   if (showSummary && workoutSummary) {
     return (
       <SafeAreaView style={styles.container}>
-        <View style={styles.summaryContainer}>
+        {/* Scrollable: the summary now carries Sara's post-workout questions,
+            which can push it past a small screen. */}
+        <ScrollView contentContainerStyle={styles.summaryContainer}>
           <Ionicons name="trophy" size={64} color={colors.success} />
           <Text style={styles.summaryTitle}>Workout Complete!</Text>
 
@@ -132,13 +136,17 @@ export default function WorkoutModeScreen() {
             </View>
           )}
 
+          {/* Anything Sara wants to make permanent is asked here, as its own
+              approval — never folded into an in-session tap (§4.3). */}
+          <PostWorkoutProposals />
+
           <TouchableOpacity
             style={styles.doneButton}
             onPress={() => navigation.goBack()}
           >
             <Text style={styles.doneButtonText}>Done</Text>
           </TouchableOpacity>
-        </View>
+        </ScrollView>
       </SafeAreaView>
     );
   }
@@ -280,7 +288,7 @@ const styles = StyleSheet.create({
     fontWeight: fontWeights.bold,
   },
   summaryContainer: {
-    flex: 1,
+    flexGrow: 1,
     justifyContent: 'center',
     alignItems: 'center',
     padding: spacing.xl,

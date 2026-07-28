@@ -85,14 +85,10 @@ class WorkoutSuggestTool(BaseTool):
 
             day_of_week = workout_date.strftime("%A").lower()
 
-            # 1. Find the active phase (if any)
-            active_phase = db.execute(text("""
-                SELECT id, name FROM fitness_phase
-                WHERE user_id = :user_id AND status = 'active'
-                LIMIT 1
-            """), {"user_id": user_id}).fetchone()
-
-            active_phase_id = active_phase.id if active_phase else None
+            # 1. Resolve the dated phase of the approved active program.
+            from app.services.phase_resolution import get_effective_phase
+            active_phase = get_effective_phase(db, user_id, workout_date)
+            active_phase_id = active_phase["id"] if active_phase else None
 
             # 2. Find templates scheduled for this day
             templates_result = db.execute(text("""
@@ -164,6 +160,8 @@ class WorkoutSuggestTool(BaseTool):
                     WHERE user_id = :user_id
                       AND LOWER(exercise_id) = LOWER(:exercise_name)
                       AND session_date IS NOT NULL
+                      AND voided_at IS NULL
+                      AND COALESCE(set_kind, 'working') = 'working'
                     ORDER BY session_date DESC, created_at DESC
                     LIMIT 15
                 """), {
@@ -256,6 +254,7 @@ class WorkoutSuggestTool(BaseTool):
                 SELECT MAX(session_date) as last_date
                 FROM workout_log
                 WHERE user_id = :user_id AND session_date IS NOT NULL
+                  AND voided_at IS NULL
             """), {"user_id": user_id}).fetchone()
 
             days_since_last = None
