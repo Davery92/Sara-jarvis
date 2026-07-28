@@ -239,6 +239,59 @@ def relative_time(dt: Optional[datetime], reference: Optional[datetime] = None) 
     return f"{years} year{'s' if years != 1 else ''} ago"
 
 
+def render_relative(dt: Optional[datetime], reference: Optional[datetime] = None) -> str:
+    """Bidirectional relative-time phrasing for prompts (SARA_MIND_V2 §5.2):
+    "3 days ago" for the past, "in 2 hours" / "in 2 days" for the future.
+    `relative_time()` above only handles the past (memory-timestamp use
+    case) and collapses every future moment to "in the future" — too coarse
+    for the World Brief's AHEAD section, which needs to say when a prepped
+    meeting actually is. A naked ISO timestamp in a prompt is a bug per the
+    plan's time-correctness rules; this is the sanctioned way to render one
+    for model consumption instead."""
+    if dt is None:
+        return "unknown time"
+
+    local_dt = to_local(dt)
+    ref = reference if reference else now()
+    diff = local_dt - ref
+    seconds = diff.total_seconds()
+
+    if seconds <= 0:
+        return relative_time(dt, reference=ref)
+
+    if seconds < 60:
+        return "in a moment"
+
+    minutes = int(seconds / 60)
+    if minutes < 60:
+        return f"in {minutes} minute{'s' if minutes != 1 else ''}"
+
+    hours = int(minutes / 60)
+    if hours < 24:
+        remaining_minutes = minutes % 60
+        if remaining_minutes and hours < 4:
+            return f"in {hours}h {remaining_minutes}m"
+        return f"in {hours} hour{'s' if hours != 1 else ''}"
+
+    if local_dt.date() == ref.date() + timedelta(days=1):
+        return f"tomorrow at {local_dt.strftime('%-I:%M %p')}"
+
+    days = int(hours / 24)
+    if days < 7:
+        return f"in {days} day{'s' if days != 1 else ''} ({local_dt.strftime('%A')})"
+
+    weeks = int(days / 7)
+    if days < 30:
+        return f"in {weeks} week{'s' if weeks != 1 else ''}"
+
+    months = int(days / 30)
+    if days < 365:
+        return f"in {months} month{'s' if months != 1 else ''}"
+
+    years = int(days / 365)
+    return f"in {years} year{'s' if years != 1 else ''}"
+
+
 def format_memory_timestamp(dt: Optional[datetime]) -> str:
     """
     Format a timestamp for memory context display.

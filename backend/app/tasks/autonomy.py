@@ -298,13 +298,20 @@ async def _anticipation_async(time_of_day: str):
 @celery_app.task(
     name="app.tasks.autonomy.nightly_memory_consolidation",
     bind=True,
-    queue="maintenance"
+    queue="maintenance",
+    max_retries=3,
 )
 def nightly_memory_consolidation(self):
     """
     Nightly memory consolidation - process the day's experiences.
 
-    Runs at 3 AM daily.
+    Scheduled at 3:40 AM ET (moved off the 02:30-03:00 ML cluster window —
+    see MINDV2 Phase 0 / F10 in scheduled_job; this docstring is the only
+    place the old "3 AM" time was recorded). MINDV2 Phase 0 / F10: retries
+    with jitter on transient Postgres deadlocks against the concurrent ML
+    feature/retrain/baseline jobs that also write to `episode` in that
+    window (observed live 07-27). Any other failure still raises so
+    interoception catches it as a real failure, not silently retried away.
     """
     logger.info("Starting nightly memory consolidation")
 
@@ -315,6 +322,16 @@ def nightly_memory_consolidation(self):
         logger.info(f"Memory consolidation complete: {result}")
         return result
     except Exception as e:
+        is_deadlock = "deadlock" in str(e).lower()
+        if is_deadlock and self.request.retries < (self.max_retries or 3):
+            import random
+            jitter = random.uniform(20, 90)
+            logger.warning(
+                f"Memory consolidation hit a deadlock (retry "
+                f"{self.request.retries + 1}/{self.max_retries}, "
+                f"retrying in {jitter:.0f}s): {e}"
+            )
+            raise self.retry(exc=e, countdown=jitter)
         logger.error(f"Memory consolidation failed: {e}")
         raise
 

@@ -1002,7 +1002,20 @@ async def _learned_buzz_decision(db: AsyncSession, user_id: str, category: str) 
 # are the "requested timers, reminders" carve-out — explicit, David-requested
 # commitments are never rationed. Urgent/critical priority is exempted at the
 # call site below, not here.
-_BUDGET_EXEMPT_CATEGORIES = {"timer", "reminder", "reminders", "timers"}
+#
+# MINDV2 Phase 0 / F1 fix: 'agent_task' is also exempt. task_result_delivery
+# ._record_delivered() writes a tell-once ledger row with sent=TRUE for
+# EVERY completion delivery — including SSE chat injections and desktop
+# toasts, neither of which buzzes a phone — and the desktop-toast delivery
+# path itself also logs under 'agent_task'. Counting those against the same
+# 2/day budget as real proactive pushes let seven bookkeeping/toast rows
+# exhaust the day's budget before any push happened (observed live 07-27:
+# three concrete email-insight pushes suppressed by budget while the day's
+# "pushes" were all silent ledger/toast rows). Real completion pushes that
+# do buzz a phone (paths 3-5 in deliver_task_result) log under
+# 'background_task', which is intentionally NOT exempt — those should still
+# compete for the budget like any other proactive content.
+_BUDGET_EXEMPT_CATEGORIES = {"timer", "reminder", "reminders", "timers", "agent_task"}
 DAILY_NON_URGENT_PUSH_BUDGET = 2
 
 
@@ -1017,7 +1030,7 @@ async def _daily_push_budget_available(db: AsyncSession, user_id: str, category:
             SELECT COUNT(*) FROM notification_log
             WHERE user_id = :uid AND sent = TRUE
               AND priority NOT IN ('urgent', 'critical')
-              AND category NOT IN ('timer', 'reminder', 'reminders', 'timers')
+              AND category NOT IN ('timer', 'reminder', 'reminders', 'timers', 'agent_task')
               AND sent_at >= (date_trunc('day', NOW() AT TIME ZONE 'America/New_York')
                               AT TIME ZONE 'America/New_York')
         """), {"uid": user_id})

@@ -43,6 +43,14 @@ class Flag(str, Enum):
     WORKOUT_COMMAND_V2_ENABLED = "WORKOUT_COMMAND_V2_ENABLED"
     WORKOUT_COACHING_AUDIO_ENABLED = "WORKOUT_COACHING_AUDIO_ENABLED"
 
+    # SARA_MIND_V2_PLAN §6 — each gates one phase of the Jarvis-grade rebuild.
+    # Feature-flag-per-phase, overlap window with counters, then hard
+    # deletion in Phase 5 (D3) — same cutover discipline as SINGULAR_*.
+    MINDV2_BRIEF = "MINDV2_BRIEF"          # Phase 1: World Brief feeds chat context (A/B, additive)
+    MINDV2_COMPOSE = "MINDV2_COMPOSE"      # Phase 2: Judge/Compose/Review own outbound delivery
+    MINDV2_APPRAISAL = "MINDV2_APPRAISAL"  # Phase 3: appraisal loop replaces salience/deliberation
+    MINDV2_ACT = "MINDV2_ACT"              # Phase 4: act-then-speak prep dispatch + commitments
+
 
 ALL_FLAGS: List[str] = [f.value for f in Flag]
 _TRUE_VALUES = {"1", "true", "yes", "on"}

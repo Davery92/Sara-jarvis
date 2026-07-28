@@ -5768,6 +5768,13 @@ except Exception as e:
     logger.error(f"❌ Managed hosts routes failed to load: {e}")
 
 try:
+    from app.routes.interest_model import router as interest_model_router
+    app.include_router(interest_model_router, prefix="/api", tags=["Interest Model"])
+    logger.info("✅ Interest model routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Interest model routes failed to load: {e}")
+
+try:
     from app.routes.fleet import router as fleet_router
     app.include_router(fleet_router, prefix="/api/fleet", tags=["Fleet"])
     logger.info("✅ Fleet routes loaded successfully")
@@ -8660,6 +8667,30 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
             except Exception as _ui_e:
                 logger.error(f"UI command interception error: {_ui_e}", exc_info=True)
 
+            # INTEREST MODEL CHAT VERBS (SARA_MIND_V2 §3.2)
+            # "stop pinging me about X" / "I care about Y now" → immediate
+            # edit + confirmation, no LLM round trip. Same interception
+            # shape as ui_intent/web_investigation above.
+            try:
+                from app.core.feature_flags import Flag as _IMFlag, is_enabled as _im_enabled
+                if _im_enabled(_IMFlag.MINDV2_BRIEF):
+                    from app.services import interest_model as _im
+                    _im_raw = next((m.content for m in reversed(request.messages) if m.role == "user"), None)
+                    _im_msg = _extract_text_content(_im_raw) if _im_raw else None
+                    if _im_msg:
+                        from app.db.session import get_async_session_factory as _get_imf
+                        _imf = _get_imf()
+                        async with _imf() as _imdb:
+                            _im_ack = await _im.apply_chat_verb(_imdb, str(current_user.id), _im_msg)
+                        if _im_ack:
+                            logger.info(f"🎯 Interest model chat verb applied: {_im_msg[:60]}")
+                            yield f"data: {json.dumps({'type': 'text_chunk', 'data': {'content': _im_ack, 'full_content': _im_ack}})}\n\n"
+                            yield f"data: {json.dumps({'type': 'final_response', 'data': {'content': _im_ack, 'citations': [], 'timestamp': datetime.now(timezone.utc).isoformat(), 'conversation_id': request.conversation_id}})}\n\n"
+                            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                            return
+            except Exception as _im_e:
+                logger.error(f"Interest model chat verb interception error: {_im_e}", exc_info=True)
+
             # Create an async queue for events
             event_queue = asyncio.Queue()
 
@@ -9359,10 +9390,47 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
             except Exception as e:
                 logger.debug(f"Workspace (mind) context failed (non-critical): {e}")
 
+            # --- World Brief (SARA_MIND_V2 Phase 1, MINDV2_BRIEF) ---
+            # Additive A/B against global_workspace above during the overlap
+            # window (D3 cutover discipline) — both render into context so
+            # brief quality can be judged against the workspace it will
+            # eventually replace (Phase 5 deletes global_workspace.py once
+            # this is proven out).
+            world_brief_ctx = None
+            try:
+                from app.core.feature_flags import Flag as _MFlag, is_enabled as _mind_enabled
+                if _mind_enabled(_MFlag.MINDV2_BRIEF):
+                    from app.services.world_brief import get_rendered_brief as _get_brief
+                    from app.db.session import get_async_session_factory as _get_bf
+                    _bf = _get_bf()
+                    async with _bf() as _bdb:
+                        rendered = await asyncio.wait_for(
+                            _get_brief(_bdb, str(current_user.id)), timeout=2.0
+                        )
+                    world_brief_ctx = "\n\n## World Brief (what Sara currently knows)\n" + rendered
+            except Exception as e:
+                logger.debug(f"World Brief context failed (non-critical): {e}")
+
+            # --- Interest Model (SARA_MIND_V2 §3.2, MINDV2_BRIEF) ---
+            interest_model_ctx = None
+            try:
+                if _mind_enabled(_MFlag.MINDV2_BRIEF):
+                    from app.services.interest_model import get_rendered_interest_model as _get_im
+                    _imf2 = _get_bf()
+                    async with _imf2() as _imdb2:
+                        im_rendered = await asyncio.wait_for(
+                            _get_im(_imdb2, str(current_user.id)), timeout=2.0
+                        )
+                    interest_model_ctx = "\n\n" + im_rendered
+            except Exception as e:
+                logger.debug(f"Interest model context failed (non-critical): {e}")
+
             # --- Apply token budget ---
             budget = ContextBudget(max_tokens=6000)
             # Workspace first — it is the base the rest of retrieval adds to.
             budget.add("workspace_mind", _safe(mind_ctx), priority=1)
+            budget.add("world_brief", _safe(world_brief_ctx), priority=1)
+            budget.add("interest_model", _safe(interest_model_ctx), priority=2)
             budget.add("memory", _safe(memory_ctx), priority=1)
             budget.add("personality", _safe(personality_ctx), priority=1)
             budget.add("daily_brief", _safe(daily_brief_ctx), priority=2)

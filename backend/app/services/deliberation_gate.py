@@ -96,7 +96,12 @@ _BANNED_ENTITIES = [
 ]
 
 # Autonomy tiers for task proposals
-AUTO_EXECUTE_CATEGORIES = {"research", "pkg_update", "note_organization", "home_control", "maintenance"}
+# MINDV2 Phase 0 / F2: "maintenance" dropped — it duplicated email_sync, the
+# reminder engine, and the assistant-verbs sweep, and its busywork
+# completions ("Check for unread action-required emails") were 6 of 9
+# auto-dispatched tasks in a week, none engaged. The prompt no longer asks
+# for this category either (deliberation_prompt.py).
+AUTO_EXECUTE_CATEGORIES = {"research", "pkg_update", "note_organization", "home_control"}
 PROPOSE_FIRST_CATEGORIES = {"calendar_change", "user_facing"}
 HARD_BLOCK_CATEGORIES = {"email_send", "purchase", "external_message"}
 
@@ -506,20 +511,20 @@ async def _process_task_proposals(
             continue
 
         if proposal.category in AUTO_EXECUTE_CATEGORIES and proposal.confidence >= 0.6:
-            # Research auto-dispatch is gated: it must respect the daily research
-            # cap AND must not re-dispatch a topic already attempted recently.
-            # Without this, a research task that can't succeed (the agent hangs
-            # and auto-expires after 4h) gets re-proposed and re-dispatched every
+            # MINDV2 Phase 0 / F2: every auto-execute category is gated, not
+            # just research — it must respect a per-category daily cap AND
+            # must not re-dispatch a topic already attempted recently.
+            # Without this, a task that can't succeed (the agent hangs and
+            # auto-expires after 4h) gets re-proposed and re-dispatched every
             # deliberation cycle — looping forever on the same subject.
-            if proposal.category == "research":
-                skip_reason = await _research_should_skip(user_id, proposal)
-                if skip_reason:
-                    summary["tasks_skipped"] = summary.get("tasks_skipped", 0) + 1
-                    logger.info(
-                        f"[DeliberationGate] Research auto-dispatch skipped "
-                        f"({skip_reason}): {proposal.description[:80]}"
-                    )
-                    continue
+            skip_reason = await _auto_execute_should_skip(user_id, proposal.category, proposal)
+            if skip_reason:
+                summary["tasks_skipped"] = summary.get("tasks_skipped", 0) + 1
+                logger.info(
+                    f"[DeliberationGate] Auto-dispatch skipped "
+                    f"({skip_reason}): {proposal.category} — {proposal.description[:80]}"
+                )
+                continue
             # Auto-execute: dispatch directly, notify after completion
             try:
                 await _dispatch_from_deliberation(user_id, proposal)
@@ -561,17 +566,21 @@ async def _check_daily_research_cap(user_id: str) -> bool:
         return False  # Allow if we can't check
 
 
-async def _research_should_skip(user_id: str, proposal):
-    """Guard the auto-research path so it can't loop.
+async def _auto_execute_should_skip(user_id: str, category: str, proposal):
+    """Guard EVERY auto-execute category so none of them can loop (MINDV2
+    Phase 0 / F2 — this used to be research-only, which is exactly why
+    maintenance/pkg_update/note_organization/home_control busywork could
+    re-propose and re-dispatch itself every deliberation cycle unchecked).
 
-    Returns a short reason string if this research proposal should NOT be
+    Returns a short reason string if this proposal should NOT be
     auto-dispatched, else None:
-      - "daily_cap": an auto-research already went out today. This counts the
-        deliberation_task auto-dispatch path too — the original cap only looked
-        at the deliberation_research / consolidation_research sources, which is
-        exactly why this path looped past the "max 1/day" limit.
-      - "duplicate": a closely-matching research task was already attempted in
-        the last 3 days (any status), so re-dispatching would just repeat it.
+      - "daily_cap": this category already had an auto-dispatch today
+        (max 1/category/day). Research additionally counts the legacy
+        deliberation_research / consolidation_research sources so the two
+        research pathways (research_proposals vs. task_proposals) share one
+        cap instead of stacking to 2/day.
+      - "duplicate": a closely-matching task was already attempted in the
+        last 3 days (any status), so re-dispatching would just repeat it.
     """
     import difflib
     from sqlalchemy import text as sa_text
@@ -581,17 +590,21 @@ async def _research_should_skip(user_id: str, proposal):
         AsyncSession = get_async_session_factory()
         async with AsyncSession() as db:
             today_start = local_now().replace(hour=0, minute=0, second=0, microsecond=0)
-            row = await db.execute(sa_text("""
+            legacy_research_sources = (
+                "OR source IN ('deliberation_research', 'consolidation_research')"
+                if category == "research" else ""
+            )
+            row = await db.execute(sa_text(f"""
                 SELECT COUNT(*)::int AS cnt
                 FROM agent_run_log
                 WHERE user_id = :uid AND run_at >= :since
                   AND (
-                    source IN ('deliberation_research', 'consolidation_research')
-                    OR (source = 'deliberation_task'
-                        AND actions_taken->>'category' = 'research'
+                    (source = 'deliberation_task'
+                        AND actions_taken->>'category' = :category
                         AND actions_taken->>'action' = 'auto_dispatched')
+                    {legacy_research_sources}
                   )
-            """), {"uid": user_id, "since": today_start})
+            """), {"uid": user_id, "since": today_start, "category": category})
             if (row.scalar() or 0) >= 1:
                 return "daily_cap"
 
@@ -612,7 +625,7 @@ async def _research_should_skip(user_id: str, proposal):
                     return "duplicate"
     except Exception as e:
         # Fail open — a check failure shouldn't permanently mute autonomy.
-        logger.warning(f"[DeliberationGate] research skip-check failed (allowing): {e}")
+        logger.warning(f"[DeliberationGate] auto-execute skip-check failed for {category} (allowing): {e}")
         return None
     return None
 
@@ -1003,10 +1016,14 @@ async def _deliver_notification(user_id: str, proposal: NotificationProposal) ->
     from app.services.unified_notification import send_notification
     from app.db.session import get_async_session_factory
 
+    # MINDV2 Phase 0 / F6: was mapping critical -> "max", a value
+    # unified_notification._normalize_priority doesn't recognize — it fell
+    # back to "normal" and a critical deliberation alert would be subject to
+    # budget, buzz, and sleep-hold like any routine ping. critical -> critical.
     priority_map = {
         "normal": "normal",
         "high": "high",
-        "critical": "max",
+        "critical": "critical",
     }
     ntfy_priority = priority_map.get(proposal.priority, "default")
 

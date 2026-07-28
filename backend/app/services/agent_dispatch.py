@@ -1705,18 +1705,24 @@ class AgentDispatchService:
         category: str,
         confidence: float,
         reason: str = "",
+        notify_on_complete: bool = False,
     ) -> dict:
         """Dispatch a task originating from Sara's deliberation engine.
 
-        Creates a mission linked to the deliberation, dispatches in auto mode,
-        and sets notify_on_complete=True so David sees the result.
+        Creates a mission linked to the deliberation and dispatches in auto
+        mode. MINDV2 Phase 0 / F2/F3: notify_on_complete defaults to False —
+        these are tasks Sara assigned herself, not something David asked
+        for, and "Background task complete" announcements for self-generated
+        homework were the single largest source of payload-free pushes
+        (6 of 9 auto-dispatches/week, 0 engaged). Pass True explicitly for
+        categories whose output is genuinely worth surfacing.
         """
         result = await self.dispatch_task(
             db=db,
             user_id=user_id,
             task_description=description,
             mode="auto",
-            notify_on_complete=True,
+            notify_on_complete=notify_on_complete,
         )
 
         # Annotate task metadata with deliberation origin

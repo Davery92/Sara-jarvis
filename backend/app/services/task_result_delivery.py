@@ -77,8 +77,8 @@ async def deliver_task_result(
         if command_router.get_connected_devices(user_id):
             await send_notification(
                 user_id=user_id,
-                title="Background task complete",
-                message=_short_summary(task_query),
+                title=_task_subject(task_query),
+                message=_push_body(result_summary),
                 category="agent_task",
                 topic=f"agent_task:{task_id}",
                 source="task_result_delivery",
@@ -119,8 +119,8 @@ async def deliver_task_result(
         else:
             publish_task_event(user_id, {
                 "type": "show_notification",
-                "title": "Background task complete",
-                "message": _short_summary(task_query),
+                "title": _task_subject(task_query),
+                "message": _push_body(result_summary),
                 "task_id": task_id,
                 "note_id": result_note_id,
             })
@@ -145,8 +145,8 @@ async def deliver_task_result(
                 )
             await send_notification(
                 user_id=user_id,
-                title="Background task complete",
-                message=_short_summary(task_query),
+                title=_task_subject(task_query),
+                message=_push_body(result_summary),
                 category="background_task",
                 topic=f"agent_task:{task_id}",
                 source="task_result_delivery",
@@ -163,8 +163,8 @@ async def deliver_task_result(
         else:
             await send_notification(
                 user_id=user_id,
-                title="Background task complete",
-                message=_short_summary(task_query),
+                title=_task_subject(task_query),
+                message=_push_body(result_summary),
                 category="background_task",
                 topic=f"agent_task:{task_id}",
                 source="task_result_delivery",
@@ -184,8 +184,8 @@ async def deliver_task_result(
     # --- Path 5: Nobody's home — standard push ---
     await send_notification(
         user_id=user_id,
-        title="Background task complete",
-        message=_short_summary(task_query),
+        title=_task_subject(task_query),
+        message=_push_body(result_summary),
         category="background_task",
         topic=f"agent_task:{task_id}",
         source="task_result_delivery",
@@ -364,12 +364,24 @@ def _compose_chat_message(query: str, summary: str, note_title: Optional[str]) -
     return "\n".join(parts)
 
 
-def _short_summary(query: str) -> str:
-    """Truncate query for notification body."""
-    preview = query[:80]
-    if len(query) > 80:
-        preview += "..."
-    return f"Your agents finished: {preview}"
+def _task_subject(query: str) -> str:
+    """Short, David-facing task subject for the notification title (MINDV2
+    Phase 0 / F3). Replaces the constant "Background task complete" title,
+    which carried zero information about what actually finished."""
+    subject = " ".join((query or "").split())
+    if len(subject) > 60:
+        subject = subject[:57].rstrip() + "..."
+    return subject or "Background task"
+
+
+def _push_body(summary: str) -> str:
+    """Truncate the actual outcome summary for a push notification body
+    (MINDV2 Phase 0 / F3). The body is the outcome — what was produced —
+    not the original task query."""
+    body = (summary or "").strip()
+    if len(body) > 180:
+        body = body[:177].rstrip() + "..."
+    return body or "Finished — no summary available."
 
 
 def _get_active_conversation_id(user_id: str, db: Session) -> Optional[str]:

@@ -368,7 +368,7 @@ Respond with ONLY valid JSON in this exact format:
   "task_proposals": [
     {{
       "description": "What the task should accomplish — be specific and actionable",
-      "category": "research|pkg_update|note_organization|home_control|maintenance",
+      "category": "research|pkg_update|note_organization|home_control",
       "confidence": 0.8,
       "reason": "Why this task is worth doing right now"
     }}
@@ -429,8 +429,12 @@ Respond with ONLY valid JSON in this exact format:
   before assuming "most deliberations produce 0" is the safe default.
 - Max {task_cap} proposals per deliberation
 - Categories determine autonomy level:
-  - research, pkg_update, note_organization, home_control, maintenance → auto-executed silently
+  - research, pkg_update, note_organization, home_control → auto-executed silently
   - calendar_change, user_facing → proposed to David first
+  - Do NOT propose "check for unread emails" / "check overdue reminders" / generic
+    housekeeping tasks — email sync, the reminder engine, and the assistant-verbs
+    sweep already own those continuously. A task_proposal that just re-checks
+    something a dedicated system already checks is busywork, not initiative.
   - email_draft → drafts a reply for the top unhandled important email and puts it in the
     inbox for David to copy/edit/discard. NEVER sends anything itself. Only propose when
     there's an unhandled important email (see the "Unhandled Important Email" section above)

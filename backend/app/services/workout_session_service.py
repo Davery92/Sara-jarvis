@@ -22,6 +22,35 @@ from app.core.llm_config import llm_config as _llm_cfg
 WORKOUT_LLM_BASE_URL = os.getenv("OPENAI_BASE_URL", _llm_cfg.primary_url)
 WORKOUT_LLM_MODEL = os.getenv("WORKOUT_LLM_MODEL", os.getenv("OPENAI_MODEL", _llm_cfg.fast_model))
 
+_VOICE_SNIPPET_CACHE: Dict[str, Optional[str]] = {"text": None}
+_VOICE_SNIPPET_FALLBACK = (
+    "You are Sara, David's personal AI assistant — Syl's bubbly, curious energy with "
+    "Cortana's competence. Warm, sharp, genuinely invested in what David's doing."
+)
+
+
+def _get_voice_snippet() -> str:
+    """SARA_MIND_V2 §3.10: mid-set coaching draws from the SAME shared voice
+    doc as chat and background compose, "so mid-set Sara is the same Sara
+    who texted you about Jim." This is the low-latency coaching lane
+    (must render in ~1-2s, may not queue behind judge/compose) — it can't
+    afford a DB round-trip or a full World Brief render per set, but one
+    small file read cached for the process lifetime costs nothing after
+    the first call.
+    """
+    if _VOICE_SNIPPET_CACHE["text"] is None:
+        try:
+            from pathlib import Path
+            doc_path = Path(__file__).resolve().parent.parent / "prompts" / "sara_voice.md"
+            content = doc_path.read_text()
+            start = content.find("## Who Sara Is")
+            end = content.find("## Anti-examples")
+            snippet = content[start:end].strip() if (start >= 0 and end > start) else ""
+            _VOICE_SNIPPET_CACHE["text"] = snippet[:1200] or _VOICE_SNIPPET_FALLBACK
+        except Exception:
+            _VOICE_SNIPPET_CACHE["text"] = _VOICE_SNIPPET_FALLBACK
+    return _VOICE_SNIPPET_CACHE["text"]
+
 
 class WorkoutSessionService:
     """Manages active workout sessions for real-time coaching"""
@@ -396,8 +425,13 @@ class WorkoutSessionService:
             elif rpe >= 9:
                 weight_adjustment = -5
 
-        # Build context for LLM
-        context = f"""You are Sara, an encouraging fitness coach. Give brief, personalized feedback (1-2 sentences max).
+        # Build context for LLM. SARA_MIND_V2 §3.10: this is the ENGAGED
+        # state of the same mind that texts David about Jim, not a separate
+        # "fitness coach" persona — the voice snippet below is the shared
+        # doc's actual identity/tone, not a generic coach framing.
+        context = f"""{_get_voice_snippet()}
+
+Right now you're coaching David mid-set, in your own voice above — not a generic "encouraging fitness coach" persona. Give brief, personalized feedback (1-2 sentences max).
 
 Current situation:
 - Exercise: {exercise_name}

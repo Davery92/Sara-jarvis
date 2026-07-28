@@ -16,7 +16,7 @@ session its caller already has).
 
 import json
 import logging
-from datetime import datetime
+from app.core.timezone import now_utc
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import text
@@ -75,7 +75,7 @@ def record_standing_order_action(
             "target": f"standing_order:{order_id}",
             "permission_tier": "reversible_local" if reversible else "consequential",
             "reversible": reversible,
-            "idempotency_key": f"standing_order:{order_id}:{action_type}:{datetime.utcnow().isoformat()}",
+            "idempotency_key": f"standing_order:{order_id}:{action_type}:{now_utc().isoformat()}",
             "status": status,
             "correlation_id": correlation_id,
             "order_id": str(order_id),

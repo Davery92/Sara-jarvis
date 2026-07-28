@@ -96,6 +96,10 @@ celery_app = Celery(
         "app.tasks.readiness",
         "app.tasks.bedtime",
         "app.tasks.intent_graph",
+        "app.tasks.world_brief",
+        "app.tasks.appraisal",
+        "app.tasks.judge",
+        "app.tasks.mindv2_weekly_review",
     ]
 )
 
@@ -174,6 +178,10 @@ celery_app.conf.task_routes = {
     "app.tasks.dreams.*": {"queue": "cognitive"},
     "app.tasks.readiness.*": {"queue": "cognitive"},
     "app.tasks.bedtime.*": {"queue": "cognitive"},
+    "app.tasks.world_brief.*": {"queue": "cognitive"},
+    "app.tasks.appraisal.*": {"queue": "cognitive"},
+    "app.tasks.judge.*": {"queue": "cognitive"},
+    "app.tasks.mindv2_weekly_review.*": {"queue": "cognitive"},
 }
 
 # Define queues with priorities
