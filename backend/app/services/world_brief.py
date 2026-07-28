@@ -25,6 +25,7 @@ context assembly).
 """
 import json
 import logging
+import re
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -33,6 +34,24 @@ from sqlalchemy import text
 from app.core.timezone import now as local_now, render_relative
 
 logger = logging.getLogger(__name__)
+
+_NOW_PREFIX_RE = re.compile(r"Now:\s*[^.]+\.\s*")
+
+
+def _strip_clock_from_header(header: str) -> str:
+    """interoception.build_interoception_header() embeds a minute-precision
+    'Now: Tuesday 2026-07-28 09:07 ET.' clock sentence, correct for its
+    other callers (chat/deliberation prompts with no separate current-
+    moment line) but wrong here: the brief already states the moment via
+    its own 'AS OF:' line (§5 — store absolute, render relative; the
+    current moment is the renderer's job). Storing the embedded clock into
+    sara_state made that section's content differ on literally every
+    5-min sweep even when nothing else about David's state changed,
+    permanently defeating brief_patch's no-op guard for this one section
+    (~288 version bumps + patch_log rows/day, forever). Strip it here, at
+    the one call site with an alternative clock source — the shared
+    header function's contract for its other callers is untouched."""
+    return _NOW_PREFIX_RE.sub("", header, count=1)
 
 DEFAULT_USER_ID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
 
@@ -336,6 +355,8 @@ async def sweep_brief(db, user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]:
     try:
         from app.services.interoception import build_interoception_header
         header = await build_interoception_header(user_id)
+        if header:
+            header = _strip_clock_from_header(header)
         inflight = (await db.execute(text("""
             SELECT COUNT(*) FROM background_task
             WHERE user_id = :uid AND status IN ('running','queued','pending','processing')
