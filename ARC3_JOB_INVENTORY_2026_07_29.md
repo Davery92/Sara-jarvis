@@ -111,7 +111,7 @@ under `maintenance` below, not here.
 | `reflection-cycle` | `app.tasks.reflection.run_reflection_cycle` | 0 */4 * * * | ✅ | success | 2026-07-29T12:00:00.160393+00:00 | **done** — kernel-routed, legacy branch deleted |
 | `mindv2-appraisal-cycle` | `app.tasks.appraisal.run_appraisal_cycle` | every 180s | ✅ | success | 2026-07-29T12:45:12.128424+00:00 | separate system — `MINDV2_APPRAISAL` replaces deliberation, not folded into this kernel |
 | `mindv2-weekly-review` | `app.tasks.mindv2_weekly_review.run_weekly_review_task` | 15 19 * * 0 | ✅ | ? | never | separate system — same as above |
-| `curiosity-sweep` | `app.tasks.curiosity.run_curiosity` | 30 1 * * * | ✅ | success | 2026-07-29T05:30:00.018696+00:00 | deferred — retires at Arc 4.3 per the plan, no action now |
+| `curiosity-sweep` | `app.tasks.curiosity.run_curiosity` | 30 1 * * * | ❌ (write-freeze 2026-07-29) | success | 2026-07-29T05:30:00.018696+00:00 | Arc 4.3 done — retired: `kernel.ambient_turn` now pursues curiosity on any idle no-David-work wake (same underlying functions, `pursued_today()` throttle replaces the once-daily schedule as the budget enforcement). Disabled, not deleted — held for same-day evidence the new path actually fires a pursuit. |
 | `proactive_checkin_sweep` | `app.tasks.autonomy.proactive_checkin_sweep` | */15 8-20 * * * | ✅ | success | 2026-07-29T12:45:00.016379+00:00 | already-integrated — speaks through the say_candidate mouth (Arc 1), not raw deliberation |
 
 ## unclassified (26)
