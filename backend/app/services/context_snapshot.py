@@ -87,19 +87,31 @@ async def get_world_state(db: Session, user_id: str = DEFAULT_USER_ID) -> WorldS
     )
 
     # david + home — both already live in unified_context's Redis snapshot;
-    # this slice is a read, not a new writer.
+    # this slice is a read, not a new writer. updated_at comes from the
+    # snapshot's OWN last-write time, not our read time — that's what makes
+    # staleness (Arc 2.4) detectable at all; if we stamped "now" here, a
+    # snapshot that stopped being written 3 days ago would still look fresh
+    # forever (the exact meal-state-frozen-since-February failure mode).
     david_slice = home_slice = None
     try:
         from app.services.unified_context import read_snapshot
         snap = await read_snapshot(user_id)
+        snap_at = now
+        if snap.updated_at:
+            try:
+                snap_at = datetime.fromisoformat(snap.updated_at)
+                if snap_at.tzinfo is None:
+                    snap_at = snap_at.replace(tzinfo=timezone.utc)
+            except Exception:
+                snap_at = now
         david_slice = _slice(
-            now, "unified_context", 1.0 if snap.activity_state != "UNKNOWN" else 0.3,
+            snap_at, "unified_context", 1.0 if snap.activity_state != "UNKNOWN" else 0.3,
             activity_state=snap.activity_state, interruptibility=snap.interruptibility,
             current_place=snap.current_place, mood=snap.mood,
             hours_since_last_chat=snap.hours_since_last_chat,
         )
         home_slice = _slice(
-            now, "unified_context", 1.0,
+            snap_at, "unified_context", 1.0,
             home_occupied=snap.home_occupied, active_rooms=snap.active_rooms or [],
             temperature_inside=snap.temperature_inside, temperature_outside=snap.temperature_outside,
             weather_condition=snap.weather_condition,
@@ -107,7 +119,8 @@ async def get_world_state(db: Session, user_id: str = DEFAULT_USER_ID) -> WorldS
     except Exception as e:
         logger.debug(f"[context_snapshot] unified_context read failed: {e}")
 
-    # health_today — most recent daily recovery snapshot, if any.
+    # health_today — most recent daily recovery snapshot, if any. updated_at
+    # is the newest reading's own recorded_at (source truth), not read time.
     health_slice = None
     try:
         row = db.execute(text("""
@@ -116,9 +129,12 @@ async def get_world_state(db: Session, user_id: str = DEFAULT_USER_ID) -> WorldS
             ORDER BY recorded_at DESC LIMIT 20
         """), {"uid": user_id, "day_start": day_start}).fetchall()
         by_metric = {}
+        newest = None
         for r in row:
             by_metric.setdefault(r.metric_type, float(r.value))
-        health_slice = _slice(now, "health_metric", 1.0 if row else 0.4, **by_metric)
+            if newest is None or (r.recorded_at and r.recorded_at > newest):
+                newest = r.recorded_at
+        health_slice = _slice(newest or now, "health_metric", 1.0 if row else 0.4, **by_metric)
     except Exception as e:
         logger.debug(f"[context_snapshot] health_metric query failed: {e}")
 
@@ -139,25 +155,97 @@ async def get_world_state(db: Session, user_id: str = DEFAULT_USER_ID) -> WorldS
         logger.debug(f"[context_snapshot] work query failed: {e}")
         work_slice = _slice(now, "email+background_task", 0.3)
 
-    # fleet — managed host reachability.
+    # fleet — managed host reachability. updated_at = the OLDEST last_seen_at
+    # across hosts (the least-fresh host sets the slice's real freshness —
+    # conservative on purpose, so one silently-unpolled host can't hide
+    # behind five freshly-polled ones). A host with last_seen_at = NULL has
+    # NEVER reported in — that's not "fresh" (found live: all 6 of David's
+    # registered hosts have last_status/last_seen_at NULL, and a naive
+    # `fresh if no data` fallback would have silently called that healthy —
+    # the exact "never observed a heartbeat" gap body_state_projection.py's
+    # own comment already warns about). Never-reported hosts count as
+    # unreachable AND pin the slice to epoch (maximally stale) rather than now.
     fleet_slice = None
     try:
         hosts = db.execute(text("""
-            SELECT name, last_status FROM managed_host WHERE user_id = :uid
+            SELECT name, last_status, last_seen_at FROM managed_host WHERE user_id = :uid
         """), {"uid": user_id}).fetchall()
-        unreachable = [h.name for h in hosts if h.last_status not in ("connected", None)]
-        fleet_slice = _slice(now, "managed_host", 1.0 if hosts else 0.5,
-                              host_count=len(hosts), unreachable=unreachable)
+        never_reported = [h.name for h in hosts if h.last_seen_at is None]
+        unreachable = sorted(set(
+            [h.name for h in hosts if h.last_status not in ("connected", None)] + never_reported
+        ))
+        seen_ats = [h.last_seen_at for h in hosts if h.last_seen_at]
+        if never_reported and hosts:
+            fleet_at = datetime.fromtimestamp(0, tz=timezone.utc)
+            fleet_confidence = 0.0
+        elif seen_ats:
+            fleet_at = min(seen_ats)
+            fleet_confidence = 1.0
+        else:
+            fleet_at, fleet_confidence = now, 0.5  # no hosts registered at all
+        fleet_slice = _slice(fleet_at, "managed_host", fleet_confidence,
+                              host_count=len(hosts), unreachable=unreachable,
+                              never_reported=never_reported)
     except Exception as e:
         logger.debug(f"[context_snapshot] managed_host query failed: {e}")
 
-    return WorldStateV1(
+    world = WorldStateV1(
         as_of=now, user_id=user_id, summary=summary,
         active_calendar_events=active_calendar_events, open_threads=open_threads,
         confidence=confidence,
         david=david_slice, home=home_slice, calendar_horizon=calendar_horizon,
         health_today=health_slice, work=work_slice, fleet=fleet_slice,
     )
+    try:
+        await check_staleness(world)
+    except Exception as e:
+        logger.debug(f"[context_snapshot] staleness check failed: {e}")
+    return world
+
+
+# Arc 2.4 — a slice whose updated_at exceeds its freshness budget is a
+# prediction error ("I expected this to be current, it isn't"), not silent
+# staleness. calendar_horizon and work are live queries every call, so they
+# have no meaningful staleness budget — they're either right now or errored.
+_FRESHNESS_BUDGET = {
+    "david": timedelta(hours=2),
+    "home": timedelta(hours=2),
+    "health_today": timedelta(hours=24),
+    "fleet": timedelta(hours=24),
+}
+
+
+async def check_staleness(world: WorldStateV1) -> list:
+    """Emit a PREDICTION_VIOLATED event for every slice past its freshness
+    budget. Returns the list of stale slice names (for callers/tests that
+    want the result without going through the event bus)."""
+    from app.services.event_bus import emit_event, EventType
+
+    now = datetime.now(timezone.utc)
+    stale = []
+    for slice_name, budget in _FRESHNESS_BUDGET.items():
+        s = getattr(world, slice_name, None)
+        if s is None:
+            continue
+        age = now - s.updated_at
+        if age > budget:
+            stale.append(slice_name)
+            try:
+                await emit_event(
+                    EventType.PREDICTION_VIOLATED,
+                    user_id=world.user_id,
+                    payload={
+                        "kind": "world_state_slice_stale",
+                        "slice": slice_name,
+                        "source": s.source,
+                        "age_hours": round(age.total_seconds() / 3600, 1),
+                        "budget_hours": budget.total_seconds() / 3600,
+                    },
+                    source="context_snapshot.check_staleness",
+                )
+            except Exception as e:
+                logger.debug(f"[context_snapshot] staleness event emit failed for {slice_name}: {e}")
+    return stale
 
 
 async def get_self_state(user_id: str = DEFAULT_USER_ID) -> SelfStateV1:
