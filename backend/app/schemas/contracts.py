@@ -100,17 +100,42 @@ class BodyStateV1(BaseModel):
     confidence: float = 1.0
 
 
+class WorldStateSliceV1(BaseModel):
+    """One typed, independently-stamped slice of WorldStateV1 (SARA_ALIVE_BUILD_PLAN
+    Arc 2.1). `updated_at`/`source`/`confidence` live per-slice, not on the
+    envelope — so a stale slice is visible without staleness bleeding into
+    slices that ARE fresh (the meal-state-frozen-since-February failure mode:
+    one dead field silently poisoning the whole object's trustworthiness)."""
+    updated_at: datetime
+    source: str
+    confidence: float = 1.0
+    data: Dict[str, Any] = Field(default_factory=dict)
+
+
 class WorldStateV1(BaseModel):
-    """§4.2 world state. Deliberately thin today — a placeholder contract so
-    later phases (C2) have a versioned target rather than inventing the shape
-    ad hoc mid-migration."""
+    """§4.2 world state (SARA_ALIVE_BUILD_PLAN Arc 2.1 — grown out of the
+    originally-thin placeholder into the real per-slice projection: david,
+    home, calendar_horizon, health_today, work, fleet. Every slice is a
+    WorldStateSliceV1 read from an EXISTING source (unified_context,
+    managed_host, health_metric, background_task) — this is a projection,
+    not a new truth store, same discipline as body_state_projection.py."""
     schema_version: str = CONTRACTS_VERSION
     as_of: datetime
     user_id: str
     summary: Optional[str] = None
+    # Legacy top-level fields — kept for existing callers (get_context_snapshot
+    # consumers: kernel.py, /diagnostics/context-snapshot); calendar_horizon
+    # below is the same data, slice-wrapped.
     active_calendar_events: int = 0
     open_threads: int = 0
     confidence: float = 1.0
+
+    david: Optional[WorldStateSliceV1] = None
+    home: Optional[WorldStateSliceV1] = None
+    calendar_horizon: Optional[WorldStateSliceV1] = None
+    health_today: Optional[WorldStateSliceV1] = None
+    work: Optional[WorldStateSliceV1] = None
+    fleet: Optional[WorldStateSliceV1] = None
 
 
 class RelationshipStateV1(BaseModel):

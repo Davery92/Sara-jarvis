@@ -46,9 +46,16 @@ def _today_bounds_naive(now_utc: datetime) -> tuple:
     return start.replace(tzinfo=None), (start + timedelta(days=1)).replace(tzinfo=None)
 
 
-def get_world_state(db: Session, user_id: str = DEFAULT_USER_ID) -> WorldStateV1:
-    """David's current situation: today's calendar load + open threads.
-    Confidence reflects how much of this is actually queried vs assumed."""
+def _slice(now, source: str, confidence: float, **data) -> "WorldStateSliceV1":
+    from app.schemas.contracts import WorldStateSliceV1
+    return WorldStateSliceV1(updated_at=now, source=source, confidence=confidence, data=data)
+
+
+async def get_world_state(db: Session, user_id: str = DEFAULT_USER_ID) -> WorldStateV1:
+    """David's current situation, as six independently-stamped slices (Arc
+    2.1) — david, home, calendar_horizon, health_today, work, fleet. Each
+    slice is read from an existing source and fails independently: a broken
+    fleet query degrades fleet.confidence, not calendar_horizon's."""
     now = datetime.now(timezone.utc)
     day_start, day_end = _today_bounds_naive(now)
 
@@ -74,11 +81,82 @@ def get_world_state(db: Session, user_id: str = DEFAULT_USER_ID) -> WorldStateV1
         confidence = min(confidence, 0.5)
 
     summary = f"{active_calendar_events} calendar event(s) today, {open_threads} open thread(s)."
+    calendar_horizon = _slice(
+        now, "calendar_event+followup_thread", confidence,
+        active_calendar_events=active_calendar_events, open_threads=open_threads,
+    )
+
+    # david + home — both already live in unified_context's Redis snapshot;
+    # this slice is a read, not a new writer.
+    david_slice = home_slice = None
+    try:
+        from app.services.unified_context import read_snapshot
+        snap = await read_snapshot(user_id)
+        david_slice = _slice(
+            now, "unified_context", 1.0 if snap.activity_state != "UNKNOWN" else 0.3,
+            activity_state=snap.activity_state, interruptibility=snap.interruptibility,
+            current_place=snap.current_place, mood=snap.mood,
+            hours_since_last_chat=snap.hours_since_last_chat,
+        )
+        home_slice = _slice(
+            now, "unified_context", 1.0,
+            home_occupied=snap.home_occupied, active_rooms=snap.active_rooms or [],
+            temperature_inside=snap.temperature_inside, temperature_outside=snap.temperature_outside,
+            weather_condition=snap.weather_condition,
+        )
+    except Exception as e:
+        logger.debug(f"[context_snapshot] unified_context read failed: {e}")
+
+    # health_today — most recent daily recovery snapshot, if any.
+    health_slice = None
+    try:
+        row = db.execute(text("""
+            SELECT metric_type, value, recorded_at FROM health_metric
+            WHERE user_id = :uid AND recorded_at >= :day_start
+            ORDER BY recorded_at DESC LIMIT 20
+        """), {"uid": user_id, "day_start": day_start}).fetchall()
+        by_metric = {}
+        for r in row:
+            by_metric.setdefault(r.metric_type, float(r.value))
+        health_slice = _slice(now, "health_metric", 1.0 if row else 0.4, **by_metric)
+    except Exception as e:
+        logger.debug(f"[context_snapshot] health_metric query failed: {e}")
+
+    # work — email needing reply + agent tasks in flight.
+    work_slice = None
+    try:
+        needs_reply = db.execute(text("""
+            SELECT COUNT(*) FROM email
+            WHERE user_id = :uid AND action_required = TRUE AND is_read = FALSE
+        """), {"uid": user_id}).scalar() or 0
+        in_flight = db.execute(text("""
+            SELECT COUNT(*) FROM background_task
+            WHERE user_id = :uid AND status IN ('pending', 'running')
+        """), {"uid": user_id}).scalar() or 0
+        work_slice = _slice(now, "email+background_task", 1.0,
+                             emails_needing_reply=int(needs_reply), tasks_in_flight=int(in_flight))
+    except Exception as e:
+        logger.debug(f"[context_snapshot] work query failed: {e}")
+        work_slice = _slice(now, "email+background_task", 0.3)
+
+    # fleet — managed host reachability.
+    fleet_slice = None
+    try:
+        hosts = db.execute(text("""
+            SELECT name, last_status FROM managed_host WHERE user_id = :uid
+        """), {"uid": user_id}).fetchall()
+        unreachable = [h.name for h in hosts if h.last_status not in ("connected", None)]
+        fleet_slice = _slice(now, "managed_host", 1.0 if hosts else 0.5,
+                              host_count=len(hosts), unreachable=unreachable)
+    except Exception as e:
+        logger.debug(f"[context_snapshot] managed_host query failed: {e}")
 
     return WorldStateV1(
         as_of=now, user_id=user_id, summary=summary,
         active_calendar_events=active_calendar_events, open_threads=open_threads,
         confidence=confidence,
+        david=david_slice, home=home_slice, calendar_horizon=calendar_horizon,
+        health_today=health_slice, work=work_slice, fleet=fleet_slice,
     )
 
 
@@ -134,7 +212,7 @@ async def get_context_snapshot(db: Session, user_id: str = DEFAULT_USER_ID) -> D
     """One assembled snapshot — world + self + relationship — for inspection.
     Body state and the intent graph already have their own endpoints; this
     ties the remaining three together the same way."""
-    world = get_world_state(db, user_id)
+    world = await get_world_state(db, user_id)
     self_ = await get_self_state(user_id)
     relationship = get_relationship_state(db, user_id)
 
