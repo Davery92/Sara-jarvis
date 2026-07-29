@@ -32,9 +32,22 @@ def _db_returning(*results):
 
 
 class TestWorldState:
-    def test_computes_calendar_and_thread_counts(self):
+    @pytest.mark.asyncio
+    async def test_computes_calendar_and_thread_counts(self, monkeypatch):
+        # Arc 2.1 added david/home/health_today/work/fleet slices, each its
+        # own best-effort db.execute call beyond the original calendar+thread
+        # pair this test targets — _db_returning's canned-result queue only
+        # covers those two, so later calls raise IndexError, which every
+        # later slice already catches internally (per-slice isolation is
+        # the point of Arc 2.1). Silence the unrelated unified_context read
+        # too so this test stays scoped to calendar_horizon.
+        from unittest.mock import AsyncMock
+        monkeypatch.setattr(
+            "app.services.unified_context.read_snapshot",
+            AsyncMock(side_effect=RuntimeError("not under test here")),
+        )
         db = _db_returning(3, 5)  # calendar count, then thread count
-        state = ctx.get_world_state(db, "user-1")
+        state = await ctx.get_world_state(db, "user-1")
 
         assert state.active_calendar_events == 3
         assert state.open_threads == 5
@@ -42,14 +55,20 @@ class TestWorldState:
         assert "5 open thread(s)" in state.summary
         assert state.confidence == 1.0
 
-    def test_query_failure_lowers_confidence_but_does_not_raise(self):
+    @pytest.mark.asyncio
+    async def test_query_failure_lowers_confidence_but_does_not_raise(self, monkeypatch):
+        from unittest.mock import AsyncMock
+        monkeypatch.setattr(
+            "app.services.unified_context.read_snapshot",
+            AsyncMock(side_effect=RuntimeError("not under test here")),
+        )
         db = SimpleNamespace()
 
         def _broken(*a, **kw):
             raise RuntimeError("db down")
 
         db.execute = _broken
-        state = ctx.get_world_state(db, "user-1")
+        state = await ctx.get_world_state(db, "user-1")
 
         assert state.active_calendar_events == 0
         assert state.open_threads == 0
