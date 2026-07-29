@@ -204,6 +204,32 @@ async def ambient_turn(
         result = await deliberation_engine.run(user_id, deep=deep, wake_reason=wake_reason.value)
         summary = await process_deliberation_result(result, user_id)
 
+        # Arc 4.3: "ambient wakes with no David-work pull the top intent —
+        # boredom's sanctioned outlet is pursuit, never narration." Not a
+        # new wake_reason or a parallel cognition (per the Arc 3.1 ruling)
+        # — a natural consequence of this same turn discovering there was
+        # nothing to do for David. Still budget-capped at ≤1/day
+        # (pursued_today), same discipline the old standalone nightly
+        # curiosity-sweep job enforced structurally by only running once;
+        # now enforced explicitly since this can fire on any idle wake.
+        curiosity_pursued = None
+        no_david_work = (
+            not summary.get("notifications_sent") and not summary.get("home_actions_executed")
+            and not summary.get("tasks_dispatched") and not summary.get("tasks_proposed")
+            and not summary.get("research_dispatched")
+        )
+        if no_david_work:
+            try:
+                from app.db.session import get_async_session_factory
+                from app.services.curiosity import generate_candidates, pursued_today, select_and_pursue
+                factory = get_async_session_factory()
+                async with factory() as cdb:
+                    if not await pursued_today(cdb, user_id):
+                        await generate_candidates(cdb, user_id)
+                        curiosity_pursued = await select_and_pursue(cdb, user_id)
+            except Exception as e:
+                logger.debug(f"[kernel] curiosity pursuit skipped: {e}")
+
         # Return to a resting ambient state once the turn completes.
         await set_state(user_id, KernelState.AMBIENT, None, detail="resting", correlation_id=kernel_turn_id)
 
@@ -217,6 +243,7 @@ async def ambient_turn(
             "observations_consumed": summary["observations_consumed"],
             "tasks_dispatched": summary.get("tasks_dispatched", 0),
             "tasks_proposed": summary.get("tasks_proposed", 0),
+            "curiosity_pursued": curiosity_pursued,
             "duration": result.duration_seconds,
             "correlation_id": kernel_turn_id,
         }

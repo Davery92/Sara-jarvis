@@ -33,6 +33,22 @@ _MIN_VIOLATIONS_FOR_GOAL = 5     # a domain must miss repeatedly to be interesti
 _CALIBRATION_GAP_THRESHOLD = 0.35  # stated conf − hit_rate this big = overconfident
 
 
+async def pursued_today(db, user_id: str = _DAVID) -> bool:
+    """Arc 4.3: the daily budget (≤1 investigation LLM call/day) used to be
+    enforced structurally — `run_curiosity` only ever ran once, on its own
+    nightly schedule. Now that pursuit is triggered by *any* ambient wake
+    that finds no David-work (not a fixed schedule), the budget needs its
+    own explicit check: a goal already active, or completed today, means
+    don't pursue again until tomorrow."""
+    row = (await db.execute(text("""
+        SELECT 1 FROM sara_goal
+        WHERE created_by = 'curiosity'
+          AND (status = 'active' OR (status = 'completed' AND completed_at::date = CURRENT_DATE))
+        LIMIT 1
+    """))).first()
+    return row is not None
+
+
 async def generate_candidates(db, user_id: str = _DAVID) -> dict:
     """Mint candidate curiosity goals from prediction errors + calibration gaps."""
     minted = 0
