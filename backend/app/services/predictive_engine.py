@@ -316,27 +316,35 @@ async def _dual_write_candidate(user_id: str, pred: Dict[str, Any], topic: str) 
 
 async def send_predictions(user_id: str):
     """Generate predictions and send high-confidence ones as notifications."""
+    from app.core.feature_flags import Flag, is_enabled
     from app.services.unified_notification import send_notification
 
+    mouth_only = is_enabled(Flag.MOUTH_ONLY_PREDICTIVE_ENGINE)
     predictions = await generate_predictions(user_id)
 
     for pred in predictions:
         if pred["confidence"] >= 0.6:
             topic = f"prediction:{hash(pred['title']) % 100000}"
-            await send_notification(
-                user_id=user_id,
-                title=pred["title"],
-                message=pred["message"],
-                priority=pred.get("priority", "low"),
-                category="checkin",
-                topic=topic,
-                source=pred.get("source", "predictive_engine"),
-                payload={
-                    "prediction_grade": pred.get("prediction_grade", "novel"),
-                    "stimulus_key": pred.get("stimulus_key") or f"prediction:{pred.get('type', 'unknown')}:{pred.get('title', '')}",
-                    "generator": pred.get("generator", "predictive_engine"),
-                },
-            )
+            # Arc 1.5 write-freeze: legacy send disabled once
+            # MOUTH_ONLY_PREDICTIVE_ENGINE is on — dual-write below is
+            # unconditional either way. Flag default OFF.
+            if mouth_only:
+                logger.info(f"[mouth-only] predictive_engine legacy send skipped (candidate queued): {topic}")
+            else:
+                await send_notification(
+                    user_id=user_id,
+                    title=pred["title"],
+                    message=pred["message"],
+                    priority=pred.get("priority", "low"),
+                    category="checkin",
+                    topic=topic,
+                    source=pred.get("source", "predictive_engine"),
+                    payload={
+                        "prediction_grade": pred.get("prediction_grade", "novel"),
+                        "stimulus_key": pred.get("stimulus_key") or f"prediction:{pred.get('type', 'unknown')}:{pred.get('title', '')}",
+                        "generator": pred.get("generator", "predictive_engine"),
+                    },
+                )
             await _dual_write_candidate(user_id, pred, topic)
 
     # Inject predictions into daily brief context layer

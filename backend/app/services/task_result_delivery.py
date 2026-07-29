@@ -185,6 +185,16 @@ async def deliver_task_result(
         return
 
     # --- Path 5: Nobody's home — standard push ---
+    # Arc 1.5 write-freeze: this is the one path here that's actually
+    # equivalent to the other "legacy sender" push notifications — Paths
+    # 0-4 above (active desktop HUD, SSE, iOS push with rich routing) are a
+    # genuinely better UX than the mouth pipeline replicates today and are
+    # left untouched. Flag default OFF; dual-write (below) is unconditional
+    # either way.
+    from app.core.feature_flags import Flag, is_enabled
+    if is_enabled(Flag.MOUTH_ONLY_TASK_RESULT_DELIVERY):
+        logger.info(f"[mouth-only] task_result_delivery fallback push skipped (candidate queued): agent_task:{task_id}")
+        return
     await send_notification(
         user_id=user_id,
         title=_task_subject(task_query),

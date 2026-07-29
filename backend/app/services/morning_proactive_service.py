@@ -283,9 +283,20 @@ class MorningProactiveService:
         Returns True if sent successfully.
         """
         try:
+            topic = f"pattern_suggestion:{pattern['id']}:{datetime.now(timezone.utc).strftime('%Y%m%d')}"
+
+            # Arc 1.5 write-freeze (SARA_ALIVE_BUILD_PLAN): legacy send
+            # disabled once MOUTH_ONLY_MORNING_PROACTIVE is on — the
+            # say_candidate dual-write (below, unconditional) is the only
+            # path. Flag default OFF; legacy stays live until this is
+            # individually verified, per the plan's write-freeze pattern.
+            from app.core.feature_flags import Flag, is_enabled
+            if is_enabled(Flag.MOUTH_ONLY_MORNING_PROACTIVE):
+                logger.info(f"[mouth-only] morning_proactive legacy send skipped (candidate queued): {topic}")
+                return False
+
             from app.services.unified_notification import send_notification as unified_send_notification
 
-            topic = f"pattern_suggestion:{pattern['id']}:{datetime.now(timezone.utc).strftime('%Y%m%d')}"
             result = await unified_send_notification(
                 user_id=user_id,
                 title=message["title"],

@@ -179,19 +179,29 @@ async def check_and_send_leave_now_nudges(user_id: str) -> dict:
         leave_by = (now + timedelta(minutes=max(0, minutes_until_leave))).strftime("%-I:%M %p")
         message = f"About {travel_min} min to {location} — leave by {leave_by} for \"{title}\"."
 
-        result = await send_notification(
-            user_id=user_id,
-            title="Time to head out",
-            message=message,
-            priority="high",
-            topic=topic,
-            category="location",
-            source="travel_nudge",
-            cooldown_hours=24,  # never re-nudge the same event twice
-        )
-        if result.get("sent"):
-            sent += 1
-            logger.info(f"Leave-now nudge sent for '{title}' ({travel_min}min drive)")
+        # Arc 1.5 write-freeze: legacy send disabled once
+        # MOUTH_ONLY_TRAVEL_NUDGE is on — dual-write below is unconditional
+        # either way. Flag default OFF — this one is genuinely time-critical
+        # (leave-now, priority=high) so it needs live verification of
+        # delivery latency through the mouth before this is ever flipped.
+        from app.core.feature_flags import Flag, is_enabled
+        if is_enabled(Flag.MOUTH_ONLY_TRAVEL_NUDGE):
+            logger.info(f"[mouth-only] travel_nudge legacy send skipped (candidate queued): {topic}")
+            result = {"sent": False}
+        else:
+            result = await send_notification(
+                user_id=user_id,
+                title="Time to head out",
+                message=message,
+                priority="high",
+                topic=topic,
+                category="location",
+                source="travel_nudge",
+                cooldown_hours=24,  # never re-nudge the same event twice
+            )
+            if result.get("sent"):
+                sent += 1
+                logger.info(f"Leave-now nudge sent for '{title}' ({travel_min}min drive)")
 
         # Mind V2 rewire plan Workstream B (long tail) — dual-write into the
         # say_candidate queue. valid_until = event start: a leave-now nudge

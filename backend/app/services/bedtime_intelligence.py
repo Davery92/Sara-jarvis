@@ -95,14 +95,22 @@ async def maybe_nudge(db) -> dict:
     except Exception:
         pass
 
-    from app.services.unified_notification import send_notification
-    result = await send_notification(
-        user_id=_DAVID, title="Winddown", message=message,
-        priority="low", category="wellness", source="bedtime_intelligence",
-        topic=stimulus_key, db=db,
-        payload={"stimulus_key": stimulus_key, "generator": "bedtime"},
-    )
-    logger.info(f"🌙 Bedtime nudge: {message!r} sent={result.get('sent')}")
+    # Arc 1.5 write-freeze: legacy send disabled once
+    # MOUTH_ONLY_BEDTIME_INTELLIGENCE is on — dual-write below is
+    # unconditional either way. Flag default OFF.
+    from app.core.feature_flags import Flag, is_enabled
+    if is_enabled(Flag.MOUTH_ONLY_BEDTIME_INTELLIGENCE):
+        logger.info(f"[mouth-only] bedtime_intelligence legacy send skipped (candidate queued): {stimulus_key}")
+        result = {"sent": False}
+    else:
+        from app.services.unified_notification import send_notification
+        result = await send_notification(
+            user_id=_DAVID, title="Winddown", message=message,
+            priority="low", category="wellness", source="bedtime_intelligence",
+            topic=stimulus_key, db=db,
+            payload={"stimulus_key": stimulus_key, "generator": "bedtime"},
+        )
+        logger.info(f"🌙 Bedtime nudge: {message!r} sent={result.get('sent')}")
 
     # Mind V2 rewire plan Workstream B (long tail) — dual-write into the
     # say_candidate queue. Wrapped so a candidate-queue failure never

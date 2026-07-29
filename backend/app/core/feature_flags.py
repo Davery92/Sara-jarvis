@@ -58,6 +58,21 @@ class Flag(str, Enum):
     # flip, no data/schema change) once verified against real conversations.
     PRESENCE_TOOL_DIET = "PRESENCE_TOOL_DIET"
 
+    # SARA_ALIVE_BUILD_PLAN Arc 1.5 write-freeze — one flag per still-legacy
+    # sender, default OFF (legacy send stays live). Flipping ON disables
+    # ONLY that sender's legacy send_notification call; its say_candidate
+    # dual-write (already live) is unaffected either way. Per-sender so a
+    # regression on one (e.g. calendar_prep's 35-55min timing window) can
+    # be reverted without touching the others. Deleted only after each is
+    # individually verified live, per the plan's write-freeze pattern.
+    MOUTH_ONLY_CALENDAR_PREP = "MOUTH_ONLY_CALENDAR_PREP"
+    MOUTH_ONLY_TASK_RESULT_DELIVERY = "MOUTH_ONLY_TASK_RESULT_DELIVERY"
+    MOUTH_ONLY_MORNING_PROACTIVE = "MOUTH_ONLY_MORNING_PROACTIVE"
+    MOUTH_ONLY_PREDICTIVE_ENGINE = "MOUTH_ONLY_PREDICTIVE_ENGINE"
+    MOUTH_ONLY_BEDTIME_INTELLIGENCE = "MOUTH_ONLY_BEDTIME_INTELLIGENCE"
+    MOUTH_ONLY_TRAVEL_NUDGE = "MOUTH_ONLY_TRAVEL_NUDGE"
+    MOUTH_ONLY_LEARNING_DIGEST = "MOUTH_ONLY_LEARNING_DIGEST"
+
 
 ALL_FLAGS: List[str] = [f.value for f in Flag]
 _TRUE_VALUES = {"1", "true", "yes", "on"}
