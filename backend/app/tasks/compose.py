@@ -87,7 +87,7 @@ async def _run_async():
         }
 
         try:
-            composed = await compose_utterance(candidate, brief_text, recent_chat)
+            composed = await compose_utterance(candidate, brief_text, recent_chat, user_id=user_id)
         except ComposeDeclined as e:
             # Deterministic — the payload is too thin no matter how many
             # times we retry. Advance past judged_send so it stops being

@@ -16,7 +16,7 @@ Usage:
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -148,3 +148,87 @@ def decay_emotional_state(
         tone=current_tone,
         intensity=decayed_intensity,
     )
+
+
+DEFAULT_USER_ID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
+
+
+async def compute_appraisal(user_id: str = DEFAULT_USER_ID) -> Optional[Tuple[str, float, str]]:
+    """Arc 4.4: "one affect, computed, consequential" — driven by appraisals
+    (David's day trajectory, her own failure/success stream, prediction
+    quality), not a free-form LLM mood word alone. Returns (tone, intensity,
+    about) — the highest-weight signal that cleared its own bar — or None
+    if nothing appraises strongly enough (caller falls back to whatever the
+    deliberation LLM picked, same as before this existed).
+
+    NOT the same "appraisal" as app.services.appraisal (Mind V2's dark
+    world-brief-patch/say-candidate loop, a different cognition path
+    entirely) — this is the older sense of the word: judging what a signal
+    means emotionally, not minting candidates.
+    """
+    from sqlalchemy import text
+    from app.db.session import get_async_session_factory
+
+    factory = get_async_session_factory()
+    signals: List[Tuple[str, float, str, float]] = []  # (tone, intensity, about, weight)
+
+    async with factory() as db:
+        # 1. Prediction quality (Arc 4.1 calibration) — a domain she keeps
+        # getting wrong, with enough samples to mean something, not noise.
+        try:
+            from app.services.prediction_engine import compute_calibration
+            cal = await compute_calibration(db, user_id, days=7)
+            by_domain = cal.get("by_domain") or {}
+            worst = min(
+                (item for item in by_domain.items() if item[1].get("n", 0) >= 5),
+                key=lambda item: item[1]["hit_rate"], default=None,
+            )
+            if worst and worst[1]["hit_rate"] < 0.35:
+                signals.append((
+                    "reflective", 0.55, f"being wrong about {worst[0]} lately", 1.0,
+                ))
+        except Exception as e:
+            logger.debug(f"[appraisal] calibration signal failed: {e}")
+
+        # 2. Her own success/failure stream — a high judge kill-rate over
+        # real volume means most of what she noticed today wasn't worth
+        # saying; that's a legitimate thing to feel reflective about.
+        try:
+            row = (await db.execute(text("""
+                SELECT count(*) FILTER (WHERE status = 'judged_drop') AS dropped, count(*) AS total
+                FROM say_candidate WHERE user_id = :uid AND created_at > NOW() - INTERVAL '24 hours'
+            """), {"uid": user_id})).first()
+            if row and row.total and row.total >= 5:
+                drop_rate = row.dropped / row.total
+                if drop_rate >= 0.8:
+                    signals.append((
+                        "reflective", 0.4,
+                        "most of what I noticed today wasn't actually worth saying", 0.6,
+                    ))
+        except Exception as e:
+            logger.debug(f"[appraisal] judge-outcome signal failed: {e}")
+
+        # 3. David's day trajectory — a rough recovery night is the clearest
+        # signal available today without a real sentiment source on his
+        # side; concern here is what "attention pricing" (judge.py) reads
+        # to raise the interrupt bar.
+        try:
+            row = (await db.execute(text("""
+                SELECT metric_type, value FROM health_metric
+                WHERE user_id = :uid AND recorded_at > NOW() - INTERVAL '18 hours'
+                  AND metric_type IN ('hrv_morning', 'sleep_hours')
+            """), {"uid": user_id})).fetchall()
+            by_metric = {r.metric_type: float(r.value) for r in row}
+            sleep_hours = by_metric.get("sleep_hours")
+            hrv = by_metric.get("hrv_morning")
+            if (sleep_hours is not None and sleep_hours < 5.5) or (hrv is not None and hrv < 30):
+                signals.append((
+                    "concerned", 0.6, "David's recovery numbers looked rough", 1.2,
+                ))
+        except Exception as e:
+            logger.debug(f"[appraisal] health-trajectory signal failed: {e}")
+
+    if not signals:
+        return None
+    tone, intensity, about, _weight = max(signals, key=lambda s: s[3])
+    return tone, intensity, about

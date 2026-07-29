@@ -63,6 +63,7 @@ async def update_sara_state(
     focus: Optional[str] = None,
     emotional_tone: Optional[str] = None,
     emotional_intensity: Optional[float] = None,
+    emotional_about: Optional[str] = None,
     curiosities: Optional[list] = None,
     deliberation_happened: bool = False,
 ) -> None:
@@ -93,9 +94,11 @@ async def update_sara_state(
             current_intensity=current_intensity,
             new_tone=emotional_tone,
             new_intensity=emotional_intensity or 0.6,
+            about=emotional_about or "",
         )
         fields["sara_emotional_tone"] = new_state.tone
         fields["sara_emotional_intensity"] = new_state.intensity
+        fields["sara_emotional_about"] = new_state.about
 
     if curiosities is not None:
         fields["sara_curiosities"] = curiosities[:5]  # cap at 5

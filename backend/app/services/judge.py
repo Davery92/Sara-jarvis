@@ -126,6 +126,19 @@ async def _gather_context(db, user_id: str) -> Dict[str, Any]:
         logger.debug(f"[judge] recent chat unavailable: {e}")
         ctx["recent_chat"] = []
 
+    # Arc 4.4: attention pricing — "rough day for David ⇒ higher bar to
+    # interrupt." Only the "concerned about David" affect is relevant here
+    # (her own reflective/self-critical moods don't change what's worth
+    # interrupting HIM for); other tones are left out rather than passed
+    # through unfiltered.
+    try:
+        from app.services.working_memory import read_memory
+        snap = await read_memory(user_id)
+        if snap.sara_emotional_tone == "concerned" and (snap.sara_emotional_intensity or 0) >= 0.5:
+            ctx["affect_concerned_about_david"] = snap.sara_emotional_about or "a rough day"
+    except Exception as e:
+        logger.debug(f"[judge] affect context unavailable: {e}")
+
     return ctx
 
 
@@ -163,6 +176,8 @@ def _build_prompt(
         ctx_bits.append(f"asleep={context['asleep']}")
     if context.get("remaining_interrupt_allowance") is not None:
         ctx_bits.append(f"remaining_interrupt_allowance={context['remaining_interrupt_allowance']}")
+    if context.get("affect_concerned_about_david"):
+        ctx_bits.append(f"YOUR_AFFECT=concerned about {context['affect_concerned_about_david']}")
     ctx_block = ", ".join(ctx_bits) if ctx_bits else "(unknown)"
 
     recent_chat = context.get("recent_chat") or []
@@ -186,6 +201,10 @@ def _build_prompt(
         "context (never send_now if asleep; interruptibility below ~0.4 should push toward "
         "batch or drop unless the candidate kind is 'alert'; respect the remaining interrupt "
         "allowance — if it's 0, nothing gets send_now except genuine alerts).\n\n"
+        "Arc 4.4 attention pricing: if YOUR_AFFECT in the context line below shows you're "
+        "concerned about David's day, raise the bar to interrupt — prefer batch or drop over "
+        "send_now unless the candidate kind is 'alert'. This is your own read of his day "
+        "trajectory, not a rule to explain to him.\n\n"
         "If the recent conversation below shows David has already handled, dismissed, "
         "postponed, or contradicted a candidate's substance, the decision is drop, with the "
         "chat turn (paraphrased) as the reason — regardless of how the candidate otherwise "

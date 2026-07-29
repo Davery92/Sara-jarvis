@@ -20,7 +20,7 @@ shadow-mode addition.
 """
 import json
 import logging
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +47,7 @@ def _load_voice_doc() -> str:
 def _build_prompt(
     candidate: Dict[str, Any], brief_text: str, voice_doc: str,
     recent_chat: List[Dict[str, Any]] = None,
+    affect: Optional[Tuple[str, float, str]] = None,
 ) -> Tuple[str, str]:
     system_msg = (
         f"{voice_doc}\n\n"
@@ -72,9 +73,25 @@ def _build_prompt(
     ]
     chat_block = "\n".join(chat_lines) if chat_lines else "(no chat in the last 6 hours)"
 
+    # Arc 4.4: "one affect, computed, consequential" — modulates tone, not
+    # content. A real feeling with a real cause, phrased in like one sentence
+    # of guidance, not a mood label slapped on top of the message.
+    affect_block = ""
+    if affect and affect[0] != "attentive":
+        tone, intensity, about = affect
+        strength = "a little" if intensity < 0.5 else "genuinely"
+        affect_block = (
+            f"\n## Your current mood (let this shape tone, not content)\n"
+            f"You're {strength} feeling {tone} right now"
+            + (f", about {about}" if about else "") + ". "
+            "Let it color HOW you say this, not WHAT you say — don't mention "
+            "the feeling explicitly, don't let it override the payload.\n"
+        )
+
     user_msg = (
         f"## Current World Brief (for time-honesty — check any date/time claim against this)\n{brief_text}\n\n"
-        f"## Recent conversation (last 6 hours)\n{chat_block}\n\n"
+        f"## Recent conversation (last 6 hours)\n{chat_block}\n"
+        f"{affect_block}\n"
         f"## Candidate\n"
         f"kind: {candidate['kind']}\n"
         f"summary: {candidate['summary']}\n"
@@ -118,11 +135,25 @@ def _parse_response(raw: str) -> dict:
 
 async def compose_utterance(
     candidate: Dict[str, Any], brief_text: str, recent_chat: List[Dict[str, Any]] = None,
+    user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Returns {"text", "refs", "urgency"} — the ComposedUtterance shape
     (minus `slot`, which per-candidate immediate composition doesn't use)."""
     voice_doc = _load_voice_doc()
-    system_msg, user_msg = _build_prompt(candidate, brief_text, voice_doc, recent_chat)
+
+    # Arc 4.4: current affect modulates tone. Best-effort — a broken read
+    # must never block composition, same as every other context fetch.
+    affect = None
+    try:
+        from app.services.working_memory import read_memory
+        from app.services.emotional_state import DEFAULT_USER_ID
+        snap = await read_memory(user_id or DEFAULT_USER_ID)
+        if snap.sara_emotional_tone:
+            affect = (snap.sara_emotional_tone, snap.sara_emotional_intensity or 0.3, snap.sara_emotional_about or "")
+    except Exception as e:
+        logger.debug(f"[compose] affect read skipped: {e}")
+
+    system_msg, user_msg = _build_prompt(candidate, brief_text, voice_doc, recent_chat, affect=affect)
 
     from app.core.llm import get_background_llm_client
     client = get_background_llm_client()

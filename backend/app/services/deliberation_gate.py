@@ -415,10 +415,29 @@ async def process_deliberation_result(
     # to prevent repeated LLM calls when the model keeps returning bad JSON.
     try:
         from app.services.working_memory import update_sara_state, increment_deliberation_count
+
+        # Arc 4.4: "one affect, computed, consequential" — a computed
+        # appraisal (prediction quality, her own success/failure stream,
+        # David's day trajectory) takes priority over the deliberation
+        # LLM's free-form mood word when it has a real signal; falls back
+        # to the LLM's pick when it doesn't (most cycles — nothing strongly
+        # appraises every turn, and that's correct, not a gap).
+        appraised_tone = appraised_intensity = appraised_about = None
+        try:
+            from app.services.emotional_state import compute_appraisal
+            appraisal = await compute_appraisal(user_id)
+            if appraisal:
+                appraised_tone, appraised_intensity, appraised_about = appraisal
+        except Exception as _ae:
+            logger.debug(f"[DeliberationGate] affect appraisal skipped: {_ae}")
+
+        llm_tone = result.state_update.get("emotional_tone") if result.state_update else None
         await update_sara_state(
             user_id,
             focus=result.state_update.get("focus") if result.state_update else None,
-            emotional_tone=result.state_update.get("emotional_tone") if result.state_update else None,
+            emotional_tone=appraised_tone or llm_tone,
+            emotional_intensity=appraised_intensity,
+            emotional_about=appraised_about,
             curiosities=result.state_update.get("curiosities") if result.state_update else None,
             deliberation_happened=True,
         )
@@ -478,6 +497,27 @@ async def process_deliberation_result(
     return summary
 
 
+_BASE_AUTO_EXECUTE_CONFIDENCE = 0.6
+
+
+async def _initiative_confidence_threshold(user_id: str) -> float:
+    """Arc 4.4: "initiative margin" — no `trust_tier` system exists yet to
+    modulate per-tier (that's aspirational in the plan, not built), so this
+    is the simplified real version: during a self-doubting period (her own
+    affect appraisal came back "reflective" at real intensity — she's been
+    wrong a lot, or dropped most of what she noticed today), she requires
+    more confidence before acting autonomously instead of proposing to
+    David first. Best-effort: any failure returns the normal threshold."""
+    try:
+        from app.services.working_memory import read_memory
+        snap = await read_memory(user_id)
+        if snap.sara_emotional_tone == "reflective" and (snap.sara_emotional_intensity or 0) >= 0.5:
+            return 0.75
+    except Exception as e:
+        logger.debug(f"[DeliberationGate] initiative threshold check skipped: {e}")
+    return _BASE_AUTO_EXECUTE_CONFIDENCE
+
+
 async def _process_task_proposals(
     user_id: str,
     proposals: list,
@@ -485,6 +525,7 @@ async def _process_task_proposals(
     cap: int = 2,
 ) -> None:
     """Validate and route task proposals through autonomy tiers."""
+    auto_execute_confidence = await _initiative_confidence_threshold(user_id)
     for proposal in proposals[:cap]:
         if proposal.category in HARD_BLOCK_CATEGORIES:
             logger.info(f"[DeliberationGate] Task blocked (hard ban): {proposal.category} — {proposal.description[:80]}")
@@ -510,7 +551,7 @@ async def _process_task_proposals(
                 logger.error(f"[DeliberationGate] {proposal.category} failed: {e}")
             continue
 
-        if proposal.category in AUTO_EXECUTE_CATEGORIES and proposal.confidence >= 0.6:
+        if proposal.category in AUTO_EXECUTE_CATEGORIES and proposal.confidence >= auto_execute_confidence:
             # MINDV2 Phase 0 / F2: every auto-execute category is gated, not
             # just research — it must respect a per-category daily cap AND
             # must not re-dispatch a topic already attempted recently.

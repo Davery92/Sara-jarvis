@@ -117,6 +117,10 @@ class UnifiedContextSnapshot:
     sara_focus: Optional[str] = None  # what Sara is paying attention to
     sara_emotional_tone: Optional[str] = None  # curious/concerned/playful/proud/etc
     sara_emotional_intensity: float = 0.3  # 0.0-1.0, how strongly Sara feels the current tone
+    # Arc 4.4: what the current tone is directed at, e.g. "David's recovery
+    # numbers looked rough" — composer tone reads this so the modulation is
+    # specific, not just a mood word.
+    sara_emotional_about: Optional[str] = None
     sara_curiosities: Optional[List[str]] = None  # things Sara wants to explore (max 5)
     sara_last_deliberation_at: Optional[str] = None  # ISO timestamp
     sara_deliberation_count_today: int = 0
