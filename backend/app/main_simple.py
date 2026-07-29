@@ -142,6 +142,16 @@ NTFY_ENABLED = _app_state.ntfy_enabled
 NTFY_TIMERS_TOPIC = _app_state.ntfy_timers_topic
 NTFY_REMINDERS_TOPIC = _app_state.ntfy_reminders_topic
 NTFY_DOCUMENTS_TOPIC = _app_state.ntfy_documents_topic
+# SARA_ALIVE_BUILD_PLAN Arc 3.4 — the hand-picked "always useful" tool core
+# for the presence tool diet (Flag.PRESENCE_TOOL_DIET), replacing the 25-tool
+# "always add" category list. dispatch_and_monitor is the escape hatch for
+# anything beyond this set — already wired to kernel.focused_turn().
+_PRESENCE_CORE_TOOL_NAMES = [
+    "memory_search", "notes_create", "notes_search",
+    "list_add", "list_view", "reminders_create", "calendar_list",
+    "dispatch_and_monitor",
+]
+
 NTFY_SYSTEM_TOPIC = _app_state.ntfy_system_topic
 AI_PROVIDER = _app_state.ai_provider
 OPENAI_BASE_URL = _app_state.openai_base_url
@@ -9936,14 +9946,39 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                         logger.info(f"💼 Work mode: Loaded {len(tools)} tools from categories: {effective_categories}")
                     elif tool_categories:
                         # Standard chat uses intent-based tool loading from classify_with_context
-                        # Also ensure awareness/action core categories are always available
-                        effective_categories = list(tool_categories)
-                        capability_core_categories = ["devices", "vm_agents", "personal_knowledge", "inbox", "lists"]
-                        for category in capability_core_categories:
-                            if category not in effective_categories:
-                                effective_categories.append(category)
-                        tools = tool_registry.get_tools_by_categories(effective_categories)
-                        logger.info(f"🔧 Intent={user_intent}: Loaded {len(tools)} tools from categories: {effective_categories}")
+                        from app.core.feature_flags import Flag as _PFlag, is_enabled as _presence_flag_enabled
+                        if _presence_flag_enabled(_PFlag.PRESENCE_TOOL_DIET):
+                            # Arc 3.4 (SARA_ALIVE_BUILD_PLAN): the "always add"
+                            # 5-category core (25 tool defs, every turn,
+                            # regardless of intent) traded almost entirely on
+                            # classification already covering the same ground
+                            # (DEVICES/INBOX/PERSONAL_KNOWLEDGE are all their
+                            # own intents — see INTENT_TO_TOOL_CATEGORIES).
+                            # Replaced with a hand-picked, individually-named
+                            # core: quick recall/notes/lists/schedule plus
+                            # dispatch_and_monitor as the escape hatch for
+                            # anything deeper (already kernel.focused_turn()
+                            # underneath). Intent-classified categories are
+                            # unchanged — this only shrinks the padding.
+                            _diet_tools = tool_registry.get_tools_by_names(_PRESENCE_CORE_TOOL_NAMES)
+                            _diet_tools += tool_registry.get_tools_by_categories(list(tool_categories))
+                            _seen_names = set()
+                            tools = []
+                            for _t in _diet_tools:
+                                _tn = _t.get("function", {}).get("name")
+                                if _tn and _tn not in _seen_names:
+                                    _seen_names.add(_tn)
+                                    tools.append(_t)
+                            logger.info(f"🍽️ Intent={user_intent}: Presence diet — {len(tools)} tools ({len(_PRESENCE_CORE_TOOL_NAMES)} core + categories {list(tool_categories)})")
+                        else:
+                            # Also ensure awareness/action core categories are always available
+                            effective_categories = list(tool_categories)
+                            capability_core_categories = ["devices", "vm_agents", "personal_knowledge", "inbox", "lists"]
+                            for category in capability_core_categories:
+                                if category not in effective_categories:
+                                    effective_categories.append(category)
+                            tools = tool_registry.get_tools_by_categories(effective_categories)
+                            logger.info(f"🔧 Intent={user_intent}: Loaded {len(tools)} tools from categories: {effective_categories}")
                     else:
                         # Conservative capability fallback when intent routing fails.
                         fallback_categories = ['memory', 'notes', 'time', 'devices', 'vm_agents', 'personal_knowledge', 'inbox']

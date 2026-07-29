@@ -51,6 +51,13 @@ class Flag(str, Enum):
     MINDV2_APPRAISAL = "MINDV2_APPRAISAL"  # Phase 3: appraisal loop replaces salience/deliberation
     MINDV2_ACT = "MINDV2_ACT"              # Phase 4: act-then-speak prep dispatch + commitments
 
+    # SARA_ALIVE_BUILD_PLAN Arc 3.4 — presence tool payload diet. Measured
+    # baseline (2026-07-29): 44-54 tool defs / ~17k tokens per chat turn via
+    # the "always add" capability_core_categories list stacked on top of
+    # intent classification. Off by default: trivially reversible (a config
+    # flip, no data/schema change) once verified against real conversations.
+    PRESENCE_TOOL_DIET = "PRESENCE_TOOL_DIET"
+
 
 ALL_FLAGS: List[str] = [f.value for f in Flag]
 _TRUE_VALUES = {"1", "true", "yes", "on"}

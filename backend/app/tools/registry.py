@@ -842,6 +842,25 @@ class ToolRegistry:
         logger.info(f"Loaded {len(schemas)} tools from categories: {categories}")
         return schemas
 
+    def get_tools_by_names(self, names: List[str]) -> List[Dict[str, Any]]:
+        """Get OpenAI function calling schemas for explicitly named tools —
+        for callers that need surgical, individual-tool granularity rather
+        than whole categories (SARA_ALIVE_BUILD_PLAN Arc 3.4: the presence
+        tool payload diet picks specific tools like `calendar_list`, not
+        the 13-tool `time` category that contains it)."""
+        schemas = []
+        for tool_name in names:
+            tool = self.tools.get(tool_name)
+            if not tool:
+                logger.warning(f"Tool '{tool_name}' not found in registry")
+                continue
+            schema = tool.to_openai_schema()
+            params = schema.get('function', {}).get('parameters', {})
+            if 'required' in params and len(params['required']) == 0:
+                del params['required']
+            schemas.append(schema)
+        return schemas
+
     def _context_kwargs_for(self, name: str, tool: BaseTool):
         """Which injected context kwargs this tool's execute() can accept.
 
