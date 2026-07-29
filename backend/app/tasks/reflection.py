@@ -49,31 +49,15 @@ def run_reflection_cycle(self):
 async def _run_reflection_async():
     """Async implementation of reflection cycle.
 
-    SINGULAR_SARA_MASTER_PLAN §C6: when SINGULAR_KERNEL is on, the reflection
-    cycle folds into `kernel.dreaming_turn()` instead of calling the
-    reflection agent directly. Default (flag off) behavior below is
-    unchanged from before this fold-in existed.
+    SINGULAR_SARA_MASTER_PLAN §C6 / Arc 3 write-freeze (2026-07-29): the
+    reflection cycle folds into `kernel.dreaming_turn()`. Legacy
+    reflection-agent branch deleted after legacy_path_counters confirmed 0
+    legacy calls / 16 kernel calls over a 3-day live window
+    (ARC3_JOB_INVENTORY_2026_07_29.md).
     """
-    from app.core.feature_flags import Flag, is_enabled
     from app.db.session import get_async_session_factory
-
-    if is_enabled(Flag.SINGULAR_KERNEL):
-        from app.services.kernel import dreaming_turn
-        result_dict = await dreaming_turn()
-    else:
-        from app.services.reflection.agent import get_reflection_agent
-
-        try:
-            from app.services.legacy_path_counters import record_legacy_path
-            await record_legacy_path("dreaming_cognition")
-        except Exception:
-            pass
-
-        async_session = get_async_session_factory()
-        async with async_session() as db:
-            reflection_agent = await get_reflection_agent(db)
-            result = await reflection_agent.run_reflection_cycle()
-            result_dict = result.to_dict()
+    from app.services.kernel import dreaming_turn
+    result_dict = await dreaming_turn()
 
     # Generate policy candidates from reflection (Phase 3 — Cortana Evolution)
     try:

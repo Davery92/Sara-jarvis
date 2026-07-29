@@ -1524,54 +1524,25 @@ async def _deliberation_fallback_async():
     if not await salience_scorer.should_deliberate(user_id):
         return {"status": "no_deliberation_needed", "pruned": pruned}
 
-    # SINGULAR_SARA_MASTER_PLAN §C5: when the flag is on, this legacy
-    # safety-net task folds into the kernel's one ambient-cognition path
-    # instead of running deliberation_engine.run() directly. `ambient_turn`
-    # does its own "heavy_llm" exclusive-lock acquisition, so this branch
-    # must NOT also hold that lock first — it would make the kernel call
-    # immediately see the group as busy and falsely report "skipped".
-    from app.core.feature_flags import Flag, is_enabled
-    if is_enabled(Flag.SINGULAR_KERNEL):
-        from app.services.kernel import WakeReason, ambient_turn
-        result = await ambient_turn(user_id, wake_reason=WakeReason.SLEEP_PRESSURE, force=True)
-        if result.get("status") == "completed":
-            return {
-                "status": "deliberated", "pruned": pruned,
-                "notifications": result.get("notifications", 0),
-                "duration": result.get("duration"),
-                "correlation_id": result.get("correlation_id"),
-                "routed_via": "kernel",
-            }
-        return {"skipped": result.get("skipped", "kernel_skipped"), "pruned": pruned, "routed_via": "kernel"}
-
-    from app.services.deliberation import deliberation_engine
-    from app.services.deliberation_gate import process_deliberation_result
-    from app.services.autonomy.coordination import get_coordinator
-
-    coordinator = get_coordinator()
-    if not await coordinator.acquire_exclusive("deliberation-fallback", "heavy_llm"):
-        return {"skipped": "exclusive_group_busy", "pruned": pruned}
-
-    try:
-        # This call bypasses `kernel.ambient_turn` — recorded as the
-        # "legacy" ambient-cognition path (SINGULAR_SARA §C0/§C5 path
-        # counters).
-        try:
-            from app.services.legacy_path_counters import record_legacy_path
-            await record_legacy_path("ambient_cognition")
-        except Exception:
-            pass
-
-        result = await deliberation_engine.run(user_id)
-        summary = await process_deliberation_result(result, user_id)
+    # SINGULAR_SARA_MASTER_PLAN §C5 / Arc 3 write-freeze (2026-07-29): this
+    # safety-net task folds into the kernel's one ambient-cognition path.
+    # `ambient_turn` does its own "heavy_llm" exclusive-lock acquisition, so
+    # this must NOT also hold that lock first — it would make the kernel
+    # call immediately see the group as busy and falsely report "skipped".
+    # Legacy deliberation_engine.run() branch deleted after
+    # legacy_path_counters confirmed 0 legacy calls / 65 kernel calls over a
+    # 3-day live window (ARC3_JOB_INVENTORY_2026_07_29.md).
+    from app.services.kernel import WakeReason, ambient_turn
+    result = await ambient_turn(user_id, wake_reason=WakeReason.SLEEP_PRESSURE, force=True)
+    if result.get("status") == "completed":
         return {
-            "status": "deliberated",
-            "pruned": pruned,
-            "notifications": summary["notifications_sent"],
-            "duration": result.duration_seconds,
+            "status": "deliberated", "pruned": pruned,
+            "notifications": result.get("notifications", 0),
+            "duration": result.get("duration"),
+            "correlation_id": result.get("correlation_id"),
+            "routed_via": "kernel",
         }
-    finally:
-        await coordinator.release_exclusive("heavy_llm", "deliberation-fallback")
+    return {"skipped": result.get("skipped", "kernel_skipped"), "pruned": pruned, "routed_via": "kernel"}
 
 
 # ─── Proactive Check-ins ────────────────────────────────────────
@@ -1618,57 +1589,27 @@ def deep_deliberation(self):
 
 
 async def _deep_deliberation_async(user_id: str):
-    # SINGULAR_SARA_MASTER_PLAN §C5 — same fold-in as `_deliberation_fallback_
-    # async`: when the flag is on, route through the kernel's one
-    # ambient-cognition path instead of calling deliberation_engine.run()
-    # directly. Must not hold the "heavy_llm" lock before calling
-    # `ambient_turn` — it acquires that lock itself.
-    from app.core.feature_flags import Flag, is_enabled
-    if is_enabled(Flag.SINGULAR_KERNEL):
-        from app.services.kernel import WakeReason, ambient_turn
-        result = await ambient_turn(user_id, wake_reason=WakeReason.SCHEDULED_ANCHOR,
-                                    deep=True, force=True)
-        if result.get("status") == "completed":
-            return {
-                "status": "completed", "deep": True,
-                "notifications": result.get("notifications", 0),
-                "tasks_dispatched": result.get("tasks_dispatched", 0),
-                "tasks_proposed": result.get("tasks_proposed", 0),
-                "duration": result.get("duration"),
-                "correlation_id": result.get("correlation_id"),
-                "routed_via": "kernel",
-            }
-        return {"skipped": result.get("skipped", "kernel_skipped"), "routed_via": "kernel"}
-
-    from app.services.autonomy.coordination import get_coordinator
-    from app.services.deliberation import deliberation_engine
-    from app.services.deliberation_gate import process_deliberation_result
-
-    coordinator = get_coordinator()
-    if not await coordinator.acquire_exclusive("deep-deliberation", "heavy_llm"):
-        return {"skipped": "exclusive_group_busy"}
-
-    try:
-        # Bypasses `kernel.ambient_turn` — recorded "legacy" (see the same
-        # note in `_deliberation_fallback_async` above).
-        try:
-            from app.services.legacy_path_counters import record_legacy_path
-            await record_legacy_path("ambient_cognition")
-        except Exception:
-            pass
-
-        result = await deliberation_engine.run(user_id, deep=True)
-        summary = await process_deliberation_result(result, user_id)
+    # SINGULAR_SARA_MASTER_PLAN §C5 / Arc 3 write-freeze (2026-07-29): route
+    # through the kernel's one ambient-cognition path. Must not hold the
+    # "heavy_llm" lock before calling `ambient_turn` — it acquires that lock
+    # itself. Legacy deliberation_engine.run() branch deleted after
+    # legacy_path_counters confirmed 0 legacy calls / 65 kernel calls (shared
+    # ambient_cognition bucket with the fallback task above) over a 3-day
+    # live window (ARC3_JOB_INVENTORY_2026_07_29.md).
+    from app.services.kernel import WakeReason, ambient_turn
+    result = await ambient_turn(user_id, wake_reason=WakeReason.SCHEDULED_ANCHOR,
+                                deep=True, force=True)
+    if result.get("status") == "completed":
         return {
-            "status": "completed",
-            "deep": True,
-            "notifications": summary["notifications_sent"],
-            "tasks_dispatched": summary["tasks_dispatched"],
-            "tasks_proposed": summary["tasks_proposed"],
-            "duration": result.duration_seconds,
+            "status": "completed", "deep": True,
+            "notifications": result.get("notifications", 0),
+            "tasks_dispatched": result.get("tasks_dispatched", 0),
+            "tasks_proposed": result.get("tasks_proposed", 0),
+            "duration": result.get("duration"),
+            "correlation_id": result.get("correlation_id"),
+            "routed_via": "kernel",
         }
-    finally:
-        await coordinator.release_exclusive("heavy_llm", "deep-deliberation")
+    return {"skipped": result.get("skipped", "kernel_skipped"), "routed_via": "kernel"}
 
 
 @celery_app.task(

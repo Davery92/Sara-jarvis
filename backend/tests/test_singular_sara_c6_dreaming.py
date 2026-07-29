@@ -1,8 +1,12 @@
 """
 Tests for the SINGULAR_SARA_MASTER_PLAN §C6 `kernel.dreaming_turn()` and its
-fold-in to `app.tasks.reflection._run_reflection_async` — same discipline as
-C5: flag off (default) must be behaviorally identical to before, flag on
-routes through the kernel.
+fold-in to `app.tasks.reflection._run_reflection_async`.
+
+Arc 3 write-freeze (2026-07-29): the legacy `get_reflection_agent()` branch
+(used pre-SINGULAR_KERNEL, or when the flag was off) was deleted after
+`legacy_path_counters` confirmed 0 legacy calls / 16 kernel calls over a
+3-day live window — see ARC3_JOB_INVENTORY_2026_07_29.md. There is no longer
+a flag-off code path to test.
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -58,36 +62,10 @@ class TestDreamingTurn:
 
 class TestReflectionFoldIn:
     @pytest.mark.asyncio
-    async def test_flag_off_calls_reflection_agent_directly(self):
-        mock_result = MagicMock()
-        mock_result.to_dict.return_value = {"patterns_found": 2}
-
-        mock_agent = AsyncMock()
-        mock_agent.run_reflection_cycle = AsyncMock(return_value=mock_result)
-
-        mock_db_ctx = MagicMock()
-        mock_db_ctx.__aenter__ = AsyncMock(return_value=MagicMock())
-        mock_db_ctx.__aexit__ = AsyncMock(return_value=False)
-
-        with patch("app.core.feature_flags.is_enabled", return_value=False), \
-             patch("app.db.session.get_async_session_factory", return_value=lambda: mock_db_ctx), \
-             patch("app.services.reflection.agent.get_reflection_agent", new=AsyncMock(return_value=mock_agent)), \
-             patch("app.services.legacy_path_counters.record_legacy_path", new=AsyncMock()) as mock_legacy, \
-             patch("app.core.config.settings") as mock_settings:
-            mock_settings.autonomy_policy_candidates_enabled = False
-
-            result = await reflection._run_reflection_async()
-
-        assert result == {"patterns_found": 2}
-        mock_agent.run_reflection_cycle.assert_awaited_once()
-        mock_legacy.assert_awaited_once_with("dreaming_cognition")
-
-    @pytest.mark.asyncio
-    async def test_flag_on_routes_through_kernel(self):
+    async def test_routes_through_kernel(self):
         fake_kernel_result = {"state": "dreaming", "correlation_id": "turn_xyz", "patterns_found": 5}
 
-        with patch("app.core.feature_flags.is_enabled", return_value=True), \
-             patch("app.services.kernel.dreaming_turn", new=AsyncMock(return_value=fake_kernel_result)) as mock_dt, \
+        with patch("app.services.kernel.dreaming_turn", new=AsyncMock(return_value=fake_kernel_result)) as mock_dt, \
              patch("app.core.config.settings") as mock_settings:
             mock_settings.autonomy_policy_candidates_enabled = False
 
