@@ -26,65 +26,49 @@ logger = logging.getLogger(__name__)
 
 _DAVID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
 
-# A sent-mail cursor older than this is a stall worth surfacing (B5 lesson).
-_CURSOR_STALE_HOURS = 24
 # Daemon heartbeat older than this = the ACS locus of continuity is down.
 _DAEMON_STALE_MIN = 30
 
 
+_COMPONENT_KIND_PREFIXES = {
+    "task_failure:": "task_failure",
+    "scheduled_job:": "scheduled_job_failed",
+    "email_cursor:": "stalled_cursor",
+}
+
+
+def _kind_for_component(name: str, source: str) -> str:
+    for prefix, kind in _COMPONENT_KIND_PREFIXES.items():
+        if name.startswith(prefix):
+            return kind
+    return source  # system_heartbeat / interoception components, new here
+
+
 async def _health(db, user_id: str) -> Dict[str, Any]:
-    issues: List[Dict[str, Any]] = []
+    """Arc 2.2 (SARA_ALIVE_BUILD_PLAN): this used to run its own independent
+    checks (task_failure, scheduled_job, email_sync_state) — found live to
+    disagree with /api/sara/brief's self_status in the same minute, because
+    that endpoint reads body_state_projection.get_body_state_projection()
+    and this one never did. Now reads the same canonical projection (which
+    itself folds these exact checks back in — see
+    body_state_projection._load_self_model_health_components) so the two
+    surfaces can't diverge again. Shape unchanged for existing callers;
+    `issues` is now a superset (also surfaces system_heartbeat/interoception
+    degradation this function never used to see)."""
+    from app.services.body_state_projection import get_body_state_projection
 
-    # Unresolved self-failures (interoception's ledger).
-    failures = (await db.execute(text("""
-        SELECT task_name, error_class, error_message, occurrences, last_seen
-        FROM task_failure
-        WHERE resolved = FALSE
-        ORDER BY occurrences DESC, last_seen DESC
-        LIMIT 20
-    """))).fetchall()
-    for f in failures:
-        issues.append({
-            "kind": "task_failure", "severity": "error",
-            "what": f"{f.task_name} failing ({f.error_class})",
-            "detail": (f.error_message or "")[:200],
-            "occurrences": f.occurrences,
-            "since": f.last_seen.isoformat() if f.last_seen else None,
-        })
-
-    # Scheduled jobs whose LAST run failed (outcome-honest, not just "ran").
-    failed_jobs = (await db.execute(text("""
-        SELECT key, last_status, last_error, last_run_at
-        FROM scheduled_job
-        WHERE enabled = TRUE AND last_status = 'failed'
-        ORDER BY last_run_at DESC NULLS LAST
-        LIMIT 20
-    """))).fetchall()
-    for j in failed_jobs:
-        issues.append({
-            "kind": "scheduled_job_failed", "severity": "warning",
-            "what": f"job '{j.key}' last run failed",
-            "detail": (j.last_error or "")[:200],
-            "since": j.last_run_at.isoformat() if j.last_run_at else None,
-        })
-
-    # Stalled email cursors (the B5 class — a stalled sent cursor means Sara is
-    # half-blind to what David committed to by email).
-    cursors = (await db.execute(text("""
-        SELECT mailbox, last_sync_at,
-               EXTRACT(EPOCH FROM (NOW() - last_sync_at)) / 3600.0 AS hours_stale
-        FROM email_sync_state
-        WHERE last_sync_at IS NOT NULL
-    """))).fetchall()
-    for c in cursors:
-        if c.hours_stale and c.hours_stale > _CURSOR_STALE_HOURS:
-            issues.append({
-                "kind": "stalled_cursor", "severity": "warning",
-                "what": f"email cursor '{c.mailbox}' stalled {c.hours_stale:.0f}h",
-                "detail": f"last synced {c.last_sync_at.isoformat()}",
-                "since": c.last_sync_at.isoformat(),
-            })
-
+    projection = await get_body_state_projection(user_id)
+    issues: List[Dict[str, Any]] = [
+        {
+            "kind": _kind_for_component(c.name, c.source),
+            "severity": c.severity or "warning",
+            "what": c.label or c.name,
+            "detail": c.impact,
+            "since": c.as_of.isoformat() if c.as_of else None,
+        }
+        for c in projection.components
+        if c.status.value == "degraded"
+    ]
     return {"ok": len(issues) == 0, "issue_count": len(issues), "issues": issues}
 
 
