@@ -84,6 +84,33 @@ class DaemonStatusOut(BaseModel):
     seconds_since_heartbeat: Optional[int]
 
 
+class AmbientTurnIn(BaseModel):
+    """Arc 3.3 (not yet wired to the live daemon — see kernel.WakeReason.
+    DAEMON_PROXY docstring): the shape the VM daemon's tick would POST here
+    instead of running its own `mind.think()`/`mind.reflect()`. `world_delta`
+    is accepted now so the contract is ready, even though ambient_turn
+    doesn't consume it yet (the kernel's own context assembly is the source
+    of truth for what changed — this is for forward compatibility only)."""
+    world_delta: list[str] = Field(default_factory=list)
+
+
+class AmbientTurnOut(BaseModel):
+    """Deliberately NOT shaped like the old daemon's ad-hoc `tool_calls`/
+    `focus_change`/`notify_david` result — that was the second self's own
+    vocabulary. `produced` is the one signal the daemon's sleep-pressure
+    backoff actually needs (ACS2's `_adjust_after_turn`), derived honestly
+    from what the kernel turn actually did."""
+    status: str
+    state: str
+    wake_reason: Optional[str] = None
+    produced: bool = False
+    notifications: int = 0
+    home_actions: int = 0
+    tasks_dispatched: int = 0
+    tasks_proposed: int = 0
+    correlation_id: Optional[str] = None
+
+
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.post("/heartbeat", response_model=HeartbeatOut, dependencies=[Depends(verify_daemon_token)])
@@ -252,6 +279,41 @@ async def daemon_status(current_user: User = Depends(get_current_user)) -> Daemo
         last_tick_summary=row["last_tick_summary"],
         is_alive=is_alive,
         seconds_since_heartbeat=seconds_since,
+    )
+
+
+@router.post("/ambient-turn", response_model=AmbientTurnOut, dependencies=[Depends(verify_daemon_token)])
+async def daemon_ambient_turn(payload: AmbientTurnIn) -> AmbientTurnOut:
+    """Arc 3.3 (ONE_MIND §3.3/§3.4b, 2026-07-29) — the endpoint the VM
+    daemon's tick will call once wired, instead of running its own
+    `mind.think()`/`mind.reflect()` prompt-identity. selves=1: the daemon
+    keeps systemd resilience and local hands; the kernel is where it thinks.
+
+    NOT YET CALLED by the live daemon (`acs-daemon/daemon.py` still runs its
+    own Mind class unchanged) — this is the backend half of the cutover,
+    built and tested in isolation first per the write-freeze discipline used
+    for every other Arc 3 migration this session. Wiring `daemon.py` to call
+    this instead requires a coordinated remote deploy + service restart on
+    the live sara-VM, which is the explicitly held next step, not done here.
+    """
+    from app.services.kernel import DEFAULT_USER_ID, WakeReason, ambient_turn
+
+    result = await ambient_turn(DEFAULT_USER_ID, wake_reason=WakeReason.DAEMON_PROXY, force=True)
+
+    produced = bool(
+        result.get("notifications") or result.get("home_actions")
+        or result.get("tasks_dispatched") or result.get("tasks_proposed")
+    )
+    return AmbientTurnOut(
+        status=result.get("status", result.get("skipped", "unknown")),
+        state=result.get("state", "ambient"),
+        wake_reason=result.get("wake_reason"),
+        produced=produced,
+        notifications=result.get("notifications", 0),
+        home_actions=result.get("home_actions", 0),
+        tasks_dispatched=result.get("tasks_dispatched", 0),
+        tasks_proposed=result.get("tasks_proposed", 0),
+        correlation_id=result.get("correlation_id"),
     )
 
 
