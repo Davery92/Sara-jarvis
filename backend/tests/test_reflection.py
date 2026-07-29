@@ -230,7 +230,7 @@ class TestReflectionCycle:
 
     @pytest.mark.asyncio
     async def test_reflection_cycle_returns_result_dataclass(self, reflection_agent):
-        """Test that reflection cycle returns a ReflectionCycleResult."""
+        """Test that reflection cycle executes without crashing."""
         from app.services.reflection.agent import ReflectionCycleResult
 
         result = await reflection_agent.run_reflection_cycle()
@@ -238,6 +238,32 @@ class TestReflectionCycle:
         assert hasattr(result, 'cycle_start')
         assert hasattr(result, 'patterns_detected')
         assert hasattr(result, 'proposals_generated')
+
+    @pytest.mark.asyncio
+    async def test_reflection_cycle_scores_prediction_calibration(self, reflection_agent):
+        """Arc 4.1: 'dreaming scores every resolved prediction nightly and
+        updates per-domain confidence' — the reflection cycle must call
+        compute_calibration and carry its report on the result."""
+        fake_report = {"days": 30, "total_resolved": 5,
+                        "overall_by_bucket": {"0.9-1.0": {"n": 5, "hit_rate": 0.8}},
+                        "by_domain_bucket": {}}
+        with patch("app.services.prediction_engine.compute_calibration",
+                    new=AsyncMock(return_value=fake_report)):
+            result = await reflection_agent.run_reflection_cycle()
+
+        assert result.prediction_calibration == fake_report
+
+    @pytest.mark.asyncio
+    async def test_calibration_failure_does_not_break_the_cycle(self, reflection_agent):
+        """Calibration scoring is isolated — a failure must not take down
+        the rest of the reflection cycle (matches every other step's
+        try/except discipline in run_reflection_cycle)."""
+        with patch("app.services.prediction_engine.compute_calibration",
+                    new=AsyncMock(side_effect=RuntimeError("db exploded"))):
+            result = await reflection_agent.run_reflection_cycle()
+
+        assert result.prediction_calibration is None
+        assert result.cycle_start is not None
 
 
 # ==========================================

@@ -298,9 +298,10 @@ async def compute_calibration(db, user_id: str = _DAVID, days: int = 30) -> dict
 
     buckets = {}  # (domain, bucket) -> [n, confirmed]
     overall = {}  # bucket -> [n, confirmed]
+    by_domain = {}  # domain -> [n, confirmed] — Arc 4.1's "per-domain confidence"
     for domain, conf, outcome in rows:
         b = "0.5-0.7" if conf < 0.7 else ("0.7-0.9" if conf < 0.9 else "0.9-1.0")
-        for key, d in ((( domain, b), buckets), (b, overall)):
+        for key, d in ((( domain, b), buckets), (b, overall), (domain, by_domain)):
             slot = d.setdefault(key, [0, 0])
             slot[0] += 1
             if outcome == "confirmed":
@@ -313,6 +314,7 @@ async def compute_calibration(db, user_id: str = _DAVID, days: int = 30) -> dict
         return out
 
     report = {"days": days, "total_resolved": len(rows),
-              "overall_by_bucket": _fmt(overall), "by_domain_bucket": _fmt(buckets)}
+              "overall_by_bucket": _fmt(overall), "by_domain_bucket": _fmt(buckets),
+              "by_domain": _fmt(by_domain)}
     logger.info(f"📊 Calibration ({len(rows)} resolved): {report['overall_by_bucket']}")
     return report

@@ -189,12 +189,61 @@ async def get_world_state(db: Session, user_id: str = DEFAULT_USER_ID) -> WorldS
     except Exception as e:
         logger.debug(f"[context_snapshot] managed_host query failed: {e}")
 
+    # expectations (Arc 4.1) — today's expected shape, from daily_rhythm +
+    # training_day + calendar_event. A prediction, not an observation: this
+    # is what "ambient wakes evaluate error-against-expectation" reads.
+    # updated_at is now (recomputed live each call, cheap DB reads only) —
+    # confidence reflects how much of the day is actually predictable yet,
+    # not staleness (daily_rhythm itself decays its own confidence).
+    expectations_slice = None
+    try:
+        from app.services.daily_rhythm import build_rhythm_summary, get_upcoming_rhythm_window
+        from app.services.training_day import is_training_day
+
+        rhythm_summary = build_rhythm_summary(db, user_id)
+        upcoming = get_upcoming_rhythm_window(db, user_id, within_minutes=180)
+        training = is_training_day(db, user_id, now.astimezone(_TZ).date())
+
+        next_meeting_row = db.execute(text("""
+            SELECT title, start_time FROM calendar_event
+            WHERE user_id = :uid AND start_time > :now_naive
+            ORDER BY start_time ASC LIMIT 1
+        """), {"uid": user_id, "now_naive": now.astimezone(_TZ).replace(tzinfo=None)}).fetchone()
+
+        exp_data = {}
+        if rhythm_summary:
+            exp_data["rhythm_summary"] = rhythm_summary
+        if upcoming:
+            exp_data["next_rhythm_window"] = upcoming["label"]
+            exp_data["next_rhythm_minutes_away"] = upcoming["minutes_until"]
+            exp_data["next_rhythm_confidence"] = upcoming["confidence"]
+        exp_data["is_training_day"] = bool(training.get("is_training_day"))
+        if next_meeting_row:
+            exp_data["next_meeting"] = next_meeting_row.title
+            exp_data["next_meeting_at"] = next_meeting_row.start_time.isoformat()
+
+        # Confidence: 0 with nothing predictable yet (cold start — no learned
+        # rhythm, no training-day signal, no calendar), scaling up with how
+        # many of the expected-day components actually resolved.
+        signal_count = sum([
+            bool(rhythm_summary), bool(upcoming), training.get("is_training_day") is not None,
+            bool(next_meeting_row),
+        ])
+        exp_confidence = min(1.0, signal_count / 3.0) if signal_count else 0.0
+
+        expectations_slice = _slice(
+            now, "daily_rhythm+training_day+calendar_event", exp_confidence, **exp_data,
+        )
+    except Exception as e:
+        logger.debug(f"[context_snapshot] expectations slice failed: {e}")
+
     world = WorldStateV1(
         as_of=now, user_id=user_id, summary=summary,
         active_calendar_events=active_calendar_events, open_threads=open_threads,
         confidence=confidence,
         david=david_slice, home=home_slice, calendar_horizon=calendar_horizon,
         health_today=health_slice, work=work_slice, fleet=fleet_slice,
+        expectations=expectations_slice,
     )
     try:
         await check_staleness(world)
@@ -415,7 +464,7 @@ def render_engaged_context(
     lines = ["## Current Situation (world_state + self_state + relationship_state)"]
 
     world = context.get("world_state") or {}
-    for slice_name in ("david", "home", "calendar_horizon", "health_today", "work", "fleet"):
+    for slice_name in ("david", "home", "calendar_horizon", "health_today", "work", "fleet", "expectations"):
         s = world.get(slice_name)
         if not s or not s.get("data"):
             continue

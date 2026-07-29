@@ -61,6 +61,23 @@ async def _run_async():
         utterance_history = await _gather_utterance_history(db, user_id)
         recent_chat = await _gather_recent_chat(db, user_id)
 
+    # Arc 4.1 "consequence with teeth": flatten compute_calibration's
+    # by_domain into {domain: hit_rate} for the hedging linter — the
+    # reliability of each domain's predictions, aggregated across
+    # confidence buckets. Best-effort: a failure here must never block
+    # composition; an empty dict just means no domain requires hedging yet
+    # (lint_hedging treats an unmeasured domain as not-a-violation).
+    calibration_by_domain: dict = {}
+    try:
+        from app.services.prediction_engine import compute_calibration
+        async with factory() as db:
+            report = await compute_calibration(db, user_id)
+        for domain, stat in (report.get("by_domain") or {}).items():
+            if stat.get("hit_rate") is not None:
+                calibration_by_domain[domain] = stat["hit_rate"]
+    except Exception as e:
+        logger.debug(f"[compose] calibration fetch for hedging check failed: {e}")
+
     stats = {"composed": 0, "approved": 0, "edited": 0, "killed": 0, "errors": 0}
 
     for r in rows:
@@ -101,6 +118,30 @@ async def _run_async():
             final_text = composed["text"]
         elif review["verdict"] == "edit":
             final_text = review["edited_text"]
+
+        # Arc 4.1 "consequence with teeth": review approving/editing a
+        # claim doesn't override a proven-unreliable domain going out
+        # unhedged. Deterministic, runs regardless of what the LLM review
+        # decided — the actual enforcement, not just a logged finding.
+        if final_text and calibration_by_domain:
+            from app.services.voice_linter import infer_domain, lint_hedging
+            domain = infer_domain(candidate)
+            hedge_check = lint_hedging(final_text, domain, calibration_by_domain)
+            if hedge_check["violation"]:
+                logger.info(
+                    f"[compose] hedging violation for {candidate['id']}: domain={domain} "
+                    f"confidence={hedge_check['confidence']} — killing unhedged low-confidence claim"
+                )
+                review = {
+                    "verdict": "kill",
+                    "reason": (
+                        f"[hedging linter] unhedged claim in '{domain}' domain, whose predictions "
+                        f"have only been right {hedge_check['confidence']:.0%} of the time recently — "
+                        f"original review verdict was {review['verdict']!r}: {review['reason']}"
+                    ),
+                    "edited_text": None,
+                }
+                final_text = None
 
         async with factory() as db:
             await db.execute(text("""

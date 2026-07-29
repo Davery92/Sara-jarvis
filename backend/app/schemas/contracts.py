@@ -136,6 +136,11 @@ class WorldStateV1(BaseModel):
     health_today: Optional[WorldStateSliceV1] = None
     work: Optional[WorldStateSliceV1] = None
     fleet: Optional[WorldStateSliceV1] = None
+    # Arc 4.1 (2026-07-29): the expected-day model — wake window, training
+    # slot, departure, quiet hours, next meeting — read from daily_rhythm +
+    # training_day + calendar_event (existing sources, no new truth store).
+    # Ambient wakes evaluate error-against-this, not raw events.
+    expectations: Optional[WorldStateSliceV1] = None
 
 
 class RelationshipStateV1(BaseModel):

@@ -56,6 +56,67 @@ _ROBOTIC = re.compile(
     re.IGNORECASE,
 )
 
+# Arc 4.1: "the composer/linter must hedge any claim whose domain confidence
+# is below threshold" — the mechanical fix for the morning brief announcing
+# a "9:30 standing meeting today" the calendar actually had Wednesday 2:30
+# PM. Claims carry provenance; loops are not calendars. Deliberately plain
+# hedge words, not a wall of qualifiers — the voice contract still wants
+# one sentence, not a legal disclaimer.
+_HEDGE_WORDS = re.compile(
+    r"\b(might|may|could|probably|likely|possibly|i think|looks like|"
+    r"seems like|as (?:far as|best) i (?:can tell|know)|not (?:totally|"
+    r"100%|entirely) sure|last i (?:checked|saw)|as of (?:my|the) last)\b",
+    re.IGNORECASE,
+)
+
+# Same domain taxonomy prediction_engine/salience already use (§3.2's
+# domain_prior dict) — not a new vocabulary.
+_DOMAIN_KEYWORDS = {
+    "calendar": ("meeting", "call", "appointment", "event", "calendar", "schedule"),
+    "routine": ("usually", "normally", "typically", "routine", "pattern"),
+    "health": ("hrv", "sleep", "workout", "heart rate", "steps", "recovery", "gym"),
+    "home": ("light", "lock", "door", "thermostat", "temperature", "home"),
+    "security": ("alarm", "camera", "motion", "unlock", "intruder"),
+    "comms": ("email", "message", "text", "call from", "reply"),
+}
+
+
+def infer_domain(candidate: Dict[str, Any]) -> str:
+    """Best-effort domain classification from a candidate's own words —
+    crude keyword matching, not a new store. Falls back to 'routine' (the
+    lowest-stakes domain) when nothing matches, so an unclassifiable
+    candidate degrades toward "needs hedging" rather than silently
+    skipping the check."""
+    haystack = f"{candidate.get('kind', '')} {candidate.get('summary', '')}".lower()
+    for domain, keywords in _DOMAIN_KEYWORDS.items():
+        if any(kw in haystack for kw in keywords):
+            return domain
+    return "routine"
+
+
+def lint_hedging(
+    text: str, domain: str, calibration_by_domain: Dict[str, float],
+    min_confidence: float = 0.7,
+) -> Dict[str, Any]:
+    """Deterministic check: does `text` make an unhedged claim in a domain
+    whose calibration hit-rate is below `min_confidence`? `calibration_by_
+    domain` is {domain: hit_rate} — typically the '0.9-1.0' (or whichever
+    bucket the claim's implied confidence falls in) row from
+    prediction_engine.compute_calibration's by_domain_bucket, pre-flattened
+    by the caller. An unknown domain (no calibration data yet) is NOT a
+    violation — hedging is for domains proven unreliable, not domains
+    merely unmeasured."""
+    conf = calibration_by_domain.get(domain)
+    if conf is None or conf >= min_confidence:
+        return {"domain": domain, "confidence": conf, "required": False,
+                "hedged": None, "violation": False}
+
+    hedged = bool(_HEDGE_WORDS.search(text or ""))
+    return {
+        "domain": domain, "confidence": conf, "required": True,
+        "hedged": hedged, "violation": not hedged,
+    }
+
 
 def _opener(message: str, n: int = 5) -> str:
     """First n words of a message, lowercased & punctuation-stripped — the

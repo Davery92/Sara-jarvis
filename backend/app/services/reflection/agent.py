@@ -33,6 +33,11 @@ class ReflectionCycleResult:
     patterns_detected: List[DetectedPattern] = field(default_factory=list)
     proposals_generated: List[PromptProposal] = field(default_factory=list)
     uncertainties_flagged: int = 0
+    # Arc 4.1: "dreaming scores every resolved prediction nightly and
+    # updates per-domain confidence" — compute_calibration's report
+    # (total_resolved, overall_by_bucket, by_domain_bucket), not a new
+    # store. None if the prediction table has nothing resolved yet.
+    prediction_calibration: Optional[Dict[str, Any]] = None
     duration_seconds: float = 0
 
     def to_dict(self) -> Dict[str, Any]:
@@ -49,6 +54,7 @@ class ReflectionCycleResult:
             "patterns_detected": len(self.patterns_detected),
             "proposals_generated": len(self.proposals_generated),
             "uncertainties_flagged": self.uncertainties_flagged,
+            "prediction_calibration": self.prediction_calibration,
             "duration_seconds": self.duration_seconds,
         }
 
@@ -133,7 +139,23 @@ class ReflectionAgent:
             result.uncertainties_flagged = len(uncertain_items)
             logger.info(f"Flagged {len(uncertain_items)} uncertainties")
 
-            # 6. Self-assess this reflection cycle
+            # 6. Score prediction calibration (Arc 4.1) — grades whether
+            # stated confidence matched actual hit-rate, per domain and
+            # confidence bucket, over predictions resolved since the last
+            # cycle window. Read-only scoring; compute_calibration doesn't
+            # write anything itself, so a failure here can't corrupt state —
+            # still isolated so it never blocks the rest of the cycle.
+            try:
+                from app.services.prediction_engine import compute_calibration
+                result.prediction_calibration = await compute_calibration(self.db)
+                logger.info(
+                    f"Prediction calibration: {result.prediction_calibration['total_resolved']} "
+                    f"resolved, {result.prediction_calibration['overall_by_bucket']}"
+                )
+            except Exception as e:
+                logger.warning(f"Prediction calibration scoring failed (non-critical): {e}")
+
+            # 7. Self-assess this reflection cycle
             await self._self_assess(result)
 
         except Exception as e:
