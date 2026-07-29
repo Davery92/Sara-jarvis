@@ -26,8 +26,10 @@ Everything is reused, not reinvented:
 - ``thread_manager``            → anti-harping (max_mentions, drop-on-ignore)
 - ``activity_state_machine`` + ``interruptibility`` → never ping during a
   meeting, deep-focus work, exercise, wind-down, or sleep
-- ``unified_notification.send_notification`` → dedup, cooldown, push delivery,
-  and (now) the learned buzz decision — priority is no longer floored here.
+- ``say_candidate.create_candidate`` (Arc 1.5) → this module no longer sends
+  directly; it queues a candidate and the judge/compose/review/deliver
+  pipeline (unified_notification.send_notification underneath) decides
+  whether, when, and how it actually reaches David.
 
 Topics are namespaced so the existing per-category caps do the right thing:
 post-meeting/thread follow-ups use ``followup:`` so a timely meeting recap is
@@ -118,30 +120,6 @@ async def _checkins_sent_today(db, user_id: str) -> int:
     return int(res.scalar() or 0)
 
 
-async def _send(user_id: str, *, title: str, message: str, category: str,
-                topic: str, priority: str = "normal", stimulus_key: str | None = None) -> dict:
-    from app.services.unified_notification import send_notification
-    # No priority floor here (SARA_UNLEASHED Phase A.3): whether this actually
-    # buzzes the phone is decided once, centrally, by
-    # unified_notification.route_through_attention_queue's learned buzz
-    # decision (trailing engagement + interruptibility). A caller inflating
-    # priority to defeat that routing is exactly the bug this phase removes.
-    return await send_notification(
-        user_id=user_id,
-        title=title,
-        message=message,
-        priority=priority,
-        topic=topic,
-        category=category,
-        source="proactive_checkin",
-        extra_push_data={"target": "chat"},
-        payload={
-            "prediction_grade": "novel",
-            "stimulus_key": stimulus_key or topic,
-            "generator": "proactive_checkins",
-        },
-    )
-
 
 async def _dual_write_candidate(user_id: str, t: dict, message: str, topic: str) -> None:
     """Mind V2 rewire plan Workstream B.2 — feed the say_candidate queue
@@ -216,24 +194,19 @@ async def run_followup_sweep(user_id: str) -> dict:
 
         message = (t.get("suggested_followup") or "").strip() or f"Wanted to follow up on {t['topic']}."
         topic = f"followup:{t['id'][:12]}"
-        res = await _send(
-            user_id,
-            title="Hey David",
-            message=message,
-            category="followup",
-            topic=topic,
-            priority="normal",
-            stimulus_key=stimulus_key,
-        )
+        # Arc 1.5 (SARA_ALIVE_BUILD_PLAN): the legacy direct send (_send(),
+        # a thin send_notification wrapper) is retired now that Arc 1.4's
+        # real delivery path is live — this source speaks through the
+        # say_candidate queue only, same as everything else.
         await _dual_write_candidate(user_id, t, message, topic)
-        # Record the mention in a fresh short session (connection was never held
-        # across the send above).
-        if res.get("sent"):
-            async with factory() as db2:
-                await record_mention(t["id"], db2)
-                await db2.commit()
-        return {"sent": bool(res.get("sent")), "kind": "thread",
-                "meeting": t.get("category") == "meeting", "reason": res.get("reason")}
+        # Record the mention in a fresh short session — a candidate was
+        # queued for this thread, so it won't be re-offered next sweep
+        # regardless of whether the judge eventually sends it.
+        async with factory() as db2:
+            await record_mention(t["id"], db2)
+            await db2.commit()
+        return {"sent": False, "kind": "thread", "queued_candidate": True,
+                "meeting": t.get("category") == "meeting"}
     except Exception as e:
         if _is_transient_db_error(e):
             logger.warning(f"[checkin] transient DB blip, skipping this cycle: {e}")

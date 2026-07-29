@@ -49,7 +49,6 @@ def cross_system_check(self):
     try:
         from app.core.timezone import now as et_now
         from app.services.proactive_intelligence import cross_reference_check
-        from app.services.unified_notification import send_notification
 
         # These are FYI nudges, never urgent — don't fire them overnight.
         # (This task pushed "Email from X may relate to upcoming event" at
@@ -64,18 +63,14 @@ def cross_system_check(self):
             # id + event id). Fall back to the legacy hash-of-title key
             # only if an older generator is somehow still in the tree.
             topic = insight.get("topic") or f"xref:{hash(insight['title']) % 100000}"
-            _run_async(send_notification(
-                user_id=DEFAULT_USER_ID,
-                title=insight["title"],
-                message=insight["message"],
-                priority=insight.get("priority", "normal"),
-                category="checkin",
-                topic=topic,
-                source="cross_system_synthesis",
-            ))
+            # Arc 1.5 (SARA_ALIVE_BUILD_PLAN): the legacy direct send is
+            # retired now that Arc 1.4's real delivery path is live — this
+            # source speaks through the say_candidate queue only, same as
+            # everything else. Legacy send_notification call removed here;
+            # see git history (Arc 1.2 commit) for what it looked like.
             _run_async(_dual_write_candidate(insight, topic))
         if insights:
-            logger.info(f"Cross-system synthesis: sent {len(insights)} insight(s)")
+            logger.info(f"Cross-system synthesis: queued {len(insights)} insight(s) as candidates")
     except Exception as e:
         logger.warning(f"Cross-system synthesis failed: {e}")
 

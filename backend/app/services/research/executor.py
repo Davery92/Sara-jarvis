@@ -543,8 +543,6 @@ Write in clean markdown format."""
     ):
         """Push a 'Research ready' notification with deep-link data to the note."""
         try:
-            from app.services.notification_service import notification_service, NotificationPriority
-
             # Body = first paragraph of synthesis, trimmed for the lock screen.
             body = (synthesis or "").strip().split("\n\n", 1)[0]
             body = body.replace("# ", "").replace("## ", "").strip()
@@ -553,24 +551,15 @@ Write in clean markdown format."""
             if not body:
                 body = f"Your research on {plan.get('title', 'the topic')} is ready."
 
-            await notification_service.send_notification(
-                user_id=self.user_id,
-                title=f"Research ready: {plan.get('title', 'Untitled')}",
-                message=body,
-                priority=NotificationPriority.NORMAL,
-                data={
-                    "type": "research_complete",
-                    "note_id": note_id,
-                    "note_title": note_title,
-                    "plan_id": self.plan_id,
-                },
-                category="research_complete",
-                source="research_executor",
-            )
-            logger.info("Sent research_complete push for plan %s → note %s", self.plan_id, note_id)
+            # Arc 1.5 (SARA_ALIVE_BUILD_PLAN): the legacy direct push
+            # (notification_service.send_notification — itself a thin
+            # wrapper over unified_notification.send_notification) is
+            # retired now that Arc 1.4's real delivery path is live — this
+            # source speaks through the say_candidate queue only.
             await self._dual_write_candidate(plan, note_id, body, synthesis)
+            logger.info("Queued research_complete candidate for plan %s → note %s", self.plan_id, note_id)
         except Exception as e:
-            logger.warning("Failed to send research completion push: %s", e)
+            logger.warning("Failed to queue research completion candidate: %s", e)
 
     async def _dual_write_candidate(
         self, plan: Dict[str, Any], note_id: str, body: Optional[str], synthesis: str
