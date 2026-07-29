@@ -297,10 +297,16 @@ async def check_staleness(world: WorldStateV1) -> list:
     return stale
 
 
-async def get_self_state(user_id: str = DEFAULT_USER_ID) -> SelfStateV1:
+async def get_self_state(user_id: str = DEFAULT_USER_ID, db: Optional[Session] = None) -> SelfStateV1:
     """Sara's own state: current kernel mode/wake-reason (the real published
     state, not a guess) plus open concerns derived from the canonical
-    body-state projection's degraded components."""
+    body-state projection's degraded components.
+
+    `db` (Arc 4.2, optional so existing callers that only want kernel/body
+    state keep working unchanged) reads the rolling self-story —
+    sara_journal_service uses a sync Session, so this must be the same kind
+    of Session get_context_snapshot's caller already has, not a new
+    connection opened here."""
     from app.services.body_state_projection import get_body_state_projection
     from app.services.kernel import get_state as kernel_get_state
 
@@ -310,6 +316,14 @@ async def get_self_state(user_id: str = DEFAULT_USER_ID) -> SelfStateV1:
 
     open_concerns = [c.impact for c in body_state.components if c.status.value == "degraded" and c.impact]
 
+    self_story = None
+    if db is not None:
+        try:
+            from app.services.sara_journal_service import sara_journal
+            self_story = await sara_journal.get_self_story(db, user_id)
+        except Exception as e:
+            logger.debug(f"[context_snapshot] self_story read failed: {e}")
+
     return SelfStateV1(
         as_of=now,
         kernel_state=kernel_state.get("state") or "ambient",
@@ -317,6 +331,7 @@ async def get_self_state(user_id: str = DEFAULT_USER_ID) -> SelfStateV1:
         focus=None,  # no focus-tracking source exists yet (C7 territory)
         open_concerns=open_concerns,
         confidence=body_state.confidence if body_state.components else 0.5,
+        self_story=self_story,
     )
 
 
@@ -350,7 +365,7 @@ async def get_context_snapshot(db: Session, user_id: str = DEFAULT_USER_ID) -> D
     Body state and the intent graph already have their own endpoints; this
     ties the remaining three together the same way."""
     world = await get_world_state(db, user_id)
-    self_ = await get_self_state(user_id)
+    self_ = await get_self_state(user_id, db=db)
     relationship = get_relationship_state(db, user_id)
 
     return {
@@ -477,6 +492,11 @@ def render_engaged_context(
         lines.append(f"- **self**: kernel_state={self_state['kernel_state']}")
     for concern in (self_state.get("open_concerns") or [])[:5]:
         lines.append(f"  - concern: {concern}")
+    if self_state.get("self_story"):
+        # Arc 4.2: "included in every context in every state" — its own
+        # block, not folded into the terse `- **self**:` bullet line, since
+        # this is prose (a paragraph), not a data point.
+        lines.append(f"\n### Your ongoing self-story\n{self_state['self_story']}")
 
     relationship = context.get("relationship_state") or {}
     if relationship.get("active_conversation_id"):

@@ -199,6 +199,18 @@ class TestProposalGeneration:
 class TestReflectionCycle:
     """Tests for the full reflection cycle."""
 
+    @pytest.fixture(autouse=True)
+    def _mock_self_story(self):
+        """Arc 4.2's self-story step makes a real LLM call
+        (sara_journal_service uses a sync Session, incompatible with this
+        class's AsyncMock db, so it opens its own SessionLocal()) — the LLM
+        call is what actually needs mocking to keep cycle-level tests fast
+        and isolated. Tests that care about self-story specifically
+        override this."""
+        with patch("app.services.sara_journal_service.sara_journal.write_self_story",
+                   new=AsyncMock(return_value=None)):
+            yield
+
     @pytest.fixture
     def reflection_agent(self):
         """Create a ReflectionAgent via the factory function pattern."""

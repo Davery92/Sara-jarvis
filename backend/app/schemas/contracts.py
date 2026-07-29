@@ -165,6 +165,11 @@ class SelfStateV1(BaseModel):
     focus: Optional[str] = None
     open_concerns: List[str] = Field(default_factory=list)
     confidence: float = 1.0
+    # Arc 4.2: the rolling consolidated self-story — "yesterday's self
+    # constrains today's." A few hundred tokens, meant to sit in every
+    # context in every state (chat, kernel, dreaming). None until the
+    # first dreaming cycle writes one.
+    self_story: Optional[str] = None
 
 
 class KernelStateV1(BaseModel):

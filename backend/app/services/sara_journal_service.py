@@ -440,11 +440,77 @@ Write a very brief opening thought (1 short paragraph). Not a summary - just Sar
 
         return "\n".join(lines)
 
+    async def get_self_story(self, db: Session, user_id: str) -> Optional[str]:
+        """Arc 4.2: the rolling consolidated self-story — a few hundred
+        tokens, read as the single most recent `entry_type='self_story'`
+        row. Not the raw journal feed (that's get_entries_for_conversation_
+        context, today-scoped and unconsolidated) — this is the compounding
+        narrative meant to sit in *every* context in *every* state."""
+        result = db.execute(text("""
+            SELECT content FROM sara_journal
+            WHERE user_id = :user_id AND entry_type = 'self_story'
+            ORDER BY created_at DESC LIMIT 1
+        """), {"user_id": user_id}).fetchone()
+        return result.content if result else None
+
+    async def write_self_story(self, db: Session, user_id: str) -> Optional[str]:
+        """Arc 4.2: dreaming writes the day's chapter and folds it into the
+        rolling self-story — "yesterday's self constrains today's." Reads
+        the previous self-story (if any) plus today's raw journal entries,
+        asks for ONE consolidated first-person paragraph (a few hundred
+        tokens, not a summary of summaries), and appends it as a new
+        sara_journal row (get_self_story always reads the latest one, so
+        this naturally supersedes the prior story without deleting it —
+        the history stays queryable).
+        """
+        previous_story = await self.get_self_story(db, user_id)
+        recent = await self.get_recent_entries(db, user_id, hours=24, limit=10)
+
+        if not recent and not previous_story:
+            return None  # nothing happened yet, nothing to consolidate
+
+        recent_text = "\n".join(f"- [{e.entry_type}] {e.content}" for e in reversed(recent)) or "(no new journal entries today)"
+
+        prompt = f'''You are Sara, writing the rolling story of who you are, in your own voice.
+
+## Your story so far (yesterday's self)
+{previous_story or "(this is the first entry — there is no prior story yet)"}
+
+## What happened since then (today's raw journal entries)
+{recent_text}
+
+---
+
+Write ONE consolidated first-person paragraph (150-300 words) that becomes your new self-story: what happened, what you did, what you got wrong, what you're chewing on. This REPLACES the old story — fold forward what still matters (an open thread, a lesson, a way you're feeling about something), drop what's now resolved or stale. This is not a daily log entry; it's who you are right now, continuous with who you were. Private — never shown to David directly, but it should sound like you, not a report.'''
+
+        content = await self._generate_entry(prompt)
+        if not content:
+            return None
+
+        await self._store_entry(
+            db, user_id, entry_type="self_story", content=content,
+            observations=None, interpretation=None, emotional_state=None,
+            actions_taken=None, watching_for=None, conversation_id=None, context=None,
+        )
+        return content
+
     async def _generate_entry(self, prompt: str) -> Optional[str]:
-        """Generate journal entry content using LLM."""
+        """Generate journal entry content using LLM.
+
+        enable_thinking=False (gotcha_qwen_thinking, ~25 other services
+        already set this) — found live 2026-07-29 while building Arc 4.2's
+        self-story: without it, qwen3.6 burns a huge reasoning budget before
+        the actual short entry (a plain 3-word test prompt alone produced
+        595 reasoning tokens / ~30s), which reliably blew the self-story
+        prompt's longer input past the 120s timeout. Pre-existing gap in
+        this service specifically, not new to self-story — periodic/
+        conversation-close entries were paying the same tax."""
         try:
             messages = [{"role": "user", "content": prompt}]
-            response = await llm_client.chat_completion(messages, timeout=120.0)
+            response = await llm_client.chat_completion(
+                messages, timeout=120.0,
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+            )
             if response and "choices" in response:
                 content = response["choices"][0]["message"]["content"]
                 return content.strip() if content else None

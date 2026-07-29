@@ -249,6 +249,20 @@ class DeliberationEngine:
         except Exception as _sige:
             logger.debug(f"situational signals injection skipped: {_sige}")
 
+        # 3f. Self-story (Arc 4.2) — "yesterday's self constrains today's."
+        # sara_journal_service uses a sync Session; read fresh each turn
+        # (same live-DB-read pattern as life_facts/scratchpad above), not
+        # cached in working_memory's Redis snapshot.
+        try:
+            from app.db.session import SessionLocal
+            from app.services.sara_journal_service import sara_journal
+            with SessionLocal() as _sdb:
+                _story = await sara_journal.get_self_story(_sdb, user_id)
+            if _story:
+                user_msg = f"## Your ongoing self-story\n{_story}\n\n{user_msg}"
+        except Exception as _sse:
+            logger.debug(f"self-story injection skipped: {_sse}")
+
         # 4. LLM call — deep runs use the strong model (Anthropic), hourly
         # runs stay on the local BackgroundLLMClient (qwen).
         try:

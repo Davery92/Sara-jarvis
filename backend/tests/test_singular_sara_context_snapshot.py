@@ -109,6 +109,66 @@ class TestSelfState:
         assert state.kernel_state == "ambient"
         assert state.wake_reason == "promoted_event"
         assert state.open_concerns == ["background self is offline"]
+        assert state.self_story is None  # no db passed — unchanged, backward compatible
+
+    @pytest.mark.asyncio
+    async def test_self_story_populates_when_db_passed(self, monkeypatch):
+        """Arc 4.2: passing db reads the rolling self-story; omitting it
+        (the call above) stays exactly as before — additive, not breaking."""
+        from unittest.mock import AsyncMock
+        from app.schemas.contracts import BodyStateV1
+        from datetime import datetime, timezone
+
+        async def _fake_get_body_state_projection(user_id):
+            return BodyStateV1(as_of=datetime.now(timezone.utc), healthy=True, components=[], degraded_count=0, confidence=1.0)
+
+        async def _fake_kernel_get_state(user_id):
+            return {"state": "ambient", "wake_reason": None}
+
+        import app.services.body_state_projection as bsp
+        import app.services.kernel as kernel
+        import app.services.sara_journal_service as sjs
+
+        monkeypatch.setattr(bsp, "get_body_state_projection", _fake_get_body_state_projection)
+        monkeypatch.setattr(kernel, "get_state", _fake_kernel_get_state)
+        monkeypatch.setattr(
+            sjs.sara_journal, "get_self_story",
+            AsyncMock(return_value="Yesterday I helped David plan the Risk Ninja pitch."),
+        )
+
+        state = await ctx.get_self_state("user-1", db=SimpleNamespace())
+
+        assert state.self_story == "Yesterday I helped David plan the Risk Ninja pitch."
+
+    @pytest.mark.asyncio
+    async def test_self_story_read_failure_degrades_silently(self, monkeypatch):
+        """A broken journal read must not take down the rest of self_state
+        — same slice-isolation discipline as world_state."""
+        from unittest.mock import AsyncMock
+        from app.schemas.contracts import BodyStateV1
+        from datetime import datetime, timezone
+
+        async def _fake_get_body_state_projection(user_id):
+            return BodyStateV1(as_of=datetime.now(timezone.utc), healthy=True, components=[], degraded_count=0, confidence=1.0)
+
+        async def _fake_kernel_get_state(user_id):
+            return {"state": "ambient", "wake_reason": None}
+
+        import app.services.body_state_projection as bsp
+        import app.services.kernel as kernel
+        import app.services.sara_journal_service as sjs
+
+        monkeypatch.setattr(bsp, "get_body_state_projection", _fake_get_body_state_projection)
+        monkeypatch.setattr(kernel, "get_state", _fake_kernel_get_state)
+        monkeypatch.setattr(
+            sjs.sara_journal, "get_self_story",
+            AsyncMock(side_effect=RuntimeError("db exploded")),
+        )
+
+        state = await ctx.get_self_state("user-1", db=SimpleNamespace())
+
+        assert state.self_story is None
+        assert state.kernel_state == "ambient"
 
 
 class TestRelationshipState:
@@ -144,7 +204,7 @@ class TestRelationshipState:
 class TestGetContextSnapshot:
     @pytest.mark.asyncio
     async def test_assembles_all_three_quadrants(self, monkeypatch):
-        async def _fake_self_state(user_id):
+        async def _fake_self_state(user_id, db=None):
             from app.schemas.contracts import SelfStateV1
             from datetime import datetime, timezone
             return SelfStateV1(as_of=datetime.now(timezone.utc), kernel_state="ambient")

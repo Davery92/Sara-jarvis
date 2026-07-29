@@ -53,6 +53,20 @@ class TestRenderEngagedContext:
         assert "kernel_state=ambient" in text
         assert "consolidation stalled" in text
 
+    def test_self_story_renders_under_own_heading(self):
+        """Arc 4.2: 'included in every context in every state' — this is
+        the chat/kernel-context half of that (dreaming writes it, this
+        reads it)."""
+        self_state = {"kernel_state": "ambient", "self_story": "I've been helping David with Risk Ninja this week."}
+        text = render_engaged_context(_context(self_state=self_state), open_intents=0, recall_traces=[])
+        assert "Your ongoing self-story" in text
+        assert "I've been helping David with Risk Ninja this week." in text
+
+    def test_no_self_story_omits_the_heading(self):
+        self_state = {"kernel_state": "ambient"}
+        text = render_engaged_context(_context(self_state=self_state), open_intents=0, recall_traces=[])
+        assert "Your ongoing self-story" not in text
+
     def test_recall_traces_render_under_own_heading(self):
         traces = [{"kind": "episode", "confidence": "observed", "text": "David mentioned the Q3 report"}]
         text = render_engaged_context(_context(), open_intents=0, recall_traces=traces)

@@ -23,6 +23,10 @@ from .proposal_generator import PromptProposalGenerator, PromptProposal
 
 logger = logging.getLogger(__name__)
 
+# Single-user system — same default every other reflection-adjacent service
+# (prediction_engine._DAVID, kernel.DEFAULT_USER_ID) uses.
+_DAVID_USER_ID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
+
 
 @dataclass
 class ReflectionCycleResult:
@@ -38,6 +42,11 @@ class ReflectionCycleResult:
     # (total_resolved, overall_by_bucket, by_domain_bucket), not a new
     # store. None if the prediction table has nothing resolved yet.
     prediction_calibration: Optional[Dict[str, Any]] = None
+    # Arc 4.2: the rolling consolidated self-story dreaming just wrote this
+    # cycle (None if nothing happened yet to consolidate). The persisted
+    # story lives in sara_journal (entry_type='self_story'); this is just
+    # this cycle's copy for the caller/logs.
+    self_story: Optional[str] = None
     duration_seconds: float = 0
 
     def to_dict(self) -> Dict[str, Any]:
@@ -55,6 +64,7 @@ class ReflectionCycleResult:
             "proposals_generated": len(self.proposals_generated),
             "uncertainties_flagged": self.uncertainties_flagged,
             "prediction_calibration": self.prediction_calibration,
+            "self_story": self.self_story,
             "duration_seconds": self.duration_seconds,
         }
 
@@ -155,7 +165,24 @@ class ReflectionAgent:
             except Exception as e:
                 logger.warning(f"Prediction calibration scoring failed (non-critical): {e}")
 
-            # 7. Self-assess this reflection cycle
+            # 7. Fold today's chapter into the rolling self-story (Arc 4.2)
+            # — "yesterday's self constrains today's." sara_journal_service
+            # uses a sync Session (db.execute without await) throughout,
+            # unlike self.db here (an AsyncSession, needed for compute_
+            # calibration above) — a separate sync session for just this
+            # step, matching the pattern other services already use when
+            # they need to call a sync-session service from async code.
+            try:
+                from app.db.session import SessionLocal
+                from app.services.sara_journal_service import sara_journal
+                with SessionLocal() as sync_db:
+                    result.self_story = await sara_journal.write_self_story(sync_db, _DAVID_USER_ID)
+                if result.self_story:
+                    logger.info(f"Self-story updated ({len(result.self_story)} chars)")
+            except Exception as e:
+                logger.warning(f"Self-story consolidation failed (non-critical): {e}")
+
+            # 8. Self-assess this reflection cycle
             await self._self_assess(result)
 
         except Exception as e:
