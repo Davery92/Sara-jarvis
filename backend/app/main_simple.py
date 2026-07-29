@@ -5737,14 +5737,6 @@ try:
 except Exception as e:
     logger.error(f"❌ Model-of-you routes failed to load: {e}")
 
-# Include Emotion routes (Phase 2)
-try:
-    from app.routes.emotions import router as emotions_router
-    app.include_router(emotions_router, prefix="/api/emotions", tags=["Emotions"])
-    logger.info("✅ Emotion routes loaded successfully")
-except Exception as e:
-    logger.error(f"❌ Emotion routes failed to load: {e}")
-
 # Include Intelligence Reports routes (Phase 3)
 try:
     from app.routes.intelligence_reports import router as reports_router
