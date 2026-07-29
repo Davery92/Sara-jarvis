@@ -67,6 +67,19 @@ class TestRenderEngagedContext:
         text = render_engaged_context(_context(self_state=self_state), open_intents=0, recall_traces=[])
         assert "Your ongoing self-story" not in text
 
+    def test_theory_of_david_renders_under_own_heading(self):
+        """Arc 4.5: same 'every context in every state' treatment as
+        self-story, but sourced from relationship_state."""
+        relationship_state = {"theory_of_david": "David trains around 1pm and is a bit stressed this week."}
+        text = render_engaged_context(_context(relationship_state=relationship_state), open_intents=0, recall_traces=[])
+        assert "What you understand about David" in text
+        assert "David trains around 1pm and is a bit stressed this week." in text
+
+    def test_no_theory_of_david_omits_the_heading(self):
+        relationship_state = {"active_conversation_id": "conv-1"}
+        text = render_engaged_context(_context(relationship_state=relationship_state), open_intents=0, recall_traces=[])
+        assert "What you understand about David" not in text
+
     def test_recall_traces_render_under_own_heading(self):
         traces = [{"kind": "episode", "confidence": "observed", "text": "David mentioned the Q3 report"}]
         text = render_engaged_context(_context(), open_intents=0, recall_traces=traces)

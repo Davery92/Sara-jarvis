@@ -211,6 +211,15 @@ class TestReflectionCycle:
                    new=AsyncMock(return_value=None)):
             yield
 
+    @pytest.fixture(autouse=True)
+    def _mock_theory_of_david(self):
+        """Arc 4.5's theory-of-david step is the same shape as self-story
+        (step 7) — a real LLM call via a separate sync SessionLocal(). Mock
+        it for the same reason: keep cycle-level tests fast and isolated."""
+        with patch("app.services.sara_journal_service.sara_journal.write_theory_of_david",
+                   new=AsyncMock(return_value=None)):
+            yield
+
     @pytest.fixture
     def reflection_agent(self):
         """Create a ReflectionAgent via the factory function pattern."""
@@ -275,6 +284,30 @@ class TestReflectionCycle:
             result = await reflection_agent.run_reflection_cycle()
 
         assert result.prediction_calibration is None
+        assert result.cycle_start is not None
+
+    @pytest.mark.asyncio
+    async def test_reflection_cycle_updates_theory_of_david(self, reflection_agent):
+        """Arc 4.5: the reflection cycle must call write_theory_of_david and
+        carry its result on the cycle result — this test overrides the
+        class-level autouse mock to assert the real wiring, same pattern as
+        self-story's would if it had an equivalent override test."""
+        with patch("app.services.sara_journal_service.sara_journal.write_theory_of_david",
+                    new=AsyncMock(return_value="David trains around 1pm and is stressed this week.")):
+            result = await reflection_agent.run_reflection_cycle()
+
+        assert result.theory_of_david == "David trains around 1pm and is stressed this week."
+
+    @pytest.mark.asyncio
+    async def test_theory_of_david_failure_does_not_break_the_cycle(self, reflection_agent):
+        """Isolated the same way as self-story (step 7) and calibration
+        (step 6) — a failure here must not take down the rest of the
+        reflection cycle."""
+        with patch("app.services.sara_journal_service.sara_journal.write_theory_of_david",
+                    new=AsyncMock(side_effect=RuntimeError("db exploded"))):
+            result = await reflection_agent.run_reflection_cycle()
+
+        assert result.theory_of_david is None
         assert result.cycle_start is not None
 
 

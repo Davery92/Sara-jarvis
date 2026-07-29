@@ -47,6 +47,11 @@ class ReflectionCycleResult:
     # story lives in sara_journal (entry_type='self_story'); this is just
     # this cycle's copy for the caller/logs.
     self_story: Optional[str] = None
+    # Arc 4.5: the rolling consolidated understanding of David dreaming
+    # just updated this cycle. Persisted in sara_journal
+    # (entry_type='theory_of_david'); this is this cycle's copy for the
+    # caller/logs.
+    theory_of_david: Optional[str] = None
     duration_seconds: float = 0
 
     def to_dict(self) -> Dict[str, Any]:
@@ -65,6 +70,7 @@ class ReflectionCycleResult:
             "uncertainties_flagged": self.uncertainties_flagged,
             "prediction_calibration": self.prediction_calibration,
             "self_story": self.self_story,
+            "theory_of_david": self.theory_of_david,
             "duration_seconds": self.duration_seconds,
         }
 
@@ -182,7 +188,20 @@ class ReflectionAgent:
             except Exception as e:
                 logger.warning(f"Self-story consolidation failed (non-critical): {e}")
 
-            # 8. Self-assess this reflection cycle
+            # 8. Fold fresh substrate into the theory-of-David document
+            # (Arc 4.5) — same sync-session shape as step 7, since it's the
+            # same sara_journal_service.
+            try:
+                from app.db.session import SessionLocal
+                from app.services.sara_journal_service import sara_journal
+                with SessionLocal() as sync_db:
+                    result.theory_of_david = await sara_journal.write_theory_of_david(sync_db, _DAVID_USER_ID)
+                if result.theory_of_david:
+                    logger.info(f"Theory-of-David updated ({len(result.theory_of_david)} chars)")
+            except Exception as e:
+                logger.warning(f"Theory-of-David consolidation failed (non-critical): {e}")
+
+            # 9. Self-assess this reflection cycle
             await self._self_assess(result)
 
         except Exception as e:

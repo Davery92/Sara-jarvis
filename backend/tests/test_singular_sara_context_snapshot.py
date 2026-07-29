@@ -200,6 +200,39 @@ class TestRelationshipState:
         assert state.active_conversation_id is None
         assert state.confidence < 0.6
 
+    def test_theory_of_david_populates_from_latest_row(self):
+        """Arc 4.5: get_relationship_state reads the latest
+        entry_type='theory_of_david' row directly (sync inline query, not
+        through sara_journal's async method — get_relationship_state itself
+        is sync)."""
+        rows = [
+            SimpleNamespace(fetchone=lambda: None),  # conversation query — none active
+            SimpleNamespace(fetchone=lambda: SimpleNamespace(content="David trains around 1pm.")),
+        ]
+        db = SimpleNamespace()
+        db.execute = lambda *a, **kw: rows.pop(0)
+        state = ctx.get_relationship_state(db, "user-1")
+
+        assert state.theory_of_david == "David trains around 1pm."
+
+    def test_theory_of_david_read_failure_degrades_silently(self):
+        """Same slice-isolation discipline as self_story — a broken
+        theory_of_david read must not affect the conversation lookup."""
+        calls = {"n": 0}
+
+        def _execute(*a, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return SimpleNamespace(fetchone=lambda: ("conv-123",))
+            raise RuntimeError("db exploded")
+
+        db = SimpleNamespace()
+        db.execute = _execute
+        state = ctx.get_relationship_state(db, "user-1")
+
+        assert state.active_conversation_id == "conv-123"
+        assert state.theory_of_david is None
+
 
 class TestGetContextSnapshot:
     @pytest.mark.asyncio

@@ -354,9 +354,28 @@ def get_relationship_state(db: Session, user_id: str = DEFAULT_USER_ID) -> Relat
         logger.debug(f"[context_snapshot] conversation query failed: {e}")
         confidence = 0.3
 
+    # Arc 4.5: read the latest theory-of-david row directly rather than
+    # through sara_journal_service.get_theory_of_david — that method is
+    # `async def` (matching write_theory_of_david's shape) but this
+    # function is sync, and db here is the same sync Session that method
+    # expects, so the tiny query is inlined instead of introducing an
+    # async/sync collision into this function's signature.
+    theory_of_david: Optional[str] = None
+    try:
+        row = db.execute(text("""
+            SELECT content FROM sara_journal
+            WHERE user_id = :uid AND entry_type = 'theory_of_david'
+            ORDER BY created_at DESC LIMIT 1
+        """), {"uid": user_id}).fetchone()
+        if row:
+            theory_of_david = row.content
+    except Exception as e:
+        logger.debug(f"[context_snapshot] theory_of_david query failed: {e}")
+
     return RelationshipStateV1(
         as_of=now, user_id=user_id, active_conversation_id=active_conversation_id,
         tone=None, recent_promises=[], confidence=confidence,
+        theory_of_david=theory_of_david,
     )
 
 
@@ -501,6 +520,10 @@ def render_engaged_context(
     relationship = context.get("relationship_state") or {}
     if relationship.get("active_conversation_id"):
         lines.append(f"- **relationship**: active_conversation={relationship['active_conversation_id']}")
+    if relationship.get("theory_of_david"):
+        # Arc 4.5: same "every context in every state" treatment as
+        # self-story — its own prose block, not a bullet.
+        lines.append(f"\n### What you understand about David\n{relationship['theory_of_david']}")
 
     lines.append(f"- **open_intents**: {open_intents}")
 

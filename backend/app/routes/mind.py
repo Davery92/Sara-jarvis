@@ -46,6 +46,32 @@ async def get_self_model(current_user=Depends(get_current_user)):
         return await build_self_model(db, str(current_user.id))
 
 
+@router.get("/theory-of-david")
+async def get_theory_of_david_route(current_user=Depends(get_current_user)):
+    """Arc 4.5: Sara's rolling consolidated understanding of David —
+    rhythms, preferences, stress signatures, active arcs. Read-only here by
+    design: corrections don't go through this endpoint, they go through the
+    existing `life_fact` stated-correction path (a David-stated correction
+    in chat already upserts as authoritative via
+    `life_facts.detect_and_apply_correction`), and the next dreaming cycle's
+    consolidation reads that fresh state automatically — "grow from
+    model-of-you + life_fact; do not create a new store" applies to
+    corrections too, not just the substrate."""
+    from app.db.session import get_async_session_factory
+    from sqlalchemy import text
+    sf = get_async_session_factory()
+    async with sf() as db:
+        row = (await db.execute(text("""
+            SELECT content, created_at FROM sara_journal
+            WHERE user_id = :u AND entry_type = 'theory_of_david'
+            ORDER BY created_at DESC LIMIT 1
+        """), {"u": str(current_user.id)})).fetchone()
+        return {
+            "content": row.content if row else None,
+            "updated_at": row.created_at.isoformat() if row and row.created_at else None,
+        }
+
+
 @router.get("/journal")
 async def get_inner_life(limit: int = 20, current_user=Depends(get_current_user)):
     """Sara's inner life (§7.5): her reflective journal — curiosity findings,

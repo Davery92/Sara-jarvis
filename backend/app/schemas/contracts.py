@@ -153,6 +153,12 @@ class RelationshipStateV1(BaseModel):
     tone: Optional[str] = None
     recent_promises: List[str] = Field(default_factory=list)
     confidence: float = 1.0
+    # Arc 4.5: the rolling consolidated understanding of David — rhythms,
+    # preferences, stress signatures, active arcs. Same "every context in
+    # every state" intent as self_story (SelfStateV1), but about David
+    # rather than Sara, so it lives here. None until the first dreaming
+    # cycle writes one.
+    theory_of_david: Optional[str] = None
 
 
 class SelfStateV1(BaseModel):

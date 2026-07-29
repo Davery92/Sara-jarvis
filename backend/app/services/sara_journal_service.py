@@ -494,6 +494,105 @@ Write ONE consolidated first-person paragraph (150-300 words) that becomes your 
         )
         return content
 
+    async def get_theory_of_david(self, db: Session, user_id: str) -> Optional[str]:
+        """Arc 4.5: the rolling consolidated understanding of David — rhythms,
+        preferences, stress signatures, active arcs — read as the single most
+        recent `entry_type='theory_of_david'` row. Same versioning shape as
+        get_self_story: never updated in place, latest row wins."""
+        result = db.execute(text("""
+            SELECT content FROM sara_journal
+            WHERE user_id = :user_id AND entry_type = 'theory_of_david'
+            ORDER BY created_at DESC LIMIT 1
+        """), {"user_id": user_id}).fetchone()
+        return result.content if result else None
+
+    async def write_theory_of_david(self, db: Session, user_id: str) -> Optional[str]:
+        """Arc 4.5: dreaming updates Sara's understanding of David — "grow
+        from model-of-you + life_fact; do not create a new store." Reads the
+        previous document plus the live substrate of the existing stores
+        (life_fact rhythms, active behavioral patterns, current stress
+        signal, open intents) and asks for ONE consolidated paragraph that
+        replaces the old one, same fold-forward shape as write_self_story.
+
+        Corrections: there is no separate correction UI here by design — a
+        David-stated correction already lands in `life_fact` via
+        `life_facts.detect_and_apply_correction()` (existing, Brain
+        Alignment H3), and the next call to this function reads that fresh
+        state, so the correction folds in automatically on the next
+        consolidation. "Corrections are graduation events into the Arc-5
+        confidence ladder" (per the plan) is aspirational — no confidence
+        ladder exists for life_fact/model-of-you yet (Arc 5 hasn't started);
+        this only wires the honest substrate available today.
+        """
+        previous_doc = await self.get_theory_of_david(db, user_id)
+
+        substrate_lines = []
+        try:
+            from app.services.life_facts import get_life_facts_summary
+            rhythms = await get_life_facts_summary(user_id)
+            if rhythms:
+                substrate_lines.append(f"Known rhythms: {rhythms}")
+        except Exception as e:
+            logger.debug(f"[theory_of_david] life_facts substrate failed: {e}")
+
+        try:
+            from app.services.behavioral_pattern_service import behavioral_pattern_service
+            patterns = await behavioral_pattern_service.get_active_patterns(db, user_id)
+            if patterns:
+                labels = [p.get("description") for p in patterns[:8] if p.get("description")]
+                if labels:
+                    substrate_lines.append("Active behavioral patterns: " + "; ".join(labels))
+        except Exception as e:
+            logger.debug(f"[theory_of_david] behavioral pattern substrate failed: {e}")
+
+        try:
+            from app.services.working_memory import read_memory
+            snap = await read_memory(user_id)
+            substrate_lines.append(
+                f"Current stress signal: {snap.stress_load:.2f} (0=relaxed, 1=highly stressed), "
+                f"alertness {snap.alertness:.2f}, circadian phase {snap.circadian_phase}"
+            )
+        except Exception as e:
+            logger.debug(f"[theory_of_david] stress substrate failed: {e}")
+
+        try:
+            from app.services.intent_graph_projection import get_intent_graph
+            graph = get_intent_graph(db, user_id)
+            if graph.get("total"):
+                steps = [i.get("next_step") or i.get("kind") for i in graph["intents"][:6]]
+                steps = [s for s in steps if s]
+                substrate_lines.append(f"Open arcs ({graph['total']} total): " + "; ".join(steps))
+        except Exception as e:
+            logger.debug(f"[theory_of_david] intent graph substrate failed: {e}")
+
+        substrate_text = "\n".join(substrate_lines) or "(no fresh substrate available this cycle)"
+
+        if not substrate_lines and not previous_doc:
+            return None  # nothing to ground a first document in yet
+
+        prompt = f'''You are Sara, updating your understanding of David — the person you support.
+
+## What you understood before
+{previous_doc or "(this is the first entry — there is no prior understanding yet)"}
+
+## What the data says right now
+{substrate_text}
+
+---
+
+Write ONE consolidated paragraph (150-300 words), in your own voice, about David: his rhythms, preferences, stress signatures, and active arcs right now. This REPLACES the old understanding — fold forward what's still true, update what's changed, drop what's stale or contradicted by fresher data. This should sound like something you'd actually say about him if asked, not a data dump — concrete and specific, not generic.'''
+
+        content = await self._generate_entry(prompt)
+        if not content:
+            return None
+
+        await self._store_entry(
+            db, user_id, entry_type="theory_of_david", content=content,
+            observations=None, interpretation=None, emotional_state=None,
+            actions_taken=None, watching_for=None, conversation_id=None, context=None,
+        )
+        return content
+
     async def _generate_entry(self, prompt: str) -> Optional[str]:
         """Generate journal entry content using LLM.
 

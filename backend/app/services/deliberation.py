@@ -263,6 +263,18 @@ class DeliberationEngine:
         except Exception as _sse:
             logger.debug(f"self-story injection skipped: {_sse}")
 
+        # 3g. Theory-of-David (Arc 4.5) — same live-DB-read pattern as 3f,
+        # same table, same sync Session.
+        try:
+            from app.db.session import SessionLocal
+            from app.services.sara_journal_service import sara_journal
+            with SessionLocal() as _tdb:
+                _tod = await sara_journal.get_theory_of_david(_tdb, user_id)
+            if _tod:
+                user_msg = f"## What you understand about David\n{_tod}\n\n{user_msg}"
+        except Exception as _tode:
+            logger.debug(f"theory-of-david injection skipped: {_tode}")
+
         # 4. LLM call — deep runs use the strong model (Anthropic), hourly
         # runs stay on the local BackgroundLLMClient (qwen).
         try:

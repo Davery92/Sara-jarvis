@@ -297,3 +297,106 @@ class TestSelfStory:
 
         assert result is None
         mock_store.assert_not_awaited()
+
+
+class TestTheoryOfDavid:
+    """Arc 4.5: 'one versioned document she maintains in dreaming —
+    rhythms, preferences, stress signatures, active arcs... grow from
+    model-of-you + life_fact; do not create a new store.'
+    get_theory_of_david/write_theory_of_david, same shape as self-story but
+    sourced from the substrate services instead of raw journal entries."""
+
+    @pytest.mark.asyncio
+    async def test_get_theory_of_david_reads_latest_row(self, journal_service):
+        mock_db = MagicMock()
+        mock_db.execute.return_value.fetchone.return_value = MagicMock(content="David trains around 1pm.")
+        result = await journal_service.get_theory_of_david(mock_db, "user-1")
+        assert result == "David trains around 1pm."
+        query = mock_db.execute.call_args[0][0].text
+        assert "entry_type = 'theory_of_david'" in query
+        assert "ORDER BY created_at DESC" in query
+
+    @pytest.mark.asyncio
+    async def test_get_theory_of_david_none_when_no_row(self, journal_service):
+        mock_db = MagicMock()
+        mock_db.execute.return_value.fetchone.return_value = None
+        result = await journal_service.get_theory_of_david(mock_db, "user-1")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_write_theory_of_david_nothing_to_consolidate_returns_none(self, journal_service):
+        """No previous doc and every substrate source empty — genuinely
+        nothing to ground a first document in."""
+        mock_db = MagicMock()
+        with patch.object(journal_service, "get_theory_of_david", new=AsyncMock(return_value=None)), \
+             patch("app.services.life_facts.get_life_facts_summary", new=AsyncMock(return_value=None)), \
+             patch("app.services.behavioral_pattern_service.behavioral_pattern_service.get_active_patterns",
+                   new=AsyncMock(return_value=[])), \
+             patch("app.services.working_memory.read_memory",
+                   new=AsyncMock(side_effect=Exception("no working memory in test"))), \
+             patch("app.services.intent_graph_projection.get_intent_graph",
+                   return_value={"total": 0, "intents": []}):
+            result = await journal_service.write_theory_of_david(mock_db, "user-1")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_write_theory_of_david_folds_previous_and_substrate_into_prompt(self, journal_service):
+        stress_snap = MagicMock(stress_load=0.65, alertness=0.4, circadian_phase="evening")
+        with patch.object(journal_service, "get_theory_of_david", new=AsyncMock(return_value="Old understanding.")), \
+             patch("app.services.life_facts.get_life_facts_summary",
+                   new=AsyncMock(return_value="David normally: wakes 5:00, trains 13:10.")), \
+             patch("app.services.behavioral_pattern_service.behavioral_pattern_service.get_active_patterns",
+                   new=AsyncMock(return_value=[{"description": "Checks calendar before leaving for work."}])), \
+             patch("app.services.working_memory.read_memory", new=AsyncMock(return_value=stress_snap)), \
+             patch("app.services.intent_graph_projection.get_intent_graph",
+                   return_value={"total": 1, "intents": [{"next_step": "Finish the Risk Ninja deck", "kind": "commitment"}]}), \
+             patch.object(journal_service, "_generate_entry", new=AsyncMock(return_value="New consolidated understanding.")) as mock_gen, \
+             patch.object(journal_service, "_store_entry", new=AsyncMock()) as mock_store:
+            result = await journal_service.write_theory_of_david(MagicMock(), "user-1")
+
+        assert result == "New consolidated understanding."
+        prompt = mock_gen.call_args[0][0]
+        assert "Old understanding." in prompt
+        assert "wakes 5:00, trains 13:10" in prompt
+        assert "Checks calendar before leaving for work." in prompt
+        assert "Finish the Risk Ninja deck" in prompt
+        assert "0.65" in prompt
+        mock_store.assert_awaited_once()
+        assert mock_store.call_args.kwargs["entry_type"] == "theory_of_david"
+        assert mock_store.call_args.kwargs["content"] == "New consolidated understanding."
+
+    @pytest.mark.asyncio
+    async def test_write_theory_of_david_first_ever_entry_has_no_prior_placeholder(self, journal_service):
+        with patch.object(journal_service, "get_theory_of_david", new=AsyncMock(return_value=None)), \
+             patch("app.services.life_facts.get_life_facts_summary",
+                   new=AsyncMock(return_value="David normally: wakes 5:00.")), \
+             patch("app.services.behavioral_pattern_service.behavioral_pattern_service.get_active_patterns",
+                   new=AsyncMock(return_value=[])), \
+             patch("app.services.working_memory.read_memory",
+                   new=AsyncMock(return_value=MagicMock(stress_load=0.3, alertness=0.5, circadian_phase="normal"))), \
+             patch("app.services.intent_graph_projection.get_intent_graph",
+                   return_value={"total": 0, "intents": []}), \
+             patch.object(journal_service, "_generate_entry", new=AsyncMock(return_value="My first understanding.")) as mock_gen, \
+             patch.object(journal_service, "_store_entry", new=AsyncMock()):
+            result = await journal_service.write_theory_of_david(MagicMock(), "user-1")
+
+        assert result == "My first understanding."
+        prompt = mock_gen.call_args[0][0]
+        assert "there is no prior understanding yet" in prompt
+
+    @pytest.mark.asyncio
+    async def test_write_theory_of_david_llm_failure_returns_none(self, journal_service):
+        with patch.object(journal_service, "get_theory_of_david", new=AsyncMock(return_value="Old understanding.")), \
+             patch("app.services.life_facts.get_life_facts_summary", new=AsyncMock(return_value=None)), \
+             patch("app.services.behavioral_pattern_service.behavioral_pattern_service.get_active_patterns",
+                   new=AsyncMock(return_value=[])), \
+             patch("app.services.working_memory.read_memory",
+                   new=AsyncMock(return_value=MagicMock(stress_load=0.3, alertness=0.5, circadian_phase="normal"))), \
+             patch("app.services.intent_graph_projection.get_intent_graph",
+                   return_value={"total": 0, "intents": []}), \
+             patch.object(journal_service, "_generate_entry", new=AsyncMock(return_value=None)), \
+             patch.object(journal_service, "_store_entry", new=AsyncMock()) as mock_store:
+            result = await journal_service.write_theory_of_david(MagicMock(), "user-1")
+
+        assert result is None
+        mock_store.assert_not_awaited()
