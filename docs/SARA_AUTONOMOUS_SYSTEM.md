@@ -364,8 +364,6 @@ curl -X POST http://localhost:8000/autonomous/sweep/standard?personality_mode=co
 # View recent insights
 curl http://localhost:8000/autonomous/insights?limit=10
 
-# Check memory service
-curl http://localhost:8000/memory/search?query=test&limit=5
 ```
 
 ---

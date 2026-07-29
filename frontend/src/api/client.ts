@@ -546,11 +546,6 @@ class ApiClient {
   }
 
   // Memory/Knowledge endpoints
-  async searchMemory(query: string): Promise<any[]> {
-    const response = await this.client.get(`/memory/search?q=${encodeURIComponent(query)}`)
-    return response.data
-  }
-
   async addMemory(content: string, tags?: string[]): Promise<any> {
     const response = await this.client.post('/memory', { content, tags })
     return response.data

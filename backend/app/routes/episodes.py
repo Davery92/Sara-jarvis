@@ -412,36 +412,6 @@ async def find_episodes_by_content(
 
 
 # ---------------------------------------------------------------------------
-# Memory search (GET /memory/search)  — uses llm_client from main_simple
-# ---------------------------------------------------------------------------
-
-@router.get("/memory/search")
-async def search_memory(
-    query: str,
-    limit: int = 10,
-    current_user: User = Depends(get_current_user),
-):
-    """Search through conversation memory"""
-    if not query.strip():
-        return {"results": []}
-
-    try:
-        # Import llm_client lazily to avoid circular imports
-        from app.main_simple import llm_client
-
-        # Use the existing search_memory_tool method
-        search_results = await llm_client.search_memory_tool(query, current_user.id)
-
-        return {"query": query, "results": search_results}
-
-    except Exception as e:
-        logger.error(f"Memory search error: {e}")
-        raise HTTPException(
-            status_code=500, detail=f"Memory search failed: {str(e)}"
-        )
-
-
-# ---------------------------------------------------------------------------
 # Dream Insights  (/memory/insights)
 # ---------------------------------------------------------------------------
 
