@@ -311,7 +311,94 @@ async def get_context_snapshot(db: Session, user_id: str = DEFAULT_USER_ID) -> D
     }
 
 
-def render_engaged_context(context: Dict[str, Any], open_intents: int, recall_traces: list) -> str:
+async def get_extended_signals(db: Session, user_id: str = DEFAULT_USER_ID, message: str = "") -> Dict[str, Optional[str]]:
+    """Arc 2.3 gap-closing (2026-07-29): the categories the side-by-side
+    comparison log measured present in the old ~19-source assembly and
+    missing from the 4-source shadow — pkg, daily_brief, journal, patterns,
+    device, and Sara's own emotional tone. Calls the exact same underlying
+    services the old assembly's fetchers call (not a re-implementation), so
+    there's one source of truth per category, just two callers of it during
+    the overlap window. Best-effort per category — one failing must never
+    block the others or the turn.
+    """
+    import asyncio
+
+    async def _pkg() -> Optional[str]:
+        try:
+            from app.services.pkg_context_provider import pkg_context
+            return await pkg_context.get_relevant_context(user_id=user_id, message=message, intent=None)
+        except Exception as e:
+            logger.debug(f"[extended_signals] pkg failed: {e}")
+            return None
+
+    async def _daily_brief() -> Optional[str]:
+        try:
+            from app.services.daily_brief import daily_brief_service
+            return await daily_brief_service.get_compiled_brief(user_id)
+        except Exception as e:
+            logger.debug(f"[extended_signals] daily_brief failed: {e}")
+            return None
+
+    async def _journal() -> Optional[str]:
+        try:
+            from app.services.sara_journal_service import sara_journal
+            return await sara_journal.get_entries_for_conversation_context(
+                db=db, user_id=user_id, max_entries=3
+            )
+        except Exception as e:
+            logger.debug(f"[extended_signals] journal failed: {e}")
+            return None
+
+    async def _patterns() -> Optional[str]:
+        try:
+            rows = db.execute(text("""
+                SELECT description, confidence FROM behavioral_pattern
+                WHERE user_id = :uid AND status = 'active'
+                ORDER BY confidence DESC LIMIT 5
+            """), {"uid": user_id}).fetchall()
+            if not rows:
+                return None
+            return "; ".join(f"{r.description} ({r.confidence:.0%})" for r in rows)
+        except Exception as e:
+            logger.debug(f"[extended_signals] patterns failed: {e}")
+            return None
+
+    async def _device() -> Optional[str]:
+        try:
+            from app.services.device_orchestrator import device_orchestrator
+            return await device_orchestrator.get_device_context_for_chat(db, user_id)
+        except Exception as e:
+            logger.debug(f"[extended_signals] device failed: {e}")
+            return None
+
+    async def _emotional_tone() -> Optional[str]:
+        try:
+            from app.services.working_memory import read_memory
+            wm = await read_memory(user_id)
+            if wm and wm.sara_emotional_tone:
+                intensity = getattr(wm, "sara_emotional_intensity", None) or 0.5
+                return f"{wm.sara_emotional_tone} ({intensity:.2f})"
+        except Exception as e:
+            logger.debug(f"[extended_signals] emotional_tone failed: {e}")
+        return None
+
+    pkg, brief, journal, patterns, device, tone = await asyncio.gather(
+        _pkg(), _daily_brief(), _journal(), _patterns(), _device(), _emotional_tone(),
+    )
+
+    def _s(v: Any) -> Optional[str]:
+        return v if isinstance(v, str) and v.strip() else None
+
+    return {
+        "pkg": _s(pkg), "daily_brief": _s(brief), "journal": _s(journal),
+        "patterns": _s(patterns), "device": _s(device), "emotional_tone": _s(tone),
+    }
+
+
+def render_engaged_context(
+    context: Dict[str, Any], open_intents: int, recall_traces: list,
+    extended: Optional[Dict[str, Optional[str]]] = None,
+) -> str:
     """Render kernel.engaged_turn()'s assembled context (world/self/
     relationship + recall) into the markdown block chat's system prompt
     would inject — Arc 2.3's actual 4-source replacement for the ~19-source
@@ -319,7 +406,12 @@ def render_engaged_context(context: Dict[str, Any], open_intents: int, recall_tr
 
     Deliberately dense but plain: one block per slice, only non-null data,
     no editorializing — matches how the other injected context blocks in
-    main_simple.py read (## headers + short lines)."""
+    main_simple.py read (## headers + short lines).
+
+    `extended` (get_extended_signals) folds in the categories the Arc 2.3
+    comparison log measured present in the old assembly and missing here —
+    pkg/daily_brief/journal/patterns/device/emotional_tone — closing the
+    measured gap before the flag flips, not after."""
     lines = ["## Current Situation (world_state + self_state + relationship_state)"]
 
     world = context.get("world_state") or {}
@@ -347,5 +439,19 @@ def render_engaged_context(context: Dict[str, Any], open_intents: int, recall_tr
         lines.append("\n### Relevant memory (memory.recall)")
         for t in recall_traces[:5]:
             lines.append(f"- [{t.get('kind')}, {t.get('confidence')}] {(t.get('text') or '')[:150]}")
+
+    if extended:
+        if extended.get("emotional_tone"):
+            lines.append(f"- **sara_feels**: {extended['emotional_tone']}")
+        if extended.get("patterns"):
+            lines.append(f"- **patterns**: {extended['patterns']}")
+        if extended.get("device"):
+            lines.append(f"\n{extended['device']}")
+        if extended.get("daily_brief"):
+            lines.append(f"\n## Today's Brief\n{extended['daily_brief'][:1500]}")
+        if extended.get("pkg"):
+            lines.append(f"\n## Knowledge Graph\n{extended['pkg'][:1000]}")
+        if extended.get("journal"):
+            lines.append(f"\n## Recent Journal\n{extended['journal'][:1000]}")
 
     return "\n".join(lines)

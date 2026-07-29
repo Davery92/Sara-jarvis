@@ -63,3 +63,49 @@ class TestRenderEngagedContext:
         traces = [{"kind": "episode", "confidence": "observed", "text": f"item {i}"} for i in range(10)]
         text = render_engaged_context(_context(), open_intents=0, recall_traces=traces)
         assert text.count("item ") == 5
+
+
+class TestExtendedSignalsRendering:
+    """Arc 2.3 gap-closing (2026-07-29): the categories the comparison log
+    measured present in the old assembly and missing from the new one —
+    pkg/daily_brief/journal/patterns/device/emotional_tone — folded in via
+    the optional `extended` param before the flag ever flips."""
+
+    def test_no_extended_arg_is_backward_compatible(self):
+        text = render_engaged_context(_context(), open_intents=0, recall_traces=[])
+        assert "Current Situation" in text
+
+    def test_empty_extended_dict_adds_nothing(self):
+        text = render_engaged_context(_context(), open_intents=0, recall_traces=[], extended={})
+        assert "sara_feels" not in text
+
+    def test_none_values_in_extended_are_skipped(self):
+        extended = {"pkg": None, "daily_brief": None, "journal": None,
+                    "patterns": None, "device": None, "emotional_tone": None}
+        text = render_engaged_context(_context(), open_intents=0, recall_traces=[], extended=extended)
+        assert "sara_feels" not in text
+        assert "Today's Brief" not in text
+
+    def test_each_present_category_renders(self):
+        extended = {
+            "pkg": "David co-founded Risk Ninja.",
+            "daily_brief": "Meeting at 2pm.",
+            "journal": "Quiet morning, nothing urgent.",
+            "patterns": "Side door locks around midnight (100%)",
+            "device": "[Device awareness] iPhone online.",
+            "emotional_tone": "attentive (0.60)",
+        }
+        text = render_engaged_context(_context(), open_intents=0, recall_traces=[], extended=extended)
+        assert "attentive (0.60)" in text
+        assert "Side door locks" in text
+        assert "[Device awareness] iPhone online." in text
+        assert "Meeting at 2pm." in text
+        assert "David co-founded Risk Ninja." in text
+        assert "Quiet morning" in text
+
+    def test_long_extended_values_are_truncated(self):
+        extended = {"daily_brief": "x" * 5000, "pkg": "y" * 5000, "journal": "z" * 5000}
+        text = render_engaged_context(_context(), open_intents=0, recall_traces=[], extended=extended)
+        assert text.count("x") <= 1600  # 1500 cap + a little header slack
+        assert text.count("y") <= 1100  # 1000 cap
+        assert text.count("z") <= 1100  # 1000 cap
