@@ -172,64 +172,6 @@ async def update_episode(
         )
 
 
-# ---------------------------------------------------------------------------
-# Episode search (POST /memory/search)
-# ---------------------------------------------------------------------------
-
-@router.post("/memory/search")
-async def search_episodes(
-    search_request: dict,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """Search episodes with POST request body"""
-    try:
-        query = search_request.get("query", "")
-        scopes = search_request.get("scopes", ["episodes"])
-        limit = search_request.get("limit", 50)
-
-        if not query.strip():
-            return {"results": []}
-
-        # Search episodes by content using LIKE for now (could be enhanced with vector search)
-        episodes = (
-            db.query(Episode)
-            .filter(
-                Episode.user_id == current_user.id,
-                Episode.content.ilike(f"%{query}%"),
-            )
-            .order_by(Episode.created_at.desc())
-            .limit(limit)
-            .all()
-        )
-
-        # Format results for frontend
-        results = []
-        for episode in episodes:
-            results.append(
-                {
-                    "text": episode.content,
-                    "metadata": {
-                        "episode_id": episode.id,
-                        "id": episode.id,
-                        "importance": episode.importance,
-                        "role": episode.role,
-                        "source": episode.source or "chat",
-                        "timestamp": format_iso_utc(episode.created_at),
-                        "memory_type": getattr(episode, "memory_type", None),
-                        "topics": getattr(episode, "topics", None),
-                        "emotional_tone": getattr(episode, "emotional_tone", None),
-                        "context_tags": getattr(episode, "context_tags", None),
-                    },
-                }
-            )
-
-        return {"results": results}
-
-    except Exception as e:
-        logger.error(f"Error searching episodes: {e}")
-        raise HTTPException(status_code=500, detail="Failed to search episodes")
-
 
 # ---------------------------------------------------------------------------
 # Episode Rating endpoints  (/api/episodes/...)
