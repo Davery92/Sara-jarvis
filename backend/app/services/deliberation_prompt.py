@@ -36,6 +36,28 @@ THOUGHT_LENSES = [
 ]
 
 
+# Arc 3.1: wake_reason shapes *context*, never selects a different cognition
+# (David, 2026-07-29 — "wake reasons shape the context and budget of one
+# mind, they never select different cognitions"). One line telling the model
+# why it woke, so it can weigh a routine safety-net pass differently from a
+# promoted event without a second prompt or a dispatch branch.
+_WAKE_REASON_DESCRIPTIONS = {
+    "promoted_event": "a promoted event crossed your attention threshold",
+    "sleep_pressure": "the periodic safety-net check — catching anything an event-driven trigger missed, not a fresh signal",
+    "scheduled_anchor": "your twice-daily deep review",
+    "interoception": "one of your own vitals or hosts just changed",
+    "checkin": "a check-in / follow-up sweep",
+    "anticipation": "look-ahead prep for the day",
+    "daemon_proxy": "your VM body's regular tick",
+    "manual": "a manual/debug trigger",
+}
+
+
+def _describe_wake_reason(wake_reason: Optional[str]) -> str:
+    desc = _WAKE_REASON_DESCRIPTIONS.get(wake_reason or "")
+    return f"You're thinking right now because: {desc}." if desc else ""
+
+
 def _read_heartbeat_rules() -> str:
     """Read HEARTBEAT.md policy rules."""
     try:
@@ -320,6 +342,7 @@ def build_deliberation_prompt(
     recent_handoff: Optional[str] = None,
     off_rhythm_flags: Optional[List[dict]] = None,
     deep: bool = False,
+    wake_reason: Optional[str] = None,
 ) -> Tuple[str, str]:
     """
     Build the system and user messages for deliberation.
@@ -328,6 +351,12 @@ def build_deliberation_prompt(
     `deep=True` (SARA_UNLEASHED Phase C.3) is for the 2x/day strong-model
     runs: a wider observation window has already been gathered by the
     caller, and this widens the task-proposal cap from 2 to 4 to match.
+
+    `wake_reason` (Arc 3.1, kernel.WakeReason.value) shapes *context only* —
+    one line telling the model why it woke, so a routine safety-net pass
+    reads differently from a promoted event without a second prompt or a
+    dispatch branch ("wake reasons shape context, they never select a
+    different cognition").
     """
     heartbeat_rules = _read_heartbeat_rules()
     task_cap = 4 if deep else 2
@@ -471,8 +500,9 @@ Respond with ONLY valid JSON in this exact format:
 
     now = datetime.now(USER_TZ)
     lens = THOUGHT_LENSES[now.hour % len(THOUGHT_LENSES)]
+    wake_line = _describe_wake_reason(wake_reason)
 
-    user_msg = f"""# Working Memory Whiteboard
+    user_msg = f"""{wake_line + chr(10) + chr(10) if wake_line else ""}# Working Memory Whiteboard
 {whiteboard}
 
 # {obs_text}

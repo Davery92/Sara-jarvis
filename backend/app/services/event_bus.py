@@ -146,6 +146,15 @@ class EventType(str, Enum):
     # the primary input to attention. Confirmed predictions are silence.
     PREDICTION_VIOLATED = "prediction.violated"
 
+    # Senses — deterministic Celery jobs whose *output* feeds the kernel via
+    # the same afferent pathway (event → salience → observation → deliberation)
+    # instead of a new per-reason dispatch branch (Arc 3.1, 2026-07-29): "wake
+    # reasons shape the context and budget of one mind — they never select
+    # different cognitions." The job body stays reflex-layer/deterministic;
+    # only its result becomes an event.
+    ANTICIPATION_COMPLETED = "anticipation.completed"
+    SELF_AUDIT_COMPLETED = "interoception.self_audit_completed"
+
 
 class Event(BaseModel):
     """Event model"""

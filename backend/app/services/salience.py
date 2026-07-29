@@ -166,6 +166,11 @@ class SalienceScorer:
         if etype in (EventType.REMINDER_CREATED, EventType.REMINDER_COMPLETED):
             return 0.4
 
+        # Senses (Arc 3.1) — ambient, not urgent. Their salience comes from
+        # novelty/relevance below, not from a clock.
+        if etype in (EventType.ANTICIPATION_COMPLETED, EventType.SELF_AUDIT_COMPLETED):
+            return 0.15
+
         return 0.1
 
     def _score_novelty(self, event: Event, memory: UnifiedContextSnapshot) -> float:
@@ -229,6 +234,17 @@ class SalienceScorer:
                 return 0.7
             return 0.4
 
+        # Anticipation prep — mildly novel once a day; more so when it found
+        # something worth preparing than when it ran and found nothing.
+        if etype == EventType.ANTICIPATION_COMPLETED:
+            return 0.4 if event.payload.get("prep_count") else 0.15
+
+        # Self-audit — a weekly rollup of the ledger, not fresh news on its
+        # own (fresh failures already fired SYSTEM_HEALTH_DEGRADED when they
+        # happened); novelty is low unless it's surfacing something new.
+        if etype == EventType.SELF_AUDIT_COMPLETED:
+            return 0.3 if event.payload.get("failing_count") else 0.15
+
         return 0.1
 
     def _score_emotional_relevance(self, event: Event, memory: UnifiedContextSnapshot) -> float:
@@ -272,6 +288,16 @@ class SalienceScorer:
             if place_type == "home":
                 return 0.5
             return 0.3
+
+        # Anticipation — literally about David's day, so it matters, but it's
+        # ambient prep, not something happening to him right now.
+        if etype == EventType.ANTICIPATION_COMPLETED:
+            return 0.35
+
+        # Self-audit — Sara's own reflection; relevant to David mainly when
+        # it surfaces something broken he'd want to know about.
+        if etype == EventType.SELF_AUDIT_COMPLETED:
+            return 0.5 if event.payload.get("failing_count") else 0.2
 
         return 0.1
 
@@ -358,6 +384,20 @@ class SalienceScorer:
                 "calendar": 0.7, "routine": 0.6, "comms": 0.6,
             }.get(str(event.payload.get("domain") or "").lower(), 0.6)
             return max(score, conf * domain_prior)
+
+        # Anticipation: modest floor so a prep run always lands in the
+        # observation log as ambient context (the "prepared X, Y, Z" note),
+        # well under the deliberation threshold on its own.
+        if etype == EventType.ANTICIPATION_COMPLETED:
+            return max(score, 0.35)
+
+        # Self-audit: same modest floor normally; elevated when it's
+        # surfacing failing jobs, since that's actionable — but still below
+        # SYSTEM_HEALTH_DEGRADED's floor, because those failures already
+        # fired their own event when they first happened. This is a rollup,
+        # not a fresh discovery.
+        if etype == EventType.SELF_AUDIT_COMPLETED:
+            return max(score, 0.6 if event.payload.get("failing_count") else 0.35)
 
         return score
 
@@ -468,6 +508,14 @@ class SalienceScorer:
             EventType.SYSTEM_HEALTH_RECOVERED: lambda: (
                 f"My own body recovered: {payload.get('summary', 'a subsystem')} is back"
             ),
+            EventType.ANTICIPATION_COMPLETED: lambda: (
+                f"{payload.get('time_of_day', 'Anticipation').title()} prep: "
+                + (", ".join(payload.get("prep_types") or []) or "nothing to prepare")
+            ),
+            EventType.SELF_AUDIT_COMPLETED: lambda: (
+                f"Weekly self-audit: {payload.get('failing_count', 0)} job(s) failing, "
+                f"{payload.get('muted_count', 0)} interest(s) muted"
+            ),
         }
 
         formatter = descriptions.get(etype)
@@ -516,6 +564,8 @@ class SalienceScorer:
             EventType.CONTEXT_UPDATED: "rhythm",
             EventType.SYSTEM_HEALTH_DEGRADED: "interoception",
             EventType.SYSTEM_HEALTH_RECOVERED: "interoception",
+            EventType.ANTICIPATION_COMPLETED: "schedule",
+            EventType.SELF_AUDIT_COMPLETED: "interoception",
         }
         return categories.get(etype, "general")
 

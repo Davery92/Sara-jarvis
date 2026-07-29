@@ -285,6 +285,26 @@ async def _anticipation_async(time_of_day: str):
             except Exception:
                 pass
 
+            # Arc 3.1 sense event: this job stays deterministic/reflex-layer
+            # (rule-based AnticipationService, not deliberation) — only its
+            # *result* becomes an event, flowing through the same afferent
+            # pathway (salience -> observation -> deliberation) every other
+            # sense uses, instead of a new ambient_turn dispatch branch.
+            try:
+                from app.services.event_bus import event_bus, Event, EventType
+                await event_bus.publish(Event(
+                    event_type=EventType.ANTICIPATION_COMPLETED,
+                    user_id=DEFAULT_USER_ID,
+                    source=f"{time_of_day}_anticipation",
+                    payload={
+                        "time_of_day": time_of_day,
+                        "prep_count": len(preparations),
+                        "prep_types": prep_types,
+                    },
+                ))
+            except Exception as evt_err:
+                logger.warning(f"Failed to publish anticipation event: {evt_err}")
+
             return {
                 "timestamp": local_now().isoformat(),
                 "time_of_day": time_of_day,

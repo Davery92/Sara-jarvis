@@ -146,7 +146,10 @@ class DeliberationEngine:
             self._llm_client = get_background_llm_client()
         return self._llm_client
 
-    async def run(self, user_id: str = DEFAULT_USER_ID, deep: bool = False) -> DeliberationResult:
+    async def run(
+        self, user_id: str = DEFAULT_USER_ID, deep: bool = False,
+        wake_reason: Optional[str] = None,
+    ) -> DeliberationResult:
         """
         Run a deliberation cycle.
         1. Read working memory
@@ -160,6 +163,9 @@ class DeliberationEngine:
         wider observation window and a higher task-proposal cap, instead of
         the hourly qwen pass. Intended for 2x/day scheduled runs, not the
         salience-triggered hourly path.
+
+        `wake_reason` (Arc 3.1) is passed straight through to the prompt
+        builder as context only — see `build_deliberation_prompt`.
         """
         start_time = datetime.now(timezone.utc)
         result = DeliberationResult(is_deep=deep)
@@ -189,6 +195,7 @@ class DeliberationEngine:
             recent_handoff=memory.last_heartbeat_handoff,
             off_rhythm_flags=off_rhythm_flags,
             deep=deep,
+            wake_reason=wake_reason,
         )
 
         # 3b. Interoception — inject a health digest so Sara can *feel* her own

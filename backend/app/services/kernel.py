@@ -61,6 +61,15 @@ class WakeReason(str, Enum):
     MANUAL = "manual"                     # explicitly requested (debug / user)
 
 
+# Arc 3.1: which wake reasons default to the deep (strong-model, wider
+# observation window) budget when a caller doesn't pass `deep` explicitly.
+# Only the twice-daily scheduled anchor gets the heavier pass by default —
+# everything else is the routine hourly-cadence budget. Explicit `deep=`
+# always wins; this is only the fallback so wake_reason has one source of
+# truth for budget instead of two independently-passed params.
+_WAKE_REASON_DEFAULT_DEEP = {WakeReason.SCHEDULED_ANCHOR}
+
+
 async def _redis():
     import redis.asyncio as aioredis
     return aioredis.from_url(
@@ -115,7 +124,7 @@ async def get_state(user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]:
 async def ambient_turn(
     user_id: str = DEFAULT_USER_ID,
     wake_reason: WakeReason = WakeReason.PROMOTED_EVENT,
-    deep: bool = False,
+    deep: Optional[bool] = None,
     force: bool = False,
 ) -> Dict[str, Any]:
     """The single ambient-state cognition entry. All background thinking —
@@ -126,8 +135,20 @@ async def ambient_turn(
     `force` skips the should_deliberate rate/threshold check (used by scheduled
     anchors and the daemon proxy, which have already decided to think).
 
+    Arc 3.1 (2026-07-29): `wake_reason` shapes this turn's *context and
+    budget* — never a different cognition. If `deep` isn't given explicitly,
+    it's derived from `wake_reason` (`_WAKE_REASON_DEFAULT_DEEP`) so budget
+    has one source of truth instead of two independently-passed params that
+    happen to agree at every call site today. `wake_reason` is also threaded
+    into the deliberation prompt as one line of context (why the mind woke),
+    so a routine safety-net pass reads differently from a promoted event
+    without a second prompt or a dispatch branch.
+
     Returns the deliberation summary plus the kernel state/wake-reason it ran in.
     """
+    if deep is None:
+        deep = wake_reason in _WAKE_REASON_DEFAULT_DEEP
+
     from app.services.autonomy.coordination import get_coordinator
     from app.core.correlation import CorrelationIds, bind_correlation, new_id
 
@@ -180,7 +201,7 @@ async def ambient_turn(
         from app.services.deliberation import deliberation_engine
         from app.services.deliberation_gate import process_deliberation_result
 
-        result = await deliberation_engine.run(user_id, deep=deep)
+        result = await deliberation_engine.run(user_id, deep=deep, wake_reason=wake_reason.value)
         summary = await process_deliberation_result(result, user_id)
 
         # Return to a resting ambient state once the turn completes.

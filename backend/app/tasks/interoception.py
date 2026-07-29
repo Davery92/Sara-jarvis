@@ -266,6 +266,29 @@ async def _weekly_self_audit_async():
                                   level="INFO", message=content[:500])
     except Exception:
         pass
+
+    # Arc 3.1 sense event: the audit body stays deterministic (ledger
+    # queries, no LLM) — only its result becomes an event, same afferent
+    # pathway (salience -> observation -> deliberation) as every other
+    # sense, instead of a new ambient_turn dispatch branch. This is a
+    # rollup, not a fresh discovery — failing jobs already fired their own
+    # SYSTEM_HEALTH_DEGRADED event when they first happened.
+    try:
+        from app.services.event_bus import event_bus, Event, EventType
+        await event_bus.publish(Event(
+            event_type=EventType.SELF_AUDIT_COMPLETED,
+            user_id=DEFAULT_USER_ID,
+            source="weekly_self_audit",
+            payload={
+                "failing_count": len(failing),
+                "muted_count": muted,
+                "pass_rate": pr,
+                "summary": content[:200],
+            },
+        ))
+    except Exception as evt_err:
+        logger.warning(f"Failed to publish self-audit event: {evt_err}")
+
     return {"state_of_me": content, "failing": len(failing), "muted": muted}
 
 

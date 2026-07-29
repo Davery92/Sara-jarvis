@@ -74,6 +74,11 @@ class SalienceSubscriber(EventSubscriber):
             EventType.SYSTEM_HEALTH_RECOVERED,
             # Prediction loop (§3.2) — a violated prediction is surprise = salience
             EventType.PREDICTION_VIOLATED,
+            # Senses (Arc 3.1) — anticipation prep and the weekly self-audit are
+            # deterministic reflex-layer jobs; their *output* becomes an event
+            # here so the kernel notices without a new dispatch branch.
+            EventType.ANTICIPATION_COMPLETED,
+            EventType.SELF_AUDIT_COMPLETED,
         )
 
     async def handle_event(self, event: Event) -> None:
