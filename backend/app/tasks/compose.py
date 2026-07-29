@@ -36,7 +36,7 @@ async def _run_async():
     from sqlalchemy import text
     from app.db.session import get_async_session_factory
     from app.services.candidate_states import CandidateStatus
-    from app.services.compose import compose_utterance
+    from app.services.compose import compose_utterance, ComposeDeclined
     from app.services.review import review_utterance
     from app.services.world_brief import get_rendered_brief
     from app.services.judge import _gather_utterance_history, _gather_recent_chat
@@ -71,6 +71,20 @@ async def _run_async():
 
         try:
             composed = await compose_utterance(candidate, brief_text, recent_chat)
+        except ComposeDeclined as e:
+            # Deterministic — the payload is too thin no matter how many
+            # times we retry. Advance past judged_send so it stops being
+            # picked up by every future cycle (unlike a real transient
+            # error below, which we deliberately leave to retry).
+            logger.info(f"[compose] declined for {candidate['id']}: {e}")
+            async with factory() as db:
+                await db.execute(text("""
+                    UPDATE say_candidate SET status = :status
+                    WHERE id = :cid AND user_id = :uid
+                """), {"status": CandidateStatus.DECLINED.value, "cid": candidate["id"], "uid": user_id})
+                await db.commit()
+            stats["declined"] = stats.get("declined", 0) + 1
+            continue
         except Exception as e:
             logger.warning(f"[compose] compose failed for {candidate['id']}: {e}")
             stats["errors"] += 1

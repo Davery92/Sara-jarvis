@@ -4,7 +4,7 @@ import logging
 from datetime import datetime, timedelta
 from app.core.timezone import naive_local_now
 from zoneinfo import ZoneInfo
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from typing import List, Optional
 

@@ -37,7 +37,16 @@ _ALLOWED_CAPS = {
 _MONOLOGUE = re.compile(
     r"(<\s*function|<\s*tool|```|as an ai|i cannot (?:help|assist|comply)|"
     r"i'm sorry,? but|thinking:|<\|.*?\|>|\bnull\b|^\s*\{[\"']|"
-    r"assistant:|user:|system:|\btool_call\b)",
+    r"assistant:|user:|system:|\btool_call\b|"
+    # Composer narrating its own send/no-send decision instead of just
+    # staying silent (found live, Arc 1.3 shadow verification: a thin
+    # candidate the compose prompt should have declined on came back as
+    # "I'm sending silence" / "keeping it quiet" / "nothing to report" —
+    # meta-commentary about the machinery is exactly what the voice
+    # contract bans, whether or not it also fails to say anything real).
+    r"i'?m (?:not )?sending (?:this|silence)|keeping (?:it|this) quiet|"
+    r"nothing to report[. —-]|this is noise,? not a payload|"
+    r"the pipeline is clear)",
     re.IGNORECASE,
 )
 

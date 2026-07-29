@@ -25,6 +25,12 @@ from typing import Any, Dict, List, Tuple
 logger = logging.getLogger(__name__)
 
 
+class ComposeDeclined(Exception):
+    """Raised when the compose model has nothing worth saying — distinct
+    from a real failure (LLM error, bad JSON) so callers can log it as a
+    quiet no-op instead of an error to investigate."""
+
+
 def _load_voice_doc() -> str:
     try:
         from pathlib import Path
@@ -133,8 +139,14 @@ async def compose_utterance(
     parsed = _parse_response(raw)
 
     text = str(parsed.get("text") or "").strip()
-    if not text:
-        raise ValueError("compose produced empty text")
+    # The prompt never gives the model an explicit "decline" option, so a
+    # candidate that's thin on payload sometimes comes back as literal
+    # "Silence." or empty rather than a forced (bad) message. Treat that as
+    # the compose-time equivalent of a kill verdict, not a pipeline error —
+    # judge already filters most of these out before compose ever sees
+    # them, so seeing one here means the payload really was too thin.
+    if not text or text.lower().rstrip(".") == "silence":
+        raise ComposeDeclined("model declined to compose — candidate has no real payload")
 
     return {
         "text": text[:2000],

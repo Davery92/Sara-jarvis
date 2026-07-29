@@ -14,6 +14,10 @@ of truth both sides import instead.
                                         composed_utterance row exists —
                                         review verdict/held state lives on
                                         that row, not here)
+                            -> declined (compose: the model had nothing worth
+                                        saying — a thin-payload candidate the
+                                        judge's send_now was too generous
+                                        about. No composed_utterance row.)
             -> expired                (say_candidate.purge_expired; valid_until
                                         passed before the judge ever looked)
 """
@@ -26,6 +30,7 @@ class CandidateStatus(str, Enum):
     JUDGED_BATCH = "judged_batch"
     JUDGED_SEND = "judged_send"
     COMPOSED = "composed"
+    DECLINED = "declined"
     EXPIRED = "expired"
 
 
@@ -44,5 +49,6 @@ TERMINAL_STATUSES = {
     CandidateStatus.JUDGED_DROP,
     CandidateStatus.JUDGED_BATCH,
     CandidateStatus.COMPOSED,
+    CandidateStatus.DECLINED,
     CandidateStatus.EXPIRED,
 }
