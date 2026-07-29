@@ -289,6 +289,31 @@ async def generate_predictions(user_id: str) -> List[Dict[str, Any]]:
     return predictions[:6]  # Max 6 predictions per check
 
 
+async def _dual_write_candidate(user_id: str, pred: Dict[str, Any], topic: str) -> None:
+    """Mind V2 rewire plan Workstream B (long tail) — feed the say_candidate
+    queue with the same real content the push above already sends. Wrapped
+    so a candidate-queue failure never breaks the legacy send."""
+    try:
+        from datetime import timedelta
+        from app.core.timezone import now as local_now
+        from app.services.say_candidate import create_candidate
+        from app.db.session import get_async_session_factory
+
+        factory = get_async_session_factory()
+        async with factory() as db:
+            await create_candidate(
+                db, user_id=user_id, source=pred.get("source", "predictive_engine"),
+                kind="inform", summary=pred["message"][:2000],
+                evidence=[{"prediction_type": pred.get("type"), "title": pred.get("title")}],
+                topic_entities=[topic],
+                value_guess=pred.get("confidence"),
+                valid_until=local_now() + timedelta(hours=12),
+                dedupe_key=topic,
+            )
+    except Exception as e:
+        logger.warning(f"[say_candidate] predictive_engine dual-write failed: {e}")
+
+
 async def send_predictions(user_id: str):
     """Generate predictions and send high-confidence ones as notifications."""
     from app.services.unified_notification import send_notification
@@ -297,13 +322,14 @@ async def send_predictions(user_id: str):
 
     for pred in predictions:
         if pred["confidence"] >= 0.6:
+            topic = f"prediction:{hash(pred['title']) % 100000}"
             await send_notification(
                 user_id=user_id,
                 title=pred["title"],
                 message=pred["message"],
                 priority=pred.get("priority", "low"),
                 category="checkin",
-                topic=f"prediction:{hash(pred['title']) % 100000}",
+                topic=topic,
                 source=pred.get("source", "predictive_engine"),
                 payload={
                     "prediction_grade": pred.get("prediction_grade", "novel"),
@@ -311,6 +337,7 @@ async def send_predictions(user_id: str):
                     "generator": pred.get("generator", "predictive_engine"),
                 },
             )
+            await _dual_write_candidate(user_id, pred, topic)
 
     # Inject predictions into daily brief context layer
     if predictions:

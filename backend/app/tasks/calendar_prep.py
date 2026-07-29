@@ -73,7 +73,43 @@ def cross_system_check(self):
                 topic=topic,
                 source="cross_system_synthesis",
             ))
+            _run_async(_dual_write_candidate(insight, topic))
         if insights:
             logger.info(f"Cross-system synthesis: sent {len(insights)} insight(s)")
     except Exception as e:
         logger.warning(f"Cross-system synthesis failed: {e}")
+
+
+async def _dual_write_candidate(insight: dict, topic: str) -> None:
+    """Mind V2 rewire plan Workstream B.1 — feed the say_candidate queue
+    with the same real content the legacy send above already delivers, so
+    the judge/compose/review chain has something other than derived-signal
+    counters to appraise. Wrapped in try/except: a candidate-queue failure
+    must never break the legacy send while it's still the delivery path.
+    Legacy send is untouched — this is additive only."""
+    try:
+        from datetime import timedelta
+        from app.core.timezone import now as et_now, to_utc
+        from app.services.say_candidate import create_candidate
+        from app.db.session import get_async_session_factory
+
+        event_start = insight.get("event_start")
+        # calendar_event.start_time is naive ET wall-clock (see world_brief.py's
+        # sweep_brief gotcha note) — convert before it reaches a
+        # DateTime(timezone=True) column, else Postgres reads it as naive UTC
+        # and the TTL lands 4-5h off.
+        valid_until = to_utc(event_start) if event_start else (et_now() + timedelta(hours=24))
+
+        factory = get_async_session_factory()
+        async with factory() as db:
+            await create_candidate(
+                db, user_id=DEFAULT_USER_ID, source="cross_system_synthesis",
+                kind="inform", summary=insight["message"],
+                evidence=[{"type": insight.get("type"), "topic": topic}],
+                topic_entities=[topic],
+                value_guess=insight.get("confidence"),
+                valid_until=valid_until,
+                dedupe_key=topic,
+            )
+    except Exception as e:
+        logger.warning(f"[say_candidate] cross_system_synthesis dual-write failed: {e}")

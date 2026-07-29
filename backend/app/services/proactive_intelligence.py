@@ -93,6 +93,10 @@ async def cross_reference_check(user_id: str) -> List[Dict[str, Any]]:
             )
             topic = f"xref:email:{email_id}"
             email_xref_topics.append(topic)
+            # Earliest matched event's start — the insight is worthless once
+            # that meeting has passed, so this is what a candidate's
+            # valid_until should be (say_candidate dual-write, Workstream B.1).
+            starts = [st for _, st in matched if st]
             insights.append({
                 "type": "email_calendar_link",
                 "title": f"Email from {sender} relates to {n} upcoming event{'s' if n > 1 else ''}",
@@ -101,6 +105,7 @@ async def cross_reference_check(user_id: str) -> List[Dict[str, Any]]:
                 "priority": "normal",
                 "confidence": 0.7,
                 "topic": topic,
+                "event_start": min(starts) if starts else None,
             })
 
         # Once per email lifetime: drop any xref insight whose topic was ever sent.
@@ -133,6 +138,7 @@ async def cross_reference_check(user_id: str) -> List[Dict[str, Any]]:
                         "priority": "low",
                         "confidence": 0.5,
                         "topic": f"xref:note:{str(note_title)[:40]}:event:{str(event_id)[:12]}",
+                        "event_start": start_time,
                     })
                     break
 

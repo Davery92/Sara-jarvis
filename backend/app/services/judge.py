@@ -54,6 +54,38 @@ async def _gather_utterance_history(db, user_id: str, days: int = 14) -> List[Di
     ]
 
 
+async def _gather_recent_chat(db, user_id: str, hours: int = 6, limit: int = 30) -> List[Dict[str, Any]]:
+    """Last few hours of chat turns (role + a short excerpt) — this is the
+    fix for the Phxins-push / BitTitan-nag class (Mind V2 rewire plan,
+    Workstream C): a candidate about something David already handled,
+    dismissed, postponed, or contradicted in conversation should die in the
+    judge, not surface as a stale push.
+
+    conversation_turn.created_at is `timestamp without time zone` storing
+    naive UTC (verified against live data) — bind naive UTC bounds
+    directly. Do NOT pass this through the ET helpers or `AT TIME ZONE`;
+    that would double-shift it (same gotcha class app/core/timezone.py's
+    docstring warns about for naive-ET columns, mirrored here for UTC)."""
+    from app.core.timezone import naive_utc_now
+
+    since = naive_utc_now() - timedelta(hours=hours)
+    rows = (await db.execute(text("""
+        SELECT role, content, created_at FROM conversation_turn
+        WHERE user_id = :uid AND created_at >= :since
+        ORDER BY created_at DESC LIMIT :limit
+    """), {"uid": user_id, "since": since, "limit": limit})).fetchall()
+    turns = [
+        {
+            "role": r.role,
+            "content": (r.content or "")[:200],
+            "at": r.created_at.isoformat() if r.created_at else None,
+        }
+        for r in rows
+    ]
+    turns.reverse()  # chronological for the prompt
+    return turns
+
+
 async def _gather_context(db, user_id: str) -> Dict[str, Any]:
     ctx: Dict[str, Any] = {}
     try:
@@ -87,6 +119,12 @@ async def _gather_context(db, user_id: str) -> Dict[str, Any]:
         ctx["remaining_interrupt_allowance"] = max(0, 2 - int(count_today))
     except Exception as e:
         logger.debug(f"[judge] interrupt allowance unavailable: {e}")
+
+    try:
+        ctx["recent_chat"] = await _gather_recent_chat(db, user_id)
+    except Exception as e:
+        logger.debug(f"[judge] recent chat unavailable: {e}")
+        ctx["recent_chat"] = []
 
     return ctx
 
@@ -127,6 +165,13 @@ def _build_prompt(
         ctx_bits.append(f"remaining_interrupt_allowance={context['remaining_interrupt_allowance']}")
     ctx_block = ", ".join(ctx_bits) if ctx_bits else "(unknown)"
 
+    recent_chat = context.get("recent_chat") or []
+    chat_lines = [
+        f"- [{t['at'][:16] if t['at'] else '?'}] {t['role']}: {t['content']}"
+        for t in recent_chat
+    ]
+    chat_block = "\n".join(chat_lines) if chat_lines else "(no chat in the last 6 hours)"
+
     system_msg = (
         "You are Sara's judge: you decide which candidate facts are worth telling David, "
         "when, and whether prep work should happen first. You do not write the message "
@@ -141,6 +186,10 @@ def _build_prompt(
         "context (never send_now if asleep; interruptibility below ~0.4 should push toward "
         "batch or drop unless the candidate kind is 'alert'; respect the remaining interrupt "
         "allowance — if it's 0, nothing gets send_now except genuine alerts).\n\n"
+        "If the recent conversation below shows David has already handled, dismissed, "
+        "postponed, or contradicted a candidate's substance, the decision is drop, with the "
+        "chat turn (paraphrased) as the reason — regardless of how the candidate otherwise "
+        "scores.\n\n"
         "You may also propose bounded prep_actions — small tasks worth doing BEFORE any "
         "message goes out (pull a document, gather context, organize notes). Only propose "
         "these for candidates of kind 'prep', and only in categories research, pkg_update, "
@@ -162,6 +211,7 @@ def _build_prompt(
         f"## Current World Brief\n{brief_text}\n\n"
         f"## Interest Model (what David cares about)\n{interest_text}\n\n"
         f"## Current context\n{ctx_block}\n\n"
+        f"## Recent conversation (last 6 hours — has David already handled any of this?)\n{chat_block}\n\n"
         f"## Utterance history (last 14 days, what was said + engagement)\n{hist_block}\n\n"
         f"## Pending candidates ({len(candidates)})\n{cand_block}\n"
     )
@@ -201,8 +251,9 @@ def _parse_response(raw: str) -> dict:
 
 
 async def _apply_decision(db, user_id: str, candidate_id: str, decision: str, reason: str, batch_slot: str = None) -> None:
-    status_map = {"drop": "judged_drop", "batch": "judged_batch", "send_now": "judged_send"}
-    status = status_map.get(decision)
+    from app.services.candidate_states import JUDGE_DECISION_TO_STATUS
+
+    status = JUDGE_DECISION_TO_STATUS.get(decision)
     if not status:
         raise ValueError(f"unknown judge decision: {decision!r}")
 
@@ -214,7 +265,7 @@ async def _apply_decision(db, user_id: str, candidate_id: str, decision: str, re
         UPDATE say_candidate
         SET status = :status, judge_reason = :reason
         WHERE id = :id AND user_id = :uid AND status = 'pending'
-    """), {"status": status, "reason": full_reason[:2000], "id": candidate_id, "uid": user_id})
+    """), {"status": status.value, "reason": full_reason[:2000], "id": candidate_id, "uid": user_id})
     await db.commit()
 
 

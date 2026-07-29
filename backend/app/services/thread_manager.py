@@ -71,6 +71,7 @@ async def get_open_threads(user_id: str, db: AsyncSession) -> List[Dict]:
             "suggested_followup": r.suggested_followup,
             "priority": r.priority or 0.5,
             "source": r.source,
+            "follow_up_before": r.follow_up_before,
         })
 
     return threads

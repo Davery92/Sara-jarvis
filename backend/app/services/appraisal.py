@@ -90,7 +90,11 @@ def _build_prompt(observations: List[Any], brief_text: str, interest_text: str) 
         '  "nothing": true only if this batch produced zero patches and zero candidates\n'
         "}\n\n"
         "Never invent a recurring routine or relationship you don't see evidence for above. "
-        "Never restate something the brief already says unchanged — that isn't a patch."
+        "Never restate something the brief already says unchanged — that isn't a patch. This "
+        "applies especially to health_deltas: only patch it when a health reading has actually "
+        "changed from what the brief already states, and set \"at\" to when the measurement "
+        "itself was taken (never the current time / when you're writing this patch — if the "
+        "exact measurement time isn't in the signal, use null rather than guessing now)."
     )
 
     user_msg = (
@@ -142,7 +146,7 @@ def _parse_response(raw: str) -> dict:
 
 
 async def _apply_brief_patch(db, user_id: str, patch: Dict[str, Any]) -> None:
-    from app.services.world_brief import brief_patch, SECTIONS
+    from app.services.world_brief import brief_patch, SECTIONS, get_brief_row
 
     op = patch.get("op")
     section = patch.get("section")
@@ -151,6 +155,25 @@ async def _apply_brief_patch(db, user_id: str, patch: Dict[str, Any]) -> None:
         raise ValueError(f"invalid brief patch shape: {patch}")
 
     content = patch.get("content") if isinstance(patch.get("content"), dict) else {}
+
+    if section == "health_deltas" and op in ("add", "update"):
+        # health_deltas patches come from a small model reading a bare
+        # "Weight 240.00 lbs" observation with no date attached — left to
+        # its own devices it fills `at` with a guess of "now" every cycle,
+        # which differs run to run even when the reading hasn't moved,
+        # defeating brief_patch's item-equality no-op guard (same class of
+        # bug as the sara_state clock leak fixed in b52b188c). Compare the
+        # VALUE (text) against the brief's current item and drop the patch
+        # outright when unchanged — an unchanged reading isn't a delta, so
+        # there's nothing to record regardless of what `at` says.
+        state = await get_brief_row(db, user_id)
+        existing = next(
+            (i for i in state["sections"].get("health_deltas", []) if i.get("key") == item_key),
+            None,
+        )
+        if existing is not None and existing.get("text") == content.get("text"):
+            return
+
     await brief_patch(
         db, user_id, op=op, section=section, item_key=str(item_key)[:200],
         content=content, source="appraisal", evidence=patch.get("evidence") or [],

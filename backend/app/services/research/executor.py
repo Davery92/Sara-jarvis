@@ -568,8 +568,56 @@ Write in clean markdown format."""
                 source="research_executor",
             )
             logger.info("Sent research_complete push for plan %s → note %s", self.plan_id, note_id)
+            await self._dual_write_candidate(plan, note_id, body, synthesis)
         except Exception as e:
             logger.warning("Failed to send research completion push: %s", e)
+
+    async def _dual_write_candidate(
+        self, plan: Dict[str, Any], note_id: str, body: Optional[str], synthesis: str
+    ) -> None:
+        """Mind V2 rewire plan Workstream B.4 — feed the say_candidate queue
+        with the same real content the legacy push above already delivers.
+        research_plan has no direct event link, so valid_until is best-
+        effort: the nearest upcoming calendar event whose title overlaps
+        this research's title (the Phxins/JFK-prep evidence class — research
+        done FOR a meeting is worthless after it), else the 'inform' kind's
+        default 24h TTL. Wrapped so a candidate-queue failure never breaks
+        the legacy push while it's still the delivery path."""
+        try:
+            from app.services.say_candidate import create_candidate
+            from app.db.session import get_async_session_factory
+
+            summary = (body or (synthesis or "").strip().split("\n\n", 1)[0] or
+                       f"Research on {plan.get('title', 'the topic')} is ready.")
+
+            factory = get_async_session_factory()
+            valid_until = None
+            async with factory() as db:
+                title_words = {w.lower() for w in (plan.get("title") or "").split() if len(w) > 3}
+                if title_words:
+                    rows = (await db.execute(text("""
+                        SELECT title, start_time FROM calendar_event
+                        WHERE user_id = :uid AND start_time BETWEEN NOW() AND NOW() + INTERVAL '7 days'
+                          AND COALESCE(all_day, FALSE) = FALSE
+                        ORDER BY start_time ASC LIMIT 20
+                    """), {"uid": self.user_id})).fetchall()
+                    for r in rows:
+                        event_words = {w.lower() for w in (r.title or "").split() if len(w) > 3}
+                        if title_words & event_words:
+                            from app.core.timezone import to_utc
+                            valid_until = to_utc(r.start_time)
+                            break
+
+                await create_candidate(
+                    db, user_id=self.user_id, source="research_executor", kind="inform",
+                    summary=summary[:2000],
+                    evidence=[{"note_id": note_id, "plan_id": self.plan_id}],
+                    topic_entities=[f"research:{self.plan_id}"],
+                    valid_until=valid_until,
+                    dedupe_key=f"research:{self.plan_id}",
+                )
+        except Exception as e:
+            logger.warning("[say_candidate] research_executor dual-write failed: %s", e)
 
     async def _load_plan(self, db) -> Optional[Dict[str, Any]]:
         """Load the research plan from DB."""

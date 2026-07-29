@@ -68,6 +68,9 @@ async def deliver_task_result(
 
     chat_message = _compose_chat_message(task_query, result_summary, result_note_title)
 
+    await _dual_write_candidate(user_id, task_id, task_query, result_summary)
+    await _fulfill_commitment(user_id, task_id, result_summary)
+
     # --- Path 0: Active desktop (Desktop Jarvis Overhaul D) — HUD toast
     # with an "Open report" overlay action beats everything else; it's the
     # richest surface and doesn't compete with a push buzzing his phone.
@@ -200,6 +203,62 @@ async def deliver_task_result(
         db=db,
     )
     logger.info(f"Delivered task {task_id} via fallback push notification ({note_push_type})")
+
+
+async def _dual_write_candidate(user_id: str, task_id: str, task_query: str, result_summary: str) -> None:
+    """Mind V2 rewire plan Workstream B.5 — feed the say_candidate queue
+    with the same real completion content every delivery path below
+    already sends, once per task (the tell-once ledger above already
+    guarantees this is reached at most once per task_id). Needs its own
+    AsyncSession — the `db` passed into deliver_task_result is a sync
+    Session used for the ledger/episode writes, not awaitable. Wrapped so
+    a candidate-queue failure never breaks delivery, which stays on the
+    sync path untouched below."""
+    try:
+        from datetime import timedelta
+        from app.core.timezone import now as local_now
+        from app.services.say_candidate import create_candidate
+        from app.db.session import get_async_session_factory
+
+        topic = f"agent_task:{task_id}"
+        factory = get_async_session_factory()
+        async with factory() as adb:
+            await create_candidate(
+                adb, user_id=user_id, source="task_result_delivery", kind="inform",
+                summary=result_summary[:2000],
+                evidence=[{"task_id": task_id, "query": (task_query or "")[:200]}],
+                topic_entities=[topic],
+                valid_until=local_now() + timedelta(hours=12),
+                dedupe_key=topic,
+            )
+    except Exception as e:
+        logger.warning(f"[say_candidate] task_result_delivery dual-write failed: {e}")
+
+
+async def _fulfill_commitment(user_id: str, task_id: str, result_summary: str) -> None:
+    """Mind V2 rewire plan Workstream D.3 — close the sara_commitment opened
+    at dispatch time (DispatchAndMonitorTool._record_commitment) now that
+    the completion notice is actually reaching one of the delivery paths
+    below. make_candidate=False: the delivery paths below already tell
+    David the result — a second "commitment closed" candidate would just
+    repeat it. Best-effort: a ledger miss must never block delivery."""
+    try:
+        from app.services.commitment_service import list_open_commitments, close_commitment
+        from app.db.session import get_async_session_factory
+
+        marker = f"task:{task_id}"
+        factory = get_async_session_factory()
+        async with factory() as db:
+            open_commitments = await list_open_commitments(db, user_id)
+            for c in open_commitments:
+                if c.get("trigger_description") == marker:
+                    await close_commitment(
+                        db, user_id, c["id"],
+                        closure_note=result_summary[:500],
+                        make_candidate=False,
+                    )
+    except Exception as e:
+        logger.warning(f"[commitment] fulfillment check failed for task {task_id}: {e}")
 
 
 # --- Helpers ---

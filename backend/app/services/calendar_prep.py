@@ -280,6 +280,28 @@ async def _prep_for_event(
     )
     logger.info(f"Calendar prep sent for '{display_title}' ({time_str})")
 
+    # Mind V2 rewire plan Workstream B.3 — dual-write the same real content
+    # into the say_candidate queue. Legacy send above is untouched; this is
+    # additive only, wrapped so a candidate-queue failure never breaks the
+    # legacy send while it's still the delivery path.
+    try:
+        from app.core.timezone import to_utc
+        from app.services.say_candidate import create_candidate
+
+        valid_until = to_utc(start_time)  # naive ET wall-clock -> aware UTC
+        cand_factory = get_async_session_factory()
+        async with cand_factory() as cand_db:
+            await create_candidate(
+                cand_db, user_id=user_id, source="calendar_prep", kind="prep",
+                summary=message[:2000],
+                evidence=[{"event_id": event_id, "topic": topic}],
+                topic_entities=[topic],
+                valid_until=valid_until,
+                dedupe_key=topic,
+            )
+    except Exception as e:
+        logger.warning(f"[say_candidate] calendar_prep dual-write failed: {e}")
+
     # SARA_UNLEASHED Phase C.1: meeting preps are an autonomous action like any
     # other and belong in the same auditable ledger (Z-4 invariant).
     try:

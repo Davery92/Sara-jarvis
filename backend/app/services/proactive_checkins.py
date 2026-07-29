@@ -143,6 +143,32 @@ async def _send(user_id: str, *, title: str, message: str, category: str,
     )
 
 
+async def _dual_write_candidate(user_id: str, t: dict, message: str, topic: str) -> None:
+    """Mind V2 rewire plan Workstream B.2 — feed the say_candidate queue
+    with the same real thread content the legacy send above already
+    delivers. Legacy send is untouched; this is additive only, wrapped so
+    a candidate-queue failure never breaks the legacy send."""
+    try:
+        from datetime import timedelta as _timedelta
+        from app.services.say_candidate import create_candidate
+        from app.db.session import get_async_session_factory
+
+        valid_until = t.get("follow_up_before") or (local_now() + _timedelta(hours=24))
+        factory = get_async_session_factory()
+        async with factory() as db:
+            await create_candidate(
+                db, user_id=user_id,
+                source="proactive_checkin", kind="followup", summary=message,
+                evidence=[{"thread_id": t["id"], "topic": topic}],
+                topic_entities=[topic],
+                value_guess=t.get("priority"),
+                valid_until=valid_until,
+                dedupe_key=topic,
+            )
+    except Exception as e:
+        logger.warning(f"[say_candidate] proactive_checkin dual-write failed: {e}")
+
+
 async def run_followup_sweep(user_id: str) -> dict:
     """Deliver the single ripest open thread (meeting recap or commitment), if
     any. No template or ambient pings — those are gone (Phase A.1). Safe to
@@ -189,15 +215,17 @@ async def run_followup_sweep(user_id: str) -> dict:
                 logger.debug(f"[checkin] habituation check skipped: {e}")
 
         message = (t.get("suggested_followup") or "").strip() or f"Wanted to follow up on {t['topic']}."
+        topic = f"followup:{t['id'][:12]}"
         res = await _send(
             user_id,
             title="Hey David",
             message=message,
             category="followup",
-            topic=f"followup:{t['id'][:12]}",
+            topic=topic,
             priority="normal",
             stimulus_key=stimulus_key,
         )
+        await _dual_write_candidate(user_id, t, message, topic)
         # Record the mention in a fresh short session (connection was never held
         # across the send above).
         if res.get("sent"):

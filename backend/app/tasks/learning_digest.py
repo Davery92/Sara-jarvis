@@ -215,11 +215,29 @@ async def _send_weekly_digest_async(user_id: str) -> dict:
                "ts": now})
         await db.commit()
 
+        digest_topic = f"weekly_digest:{now.date().isoformat()}"
         from app.services.unified_notification import send_notification
         await send_notification(
             user_id=user_id, title="What I've learned this week", message=note,
-            topic=f"weekly_digest:{now.date().isoformat()}", priority="normal", source="learning_digest",
+            topic=digest_topic, priority="normal", source="learning_digest",
         )
+
+        # Mind V2 rewire plan Workstream B (long tail) — dual-write into the
+        # say_candidate queue. Wrapped so a candidate-queue failure never
+        # breaks the legacy send above.
+        try:
+            from datetime import timedelta
+            from app.services.say_candidate import create_candidate
+            await create_candidate(
+                db, user_id=user_id, source="learning_digest", kind="inform",
+                summary=note[:2000], evidence=[{"moves": len(moves)}],
+                topic_entities=[digest_topic],
+                valid_until=now + timedelta(days=7),
+                dedupe_key=digest_topic,
+            )
+        except Exception as e:
+            logger.warning(f"[say_candidate] learning_digest dual-write failed: {e}")
+
         return {"sent": True, "moves": len(moves)}
 
 

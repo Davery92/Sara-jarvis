@@ -44,7 +44,16 @@ async def create_candidate(
     topic_entities: Optional[List[str]] = None,
     value_guess: Optional[float] = None,
     valid_until=None,
-) -> UUID:
+    dedupe_key: Optional[str] = None,
+) -> Optional[UUID]:
+    """`dedupe_key` (Mind V2 rewire plan, Workstream B) is the SAME stable
+    identity a sender already uses for its notification topic — e.g.
+    `xref:{email_id}:{event_id}` — passed through so the same underlying
+    event never produces two live candidates just because a sender fired
+    twice. Duplicates die structurally here (return None, no row created)
+    rather than relying on the judge's LLM to notice a repeat in its
+    context window. Stored as topic_entities[0] so it survives without a
+    schema change."""
     if kind not in _KINDS:
         raise ValueError(f"unknown candidate kind: {kind!r}")
     if valid_until is None:
@@ -52,6 +61,24 @@ async def create_candidate(
         if default is None:
             raise ValueError(f"kind={kind!r} has no default TTL — valid_until is required")
         valid_until = local_now() + default
+
+    if dedupe_key:
+        existing = (await db.execute(text("""
+            SELECT id FROM say_candidate
+            WHERE user_id = :uid AND source = :source
+              AND :dedupe_key = ANY(topic_entities)
+              AND valid_until >= NOW()
+            LIMIT 1
+        """), {"uid": user_id, "source": source, "dedupe_key": dedupe_key})).first()
+        if existing:
+            logger.debug(
+                f"[say_candidate] duplicate suppressed dedupe_key={dedupe_key!r} source={source!r}"
+            )
+            return None
+
+    topics = list(topic_entities or [])
+    if dedupe_key and dedupe_key not in topics:
+        topics.insert(0, dedupe_key)
 
     row = (await db.execute(text("""
         INSERT INTO say_candidate
@@ -61,7 +88,7 @@ async def create_candidate(
         RETURNING id
     """), {
         "uid": user_id, "source": source, "kind": kind,
-        "topics": topic_entities or [], "summary": summary,
+        "topics": topics, "summary": summary,
         "evidence": json.dumps(evidence or []),
         "value_guess": value_guess, "valid_until": valid_until,
     })).first()

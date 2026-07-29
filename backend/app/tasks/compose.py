@@ -35,10 +35,11 @@ def run_compose_cycle():
 async def _run_async():
     from sqlalchemy import text
     from app.db.session import get_async_session_factory
+    from app.services.candidate_states import CandidateStatus
     from app.services.compose import compose_utterance
     from app.services.review import review_utterance
     from app.services.world_brief import get_rendered_brief
-    from app.services.judge import _gather_utterance_history
+    from app.services.judge import _gather_utterance_history, _gather_recent_chat
 
     user_id = DEFAULT_USER_ID
     factory = get_async_session_factory()
@@ -47,10 +48,10 @@ async def _run_async():
         rows = (await db.execute(text("""
             SELECT sc.id, sc.kind, sc.summary, sc.evidence, sc.judge_reason
             FROM say_candidate sc
-            WHERE sc.user_id = :uid AND sc.status = 'judged_send'
+            WHERE sc.user_id = :uid AND sc.status = :status
               AND NOT EXISTS (SELECT 1 FROM composed_utterance cu WHERE cu.candidate_id = sc.id)
             ORDER BY sc.created_at ASC LIMIT 10
-        """), {"uid": user_id})).fetchall()
+        """), {"uid": user_id, "status": CandidateStatus.JUDGED_SEND.value})).fetchall()
 
     if not rows:
         return {"skipped": "no_candidates"}
@@ -58,6 +59,7 @@ async def _run_async():
     async with factory() as db:
         brief_text = await get_rendered_brief(db, user_id)
         utterance_history = await _gather_utterance_history(db, user_id)
+        recent_chat = await _gather_recent_chat(db, user_id)
 
     stats = {"composed": 0, "approved": 0, "edited": 0, "killed": 0, "errors": 0}
 
@@ -68,7 +70,7 @@ async def _run_async():
         }
 
         try:
-            composed = await compose_utterance(candidate, brief_text)
+            composed = await compose_utterance(candidate, brief_text, recent_chat)
         except Exception as e:
             logger.warning(f"[compose] compose failed for {candidate['id']}: {e}")
             stats["errors"] += 1
@@ -98,6 +100,16 @@ async def _run_async():
                 "urgency": composed["urgency"], "verdict": review["verdict"],
                 "reason": review["reason"], "final_text": final_text,
             })
+            # Advance the candidate out of judged_send now that a
+            # composed_utterance row exists for it — the NOT EXISTS guard
+            # above already made re-processing safe, but leaving status
+            # stuck at judged_send forever made the state machine a lie
+            # (Arc 1.1: composed is a real, queryable state, not just an
+            # implicit "a composed_utterance row happens to exist").
+            await db.execute(text("""
+                UPDATE say_candidate SET status = :status
+                WHERE id = :cid AND user_id = :uid
+            """), {"status": CandidateStatus.COMPOSED.value, "cid": candidate["id"], "uid": user_id})
             await db.commit()
 
         stats["composed"] += 1

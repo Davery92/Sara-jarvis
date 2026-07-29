@@ -142,6 +142,7 @@ class MorningProactiveService:
 
             # Send iOS push notification
             success = await self._send_notification(db, user_id, message, pattern)
+            await self._dual_write_candidate(user_id, message, pattern)
 
             if success:
                 # Record the suggestion
@@ -313,6 +314,29 @@ class MorningProactiveService:
         except Exception as e:
             logger.error(f"Failed to send notification: {e}")
             return False
+
+    async def _dual_write_candidate(self, user_id: str, message: Dict[str, str], pattern: Dict[str, Any]) -> None:
+        """Mind V2 rewire plan Workstream B (long tail) — feed the say_candidate
+        queue with the same real content the push above already sends.
+        Wrapped so a candidate-queue failure never breaks the legacy send."""
+        try:
+            from datetime import timedelta
+            from app.services.say_candidate import create_candidate
+            from app.db.session import get_async_session_factory
+
+            topic = f"pattern_suggestion:{pattern['id']}:{datetime.now(timezone.utc).strftime('%Y%m%d')}"
+            factory = get_async_session_factory()
+            async with factory() as db:
+                await create_candidate(
+                    db, user_id=user_id, source="morning_proactive", kind="inform",
+                    summary=f"{message['title']}: {message['body']}"[:2000],
+                    evidence=[{"pattern_id": pattern["id"]}],
+                    topic_entities=[topic],
+                    valid_until=local_now() + timedelta(hours=12),
+                    dedupe_key=topic,
+                )
+        except Exception as e:
+            logger.warning(f"[say_candidate] morning_proactive dual-write failed: {e}")
 
     async def handle_suggestion_response(
         self,

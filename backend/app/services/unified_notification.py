@@ -960,6 +960,37 @@ async def flush_notification_queue(
     }
 
 
+GRACE_PUSHES_PER_CATEGORY_PER_DAY = 2
+
+
+async def _cold_start_grace_push(db: AsyncSession, user_id: str, category: str) -> bool:
+    """Bootstrap grace (Mind V2 rewire plan, Workstream A): a category with
+    fewer than 5 sends in 30d can never earn a learned buzz, because
+    engagement stats only accumulate from sends that actually happened —
+    cold-start deadlock. Grant a push anyway, capped at
+    GRACE_PUSHES_PER_CATEGORY_PER_DAY per category per day (ET), so an
+    hourly sweep can't burn the whole daily push budget on one category
+    while stats warm up. Once a category crosses the 5-send threshold in
+    _learned_buzz_decision, this path is no longer consulted for it."""
+    try:
+        row = await _db_execute(db, text("""
+            SELECT COUNT(*) FROM notification_log
+            WHERE user_id = :uid AND category = :cat AND sent = TRUE
+              AND sent_at >= (date_trunc('day', NOW() AT TIME ZONE 'America/New_York')
+                              AT TIME ZONE 'America/New_York')
+        """), {"uid": user_id, "cat": category})
+        count_today = int(row.scalar() or 0)
+    except Exception as e:
+        logger.debug(f"[buzz] cold-start grace lookup failed for {category}: {e}")
+        return False
+
+    if count_today >= GRACE_PUSHES_PER_CATEGORY_PER_DAY:
+        return False
+
+    logger.info(f"[buzz] cold-start grace push category={category}")
+    return True
+
+
 async def _learned_buzz_decision(db: AsyncSession, user_id: str, category: str) -> bool:
     """Learned buzz decision (SARA_UNLEASHED Phase A.3). Replaces the blanket
     "normal/low priority never pushes, only high+ does" rule — that rule is
@@ -968,8 +999,10 @@ async def _learned_buzz_decision(db: AsyncSession, user_id: str, category: str) 
     this actually buzz the phone?" gets decided, and it learns: push a
     normal/low item iff this category's trailing 30-day engagement rate is
     >= 40% AND David is currently interruptible (>= 0.5). A category with
-    fewer than 5 sends in the window has no track record yet and fails
-    closed (inbox-only) until it earns a push."""
+    fewer than 5 sends in the window has no track record yet — rather than
+    failing closed forever (cold-start deadlock: no track record can ever
+    form without a send), it gets a rate-limited cold-start grace push
+    instead (Mind V2 rewire plan, Workstream A)."""
     try:
         row = await _db_execute(db, text("""
             SELECT count(*) FILTER (WHERE sent = true) AS sent,
@@ -980,7 +1013,9 @@ async def _learned_buzz_decision(db: AsyncSession, user_id: str, category: str) 
         """), {"uid": user_id, "cat": category})
         r = row.fetchone()
         sent, engaged = (int(r[0] or 0), int(r[1] or 0)) if r else (0, 0)
-        if sent < 5 or (engaged / sent) < 0.4:
+        if sent < 5:
+            return await _cold_start_grace_push(db, user_id, category)
+        if (engaged / sent) < 0.4:
             return False
     except Exception as e:
         logger.debug(f"[buzz] engagement lookup failed for {category}: {e}")
@@ -1084,6 +1119,44 @@ async def route_through_attention_queue(
             priority=priority, topic=dedupe_key, category=category, source=source, db=db,
             _bypass_attention=True, _skip_phrasing=True, payload=payload,
         )
+
+    # Permanent structural dedup for content-addressed "checkin" keys (Mind
+    # V2 rewire plan §5.2). The DB unique constraint on (user_id,
+    # dedupe_key) only blocks while status is 'new'/'sent' — once the user
+    # reads or archives an item, the same dedupe_key opens right back up,
+    # AND the time-based cooldown below is category-wide (any "checkin"
+    # item, not this specific one), so once it expires (2h default) the
+    # identical fact — literally the same email, addressed by this exact
+    # xref:email:<id> dedupe_key — can be recreated as a brand-new item.
+    # Verified live: the same topic fired twice, 2h to the second apart,
+    # both sent=false, because nothing ever consulted "have I EVER surfaced
+    # this exact key" (topic-string dedup only counts sent=TRUE rows, which
+    # normal-priority checkin items almost never reach).
+    #
+    # Scoped to category == "checkin" only (cross_system_synthesis's
+    # xref:email/note keys — a genuinely one-shot fact, re-surfacing it
+    # later tells David nothing new) rather than every category: several
+    # other categories intentionally reuse a type-scoped (not instance-
+    # scoped) dedupe_key across separate real occurrences — e.g.
+    # standing_order_service's `security_action_failed:{action_type}` or
+    # predictive_engine's `prediction:{hash(title)}` — where a permanent
+    # block would wrongly silence a second, later, genuinely-new occurrence.
+    if dedupe_key and category == "checkin":
+        ever = await _db_execute(db, text("""
+            SELECT 1 FROM autonomy_attention_item
+            WHERE user_id = :user_id AND dedupe_key = :dedupe_key
+            LIMIT 1
+        """), {"user_id": user_id, "dedupe_key": dedupe_key})
+        if ever.first():
+            logger.info(
+                f"Attention queue item suppressed — dedupe_key already surfaced once: "
+                f"category={category} dedupe_key={dedupe_key} title={title[:60]}"
+            )
+            await _log_notification(
+                db, user_id, dedupe_key, category, title, message, priority, source, None,
+                0, sent=False, dedup_blocked=True,
+            )
+            return {"sent": False, "reason": "dedupe_key_already_surfaced", "routed_through_attention": True}
 
     # Time-based cooldown against recycled attention items. The DB unique
     # constraint on (user_id, dedupe_key) only blocks while status is

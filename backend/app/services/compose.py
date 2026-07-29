@@ -20,7 +20,7 @@ shadow-mode addition.
 """
 import json
 import logging
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +38,10 @@ def _load_voice_doc() -> str:
         )
 
 
-def _build_prompt(candidate: Dict[str, Any], brief_text: str, voice_doc: str) -> Tuple[str, str]:
+def _build_prompt(
+    candidate: Dict[str, Any], brief_text: str, voice_doc: str,
+    recent_chat: List[Dict[str, Any]] = None,
+) -> Tuple[str, str]:
     system_msg = (
         f"{voice_doc}\n\n"
         "---\n\n"
@@ -49,14 +52,23 @@ def _build_prompt(candidate: Dict[str, Any], brief_text: str, voice_doc: str) ->
         "above — payload, not a check-in; act-then-speak phrasing if prep already "
         "happened; never narrate the machinery (no 'my judge flagged this', no confidence "
         "numbers); time-honest (check every date/time reference against the brief below); "
-        "short — one to three sentences.\n\n"
+        "short — one to three sentences. If the recent conversation already covers this "
+        "ground, phrase around what was said — add the new part, don't repeat what David "
+        "already knows.\n\n"
         "Respond with ONLY valid JSON:\n"
         '{"text": "the actual message", "refs": ["short evidence refs, e.g. entity or id strings"], '
         '"urgency": "normal|high|urgent|critical"}'
     )
 
+    chat_lines = [
+        f"- [{t['at'][:16] if t.get('at') else '?'}] {t['role']}: {t['content']}"
+        for t in (recent_chat or [])
+    ]
+    chat_block = "\n".join(chat_lines) if chat_lines else "(no chat in the last 6 hours)"
+
     user_msg = (
         f"## Current World Brief (for time-honesty — check any date/time claim against this)\n{brief_text}\n\n"
+        f"## Recent conversation (last 6 hours)\n{chat_block}\n\n"
         f"## Candidate\n"
         f"kind: {candidate['kind']}\n"
         f"summary: {candidate['summary']}\n"
@@ -98,11 +110,13 @@ def _parse_response(raw: str) -> dict:
     raise json.JSONDecodeError("No valid JSON found in compose response", text_, 0)
 
 
-async def compose_utterance(candidate: Dict[str, Any], brief_text: str) -> Dict[str, Any]:
+async def compose_utterance(
+    candidate: Dict[str, Any], brief_text: str, recent_chat: List[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """Returns {"text", "refs", "urgency"} — the ComposedUtterance shape
     (minus `slot`, which per-candidate immediate composition doesn't use)."""
     voice_doc = _load_voice_doc()
-    system_msg, user_msg = _build_prompt(candidate, brief_text, voice_doc)
+    system_msg, user_msg = _build_prompt(candidate, brief_text, voice_doc, recent_chat)
 
     from app.core.llm import get_background_llm_client
     client = get_background_llm_client()

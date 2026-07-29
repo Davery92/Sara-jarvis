@@ -12,7 +12,7 @@ Tools:
 import logging
 import uuid
 from datetime import datetime
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from app.tools.base import BaseTool, ToolResult
 
@@ -394,6 +394,7 @@ class DispatchAndMonitorTool(BaseTool):
                     working_directory=working_directory,
                     notify_on_complete=True,
                 )
+                await self._record_commitment(user_id, task_description, result.get("task_id"))
                 return ToolResult(
                     success=True,
                     message=(
@@ -407,6 +408,33 @@ class DispatchAndMonitorTool(BaseTool):
         except Exception as e:
             logger.error(f"Error dispatching monitored task: {e}")
             return ToolResult(success=False, message=f"Failed to dispatch: {str(e)}")
+
+    async def _record_commitment(self, user_id: str, task_description: str, task_id: Optional[str]) -> None:
+        """Mind V2 rewire plan Workstream D.3 — this tool's whole contract IS
+        an explicit promise to report back ("David gets a notification with
+        the results"), so every dispatch through it opens a sara_commitment.
+        task_result_delivery closes it when the completion notice actually
+        delivers — verified live that a chat-dispatched task can complete
+        with only a bookkeeping ledger row and no channel David actually
+        saw (SSE delivery isn't recorded in notification_log at all), so
+        this ledger is the only place the promise-vs-delivery gap becomes
+        visible. Best-effort: a ledger failure must never block dispatch."""
+        if not task_id:
+            return
+        try:
+            from app.services.commitment_service import create_commitment
+            from app.db.session import get_async_session_factory
+
+            factory = get_async_session_factory()
+            async with factory() as db:
+                await create_commitment(
+                    db, user_id=str(user_id),
+                    text_=f"Report back on: {task_description[:200]}",
+                    created_from="chat",
+                    trigger_description=f"task:{task_id}",
+                )
+        except Exception as e:
+            logger.warning(f"[commitment] dispatch-time record failed for task {task_id}: {e}")
 
 
 class CancelAgentTaskTool(BaseTool):

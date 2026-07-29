@@ -103,5 +103,21 @@ async def maybe_nudge(db) -> dict:
         payload={"stimulus_key": stimulus_key, "generator": "bedtime"},
     )
     logger.info(f"🌙 Bedtime nudge: {message!r} sent={result.get('sent')}")
+
+    # Mind V2 rewire plan Workstream B (long tail) — dual-write into the
+    # say_candidate queue. Wrapped so a candidate-queue failure never
+    # breaks the legacy send above.
+    try:
+        from datetime import timedelta
+        from app.services.say_candidate import create_candidate
+        await create_candidate(
+            db, user_id=_DAVID, source="bedtime_intelligence", kind="inform",
+            summary=message, evidence=[{"sleep_debt": debt, "early_start": early}],
+            topic_entities=[stimulus_key],
+            valid_until=now + timedelta(hours=3),
+            dedupe_key=stimulus_key,
+        )
+    except Exception as e:
+        logger.warning(f"[say_candidate] bedtime_intelligence dual-write failed: {e}")
     return {"effect": "nudged", "sleep_debt": debt, "early_start": early,
             "sent": result.get("sent")}

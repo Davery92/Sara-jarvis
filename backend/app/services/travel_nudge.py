@@ -193,4 +193,22 @@ async def check_and_send_leave_now_nudges(user_id: str) -> dict:
             sent += 1
             logger.info(f"Leave-now nudge sent for '{title}' ({travel_min}min drive)")
 
+        # Mind V2 rewire plan Workstream B (long tail) — dual-write into the
+        # say_candidate queue. valid_until = event start: a leave-now nudge
+        # is worthless once the meeting has begun. Wrapped so a
+        # candidate-queue failure never breaks the legacy send above.
+        try:
+            from app.core.timezone import to_utc
+            from app.services.say_candidate import create_candidate
+            async with async_session() as cand_db:
+                await create_candidate(
+                    cand_db, user_id=user_id, source="travel_nudge", kind="alert",
+                    summary=message, evidence=[{"event_id": event_id, "travel_minutes": travel_min}],
+                    topic_entities=[topic],
+                    valid_until=to_utc(start_time),  # naive ET wall-clock -> aware UTC
+                    dedupe_key=topic,
+                )
+        except Exception as e:
+            logger.warning(f"[say_candidate] travel_nudge dual-write failed: {e}")
+
     return {"sent": sent, "checked": len(events)}
