@@ -102,6 +102,7 @@ celery_app = Celery(
         "app.tasks.mindv2_weekly_review",
         "app.tasks.compose",
         "app.tasks.mindv2_deliver",
+        "app.tasks.mindv2_batch_flush",
     ]
 )
 
