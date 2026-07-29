@@ -1,4 +1,8 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap');
+/* Self-hosted (was a <link> to fonts.googleapis.com/icon in index.html — a
+   single external CDN request that the whole app's icons depended on; any
+   network hiccup rendered ligature text like "dns" instead of a glyph). */
+@import 'material-icons/iconfont/material-icons.css';
 @tailwind base;
 @tailwind components;
 @tailwind utilities;

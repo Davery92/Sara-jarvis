@@ -486,10 +486,11 @@ async def get_health_summary(
             status = "normal"
 
             if baseline and baseline.average_value and baseline.std_deviation:
-                diff = metric.value - baseline.average_value
-                if diff > baseline.std_deviation * 1.5:
+                diff = float(metric.value) - float(baseline.average_value)
+                std_dev = float(baseline.std_deviation)
+                if diff > std_dev * 1.5:
                     status = "above_normal"
-                elif diff < -baseline.std_deviation * 1.5:
+                elif diff < -std_dev * 1.5:
                     status = "below_normal"
 
             summary[metric.metric_type] = {

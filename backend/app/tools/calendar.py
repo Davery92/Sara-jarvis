@@ -412,6 +412,30 @@ class CalendarCreateTool(BaseTool):
                     count=recurrence_count
                 )
 
+            # Dedup guard: the agent (email analysis, dispatch, chat) can be
+            # asked to create the "same" meeting more than once across runs.
+            # (title, start_time) is the natural identity here — same title
+            # starting at the same instant is never a legitimate distinct event.
+            existing = db.query(CalendarEvent).filter(
+                CalendarEvent.user_id == user_id,
+                CalendarEvent.title == title,
+                CalendarEvent.start_time == starts_at,
+            ).first()
+            if existing:
+                local_start = existing.start_time.replace(tzinfo=USER_TIMEZONE)
+                local_end = existing.end_time.replace(tzinfo=USER_TIMEZONE)
+                return ToolResult(
+                    success=True,
+                    message=f"Event '{title}' already exists at {local_start.strftime('%B %d, %Y at %I:%M %p')} — not creating a duplicate",
+                    data={
+                        "event_id": existing.id,
+                        "title": existing.title,
+                        "starts_at": local_start.isoformat(),
+                        "ends_at": local_end.isoformat(),
+                        "duplicate": True,
+                    }
+                )
+
             # Create event in calendar_event table
             event = CalendarEvent(
                 user_id=user_id,

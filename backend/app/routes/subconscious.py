@@ -55,8 +55,15 @@ async def get_subconscious_state(
             return {"message": "No state available yet", "user_id": user_id}
 
         state = dict(result._mapping)
+        # Arc 0.8: last_meal_type/last_meal_at/hours_since_meal/typical_meal_windows
+        # have no writer anywhere in the codebase — the column was stuck at a
+        # one-time seed (2026-02-17) while /api/sara/status computed a live,
+        # correct hours-since-meal from the food log, so the two surfaces
+        # disagreed. Dropping the dead fields here rather than reviving a
+        # writer for a store Arc 2's world_state replaces outright.
+        for dead_field in ("last_meal_type", "last_meal_at", "hours_since_meal", "typical_meal_windows"):
+            state.pop(dead_field, None)
         json_fields = (
-            "typical_meal_windows",
             "current_focus_areas",
             "active_threads",
             "docker_health",
@@ -68,7 +75,7 @@ async def get_subconscious_state(
                     state[field] = json.loads(state[field])
                 except (json.JSONDecodeError, TypeError) as e:
                     logger.debug(f"Failed to parse JSON field {field}: {e}")
-        ts_fields = ("last_meal_at", "last_presence_at", "updated_at", "created_at")
+        ts_fields = ("last_presence_at", "updated_at", "created_at")
         for field in ts_fields:
             if state.get(field):
                 state[field] = (

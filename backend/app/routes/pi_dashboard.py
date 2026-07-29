@@ -174,8 +174,14 @@ async def get_pi_dashboard_state(request: Request, db: Session = Depends(get_db)
     state = None
     if state_result:
         state = dict(state_result._mapping)
+        # Arc 0.8: no writer for last_meal_type/last_meal_at/hours_since_meal/
+        # typical_meal_windows anywhere in the codebase — stale since a
+        # one-time seed. /api/sara/status computes hours-since-meal live from
+        # the food log instead; drop the dead fields here rather than surface
+        # two disagreeing answers.
+        for dead_field in ("last_meal_type", "last_meal_at", "hours_since_meal", "typical_meal_windows"):
+            state.pop(dead_field, None)
         json_fields = (
-            "typical_meal_windows",
             "current_focus_areas",
             "active_threads",
             "docker_health",
@@ -187,7 +193,7 @@ async def get_pi_dashboard_state(request: Request, db: Session = Depends(get_db)
                     state[field] = json.loads(state[field])
                 except (json.JSONDecodeError, TypeError) as e:
                     logger.debug(f"Failed to parse JSON field {field}: {e}")
-        ts_fields = ("last_meal_at", "last_presence_at", "updated_at", "created_at")
+        ts_fields = ("last_presence_at", "updated_at", "created_at")
         for field in ts_fields:
             if state.get(field):
                 state[field] = (

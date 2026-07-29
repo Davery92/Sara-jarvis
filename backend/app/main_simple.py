@@ -1124,6 +1124,14 @@ class SimpleLLMClient:
                         # Handle content streaming with XML filtering and MLX channel filtering
                         if "content" in delta and delta["content"]:
                             content_chunk = delta["content"]
+
+                            # Some models/providers lead their very first token
+                            # with a stray newline from the chat template — strip
+                            # it here (once, at the true start of the response)
+                            # rather than at every downstream emit site.
+                            if not full_content:
+                                content_chunk = content_chunk.lstrip("\n")
+
                             full_content += content_chunk
 
                             # Check for MLX channel markers in the full content so far
@@ -1722,12 +1730,24 @@ class SimpleLLMClient:
         """
         Keep chat completion responsive: do not block final stream events on memory persistence.
         If storage exceeds timeout, continue without waiting and persist in background.
+
+        The assistant episode id is generated up front (not read off the DB
+        row after insert) so callers — namely the SSE final_response frame —
+        always have the real id synchronously, even when persistence itself
+        is still running in the background past the timeout. Without this,
+        final_response.episode_id was null whenever storage ran long, and the
+        client had no id to attach a rating to.
         """
+        # Only the assistant-response episode gets a pre-generated id — if
+        # there's no response_content, store_conversation writes nothing for
+        # it and a pre-issued id would dangle (no matching episode row).
+        pre_episode_id = str(uuid.uuid4()) if response_content else None
         store_task = asyncio.create_task(
-            self.store_conversation(messages, response_content, user_id, conversation_id)
+            self.store_conversation(messages, response_content, user_id, conversation_id, assistant_episode_id=pre_episode_id)
         )
         try:
-            return await asyncio.wait_for(asyncio.shield(store_task), timeout=timeout_seconds)
+            await asyncio.wait_for(asyncio.shield(store_task), timeout=timeout_seconds)
+            return pre_episode_id
         except asyncio.TimeoutError:
             logger.warning(
                 f"⚠️ store_conversation timed out after {timeout_seconds}s; continuing stream without waiting"
@@ -1741,7 +1761,7 @@ class SimpleLLMClient:
                     logger.warning(f"⚠️ Background conversation storage failed: {exc}")
 
             store_task.add_done_callback(_log_background_failure)
-            return None
+            return pre_episode_id
         except Exception as e:
             logger.warning(f"⚠️ Conversation storage failed (continuing): {e}")
             return None
@@ -2846,10 +2866,9 @@ class SimpleLLMClient:
             logger.error(f"Error searching dream insights: {e}")
             return []
 
-    async def store_conversation(self, messages, response_content, user_id, conversation_id=None) -> str:
+    async def store_conversation(self, messages, response_content, user_id, conversation_id=None, assistant_episode_id=None) -> str:
         """Store the conversation in enhanced episodic memory with emotional and topical analysis.
         Returns the episode_id of the assistant response for rating purposes."""
-        assistant_episode_id = None
         try:
             # Skip storage if ephemeral mode is enabled
             if getattr(self, '_ephemeral', False):
@@ -2924,9 +2943,10 @@ class SimpleLLMClient:
                     content=response_content,
                     conversation_id=conversation_id,
                     source="chat",
-                    memory_type="conversation"
+                    memory_type="conversation",
+                    episode_id=assistant_episode_id
                 )
-                assistant_episode_id = episode.id if episode else None
+                assistant_episode_id = episode.id if episode else assistant_episode_id
                 logger.info(f"🎯 Assistant episode stored with ID: {assistant_episode_id}")
 
             # Also maintain legacy conversation storage for compatibility
@@ -3086,8 +3106,16 @@ class SimpleLLMClient:
             logger.error(f"Error detecting session gap: {e}")
             return False, None
 
-    async def summarize_session(self, user_id: str, start_time: datetime, end_time: datetime, db: Session) -> str | None:
-        """Generate concise 2-3 sentence summary of conversation session"""
+    async def summarize_session(self, user_id: str, start_time: datetime, end_time: datetime, db: Session = None) -> str | None:
+        """Generate concise 2-3 sentence summary of conversation session.
+
+        Runs off the chat hot path (fire-and-forget from chat_stream) so it
+        needs its own DB session rather than borrowing the request-scoped one,
+        which may already be closed by the time this actually runs.
+        """
+        _owns_db = db is None
+        if _owns_db:
+            db = SessionLocal()
         try:
             # Get episodes in time range
             episodes = db.query(Episode).filter(
@@ -3142,6 +3170,9 @@ Keep it brief and factual."""
         except Exception as e:
             logger.error(f"Error summarizing session: {e}")
             return None
+        finally:
+            if _owns_db:
+                db.close()
 
     async def store_session_summary(self, user_id: str, summary: str, timestamp: datetime):
         """Store session summary in Redis with 24hr TTL"""
@@ -4474,7 +4505,8 @@ class IntelligentMemoryService:
         content: str,
         conversation_id: str = None,
         source: str = "chat",
-        memory_type: str = "conversation"
+        memory_type: str = "conversation",
+        episode_id: str = None
     ) -> Episode:
         """Store an episode with fast heuristic scoring.
 
@@ -4534,6 +4566,7 @@ class IntelligentMemoryService:
                 base_score * 0.6 + emotional_intensity * 0.25 + novelty * 0.15))
 
             episode = Episode(
+                **({"id": episode_id} if episode_id else {}),
                 conversation_id=conversation_id,
                 user_id=user_id,
                 role=role,
@@ -9668,49 +9701,52 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                 )
 
                 if has_gap and last_message_time:
-                    # Session gap detected - summarize the previous session
-                    logger.info(f"⏱️ Session gap detected (45+ min since last message)")
+                    # Session gap detected - summarize the previous session.
+                    # This closes out the PAST session (redis/day-layer/journal
+                    # writes) — nothing in *this* turn's context depends on its
+                    # result, so it must never block the chat hot path. It used
+                    # to be awaited inline with a 4s timeout that routinely burned
+                    # the full 4s only to be discarded (Arc 0.6). Fully detached
+                    # now, with its own DB session (the request's `db` may already
+                    # be closed by the time this background task actually runs).
+                    logger.info(f"⏱️ Session gap detected (45+ min since last message) — closing previous session in background")
 
-                    # Define session time range: from 2 hours before gap to the gap time
                     session_end = last_message_time
                     session_start = session_end - timedelta(hours=2)
+                    _conversation_id_for_close = request.conversation_id or "unknown"
 
-                    # Summarize session
-                    try:
-                        summary = await asyncio.wait_for(
-                            llm_client.summarize_session(current_user.id, session_start, session_end, db),
-                            timeout=4.0
-                        )
-                    except asyncio.TimeoutError:
-                        logger.warning("⚠️ Session summarization timed out (skipping)")
-                        summary = None
-                    if summary:
-                        # Store in Redis (legacy, for fallback)
-                        asyncio.create_task(
-                            llm_client.store_session_summary(current_user.id, summary, session_end)
-                        )
-                        # Also feed to day layer if daily brief is available
+                    async def _close_previous_session(uid=current_user.id, s_start=session_start, s_end=session_end, conv_id=_conversation_id_for_close):
+                        summary = await llm_client.summarize_session(uid, s_start, s_end)
+                        if not summary:
+                            return
+                        await llm_client.store_session_summary(uid, summary, s_end)
                         if DAILY_BRIEF_AVAILABLE:
-                            asyncio.create_task(
-                                daily_brief_service.append_to_day_layer(current_user.id, summary, session_end)
-                            )
-                            logger.info(f"📅 Appended session summary to day layer")
-
-                        # Write Sara's conversation close journal entry
+                            await daily_brief_service.append_to_day_layer(uid, summary, s_end)
+                            logger.info("📅 Appended session summary to day layer")
+                        close_db = SessionLocal()
                         try:
-                            asyncio.create_task(
-                                sara_journal.write_conversation_close_entry(
-                                    db=db,
-                                    user_id=current_user.id,
-                                    conversation_id=request.conversation_id or "unknown",
-                                    conversation_summary=summary,
-                                    user_mood=None,  # Could infer from summary
-                                    body_state=None
-                                )
+                            await sara_journal.write_conversation_close_entry(
+                                db=close_db,
+                                user_id=uid,
+                                conversation_id=conv_id,
+                                conversation_summary=summary,
+                                user_mood=None,  # Could infer from summary
+                                body_state=None
                             )
-                            logger.info(f"📔 Queued conversation close journal entry")
-                        except Exception as je:
-                            logger.warning(f"⚠️ Failed to write journal entry: {je}")
+                            logger.info("📔 Wrote conversation close journal entry")
+                        finally:
+                            close_db.close()
+
+                    def _log_session_close_failure(task: asyncio.Task):
+                        try:
+                            exc = task.exception()
+                        except asyncio.CancelledError:
+                            return
+                        if exc:
+                            logger.warning(f"⚠️ Background session close failed: {exc}")
+
+                    _close_task = asyncio.create_task(_close_previous_session())
+                    _close_task.add_done_callback(_log_session_close_failure)
 
                     # Build re-entry context from unified snapshot changes + agent memory + journal + PKG
                     try:

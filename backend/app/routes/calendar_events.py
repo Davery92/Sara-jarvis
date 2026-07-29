@@ -1,7 +1,7 @@
 """Calendar events routes."""
 import uuid
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from app.core.timezone import naive_local_now
 from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, HTTPException
@@ -157,10 +157,11 @@ async def list_synced_calendars(
 async def list_calendar_events(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
+    days: Optional[int] = Query(None, ge=1, le=365, description="Window in days from now — ignored if start_date/end_date given"),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Get all calendar events."""
+    """Get calendar events, optionally windowed by start_date/end_date or days."""
     import os
     local_tz = ZoneInfo(os.environ.get("TIMEZONE", "America/New_York"))
     query = db.query(CalendarEvent).filter(CalendarEvent.user_id == current_user.id)
@@ -171,6 +172,9 @@ async def list_calendar_events(
             query = query.filter(CalendarEvent.start_time >= start_dt)
         except:
             pass
+    elif days is not None:
+        now_local = _to_naive_local(datetime.now(ZoneInfo("UTC")), local_tz)
+        query = query.filter(CalendarEvent.start_time >= now_local)
 
     if end_date:
         try:
@@ -178,6 +182,9 @@ async def list_calendar_events(
             query = query.filter(CalendarEvent.start_time <= end_dt)
         except:
             pass
+    elif days is not None:
+        now_local = _to_naive_local(datetime.now(ZoneInfo("UTC")), local_tz)
+        query = query.filter(CalendarEvent.start_time <= now_local + timedelta(days=days))
 
     events = query.order_by(CalendarEvent.start_time).all()
 

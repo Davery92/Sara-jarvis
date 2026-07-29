@@ -5,6 +5,7 @@ Endpoints for querying and managing cross-domain patterns.
 """
 
 import logging
+import uuid as uuid_module
 from datetime import date, timedelta
 from typing import List, Optional
 
@@ -306,6 +307,59 @@ async def get_patterns(
     return patterns
 
 
+@router.get("/summary")
+async def get_patterns_summary(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Roll-up counts/confidence over the user's correlation patterns."""
+    row = db.execute(text("""
+        SELECT
+            COUNT(*) FILTER (WHERE status = 'confirmed') AS confirmed_count,
+            COUNT(*) FILTER (WHERE status = 'emerging') AS emerging_count,
+            AVG(confidence) FILTER (WHERE status = 'confirmed') AS avg_confidence,
+            MAX(last_validated_at) AS last_validated_at
+        FROM correlation_pattern
+        WHERE user_id = :user_id
+    """), {"user_id": current_user.id}).fetchone()
+
+    return {
+        "confirmed_count": row.confirmed_count or 0,
+        "emerging_count": row.emerging_count or 0,
+        "avg_confidence": float(row.avg_confidence) if row.avg_confidence is not None else None,
+        "last_validated_at": row.last_validated_at.isoformat() if row.last_validated_at else None,
+    }
+
+
+@router.get("/insights")
+async def get_patterns_insights(
+    limit: int = Query(5, ge=1, le=20),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """The highest-confidence confirmed patterns, as short narrative insights."""
+    rows = db.execute(text("""
+        SELECT id, title, narrative, confidence, last_validated_at
+        FROM correlation_pattern
+        WHERE user_id = :user_id AND status = 'confirmed'
+        ORDER BY confidence DESC, last_validated_at DESC
+        LIMIT :limit
+    """), {"user_id": current_user.id, "limit": limit}).fetchall()
+
+    return {
+        "insights": [
+            {
+                "id": str(r.id),
+                "title": r.title,
+                "narrative": r.narrative,
+                "confidence": r.confidence,
+                "last_validated": r.last_validated_at.isoformat() if r.last_validated_at else None,
+            }
+            for r in rows
+        ]
+    }
+
+
 @router.get("/{pattern_id}", response_model=PatternResponse)
 async def get_pattern(
     pattern_id: str,
@@ -313,6 +367,11 @@ async def get_pattern(
     db: Session = Depends(get_db)
 ):
     """Get a specific pattern by ID."""
+    try:
+        uuid_module.UUID(pattern_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Pattern not found")
+
     result = db.execute(text("""
         SELECT
             id, title, description, narrative, pattern_category,

@@ -64,6 +64,7 @@ def serialize_note(note: Note, include_user_id: bool = False) -> NoteResponse:
 @router.get("", response_model=List[NoteResponse])
 async def list_notes(
     folder_id: Optional[str] = None,
+    limit: int = Query(500, ge=1, le=500, description="Max notes to return"),
     include_content: bool = Query(
         True,
         description=(
@@ -104,7 +105,7 @@ async def list_notes(
         else:
             query = query.filter(Note.folder_id == folder_id)
 
-    rows = query.order_by(Note.updated_at.desc()).limit(500).all()
+    rows = query.order_by(Note.updated_at.desc()).limit(limit).all()
 
     def _body(content: Optional[str]) -> str:
         text = content or ""

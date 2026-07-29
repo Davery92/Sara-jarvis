@@ -585,14 +585,14 @@ class WorkoutStatsTool(BaseTool):
 
             # Get completed workouts
             workouts_sql = text("""
-                SELECT DISTINCT w.id, w.title, w.status,
+                SELECT w.id, w.title, w.status, w.created_at,
                        COUNT(wl.id) as sets_logged
                 FROM workout w
                 LEFT JOIN workout_log wl ON w.id = wl.workout_id
                 WHERE w.user_id = :user_id
                 AND w.created_at >= :start_date
                 AND w.created_at < :end_date
-                GROUP BY w.id, w.title, w.status
+                GROUP BY w.id, w.title, w.status, w.created_at
                 ORDER BY w.created_at DESC
             """)
 
