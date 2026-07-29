@@ -309,3 +309,43 @@ async def get_context_snapshot(db: Session, user_id: str = DEFAULT_USER_ID) -> D
         "self_state": self_.model_dump(mode="json"),
         "relationship_state": relationship.model_dump(mode="json"),
     }
+
+
+def render_engaged_context(context: Dict[str, Any], open_intents: int, recall_traces: list) -> str:
+    """Render kernel.engaged_turn()'s assembled context (world/self/
+    relationship + recall) into the markdown block chat's system prompt
+    would inject — Arc 2.3's actual 4-source replacement for the ~19-source
+    budget assembly, made comparable to it instead of just a shadow dict.
+
+    Deliberately dense but plain: one block per slice, only non-null data,
+    no editorializing — matches how the other injected context blocks in
+    main_simple.py read (## headers + short lines)."""
+    lines = ["## Current Situation (world_state + self_state + relationship_state)"]
+
+    world = context.get("world_state") or {}
+    for slice_name in ("david", "home", "calendar_horizon", "health_today", "work", "fleet"):
+        s = world.get(slice_name)
+        if not s or not s.get("data"):
+            continue
+        data_str = ", ".join(f"{k}={v}" for k, v in s["data"].items() if v not in (None, [], ""))
+        if data_str:
+            lines.append(f"- **{slice_name}** ({s.get('source', '?')}, confidence={s.get('confidence', '?')}): {data_str}")
+
+    self_state = context.get("self_state") or {}
+    if self_state.get("kernel_state"):
+        lines.append(f"- **self**: kernel_state={self_state['kernel_state']}")
+    for concern in (self_state.get("open_concerns") or [])[:5]:
+        lines.append(f"  - concern: {concern}")
+
+    relationship = context.get("relationship_state") or {}
+    if relationship.get("active_conversation_id"):
+        lines.append(f"- **relationship**: active_conversation={relationship['active_conversation_id']}")
+
+    lines.append(f"- **open_intents**: {open_intents}")
+
+    if recall_traces:
+        lines.append("\n### Relevant memory (memory.recall)")
+        for t in recall_traces[:5]:
+            lines.append(f"- [{t.get('kind')}, {t.get('confidence')}] {(t.get('text') or '')[:150]}")
+
+    return "\n".join(lines)

@@ -9492,6 +9492,34 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
             budget.add("workspace", workspace_ctx, priority=5)
 
             combined_context = budget.build_context_text()
+
+            # Arc 2.3 staged rollout (SARA_ALIVE_BUILD_PLAN, per review): same
+            # mechanism as Arc 3.4's tool diet — log the old ~19-source
+            # assembly and the new 4-source kernel assembly side by side for
+            # real turns before ever substituting one for the other. Never
+            # blocks or alters the response; comparison-only.
+            try:
+                from app.core.feature_flags import Flag as _CtxFlag, is_enabled as _ctx_flag_enabled
+                if _ctx_flag_enabled(_CtxFlag.SINGULAR_KERNEL):
+                    from app.services.context_snapshot import get_context_snapshot, render_engaged_context
+                    from app.services.memory_recall import recall as _memory_recall
+                    from app.services.intent_graph_projection import get_intent_graph
+
+                    _new_context = await get_context_snapshot(db, str(current_user.id))
+                    _new_open_intents = get_intent_graph(db, str(current_user.id))["total"]
+                    _new_recalled = await _memory_recall(user_id=str(current_user.id), query=last_user_text or "", k=5)
+                    _new_rendered = render_engaged_context(_new_context, _new_open_intents, _new_recalled.get("traces") or [])
+                    _old_source_names = [getattr(s, "name", "?") for s in (getattr(budget, "sources", []) or [])]
+                    logger.info(
+                        f"📐 [context-diet-compare] old={len(combined_context or '')}chars "
+                        f"sources={_old_source_names} "
+                        f"new={len(_new_rendered)}chars "
+                        f"(world_slices={sum(1 for k in ('david','home','calendar_horizon','health_today','work','fleet') if (_new_context.get('world_state') or {}).get(k))}, "
+                        f"recall_traces={len(_new_recalled.get('traces') or [])}, open_intents={_new_open_intents})"
+                    )
+            except Exception as _ctx_cmp_err:
+                logger.debug(f"[context-diet-compare] skipped: {_ctx_cmp_err}")
+
             if combined_context:
                 system_message = ChatMessage(
                     role="system",
