@@ -101,6 +101,7 @@ celery_app = Celery(
         "app.tasks.judge",
         "app.tasks.mindv2_weekly_review",
         "app.tasks.compose",
+        "app.tasks.mindv2_deliver",
     ]
 )
 
@@ -184,6 +185,7 @@ celery_app.conf.task_routes = {
     "app.tasks.judge.*": {"queue": "cognitive"},
     "app.tasks.mindv2_weekly_review.*": {"queue": "cognitive"},
     "app.tasks.compose.*": {"queue": "cognitive"},
+    "app.tasks.mindv2_deliver.*": {"queue": "cognitive"},
 }
 
 # Define queues with priorities
