@@ -310,6 +310,27 @@ class TestReflectionCycle:
         assert result.theory_of_david is None
         assert result.cycle_start is not None
 
+    @pytest.mark.asyncio
+    async def test_reflection_cycle_decays_stale_life_facts(self, reflection_agent):
+        """Arc 5.2: the reflection cycle must call decay_stale_life_facts
+        and carry its count on the cycle result."""
+        with patch("app.services.life_facts.decay_stale_life_facts",
+                    new=AsyncMock(return_value=3)):
+            result = await reflection_agent.run_reflection_cycle()
+
+        assert result.life_facts_decayed == 3
+
+    @pytest.mark.asyncio
+    async def test_life_facts_decay_failure_does_not_break_the_cycle(self, reflection_agent):
+        """Isolated the same way as every other Arc 4/5 dreaming step — a
+        failure here must not take down the rest of the reflection cycle."""
+        with patch("app.services.life_facts.decay_stale_life_facts",
+                    new=AsyncMock(side_effect=RuntimeError("db exploded"))):
+            result = await reflection_agent.run_reflection_cycle()
+
+        assert result.life_facts_decayed == 0
+        assert result.cycle_start is not None
+
 
 # ==========================================
 # NOTIFICATION INTEGRATION TESTS

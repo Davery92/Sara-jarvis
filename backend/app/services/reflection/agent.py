@@ -52,6 +52,8 @@ class ReflectionCycleResult:
     # (entry_type='theory_of_david'); this is this cycle's copy for the
     # caller/logs.
     theory_of_david: Optional[str] = None
+    # Arc 5.2: how many stale inferred life_facts this cycle decayed.
+    life_facts_decayed: int = 0
     duration_seconds: float = 0
 
     def to_dict(self) -> Dict[str, Any]:
@@ -71,6 +73,7 @@ class ReflectionCycleResult:
             "prediction_calibration": self.prediction_calibration,
             "self_story": self.self_story,
             "theory_of_david": self.theory_of_david,
+            "life_facts_decayed": self.life_facts_decayed,
             "duration_seconds": self.duration_seconds,
         }
 
@@ -201,7 +204,17 @@ class ReflectionAgent:
             except Exception as e:
                 logger.warning(f"Theory-of-David consolidation failed (non-critical): {e}")
 
-            # 9. Self-assess this reflection cycle
+            # 9. Decay stale inferred life_facts (Arc 5.2) — one confidence
+            # scheme means life_fact confidence has to actually move, not
+            # just ever increase. self.db is already the right session type
+            # (AsyncSession), no separate session needed here.
+            try:
+                from app.services.life_facts import decay_stale_life_facts
+                result.life_facts_decayed = await decay_stale_life_facts(self.db, _DAVID_USER_ID)
+            except Exception as e:
+                logger.warning(f"life_fact decay failed (non-critical): {e}")
+
+            # 10. Self-assess this reflection cycle
             await self._self_assess(result)
 
         except Exception as e:

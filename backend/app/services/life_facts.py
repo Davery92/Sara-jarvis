@@ -375,6 +375,30 @@ async def detect_and_apply_correction(
     return None
 
 
+async def decay_stale_life_facts(db: AsyncSession, user_id: str, days_threshold: int = 90) -> int:
+    """Arc 5.2: life_fact confidence had no decay at all — upsert_life_fact's
+    GREATEST() only ever raises it. Mirrors PKG's decay_stale_knowledge
+    (×0.9 if unconfirmed in days_threshold days, floored so it never fully
+    vanishes) but ONLY for inferred facts (authority=1) — a stated fact
+    (authority=2, David's own word) is law until he changes it, per this
+    module's own docstring; decaying it because it hasn't come up in
+    conversation lately would be wrong, not just inconsistent. Returns the
+    number of rows decayed."""
+    result = await db.execute(text("""
+        UPDATE life_fact
+        SET confidence = confidence * 0.9
+        WHERE user_id = :uid
+          AND authority = :inferred
+          AND confidence > 0.2
+          AND last_confirmed_at < NOW() - make_interval(days => :days)
+    """), {"uid": user_id, "inferred": AUTHORITY_INFERRED, "days": days_threshold})
+    await db.commit()
+    decayed = result.rowcount or 0
+    if decayed:
+        logger.info(f"life_fact: decayed {decayed} stale inferred facts (unconfirmed {days_threshold}d+)")
+    return decayed
+
+
 def confirmation_line(fact: Dict[str, Any]) -> str:
     """A short, in-voice confirmation of a durable fact, for the reply."""
     label = fact.get("label", fact.get("predicate", "that"))
