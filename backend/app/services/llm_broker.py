@@ -125,6 +125,36 @@ def all_capabilities() -> Dict[str, Dict[str, Optional[str]]]:
     return {name: resolve(name) for name in CAPABILITIES}
 
 
+async def get_broker_client(capability: str):
+    """Arc 6.2 (work-order item 6): the client-factory layer `resolve()`
+    was missing — until this, nothing outside the two admin settings
+    endpoints ever actually called `resolve()`, so "migrate call sites
+    to llm_broker capability classes" had no factory to migrate *onto*.
+    Returns a plain `openai.AsyncOpenAI` client pointed at the
+    capability's resolved model/endpoint, for callers that build their
+    own request payloads and just need model+base_url (the shape most
+    of the ~15 raw `openai_model` call sites already use).
+
+    Deliberately NOT wired into `app/core/llm.py`'s two existing hubs
+    (`get_background_llm_client()`/`llm_client`) this pass — those are
+    the most widely-used, business-critical LLM clients in the whole
+    system (compose/judge/curiosity/sara_journal/verification_loop all
+    route through them), and `BackgroundLLMClient` already has its own
+    DB-persisted-override mechanism for `bg_llm_*` settings
+    (`_load_persisted_ai_setting_overrides()`) that substantially
+    achieves "rename = one row" for that axis already, just via older,
+    parallel code rather than this broker. Rewiring that internal
+    resolution path is real, valuable follow-up work — not something
+    to do as a drive-by inside an unrelated client-factory addition."""
+    cap = resolve(capability)
+    from openai import AsyncOpenAI
+    from app.core.config import settings
+    return AsyncOpenAI(
+        base_url=cap["base_url"],
+        api_key=getattr(settings, "openai_api_key", "") or "not-needed",
+    ), cap["model"]
+
+
 def rename_model(old: str, new: str) -> Dict[str, object]:
     """Rewrite every app_settings row whose value is exactly `old` model name to
     `new`, in one operation. This is the "rename = one action" primitive: no

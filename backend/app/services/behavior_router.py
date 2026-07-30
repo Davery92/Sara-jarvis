@@ -248,20 +248,30 @@ class BehaviorRouter:
         self._client = None
 
     async def _get_llm_client(self):
-        """Get or create the OpenAI client"""
+        """Get or create the OpenAI client.
+
+        Arc 6.2 (work-order item 6): this used to read settings.OPENAI_
+        BASE_URL / settings.OPENAI_MODEL — uppercase attributes that
+        don't exist on Settings (only lowercase openai_base_url/
+        openai_model do) — so this path raised AttributeError every
+        time it actually ran. Fixed and migrated onto llm_broker's
+        "utility" capability in the same move, rather than just
+        swapping in the lowercase names."""
         if self._client is None:
             from openai import AsyncOpenAI
             from app.core.config import settings
+            from app.services.llm_broker import resolve
+            cap = resolve("utility")
             self._client = AsyncOpenAI(
-                base_url=settings.OPENAI_BASE_URL,
-                api_key=settings.OPENAI_API_KEY or "not-needed",
+                base_url=cap["base_url"],
+                api_key=settings.openai_api_key or "not-needed",
             )
         return self._client
 
     def _get_model(self) -> str:
-        """Get the model name from settings"""
-        from app.core.config import settings
-        return settings.OPENAI_MODEL
+        """Get the model name via the broker's "utility" capability."""
+        from app.services.llm_broker import resolve
+        return resolve("utility")["model"]
 
     def _get_existing_skills_summary(self) -> str:
         """Get a summary of existing skills for the classification prompt"""
