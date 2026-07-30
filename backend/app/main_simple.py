@@ -1894,119 +1894,112 @@ class SimpleLLMClient:
                     "content": cached_result + "\n\n[Retrieved from session cache - already fetched this conversation]"
                 }
         
-        if function_name == "search_notes":
-            result = await self.search_notes_tool(arguments["query"], user_id, arguments.get("folder_name"))
-        elif function_name == "create_note":
-            result = await self.create_note_tool(arguments.get("title", ""), arguments["content"], user_id, arguments.get("folder_name"))
-        elif function_name == "list_notes":
-            result = await self.list_notes_tool(user_id)
-        elif function_name == "list_folders":
-            result = await self.list_folders_tool(user_id)
-        elif function_name == "create_reminder":
-            result = await self.create_reminder_tool(arguments["title"], arguments.get("description", ""), arguments["reminder_time"], user_id)
-        elif function_name == "start_timer":
-            result = await self.start_timer_tool(arguments["title"], arguments["duration_minutes"], user_id)
-        elif function_name == "search_documents":
-            result = await self.search_documents_tool(arguments["query"], user_id)
-        elif function_name == "search_memory":
-            result = await self.search_memory_tool(arguments["query"], user_id)
-        else:
-            # H6 (Brain Alignment): body schema. If the model calls a tool that
-            # isn't actually wired, say so plainly instead of guessing — Sara
-            # should have an accurate self-model of her own capabilities.
-            if not tool_registry.get_tool(function_name):
-                from app.services.capability_manifest import not_wired_result
-                logger.warning(f"🦾 Model called unwired tool '{function_name}'")
-                return {
-                    "role": "tool",
-                    "tool_call_id": tool_call["id"],
-                    "content": json.dumps({
-                        "success": False,
-                        "message": not_wired_result(function_name),
-                        "data": None,
-                    }),
-                }
-            # Fallback to global tool registry (e.g., web_search, open_page, knowledge_graph, etc.)
+        # Work-order item 5 (2026-07-30): the 8 inline branches that used to
+        # live here (search_notes/create_note/list_notes/list_folders/
+        # create_reminder/start_timer/search_documents/search_memory) were
+        # dead code — chat_with_tools' `tools` list is built exclusively from
+        # tool_registry (get_tools_by_categories/get_tools_by_names), which
+        # never emits those schema names, so the branches could never fire.
+        # Their real equivalents (notes_search, notes_create, notes_list,
+        # notes_list_folders, reminders_create, timers_start, memory_search,
+        # and the newly-built documents_search) are registry tools reachable
+        # below. Backing methods deleted with the branches — no other caller.
+        # H6 (Brain Alignment): body schema. If the model calls a tool that
+        # isn't actually wired, say so plainly instead of guessing — Sara
+        # should have an accurate self-model of her own capabilities.
+        if not tool_registry.get_tool(function_name):
+            from app.services.capability_manifest import not_wired_result
+            logger.warning(f"🦾 Model called unwired tool '{function_name}'")
+            return {
+                "role": "tool",
+                "tool_call_id": tool_call["id"],
+                "content": json.dumps({
+                    "success": False,
+                    "message": not_wired_result(function_name),
+                    "data": None,
+                }),
+            }
+        # Dispatch through the global tool registry.
+        try:
+            reg_result = await tool_registry.execute_tool(
+                name=function_name,
+                user_id=str(user_id),
+                parameters=arguments,
+                context={"origin": "chat", "conversation_id": conversation_id},
+            )
+            # Collect citations if available
             try:
-                reg_result = await tool_registry.execute_tool(
-                    name=function_name,
-                    user_id=str(user_id),
-                    parameters=arguments,
-                    context={"origin": "chat", "conversation_id": conversation_id},
-                )
-                # Collect citations if available
-                try:
-                    if reg_result.citations:
-                        for c in reg_result.citations:
-                            if isinstance(c, str):
-                                self._citations.add(c)
-                except Exception:
-                    pass
+                if reg_result.citations:
+                    for c in reg_result.citations:
+                        if isinstance(c, str):
+                            self._citations.add(c)
+            except Exception:
+                pass
 
-                # Emit canvas_command SSE event for immediate UI update
-                if reg_result.success and reg_result.data and isinstance(reg_result.data, dict):
-                    canvas_command = reg_result.data.get("canvas_command")
-                    if canvas_command:
-                        await self.emit_event("canvas_command", reg_result.data)
-                        logger.info(f"📐 Emitted canvas_command: {canvas_command}")
+            # Emit canvas_command SSE event for immediate UI update
+            if reg_result.success and reg_result.data and isinstance(reg_result.data, dict):
+                canvas_command = reg_result.data.get("canvas_command")
+                if canvas_command:
+                    await self.emit_event("canvas_command", reg_result.data)
+                    logger.info(f"📐 Emitted canvas_command: {canvas_command}")
 
-                    # Surface commands (ephemeral interactive UI) — same forwarding
-                    # pattern; the web `custom` view + Redis mirror consume these.
-                    surface_command = reg_result.data.get("surface_command")
-                    if surface_command:
-                        await self.emit_event("surface_command", reg_result.data)
-                        logger.info(f"🧩 Emitted surface_command: {surface_command}")
-                        try:
-                            from redis import Redis
-                            redis_conn = Redis.from_url(config.settings.redis_url, decode_responses=True)
-                            redis_conn.lpush(f"surface_commands:{user_id}", json.dumps(reg_result.data))
-                            redis_conn.expire(f"surface_commands:{user_id}", 60)
-                        except Exception as e:
-                            logger.warning(f"Failed to mirror surface_command to Redis: {e}")
+                # Surface commands (ephemeral interactive UI) — same forwarding
+                # pattern; the web `custom` view + Redis mirror consume these.
+                surface_command = reg_result.data.get("surface_command")
+                if surface_command:
+                    await self.emit_event("surface_command", reg_result.data)
+                    logger.info(f"🧩 Emitted surface_command: {surface_command}")
+                    try:
+                        from redis import Redis
+                        redis_conn = Redis.from_url(config.settings.redis_url, decode_responses=True)
+                        redis_conn.lpush(f"surface_commands:{user_id}", json.dumps(reg_result.data))
+                        redis_conn.expire(f"surface_commands:{user_id}", 60)
+                    except Exception as e:
+                        logger.warning(f"Failed to mirror surface_command to Redis: {e}")
 
-                    # Emit workspace_command SSE event for workbench-canvas
-                    workspace_commands = []
-                    if isinstance(reg_result.data.get("workspace_commands"), list):
-                        workspace_commands = [
-                            cmd for cmd in reg_result.data.get("workspace_commands", [])
-                            if isinstance(cmd, dict) and cmd.get("workspace_command")
-                        ]
+                # Emit workspace_command SSE event for workbench-canvas
+                workspace_commands = []
+                if isinstance(reg_result.data.get("workspace_commands"), list):
+                    workspace_commands = [
+                        cmd for cmd in reg_result.data.get("workspace_commands", [])
+                        if isinstance(cmd, dict) and cmd.get("workspace_command")
+                    ]
 
-                    workspace_command = reg_result.data.get("workspace_command")
-                    if workspace_command and not workspace_commands:
-                        workspace_commands = [reg_result.data]
+                workspace_command = reg_result.data.get("workspace_command")
+                if workspace_command and not workspace_commands:
+                    workspace_commands = [reg_result.data]
 
-                    if workspace_commands:
+                if workspace_commands:
+                    for cmd in workspace_commands:
+                        await self.emit_event("workspace_command", cmd)
+                    logger.info(f"🖼️ Emitted {len(workspace_commands)} workspace_command event(s)")
+
+                    # Also store in Redis for voice/non-SSE access
+                    try:
+                        from redis import Redis
+                        redis_conn = Redis.from_url(config.settings.redis_url, decode_responses=True)
                         for cmd in workspace_commands:
-                            await self.emit_event("workspace_command", cmd)
-                        logger.info(f"🖼️ Emitted {len(workspace_commands)} workspace_command event(s)")
+                            cmd_data = json.dumps(cmd)
+                            redis_conn.lpush(f"workspace_commands:{user_id}", cmd_data)
+                        redis_conn.expire(f"workspace_commands:{user_id}", 60)  # 1 minute TTL
+                        logger.info(f"🖼️ Stored {len(workspace_commands)} workspace_command(s) in Redis for user {user_id}")
+                    except Exception as e:
+                        logger.warning(f"Failed to store workspace_command in Redis: {e}")
 
-                        # Also store in Redis for voice/non-SSE access
-                        try:
-                            from redis import Redis
-                            redis_conn = Redis.from_url(config.settings.redis_url, decode_responses=True)
-                            for cmd in workspace_commands:
-                                cmd_data = json.dumps(cmd)
-                                redis_conn.lpush(f"workspace_commands:{user_id}", cmd_data)
-                            redis_conn.expire(f"workspace_commands:{user_id}", 60)  # 1 minute TTL
-                            logger.info(f"🖼️ Stored {len(workspace_commands)} workspace_command(s) in Redis for user {user_id}")
-                        except Exception as e:
-                            logger.warning(f"Failed to store workspace_command in Redis: {e}")
+            result = json.dumps({
+                "success": reg_result.success,
+                "message": reg_result.message,
+                "data": reg_result.data
+            })
+        except Exception as e:
+            result = f"Unknown tool: {function_name} ({e})"
 
-                result = json.dumps({
-                    "success": reg_result.success,
-                    "message": reg_result.message,
-                    "data": reg_result.data
-                })
-            except Exception as e:
-                result = f"Unknown tool: {function_name} ({e})"
-        
         # STORE IN CACHE
         if session_cache and conversation_id:
             session_cache.set(conversation_id, function_name, arguments, str(result))
 
         logger.info(f"Tool {function_name} result length: {len(str(result))} chars")
-        if function_name == "search_documents":
+        if function_name == "documents_search":
             logger.info(f"Search result preview: {str(result)[:500]}...")
 
         # Emit tool_completed event
@@ -2038,653 +2031,6 @@ class SimpleLLMClient:
 
     def get_citations(self):
         return list(self._citations)
-
-    async def search_notes_tool(self, query, user_id, folder_name=None):
-        """Search notes using Neo4j knowledge graph (with PostgreSQL fallback)"""
-        neo4j_failed = False
-        folder_filter_info = ""
-        folder_id = None
-
-        # Resolve folder name to folder_id if provided
-        if folder_name:
-            try:
-                db_check = SessionLocal()
-                try:
-                    folder = db_check.query(Folder).filter(
-                        Folder.user_id == user_id,
-                        Folder.name.ilike(folder_name)
-                    ).first()
-                    if folder:
-                        folder_id = folder.id
-                        folder_filter_info = f" in folder '{folder.name}'"
-                    else:
-                        folder_filter_info = f" (folder '{folder_name}' not found, searching all)"
-                finally:
-                    db_check.close()
-            except Exception as e:
-                logger.warning(f"Error resolving folder: {e}")
-
-        # Try Neo4j search first (Neo4j doesn't have folder info, so fall through to PostgreSQL if filtering)
-        if not folder_id:
-            try:
-                from app.services.neo4j_service import neo4j_service
-                if neo4j_service.driver:
-                    search_results = await neo4j_service.search_knowledge_graph(
-                        user_id=user_id,
-                        query=query,
-                        content_types=["Note"],
-                        limit=10
-                    )
-
-                    if search_results:
-                        results = []
-                        for node in search_results:
-                            title = node.get('title', 'Untitled')
-                            content = node.get('content', '')[:200]
-                            results.append(f"Note: {title}\nContent: {content}...")
-                        return "\n\n".join(results) + folder_filter_info
-                    elif search_results is not None:  # Empty list means no results found
-                        return f"No notes found matching your query{folder_filter_info}."
-            except Exception as e:
-                logger.warning(f"Neo4j search failed, falling back to PostgreSQL: {e}")
-                neo4j_failed = True
-
-        # Fallback to PostgreSQL (or primary if folder filtering)
-        try:
-            db = SessionLocal()
-            try:
-                # Normalize query - remove spaces for fuzzy matching
-                normalized_query = query.replace(" ", "")
-
-                # Search both title and content, with fuzzy matching on title
-                from sqlalchemy import or_, func
-                query_filter = db.query(Note).filter(
-                    Note.user_id == user_id,
-                    or_(
-                        Note.title.ilike(f"%{query}%"),  # Exact match
-                        func.replace(Note.title, ' ', '').ilike(f"%{normalized_query}%"),  # Without spaces
-                        Note.content.ilike(f"%{query}%")  # Content search
-                    )
-                )
-
-                # Apply folder filter if specified
-                if folder_id:
-                    query_filter = query_filter.filter(Note.folder_id == folder_id)
-
-                notes = query_filter.limit(5).all()
-
-                if not notes:
-                    return f"No notes found matching your query{folder_filter_info}."
-
-                results = []
-                for note in notes:
-                    folder_label = ""
-                    if note.folder_id and not folder_id:  # Show folder info if not filtering by folder
-                        note_folder = db.query(Folder).filter(Folder.id == note.folder_id).first()
-                        if note_folder:
-                            folder_label = f" [📁 {note_folder.name}]"
-                    results.append(f"Note: {note.title or 'Untitled'}{folder_label}\nContent: {note.content[:200]}...")
-
-                fallback_notice = " (via PostgreSQL)" if neo4j_failed or folder_id else ""
-                return "\n\n".join(results) + folder_filter_info + fallback_notice
-            finally:
-                db.close()
-        except Exception as e:
-            logger.error(f"Error searching notes in PostgreSQL: {e}")
-            return "Unable to search notes at this time. Please try again later."
-
-    async def create_note_tool(self, title, content, user_id, folder_name=None):
-        """Create a new note using Neo4j-first architecture with intelligent processing"""
-        note_id = str(__import__('uuid').uuid4())
-        folder_id = None
-        folder_info = ""
-
-        # Resolve folder name to folder_id if provided
-        if folder_name:
-            try:
-                db_check = SessionLocal()
-                try:
-                    folder = db_check.query(Folder).filter(
-                        Folder.user_id == user_id,
-                        Folder.name.ilike(folder_name)
-                    ).first()
-                    if folder:
-                        folder_id = folder.id
-                        folder_info = f" in folder '{folder.name}'"
-                    else:
-                        folder_info = f" (folder '{folder_name}' not found, created at root)"
-                finally:
-                    db_check.close()
-            except Exception as e:
-                logger.warning(f"Error resolving folder: {e}")
-
-        try:
-            # Neo4j-first approach: Create note in Neo4j immediately
-            from app.services.neo4j_service import neo4j_service
-            from app.services.intelligence_pipeline import intelligence_pipeline, ContentType
-
-            # Ensure Neo4j connection
-            if neo4j_service.driver:
-                try:
-                    # Create note in Neo4j graph
-                    await neo4j_service.create_note(
-                        note_id=note_id,
-                        user_id=user_id,
-                        title=title or "Untitled",
-                        content=content
-                    )
-
-                    # Queue for intelligent processing
-                    await intelligence_pipeline.queue_fast_processing(
-                        content_id=note_id,
-                        content_type=ContentType.NOTE,
-                        metadata={
-                            "user_id": user_id,
-                            "title": title
-                        }
-                    )
-
-                    logger.info(f"✅ Tool: Note {note_id} created in Neo4j and queued for processing")
-                except Exception as neo_error:
-                    logger.warning(f"Neo4j note creation failed in tool: {neo_error}")
-
-            # Background sync to PostgreSQL (backup)
-            db = SessionLocal()
-            try:
-                note = Note(
-                    id=note_id,
-                    user_id=user_id,
-                    title=title or "",
-                    content=content,
-                    folder_id=folder_id
-                )
-                db.add(note)
-                db.commit()
-                db.refresh(note)
-
-                return f"Created note: {note.title or 'Untitled'}{folder_info} (with intelligent graph processing)"
-            finally:
-                db.close()
-        except Exception as e:
-            logger.error(f"Error creating note: {e}")
-            return f"Error creating note: {str(e)}"
-
-    async def list_notes_tool(self, user_id):
-        """List all notes for the user"""
-        try:
-            # First try Neo4j
-            from app.services.neo4j_service import neo4j_service
-            if neo4j_service.driver:
-                try:
-                    notes = await neo4j_service.get_user_notes(user_id)
-                    if notes:
-                        formatted_notes = []
-                        for note in notes:
-                            title = note.get('title', 'Untitled')
-                            note_id = note.get('id', '')
-                            content_preview = note.get('content', '')[:100] + "..." if len(note.get('content', '')) > 100 else note.get('content', '')
-                            formatted_notes.append(f"• {title} (ID: {note_id})\n  {content_preview}")
-                        return f"Your notes:\n\n" + "\n\n".join(formatted_notes)
-                except Exception as neo_error:
-                    logger.warning(f"Neo4j list notes failed: {neo_error}")
-
-            # Fallback to PostgreSQL
-            db = SessionLocal()
-            try:
-                notes = db.query(Note).filter(Note.user_id == user_id).order_by(Note.created_at.desc()).all()
-                if not notes:
-                    return "You don't have any notes yet."
-
-                formatted_notes = []
-                for note in notes:
-                    title = note.title or "Untitled"
-                    folder_label = ""
-                    if note.folder_id:
-                        folder = db.query(Folder).filter(Folder.id == note.folder_id).first()
-                        if folder:
-                            folder_label = f" [📁 {folder.name}]"
-                    content_preview = note.content[:100] + "..." if len(note.content) > 100 else note.content
-                    formatted_notes.append(f"• {title}{folder_label} (ID: {note.id})\n  {content_preview}")
-
-                return f"Your notes:\n\n" + "\n\n".join(formatted_notes)
-            finally:
-                db.close()
-        except Exception as e:
-            logger.error(f"Error listing notes: {e}")
-            return f"Error listing notes: {str(e)}"
-
-    async def list_folders_tool(self, user_id):
-        """List all folders for the user with their hierarchy"""
-        try:
-            db = SessionLocal()
-            try:
-                folders = db.query(Folder).filter(Folder.user_id == user_id).order_by(Folder.name).all()
-                if not folders:
-                    return "You don't have any folders yet. You can ask me to create one!"
-
-                # Build folder hierarchy
-                def build_tree(parent_id=None, depth=0):
-                    result = []
-                    for folder in folders:
-                        if folder.parent_id == parent_id:
-                            indent = "  " * depth
-                            notes_count = db.query(Note).filter(Note.folder_id == folder.id).count()
-                            subfolder_count = sum(1 for f in folders if f.parent_id == folder.id)
-                            info_parts = []
-                            if notes_count > 0:
-                                info_parts.append(f"{notes_count} notes")
-                            if subfolder_count > 0:
-                                info_parts.append(f"{subfolder_count} subfolders")
-                            info = f" ({', '.join(info_parts)})" if info_parts else ""
-                            result.append(f"{indent}📁 {folder.name}{info}")
-                            result.extend(build_tree(folder.id, depth + 1))
-                    return result
-
-                tree = build_tree()
-                return f"Your folders:\n\n" + "\n".join(tree)
-            finally:
-                db.close()
-        except Exception as e:
-            logger.error(f"Error listing folders: {e}")
-            return f"Error listing folders: {str(e)}"
-
-    async def create_reminder_tool(self, title, description, reminder_time, user_id):
-        """Create a new reminder for the user"""
-        try:
-            db = SessionLocal()
-            try:
-                # Parse reminder time
-                reminder_dt = datetime.fromisoformat(reminder_time.replace('Z', '+00:00'))
-                
-                reminder = Reminder(
-                    user_id=user_id,
-                    title=title,
-                    description=description,
-                    reminder_time=reminder_dt
-                )
-                db.add(reminder)
-                db.commit()
-                db.refresh(reminder)
-                
-                return f"Created reminder: {reminder.title} for {reminder_dt.strftime('%Y-%m-%d %H:%M')}"
-            finally:
-                db.close()
-        except Exception as e:
-            logger.error(f"Error creating reminder: {e}")
-            return f"Error creating reminder: {str(e)}"
-
-    async def start_timer_tool(self, title, duration_minutes, user_id):
-        """Start a new timer"""
-        try:
-            # Validate duration
-            if not isinstance(duration_minutes, int) or duration_minutes < 1 or duration_minutes > 480:
-                return f"Invalid duration: {duration_minutes}. Please specify between 1 and 480 minutes (8 hours max)."
-            
-            db = SessionLocal()
-            try:
-                start_time = datetime.now(timezone.utc)
-                end_time = start_time + timedelta(minutes=duration_minutes)
-                
-                logger.info(f"Timer timestamps - Start: {start_time.isoformat()}, End: {end_time.isoformat()}, Duration: {duration_minutes}m")
-                
-                timer = Timer(
-                    user_id=user_id,
-                    title=title,
-                    duration_minutes=duration_minutes,
-                    start_time=start_time,
-                    end_time=end_time
-                )
-                db.add(timer)
-                db.commit()
-                db.refresh(timer)
-                
-                logger.info(f"Created timer: {title} for {duration_minutes} minutes for user {user_id}")
-                return f"Started timer '{timer.title}' for {duration_minutes} minutes (ends at {end_time.strftime('%H:%M')})"
-            finally:
-                db.close()
-        except Exception as e:
-            logger.error(f"Error starting timer: {e}")
-            return f"Error starting timer: {str(e)}"
-
-    async def search_documents_tool(self, query, user_id):
-        """🧠 Advanced hybrid search through uploaded documents using Neo4j knowledge graph + PostgreSQL fallback"""
-        try:
-            # Try Neo4j search first for enhanced document discovery
-            from app.services.neo4j_service import neo4j_service
-            if neo4j_service.driver:
-                try:
-                    search_results = await neo4j_service.search_knowledge_graph(
-                        user_id=user_id,
-                        query=query,
-                        content_types=["Document"],
-                        limit=5
-                    )
-                    
-                    if search_results:
-                        results = []
-                        for node in search_results:
-                            title = node.get('title', 'Unknown Document')
-                            content = node.get('content_text', '')[:300]
-                            results.append(f"From {title}: {content}...")
-                        
-                        # If Neo4j found results, return them
-                        if results:
-                            return f"Found {len(results)} relevant results about '{query}' in your documents.\n\n" + "\n\n".join(results)
-                except Exception as e:
-                    logger.warning(f"Neo4j document search failed: {e}")
-            
-            # Fallback to PostgreSQL vector search
-            db = SessionLocal()
-            try:
-                # Check if user has documents
-                documents = db.query(Document).filter(
-                    Document.user_id == user_id,
-                    Document.is_processed == "true"
-                ).all()
-                
-                if not documents:
-                    return "No documents found. Upload some documents first."
-                
-                # Generate query embedding for semantic search
-                logger.info(f"🔍 Generating embedding for query: '{query}'")
-                query_embedding = await embedding_service.generate_embedding(query)
-                
-                semantic_results = []
-                text_results = []
-                
-                # 1. SEMANTIC VECTOR SEARCH (Primary method)
-                if query_embedding:
-                    logger.info("🧠 Performing semantic vector search...")
-                    try:
-                        if DATABASE_URL.startswith("postgresql") and PGVECTOR_AVAILABLE:
-                            # Use pgvector for similarity search
-                            from sqlalchemy import text
-                            similarity_query = text("""
-                                SELECT dc.chunk_text, d.original_filename,
-                                       (dc.embedding <=> :query_embedding) as distance
-                                FROM document_chunk dc
-                                JOIN document d ON dc.document_id = d.id
-                                WHERE dc.user_id = :user_id 
-                                  AND dc.embedding IS NOT NULL
-                                  AND d.is_processed = 'true'
-                                ORDER BY dc.embedding <=> :query_embedding
-                                LIMIT 8
-                            """)
-                            
-                            result = db.execute(similarity_query, {
-                                'query_embedding': str(query_embedding),
-                                'user_id': user_id
-                            })
-                            
-                            for row in result:
-                                similarity = 1 - row.distance  # Convert distance to similarity
-                                if similarity > 0.3:  # Only include reasonably similar results
-                                    semantic_results.append({
-                                        'chunk_text': row.chunk_text,
-                                        'filename': row.original_filename,
-                                        'similarity': similarity,
-                                        'type': 'SEMANTIC'
-                                    })
-                        else:
-                            # SQLite: Manual similarity calculation using JSON embeddings
-                            import json
-                            import numpy as np
-                            
-                            chunks = db.query(DocumentChunk, Document).join(
-                                Document, DocumentChunk.document_id == Document.id
-                            ).filter(
-                                DocumentChunk.user_id == user_id,
-                                DocumentChunk.embedding.isnot(None),
-                                Document.is_processed == "true"
-                            ).limit(50).all()  # Get more for manual filtering
-                            
-                            for chunk, doc in chunks:
-                                try:
-                                    stored_embedding = json.loads(chunk.embedding)
-                                    # Calculate cosine similarity
-                                    similarity = np.dot(query_embedding, stored_embedding) / (
-                                        np.linalg.norm(query_embedding) * np.linalg.norm(stored_embedding)
-                                    )
-                                    
-                                    if similarity > 0.3:  # Only include reasonably similar results
-                                        semantic_results.append({
-                                            'chunk_text': chunk.chunk_text,
-                                            'filename': doc.original_filename,
-                                            'similarity': float(similarity),
-                                            'type': 'SEMANTIC'
-                                        })
-                                except Exception as e:
-                                    logger.warning(f"Error processing embedding for chunk {chunk.id}: {e}")
-                                    continue
-                            
-                            # Sort by similarity
-                            semantic_results.sort(key=lambda x: x['similarity'], reverse=True)
-                            semantic_results = semantic_results[:8]  # Top 8 results
-                            
-                        logger.info(f"🎯 Found {len(semantic_results)} semantic matches")
-                            
-                    except Exception as e:
-                        logger.warning(f"Vector search failed, using text search: {e}")
-                
-                # 2. ENHANCED TEXT SEARCH (Fallback + Supplementary)
-                logger.info("📝 Performing enhanced text search...")
-                query_terms = query.lower().split()
-                
-                for doc in documents:
-                    # Search in document content
-                    if doc.content_text:
-                        content_lower = doc.content_text.lower()
-                        
-                        # Exact phrase match
-                        if query.lower() in content_lower:
-                            start_idx = content_lower.find(query.lower())
-                            context_start = max(0, start_idx - 150)
-                            context_end = min(len(doc.content_text), start_idx + len(query) + 150)
-                            excerpt = doc.content_text[context_start:context_end].strip()
-                            if context_start > 0:
-                                excerpt = "..." + excerpt
-                            if context_end < len(doc.content_text):
-                                excerpt = excerpt + "..."
-                            
-                            text_results.append({
-                                'chunk_text': excerpt,
-                                'filename': doc.original_filename,
-                                'similarity': 0.95,  # High score for exact matches
-                                'type': 'EXACT'
-                            })
-                    
-                    # Search in chunks
-                    chunks = db.query(DocumentChunk).filter(
-                        DocumentChunk.document_id == doc.id,
-                        DocumentChunk.chunk_text.ilike(f"%{query}%")
-                    ).limit(3).all()
-                    
-                    for chunk in chunks:
-                        text_results.append({
-                            'chunk_text': chunk.chunk_text,
-                            'filename': doc.original_filename,
-                            'similarity': 0.8,  # Good score for text matches
-                            'type': 'TEXT'
-                        })
-                
-                # 3. COMBINE AND RANK RESULTS
-                all_results = semantic_results + text_results
-                
-                # Remove duplicates and sort by similarity
-                seen_content = set()
-                unique_results = []
-                for result in all_results:
-                    content_key = (result['filename'], result['chunk_text'][:100])
-                    if content_key not in seen_content:
-                        seen_content.add(content_key)
-                        unique_results.append(result)
-                
-                # Sort by similarity score
-                unique_results.sort(key=lambda x: x['similarity'], reverse=True)
-                
-                if not unique_results:
-                    return f"❌ No results found for '{query}' in your documents. Try different search terms or upload more documents."
-                
-                # 4. FORMAT SIMPLE RESPONSE
-                total_results = len(unique_results)
-                
-                response_parts = [f"Found {total_results} relevant results about '{query}' in your documents."]
-                response_parts.append("")
-                
-                # Show top results from different documents
-                seen_docs = set()
-                for result in unique_results[:3]:  # Top 3 results
-                    filename = result['filename']
-                    if filename not in seen_docs:
-                        seen_docs.add(filename)
-                        
-                        # Clean and present content
-                        content = result['chunk_text'].strip()
-                        if len(content) > 200:
-                            content = content[:200] + "..."
-                        
-                        response_parts.append(f"From {filename}: {content}")
-                        response_parts.append("")
-                
-                return "\n".join(response_parts)
-                
-            finally:
-                db.close()
-        except Exception as e:
-            logger.error(f"Error in advanced document search: {e}")
-            return f"⚠️ Search temporarily unavailable. Error: {str(e)}"
-
-    async def search_memory_tool(self, query, user_id):
-        """🧠 Search through Sara's enhanced episodic memory with intelligent context windows"""
-        try:
-            # Check if user has any episodes
-            db = SessionLocal()
-            try:
-                episode_count = db.query(Episode).filter(Episode.user_id == user_id).count()
-                if episode_count == 0:
-                    return "🆕 This is our first conversation! I don't have any memories to search yet, but I'll remember everything we discuss."
-            finally:
-                db.close()
-            
-            # Use intelligent memory search with auto context window selection
-            episodes = await intelligent_memory_service.intelligent_memory_search(
-                user_id=user_id,
-                query=query,
-                auto_window=True
-            )
-            
-            # Also search dream insights for relevant patterns/connections
-            dream_insights = await self._search_dream_insights(query, user_id)
-            
-            if not episodes and not dream_insights:
-                return f"🤔 I searched my memory using intelligent context windows but couldn't find anything specifically about '{query}'. What would you like to know?"
-            
-            # Format the intelligent memory response  
-            response_parts = [f"🧠 **Sara's Intelligent Memory Search: {len(episodes)} memories found for '{query}'**"]
-            response_parts.append("✨ Using AI context window selection and emotional analysis")
-            
-            if dream_insights:
-                response_parts.append(f"💭 Found {len(dream_insights)} relevant insights from background analysis")
-            
-            response_parts.append("")
-            
-            for i, episode in enumerate(episodes[:6]):  # Top 6 memory results
-                role_emoji = "👤" if episode['role'] == "user" else "🤖"
-                
-                # Parse emotional and topic metadata
-                try:
-                    emotional_data = json.loads(episode['emotional_tone']) if episode['emotional_tone'] else {}
-                    topics_data = json.loads(episode['topics']) if episode['topics'] else []
-                except (json.JSONDecodeError, TypeError) as e:
-                    logger.debug(f"Failed to parse episode metadata: {e}")
-                    emotional_data = {}
-                    topics_data = []
-                
-                # Format timestamp with relative time for clarity
-                try:
-                    created_at = episode['created_at']
-                    time_str = format_memory_timestamp(created_at)
-                except (AttributeError, TypeError):
-                    time_str = "Recent"
-
-                # Create rich context header
-                context_parts = []
-                if emotional_data.get('primary_emotion'):
-                    emotion = emotional_data.get('primary_emotion')
-                    intensity = emotional_data.get('intensity', 0.5)
-                    context_parts.append(f"Emotion: {emotion} ({intensity:.1%})")
-
-                if topics_data:
-                    context_parts.append(f"Topics: {', '.join(topics_data[:2])}")
-
-                importance = episode['importance'] or 0.5
-                context_parts.append(f"Importance: {importance:.1%}")
-
-                context_str = " | ".join(context_parts) if context_parts else ""
-
-                # Header with rich metadata - emphasize the relative time
-                response_parts.append(f"🧠 *Memory #{i+1}* - **{time_str}**")
-                if context_str:
-                    response_parts.append(f"   📊 {context_str}")
-                
-                # Clean and present content
-                content = episode['content'].strip()
-                if len(content) > 200:
-                    content = content[:200] + "..."
-                
-                response_parts.append(f"{role_emoji} {content}")
-                response_parts.append("")
-            
-            # Add dream insights if found
-            if dream_insights:
-                response_parts.append("💭 **Background Intelligence Insights:**")
-                for insight in dream_insights[:3]:  # Top 3 insights
-                    confidence_str = f"({insight.confidence:.0%})" if insight.confidence else ""
-                    response_parts.append(f"🌙 *{insight.title}* {confidence_str}")
-                    response_parts.append(f"   {insight.content[:150]}...")
-                    response_parts.append("")
-            
-            # Add contextual insights
-            total_episodes = episode_count
-            response_parts.append(f"💭 *I have {total_episodes} total memories of our interactions together.*")
-            
-            # Add window information if available
-            if hasattr(intelligent_memory_service.window_manager, 'last_window_info'):
-                window_info = intelligent_memory_service.window_manager.last_window_info
-                response_parts.append(f"🔍 *Used {window_info} context window for this search.*")
-            
-            return "\n".join(response_parts)
-            
-        except Exception as e:
-            logger.error(f"Error in intelligent memory search: {e}")
-            return f"🤔 My intelligent memory search is temporarily unavailable. Error: {str(e)}"
-
-    async def _search_dream_insights(self, query: str, user_id: str) -> list:
-        """Search dream insights for relevant patterns and connections"""
-        try:
-            db = SessionLocal()
-            try:
-                # Search insights by title and content
-                query_lower = query.lower()
-                
-                # Search for insights that match the query  
-                insights = db.query(DreamInsight).filter(
-                    DreamInsight.user_id == user_id
-                ).filter(
-                    or_(
-                        DreamInsight.title.ilike(f"%{query_lower}%"),
-                        DreamInsight.content.ilike(f"%{query_lower}%"),
-                        DreamInsight.insight_type.ilike(f"%{query_lower}%")
-                    )
-                ).order_by(DreamInsight.confidence.desc(), DreamInsight.dream_date.desc()).limit(5).all()
-                
-                return insights
-            finally:
-                db.close()
-                
-        except Exception as e:
-            logger.error(f"Error searching dream insights: {e}")
-            return []
 
     async def store_conversation(self, messages, response_content, user_id, conversation_id=None, assistant_episode_id=None) -> str:
         """Store the conversation in enhanced episodic memory with emotional and topical analysis.

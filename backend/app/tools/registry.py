@@ -1,6 +1,7 @@
 from typing import Dict, List, Any
 from app.tools.base import BaseTool, ToolResult
 from app.tools.memory import MemorySearchTool
+from app.tools.documents import DocumentsSearchTool
 from app.tools.notes import (
     NotesCreateTool, NotesSearchTool, NotesEditTool, NotesDeleteTool, NotesListTool,
     NotesFindSimilarTool, NotesMergeTool, NotesListFoldersTool, NotesCreateFolderTool,
@@ -164,7 +165,7 @@ class ToolRegistry:
     TOOL_CATEGORIES = {
         'memory': {
             'description': 'Search personal knowledge across notes, documents, episodes, and summaries',
-            'tools': ['memory_search']
+            'tools': ['memory_search', 'documents_search']
         },
         'knowledge_graph': {
             'description': 'Explore connections, discover patterns, and analyze knowledge relationships',
@@ -470,7 +471,8 @@ class ToolRegistry:
         tools = [
             # Memory
             MemorySearchTool(),
-            
+            DocumentsSearchTool(),
+
             # Notes
             NotesCreateTool(),
             NotesSearchTool(),

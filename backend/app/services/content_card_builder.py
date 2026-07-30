@@ -20,14 +20,14 @@ TOOL_TO_CARD_TYPE: Dict[str, str] = {
     "calendar_create": "calendar_card",
     "create_event": "calendar_card",
     # Reminders
-    "list_reminders": "reminder_card",
-    "create_reminder": "reminder_card",
+    "reminders_list": "reminder_card",
+    "reminders_create": "reminder_card",
     # Timers
-    "start_timer": "timer_card",
-    "list_timers": "timer_card",
+    "timers_start": "timer_card",
+    "timers_status": "timer_card",
     # Notes
-    "search_notes": "notes_card",
-    "list_notes": "notes_card",
+    "notes_search": "notes_card",
+    "notes_list": "notes_card",
     # Weather
     "get_weather": "weather_card",
     "weather": "weather_card",

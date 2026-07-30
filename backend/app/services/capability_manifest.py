@@ -20,20 +20,20 @@ from typing import List, Set
 
 logger = logging.getLogger(__name__)
 
-# Tools handled by inline elif branches in the chat dispatch loop (not in the
-# tool registry). Kept explicit so the consistency check knows they're real.
-INLINE_CHAT_TOOLS: Set[str] = {
-    "search_notes", "create_note", "list_notes", "list_folders", "delete_note",
-    "create_reminder", "list_reminders", "complete_reminder",
-    "start_timer", "list_timers", "stop_timer",
-    "search_documents", "search_memory",
-}
+# Historical note (work-order item 5, 2026-07-30): this used to also list 13
+# "inline chat tool" names handled by elif branches in execute_tool
+# (search_notes, create_note, etc). Those branches were dead code — the tools
+# list handed to the model is built exclusively from tool_registry, which
+# never emitted those schema names, so the branches (and 5 of the 13 names,
+# which never had a branch at all) were unreachable. Removed along with the
+# branches; the registry is now the single source of truth for callable tool
+# names.
 
 
 def callable_tool_names() -> Set[str]:
-    """Every tool name that can actually be invoked from a chat turn:
-    the registry's tools plus the inline chat tools."""
-    names: Set[str] = set(INLINE_CHAT_TOOLS)
+    """Every tool name that can actually be invoked from a chat turn: the
+    registry's tools."""
+    names: Set[str] = set()
     try:
         from app.tools.registry import tool_registry
         names |= {t.name for t in tool_registry.get_all_tools()}

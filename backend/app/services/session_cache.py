@@ -22,13 +22,13 @@ class SessionToolCache:
 
     # Tools that should be cached (retrieval/read-only operations)
     CACHEABLE_TOOLS = {
-        "search_notes",
-        "list_notes",
-        "list_folders",
-        "search_documents",
-        "search_memory",
-        "list_reminders",
-        "list_timers",
+        "notes_search",
+        "notes_list",
+        "notes_list_folders",
+        "documents_search",
+        "memory_search",
+        "reminders_list",
+        "timers_status",
         "get_shadow_status",
         "web_search",
         "open_page"
@@ -122,13 +122,13 @@ class SessionToolCache:
                     tool = entry["tool"]
                     params = entry["params"]
 
-                    if tool in ["search_notes", "list_notes"]:
+                    if tool in ["notes_search", "notes_list"]:
                         query = params.get("query", "all notes")
                         summary["notes"].append(query)
-                    elif tool == "search_documents":
+                    elif tool == "documents_search":
                         query = params.get("query", "documents")
                         summary["documents"].append(query)
-                    elif tool == "search_memory":
+                    elif tool == "memory_search":
                         query = params.get("query", "memories")
                         summary["memories"].append(query)
                     elif tool in ["web_search", "open_page"]:

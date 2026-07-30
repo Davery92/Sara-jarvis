@@ -41,27 +41,27 @@ TOOL_SUGGESTIONS: Dict[str, List[Dict[str, Any]]] = {
     "nutrition_summary": [
         {"label": "Log a meal", "message": "I want to log a meal"},
     ],
-    "search_notes": [
+    "notes_search": [
         {"label": "Create note", "message": "Create a new note"},
         {"label": "Search again", "message": "Search my notes for "},
     ],
-    "list_notes": [
+    "notes_list": [
         {"label": "Create note", "message": "Create a new note"},
         {"label": "View Notes", "action": "navigate", "target": "Notes"},
     ],
-    "create_note": [
+    "notes_create": [
         {"label": "View Notes", "action": "navigate", "target": "Notes"},
     ],
-    "list_reminders": [
+    "reminders_list": [
         {"label": "Add reminder", "message": "Set a reminder for "},
     ],
-    "create_reminder": [
+    "reminders_create": [
         {"label": "My reminders", "message": "Show my reminders"},
     ],
-    "start_timer": [
+    "timers_start": [
         {"label": "Cancel timer", "message": "Cancel my timer"},
     ],
-    "list_timers": [
+    "timers_status": [
         {"label": "Start timer", "message": "Start a timer for "},
     ],
     "get_weather": [
