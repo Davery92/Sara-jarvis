@@ -5,7 +5,7 @@ SARA_ALIVE_BUILD_PLAN has verified live so far (Arc 0-2).
 
 Run from inside the backend container (needs DB/Redis/service access):
   docker compose -f docker-compose.dev.yml exec -T backend \\
-    python scripts/verify_sara_alive.py [--section arc0|arc1|arc2|arc5] [--user-id UUID]
+    python scripts/verify_sara_alive.py [--section arc0|arc1|arc2|arc3|arc5] [--user-id UUID]
 
 Each section is a list of independent checks. A check either passes,
 fails (with a reason), or is marked SKIP when its precondition isn't met
@@ -266,6 +266,55 @@ async def arc2_checks(user_id: str) -> list:
     return checks
 
 
+# ─────────────────────────── Arc 3 ───────────────────────────
+
+async def arc3_checks(user_id: str) -> list:
+    from sqlalchemy import text
+    from app.db.session import SessionLocal
+
+    checks = []
+
+    async def daemon_selves_one():
+        """selves=1 (work-order item 1, 2026-07-30 daemon cutover): the VM
+        daemon no longer runs its own think()/reflect() — it proxies to
+        kernel.ambient_turn(wake_reason=DAEMON_PROXY). There's no queryable
+        per-turn wake_reason trail (agent_run_log always writes
+        source='deliberation' regardless of caller — a real, separate,
+        not-fixed-here observability gap), so the live signal this script
+        CAN check from inside the backend container (acs-daemon/ isn't
+        mounted here, so a direct grep-for-Mind-calls isn't possible from
+        this process) is the daemon's own self-reported version, stamped to
+        0.10.0 specifically to mark this cutover, cross-checked against a
+        fresh heartbeat so a stale DB row can't false-positive."""
+        db = SessionLocal()
+        try:
+            row = db.execute(text("""
+                SELECT version, last_heartbeat_at,
+                       EXTRACT(EPOCH FROM (NOW() - last_heartbeat_at)) AS age_seconds
+                FROM sara_daemon_state WHERE id = 'singleton'
+            """)).first()
+        finally:
+            db.close()
+        if not row:
+            return Check("3.selves daemon reports post-cutover version").skip("no sara_daemon_state row")
+        version, _, age_seconds = row
+        if age_seconds is None or age_seconds > 900:
+            return Check("3.selves daemon reports post-cutover version").fail(
+                f"heartbeat stale ({age_seconds}s) — can't trust version={version} as current")
+        try:
+            major_minor = tuple(int(p) for p in (version or "0").split("+")[0].split(".")[:2])
+        except ValueError:
+            major_minor = (0, 0)
+        if major_minor < (0, 10):
+            return Check("3.selves daemon reports post-cutover version").fail(
+                f"version={version} predates the selves=1 cutover (need >=0.10.0)")
+        return Check("3.selves daemon reports post-cutover version").ok(
+            f"version={version}, heartbeat {int(age_seconds)}s old")
+    checks.append(await _check("3a", daemon_selves_one()))
+
+    return checks
+
+
 # ─────────────────────────── Arc 5 ───────────────────────────
 
 async def arc5_checks(user_id: str) -> list:
@@ -306,7 +355,7 @@ async def arc5_checks(user_id: str) -> list:
     return checks
 
 
-SECTIONS = {"arc0": arc0_checks, "arc1": arc1_checks, "arc2": arc2_checks, "arc5": arc5_checks}
+SECTIONS = {"arc0": arc0_checks, "arc1": arc1_checks, "arc2": arc2_checks, "arc3": arc3_checks, "arc5": arc5_checks}
 
 
 async def main():
