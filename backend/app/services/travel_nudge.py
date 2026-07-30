@@ -179,11 +179,15 @@ async def check_and_send_leave_now_nudges(user_id: str) -> dict:
         leave_by = (now + timedelta(minutes=max(0, minutes_until_leave))).strftime("%-I:%M %p")
         message = f"About {travel_min} min to {location} — leave by {leave_by} for \"{title}\"."
 
-        # Arc 1.5 write-freeze: legacy send disabled once
-        # MOUTH_ONLY_TRAVEL_NUDGE is on — dual-write below is unconditional
-        # either way. Flag default OFF — this one is genuinely time-critical
-        # (leave-now, priority=high) so it needs live verification of
-        # delivery latency through the mouth before this is ever flipped.
+        # Arc 1.5 write-freeze (work-order item 3, 2026-07-30): measured, not
+        # just cautious. judge/compose/deliver each run on an independent
+        # ~180s beat — up to ~9min worst-case sequential latency — against a
+        # <=15min "leave now" buffer. That's too tight a margin for a message
+        # whose entire value is being on time, so this stays dual-write with
+        # the legacy immediate send as primary (calendar_prep's 20-minute-
+        # wide window comfortably absorbs the same latency and was cut over;
+        # see calendar_prep.py). Revisit if judge/compose/deliver ever get a
+        # promoted/expedited path instead of a flat beat interval.
         from app.core.feature_flags import Flag, is_enabled
         if is_enabled(Flag.MOUTH_ONLY_TRAVEL_NUDGE):
             logger.info(f"[mouth-only] travel_nudge legacy send skipped (candidate queued): {topic}")

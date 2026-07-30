@@ -145,7 +145,6 @@ async def _prep_for_event(
     calendar_name: Optional[str] = None,
 ):
     """Build and send prep context for a single event."""
-    from app.services.unified_notification import send_notification
     from app.services.calendar_ownership import classify_event
     from app.core.timezone import now as local_now
     from app.db.session import get_async_session_factory
@@ -268,37 +267,15 @@ async def _prep_for_event(
     except Exception as e:
         logger.debug(f"Calendar prep habituation check skipped: {e}")
 
-    # Arc 1.5 write-freeze: legacy send disabled once MOUTH_ONLY_CALENDAR_PREP
-    # is on — dual-write below is unconditional either way. Flag default
-    # OFF: this sender forces priority="high" specifically because it fires
-    # 35-55 min before a meeting and needs to land in that window (see
-    # comment below) — flipping it needs live confirmation the judge/
-    # compose/deliver cycle (each on its own ~3min beat) actually gets a
-    # 'prep' candidate through send_now and delivered inside that window,
-    # not just that the mechanism exists.
-    from app.core.feature_flags import Flag, is_enabled
-    if is_enabled(Flag.MOUTH_ONLY_CALENDAR_PREP):
-        logger.info(f"[mouth-only] calendar_prep legacy send skipped (candidate queued): {topic}")
-    else:
-        await send_notification(
-            user_id=user_id,
-            title=f"Upcoming: {display_title}",
-            message=message[:500],
-            # Push at creation — we're already 35-55 min out, which is exactly when
-            # the reminder is useful. "high" is what actually leaves as a push
-            # (normal/important stay inbox-only and would only ever reach the phone
-            # via the 2h escalation, which is always too late for a timed event).
-            priority="high",
-            category="calendar_prep",
-            topic=topic,
-            source="calendar_prep",
-            payload={
-                "prediction_grade": "novel",
-                "stimulus_key": stimulus_key,
-                "generator": "calendar_prep",
-            },
-        )
-        logger.info(f"Calendar prep sent for '{display_title}' ({time_str})")
+    # Arc 1.5 cutover complete (work-order item 3, 2026-07-30): legacy send
+    # deleted. Live-verified end-to-end through the real pipeline — a real
+    # candidate went judged_send -> composed -> reviewed(edit, self-corrected
+    # a stale timing claim) -> delivered. Latency check: judge/compose/deliver
+    # each run on an independent ~180s beat (worst case ~9min sequential),
+    # comfortably inside this sender's 20-minute-wide 35-55min trigger window
+    # — unlike travel_nudge's tighter <=15min buffer, which is why that one
+    # stays dual-write (see travel_nudge.py).
+    logger.info(f"[mouth-only] calendar_prep candidate queued: {topic}")
 
     # Mind V2 rewire plan Workstream B.3 — dual-write the same real content
     # into the say_candidate queue. Legacy send above is untouched; this is
