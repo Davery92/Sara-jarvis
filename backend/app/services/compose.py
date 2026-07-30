@@ -20,6 +20,7 @@ shadow-mode addition.
 """
 import json
 import logging
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -61,7 +62,11 @@ def _build_prompt(
         "numbers); time-honest (check every date/time reference against the brief below); "
         "short — one to three sentences. If the recent conversation already covers this "
         "ground, phrase around what was said — add the new part, don't repeat what David "
-        "already knows.\n\n"
+        "already knows. If the candidate genuinely has no real payload once you try to "
+        "write it, respond with \"text\": \"Silence.\" exactly — do NOT write a message "
+        "ABOUT deciding not to send (no 'not sending this', no explaining why it's stale "
+        "or a duplicate, no narrating the judge's reasoning back) — that text would still "
+        "get treated as a real message.\n\n"
         "Respond with ONLY valid JSON:\n"
         '{"text": "the actual message", "refs": ["short evidence refs, e.g. entity or id strings"], '
         '"urgency": "normal|high|urgent|critical"}'
@@ -170,13 +175,23 @@ async def compose_utterance(
     parsed = _parse_response(raw)
 
     text = str(parsed.get("text") or "").strip()
-    # The prompt never gives the model an explicit "decline" option, so a
-    # candidate that's thin on payload sometimes comes back as literal
-    # "Silence." or empty rather than a forced (bad) message. Treat that as
-    # the compose-time equivalent of a kill verdict, not a pipeline error —
-    # judge already filters most of these out before compose ever sees
-    # them, so seeing one here means the payload really was too thin.
-    if not text or text.lower().rstrip(".") == "silence":
+    # The prompt now explicitly asks for a literal "Silence." on a
+    # too-thin candidate (Arc 5, work-order item 5 — a real kill-rate
+    # audit found ~18% of kills were the model narrating its own
+    # decision not to send instead: "Not sending this...", "The rain
+    # candidate was stale, so I'm sending silence.", "Nothing to
+    # report — the pipeline is clear." — meta-commentary that review
+    # correctly killed, but composed a real LLM call and a fake-looking
+    # utterance row to do it). Defensive backstop in case the model
+    # still doesn't comply with the explicit instruction: catch the
+    # same self-narrating-about-not-sending shape by pattern, not just
+    # the canonical "Silence." string.
+    _decline_narration = re.match(
+        r"^(not sending|nothing to (report|send)|i'?m (not sending|keeping (it |this )?quiet|"
+        r"sending silence)|the [\w\s]{0,30} candidate (is|was) stale)\b",
+        text.lower(),
+    )
+    if not text or text.lower().rstrip(".") == "silence" or _decline_narration:
         raise ComposeDeclined("model declined to compose — candidate has no real payload")
 
     return {
