@@ -2,6 +2,8 @@
 
 Everything below is either already done (informational — no action needed) or a single yes/no decision with a recommendation attached. Nothing here requires a design discussion; where a decision has real tradeoffs, the tradeoff and the recommendation are both stated so a read is enough.
 
+**Update 2026-07-30 (still current — the one open ask below is unchanged):** since this was written, the standing work order's floor items closed: the garden leak is confirmed genuinely zero (not stragglers — David's account had no leak, two leftover test accounts did), the verification loop's retire half shipped (parse answer → confidence_ladder graduation/retirement → question consumed, no third state), the Arc 5.2 minter ruling is written into the plan and enforced (entry-tier minting anywhere, dreaming-only promotion), and the three pre-Arc-6 floor items are closed — the 4-source context cutover is live (`SINGULAR_CONTEXT=true`), the 7-sender write-freeze audit found 5/7 senders flipped live with one real regression fixed (`morning_proactive_service`'s behavioral-learning loop had silently stopped recording), and the Phase G outbox schema proposal exists as a separate design-only artifact. None of that changes anything below — **item 3, the daemon retirement cutover, is still the single open decision waiting on you.**
+
 ---
 
 ## 1. Arc 3 job migration — status: DONE, no approval needed
