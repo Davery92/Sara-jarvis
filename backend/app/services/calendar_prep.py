@@ -190,26 +190,34 @@ async def _prep_for_event(
         except Exception as e:
             logger.debug(f"Calendar prep attendee history failed: {e}")
 
-        # Search episodic memory for related context
+        # Search episodic memory for related context.
+        # Arc 5.1: this called app.services.memory_service.search_episodes,
+        # which does not exist (an ImportError silently swallowed by the
+        # except below) — meeting prep got zero episodic memory
+        # augmentation. Fixed by routing through memory.recall(), the one
+        # door, instead of resurrecting the dead function.
         try:
-            from app.services.memory_service import search_episodes
+            from app.services.memory_recall import recall as _recall
             search_query = title
             if attendees_str:
                 search_query += f" {attendees_str}"
-            episodes = await search_episodes(user_id, search_query, limit=3)
-            if episodes:
-                memories = [f"- {ep.get('content', '')[:150]}" for ep in episodes[:2]]
-                if memories:
-                    context_parts.append("Previous context:\n" + "\n".join(memories))
+            result = await _recall(user_id=user_id, query=search_query, kinds=["episode"], k=3)
+            memories = [f"- {t['text'][:150]}" for t in result["traces"][:2] if t.get("text")]
+            if memories:
+                context_parts.append("Previous context:\n" + "\n".join(memories))
         except Exception as e:
             logger.debug(f"Calendar prep memory search failed: {e}")
 
-        # Search PKG for relevant facts
+        # Search PKG for relevant facts.
+        # Arc 5.1: this called pkg_context_provider.get_pkg_context, which
+        # was never defined there either (same silent-ImportError bug) —
+        # same fix, same door.
         try:
-            from app.services.pkg_context_provider import get_pkg_context
-            pkg_ctx = await get_pkg_context(user_id, title)
-            if pkg_ctx and len(pkg_ctx) > 20:
-                context_parts.append(f"Related: {pkg_ctx[:200]}")
+            from app.services.memory_recall import recall as _recall
+            result = await _recall(user_id=user_id, query=title, kinds=["fact"], k=3)
+            facts = [t["text"] for t in result["traces"][:2] if t.get("text")]
+            if facts:
+                context_parts.append("Related: " + "; ".join(facts)[:200])
         except Exception as e:
             logger.debug(f"Calendar prep PKG search failed: {e}")
 

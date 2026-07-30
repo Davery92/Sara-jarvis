@@ -99,12 +99,39 @@ async def _from_search_memory(user_id: str, query: str, kinds: List[str], per: i
     return out
 
 
+def _fact_text(r: Dict[str, Any]) -> str:
+    """query_semantic() merges full Neo4j node properties into each row
+    (type-specific fields like activity/day_of_week/value/description) and
+    only falls back to a bare `content_text` column when the Neo4j fetch
+    itself fails — so in the normal case there is no `content_text` key at
+    all. Reuse pkg_context_provider's per-type sentence formatter (the
+    existing, single source of "how do I say this PKG fact in words")
+    instead of re-deriving it, with a plain-field fallback for fact types
+    or shapes that formatter doesn't cover (e.g. consolidation-sourced
+    Routine rows that carry `value`/`description` instead of `activity`)."""
+    try:
+        from app.services.pkg_context_provider import pkg_context
+        sentence = pkg_context._fact_to_sentence(r.get("type", ""), r)
+    except Exception:
+        sentence = ""
+    if sentence and sentence.strip() and sentence.strip() != "David":
+        return sentence.strip()
+    return (r.get("value") or r.get("description") or r.get("content_text")
+            or r.get("content") or "").strip()
+
+
 async def _from_facts(query: str, per: int) -> List[Dict[str, Any]]:
     try:
         from app.services.personal_knowledge_graph import personal_kg
-        rows = await personal_kg.query_semantic(query, limit=per)
+        if query and query.strip():
+            rows = await personal_kg.query_semantic(query, limit=per)
+        else:
+            # No query to embed/compare against — e.g. a context-free "brief
+            # summary of what you know about David" caller. Top-confidence
+            # browse instead of semantic search; same row shape either way.
+            rows = await personal_kg.query_top_confidence(limit=per)
     except Exception as e:
-        logger.debug(f"[recall] fact query_semantic failed: {e}")
+        logger.debug(f"[recall] fact query failed: {e}")
         return []
     out: List[Dict[str, Any]] = []
     for r in rows or []:
@@ -114,7 +141,7 @@ async def _from_facts(query: str, per: int) -> List[Dict[str, Any]]:
         out.append(_trace(
             kind="fact",
             id_=r.get("pkg_id") or r.get("id"),
-            text=r.get("content_text") or r.get("content") or "",
+            text=_fact_text(r),
             score=sim,
             provenance=f"pkg:{r.get('node_type','fact')}",
             confidence=tier,
@@ -308,3 +335,22 @@ async def recall(
         "by_kind": by_kind,
         "paths": kinds,
     }
+
+
+async def recall_facts_prose(query: str = "", k: int = 8, user_id: str = DEFAULT_USER_ID) -> str:
+    """Arc 5.1: the one "what does Sara know about David" formatter, for
+    callers that want prose to inject into a prompt rather than raw traces
+    — chat context, voice, and brief bootstrap all used to call
+    `pkg_context_provider`'s own competing formatter for this (same
+    underlying `query_semantic()`/`query_top_confidence()` data, different
+    text). Empty query pulls top-confidence facts (see `_from_facts`);
+    a real message searches semantically. Same header/bullet shape
+    `pkg_context_provider._format_facts_natural` used, but with the one
+    graduated confidence tier (observed/inferred/confirmed) instead of
+    PKG's raw float bucketed three ways — the actual point of routing
+    every caller through here instead of round-tripping PKG's own scale."""
+    result = await recall(user_id=user_id, query=query, k=k, kinds=["fact"])
+    lines = [f"- {t['text']} ({t['confidence']})" for t in result["traces"] if t.get("text")]
+    if not lines:
+        return ""
+    return "\n\n## What Sara Knows About David (relevant to this conversation)\n" + "\n".join(lines) + "\n"

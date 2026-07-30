@@ -1938,6 +1938,45 @@ class PersonalKnowledgeGraph:
             logger.warning(f"PKG: query_semantic failed: {e}")
             return []
 
+    async def query_top_confidence(self, limit: int = 20) -> List[Dict]:
+        """Top-N facts by confidence, no query text — the same Cypher shape
+        as get_david_summary() but returning raw rows (type + full node
+        props) instead of pre-formatted text, so callers that want "brief
+        top facts about David" (not a topic-specific search) can go through
+        memory_recall.recall() too: query_semantic() needs a query to
+        embed and compare against, which a context-free "give me your top
+        facts" request doesn't have — this is that request's actual data
+        source. Row shape matches query_semantic()'s Neo4j-fetched rows
+        (`similarity` set from confidence as a stand-in score) so
+        memory_recall._from_facts can format either the same way."""
+        if not self._ensure_driver():
+            return []
+        try:
+            with self.driver.session() as session:
+                params = {"limit": limit, **_pkg_fresh_params()}
+                result = session.run(f"""
+                    MATCH (n)
+                    WHERE ({" OR ".join(f"n:{label}" for label in PKG_LABELS)})
+                    AND n.superseded_by IS NULL
+                    AND n.confidence > 0.5
+                    AND ({PKG_FRESH_FILTER})
+                    RETURN n.pkg_id as pkg_id, labels(n) as labels, properties(n) as props
+                    ORDER BY n.confidence DESC, n.last_confirmed DESC
+                    LIMIT $limit
+                """, params)
+                return [
+                    {
+                        "type": self._extract_pkg_label(record["labels"]),
+                        "pkg_id": record["pkg_id"],
+                        "similarity": float((record["props"] or {}).get("confidence", 0.5) or 0.5),
+                        **{k: v for k, v in (record["props"] or {}).items() if k not in ("dedup_key",)},
+                    }
+                    for record in result
+                ]
+        except Exception as e:
+            logger.warning(f"PKG: query_top_confidence failed: {e}")
+            return []
+
     async def backfill_embeddings(self) -> int:
         """Backfill embeddings for all active PKG nodes that don't have one yet."""
         if not self._ensure_driver():

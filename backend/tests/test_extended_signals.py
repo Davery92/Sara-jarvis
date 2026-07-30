@@ -21,8 +21,7 @@ class TestGetExtendedSignals:
             MagicMock(description="side door locks at midnight", confidence=1.0)
         ]
 
-        mock_pkg = MagicMock()
-        mock_pkg.get_relevant_context = AsyncMock(return_value="David co-founded Risk Ninja.")
+        mock_recall_prose = AsyncMock(return_value="David co-founded Risk Ninja.")
 
         mock_brief_service = MagicMock()
         mock_brief_service.get_compiled_brief = AsyncMock(return_value="Meeting at 2pm.")
@@ -35,7 +34,7 @@ class TestGetExtendedSignals:
 
         mock_wm = MagicMock(sara_emotional_tone="attentive", sara_emotional_intensity=0.6)
 
-        with patch("app.services.pkg_context_provider.pkg_context", mock_pkg), \
+        with patch("app.services.memory_recall.recall_facts_prose", mock_recall_prose), \
              patch("app.services.daily_brief.daily_brief_service", mock_brief_service), \
              patch("app.services.sara_journal_service.sara_journal", mock_journal), \
              patch("app.services.device_orchestrator.device_orchestrator", mock_device_orch), \
@@ -55,10 +54,9 @@ class TestGetExtendedSignals:
         mock_db = MagicMock()
         mock_db.execute.side_effect = RuntimeError("db exploded for patterns")
 
-        mock_pkg = MagicMock()
-        mock_pkg.get_relevant_context = AsyncMock(return_value="still works")
+        mock_recall_prose = AsyncMock(return_value="still works")
 
-        with patch("app.services.pkg_context_provider.pkg_context", mock_pkg), \
+        with patch("app.services.memory_recall.recall_facts_prose", mock_recall_prose), \
              patch("app.services.daily_brief.daily_brief_service") as mock_brief, \
              patch("app.services.sara_journal_service.sara_journal") as mock_journal, \
              patch("app.services.device_orchestrator.device_orchestrator") as mock_device, \
@@ -81,10 +79,9 @@ class TestGetExtendedSignals:
         mock_db = MagicMock()
         mock_db.execute.return_value.fetchall.return_value = []
 
-        mock_pkg = MagicMock()
-        mock_pkg.get_relevant_context = AsyncMock(return_value="")
+        mock_recall_prose = AsyncMock(return_value="")
 
-        with patch("app.services.pkg_context_provider.pkg_context", mock_pkg), \
+        with patch("app.services.memory_recall.recall_facts_prose", mock_recall_prose), \
              patch("app.services.daily_brief.daily_brief_service") as mock_brief, \
              patch("app.services.sara_journal_service.sara_journal") as mock_journal, \
              patch("app.services.device_orchestrator.device_orchestrator") as mock_device, \

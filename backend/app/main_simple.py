@@ -6785,10 +6785,8 @@ You are now in workspace mode. The user is working on their Windows PC with the 
                     if not context_decision.inject_pkg:
                         return None
                     try:
-                        from app.services.pkg_context_provider import pkg_context
-                        return await pkg_context.get_relevant_context(
-                            user_id=user_id, message=message, intent=user_intent
-                        )
+                        from app.services.memory_recall import recall_facts_prose
+                        return await recall_facts_prose(query=message, user_id=user_id)
                     except Exception:
                         return None
 
@@ -9877,8 +9875,8 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
 
                         # Get brief PKG summary for rapport
                         try:
-                            from app.services.pkg_context_provider import pkg_context
-                            pkg_brief = pkg_context.get_david_summary_brief(current_user.id, max_facts=5)
+                            from app.services.memory_recall import recall_facts_prose
+                            pkg_brief = await recall_facts_prose(query="", k=5, user_id=str(current_user.id))
                             if pkg_brief:
                                 reentry_context += f"\nRelevant knowledge about David:\n{pkg_brief}\n"
                         except Exception:

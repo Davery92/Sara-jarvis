@@ -408,8 +408,8 @@ async def get_extended_signals(db: Session, user_id: str = DEFAULT_USER_ID, mess
 
     async def _pkg() -> Optional[str]:
         try:
-            from app.services.pkg_context_provider import pkg_context
-            return await pkg_context.get_relevant_context(user_id=user_id, message=message, intent=None)
+            from app.services.memory_recall import recall_facts_prose
+            return await recall_facts_prose(query=message, user_id=user_id)
         except Exception as e:
             logger.debug(f"[extended_signals] pkg failed: {e}")
             return None

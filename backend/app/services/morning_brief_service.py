@@ -168,8 +168,8 @@ class MorningBriefService:
 
         # 1. Pull from Personal Knowledge Graph
         try:
-            from app.services.pkg_context_provider import pkg_context
-            pkg_summary = pkg_context.get_david_summary_brief(user_id, max_facts=10)
+            from app.services.memory_recall import recall_facts_prose
+            pkg_summary = await recall_facts_prose(query="", k=10, user_id=user_id)
             if pkg_summary and pkg_summary.strip():
                 parts.append(pkg_summary.strip())
                 logger.debug(f"PKG contributed {len(pkg_summary)} chars to stable bootstrap")
