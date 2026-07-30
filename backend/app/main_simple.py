@@ -9567,6 +9567,21 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
             except Exception as e:
                 logger.debug(f"life_fact correction detection skipped: {e}")
 
+            # Arc 5.2: verification-loop retire half — same shape as the
+            # life_fact correction check above (cheap no-op on the
+            # overwhelming majority of messages; only does real work when
+            # a verification question was actually delivered in the last
+            # 3 days and its fact is still unresolved).
+            try:
+                from app.services.verification_loop import check_and_apply_verification_answer
+                from app.db.session import get_async_session_factory
+                async with get_async_session_factory()() as _vl_db:
+                    await check_and_apply_verification_answer(
+                        _vl_db, str(current_user.id), last_user_message
+                    )
+            except Exception as e:
+                logger.debug(f"verification-loop answer check skipped: {e}")
+
             # H5 (Brain Alignment): recency floor + repeat detection. The last
             # ~2h of turns are always present (so pronouns and just-tried actions
             # resolve), and a near-duplicate of a recent question is flagged so

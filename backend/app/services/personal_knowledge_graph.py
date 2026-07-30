@@ -1096,6 +1096,33 @@ class PersonalKnowledgeGraph:
             logger.warning(f"PKG: decay_node_confidence failed for {pkg_id}: {e}")
             return None
 
+    def get_node_status(self, pkg_id: str) -> Optional[Dict[str, Any]]:
+        """Confidence + needs_review for one node, by pkg_id. Used by the
+        verification loop to decide whether a fact is still unresolved
+        regardless of which of the two ways it got flagged (a genuine
+        needs_review contradiction, or just low confidence) — mark_reviewed
+        and the other single-node helpers here don't need this since they
+        only ever write, but resolving "is there still something to
+        retire against" needs a read first."""
+        if not self._ensure_driver():
+            return None
+        try:
+            with self.driver.session() as session:
+                rec = session.run(f"""
+                    MATCH (n) WHERE n.pkg_id = $pkg_id
+                    AND ({" OR ".join(f"n:{label}" for label in PKG_LABELS)})
+                    RETURN n.confidence AS confidence, n.needs_review AS needs_review
+                """, {"pkg_id": pkg_id}).single()
+                if not rec:
+                    return None
+                return {
+                    "confidence": float(rec["confidence"]) if rec["confidence"] is not None else 0.5,
+                    "needs_review": bool(rec["needs_review"]),
+                }
+        except Exception as e:
+            logger.warning(f"PKG: get_node_status failed for {pkg_id}: {e}")
+            return None
+
     def retire_node(self, pkg_id: str) -> bool:
         """Permanently retire a PKG node: DETACH DELETE in Neo4j AND drop its
         pkg_embedding shadow row, together (P4). A node deleted from only one
