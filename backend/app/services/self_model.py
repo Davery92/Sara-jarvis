@@ -142,12 +142,20 @@ async def _deploy(db) -> Dict[str, Any]:
 async def build_self_model(db, user_id: str = _DAVID) -> Dict[str, Any]:
     """Assemble the full self-model. Read-only."""
     health = await _health(db, user_id)
+    presence_latency = None
+    try:
+        from app.services.presence_latency import get_presence_latency_status
+        presence_latency = await get_presence_latency_status(user_id)
+    except Exception:
+        pass  # Arc 6.1 telemetry — never blocks the rest of the self-model
     return {
         "generated_at": local_now().isoformat(),
         "health": health,
         "calibration": await _calibration(db, user_id),
         "capabilities": await _capabilities(db, user_id),
         "deploy": await _deploy(db),
+        # Arc 6.1 three-speed contract: the red line on the Interior.
+        "presence_latency": presence_latency,
         "summary": _summarize(health),
     }
 

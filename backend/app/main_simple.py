@@ -10265,9 +10265,31 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
         except Exception as e:
             logger.error(f"Error in chat stream: {e}")
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
-    
+
+    async def _timed_generate_events():
+        """Arc 6.1 three-speed contract: black-box presence latency —
+        measured from the outside (request start to the first real
+        content chunk actually yielded to the client), not by threading
+        a timer through every fast-path/LLM-call branch inside
+        generate_events(). This is also the only measurement that
+        reflects what David actually experiences."""
+        import time as _time
+        _start = _time.monotonic()
+        _logged = False
+        async for _event_str in generate_events():
+            if not _logged:
+                try:
+                    _evt = json.loads(_event_str[len("data: "):].strip())
+                    if _evt.get("type") == "text_chunk":
+                        _logged = True
+                        from app.services.presence_latency import record_first_token_latency
+                        await record_first_token_latency(_time.monotonic() - _start)
+                except Exception:
+                    pass
+            yield _event_str
+
     return StreamingResponse(
-        generate_events(),
+        _timed_generate_events(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
