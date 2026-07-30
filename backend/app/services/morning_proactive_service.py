@@ -287,13 +287,23 @@ class MorningProactiveService:
 
             # Arc 1.5 write-freeze (SARA_ALIVE_BUILD_PLAN): legacy send
             # disabled once MOUTH_ONLY_MORNING_PROACTIVE is on — the
-            # say_candidate dual-write (below, unconditional) is the only
-            # path. Flag default OFF; legacy stays live until this is
-            # individually verified, per the plan's write-freeze pattern.
+            # say_candidate dual-write (caller, unconditional, right after
+            # this returns) is the only path.
+            #
+            # Work-order item 4 fix (2026-07-30): this used to `return
+            # False` here, which silently broke behavioral_pattern_
+            # service.record_suggestion() — the caller only calls it
+            # `if success:`, so with the flag on (it has been for a
+            # while), the accept/reject learning feedback loop had
+            # stopped recording suggestions entirely, with nothing
+            # surfacing the gap. The dual-write happens unconditionally
+            # right after this call regardless of what's returned here,
+            # so "success" should mean "the mouth pipeline will handle
+            # delivery," not "legacy push fired."
             from app.core.feature_flags import Flag, is_enabled
             if is_enabled(Flag.MOUTH_ONLY_MORNING_PROACTIVE):
                 logger.info(f"[mouth-only] morning_proactive legacy send skipped (candidate queued): {topic}")
-                return False
+                return True
 
             from app.services.unified_notification import send_notification as unified_send_notification
 

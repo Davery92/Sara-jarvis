@@ -101,7 +101,13 @@ async def maybe_nudge(db) -> dict:
     from app.core.feature_flags import Flag, is_enabled
     if is_enabled(Flag.MOUTH_ONLY_BEDTIME_INTELLIGENCE):
         logger.info(f"[mouth-only] bedtime_intelligence legacy send skipped (candidate queued): {stimulus_key}")
-        result = {"sent": False}
+        # Work-order item 4 (2026-07-30): was hardcoded False, which is
+        # factually wrong — the say_candidate dual-write below runs
+        # unconditionally regardless of this branch, so the mouth
+        # pipeline genuinely will handle delivery. No live caller reads
+        # this today, but a future one (Celery result inspection, a
+        # dashboard) shouldn't see "not sent" for something that was.
+        result = {"sent": True}
     else:
         from app.services.unified_notification import send_notification
         result = await send_notification(
