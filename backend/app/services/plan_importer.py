@@ -130,8 +130,10 @@ async def parse_plan_document(source_text: str) -> Dict[str, Any]:
     if not source_text or not source_text.strip():
         raise ValueError("Empty document")
 
-    base_url = settings.bg_llm_primary_url
-    model = settings.bg_llm_primary_model
+    from app.services.llm_broker import resolve
+    _cap = resolve("kernel")
+    base_url = _cap["base_url"]
+    model = _cap["model"]
     payload = {
         "model": model,
         "messages": [

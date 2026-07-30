@@ -695,10 +695,12 @@ Respond ONLY with valid JSON, no markdown or explanation:"""
             if api_key and api_key not in ("", "dummy", "sk-"):
                 headers["Authorization"] = f"Bearer {api_key}"
 
+            from app.services.llm_broker import resolve
+            _cap = resolve("kernel")
             response = await client.post(
-                f"{settings.bg_llm_primary_url}/chat/completions",
+                f"{_cap['base_url']}/chat/completions",
                 json={
-                    "model": settings.bg_llm_primary_model,
+                    "model": _cap["model"],
                     "messages": [
                         {"role": "system", "content": "You are an email analysis assistant. Respond only with valid JSON."},
                         {"role": "user", "content": prompt}
@@ -1261,10 +1263,12 @@ Respond with JSON only:
             if api_key and api_key not in ("", "dummy", "sk-"):
                 headers["Authorization"] = f"Bearer {api_key}"
 
+            from app.services.llm_broker import resolve
+            _cap = resolve("kernel")
             response = await client.post(
-                f"{settings.bg_llm_primary_url}/chat/completions",
+                f"{_cap['base_url']}/chat/completions",
                 json={
-                    "model": settings.bg_llm_primary_model,
+                    "model": _cap["model"],
                     "messages": [
                         {"role": "system", "content": "You are a document classification assistant. Respond only with valid JSON."},
                         {"role": "user", "content": prompt}

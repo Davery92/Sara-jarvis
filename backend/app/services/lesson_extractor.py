@@ -201,10 +201,12 @@ class LessonExtractor:
             )
 
             # Use local LLM for lesson extraction (cheaper, faster)
+            from app.services.llm_broker import resolve
+            _cap = resolve("kernel")
             response = await self.client.post(
-                f"{settings.bg_llm_primary_url}/chat/completions",
+                f"{_cap['base_url']}/chat/completions",
                 json={
-                    "model": settings.bg_llm_primary_model,
+                    "model": _cap["model"],
                     "messages": [
                         {"role": "user", "content": prompt}
                     ],
