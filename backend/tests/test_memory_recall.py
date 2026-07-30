@@ -114,6 +114,64 @@ class TestRecallFactsProse:
         assert prose == ""
 
 
+class TestEpisodeConfidenceTier:
+    """Arc 5.2: episode traces used to always report a hardcoded 'observed'
+    tier regardless of the episode's actual importance score — not a real
+    graduated scale. Now the real importance (exposed by memory_service.
+    search_memory as of this change) grades through the same shared
+    confidence_ladder every other kind uses."""
+
+    @pytest.mark.asyncio
+    async def test_high_importance_episode_grades_confirmed(self):
+        with patch("app.services.memory_service.get_memory_service") as mock_get_svc, \
+             patch("app.services.memory_recall._strengthen_recalled_episodes", new=AsyncMock()):
+            mock_svc = MagicMock()
+            mock_svc.SessionLocal = MagicMock()
+            mock_svc.search_memory = AsyncMock(return_value=[
+                {"type": "episode", "episode_id": "ep-1", "text": "important thing",
+                 "score": 0.6, "importance": 0.9},
+            ])
+            mock_get_svc.return_value = mock_svc
+
+            traces = await _from_search_memory("user-1", "q", ["episode"], 5)
+
+        assert traces[0]["confidence"] == "confirmed"
+
+    @pytest.mark.asyncio
+    async def test_low_importance_episode_grades_observed(self):
+        with patch("app.services.memory_service.get_memory_service") as mock_get_svc, \
+             patch("app.services.memory_recall._strengthen_recalled_episodes", new=AsyncMock()):
+            mock_svc = MagicMock()
+            mock_svc.SessionLocal = MagicMock()
+            mock_svc.search_memory = AsyncMock(return_value=[
+                {"type": "episode", "episode_id": "ep-2", "text": "minor thing",
+                 "score": 0.6, "importance": 0.1},
+            ])
+            mock_get_svc.return_value = mock_svc
+
+            traces = await _from_search_memory("user-1", "q", ["episode"], 5)
+
+        assert traces[0]["confidence"] == "observed"
+
+    @pytest.mark.asyncio
+    async def test_missing_importance_falls_back_to_default_label(self):
+        """No importance field at all (e.g. a row shape that predates this
+        change, or a different scope) must not crash — falls back to the
+        old fixed per-kind default rather than grading None."""
+        with patch("app.services.memory_service.get_memory_service") as mock_get_svc, \
+             patch("app.services.memory_recall._strengthen_recalled_episodes", new=AsyncMock()):
+            mock_svc = MagicMock()
+            mock_svc.SessionLocal = MagicMock()
+            mock_svc.search_memory = AsyncMock(return_value=[
+                {"type": "episode", "episode_id": "ep-3", "text": "no importance field", "score": 0.6},
+            ])
+            mock_get_svc.return_value = mock_svc
+
+            traces = await _from_search_memory("user-1", "q", ["episode"], 5)
+
+        assert traces[0]["confidence"] == "observed"  # _KIND_CONFIDENCE default
+
+
 class TestRetrievalStrengthening:
     """Brain Alignment H4: a recalled episode earns a small, capped bump to
     its intrinsic importance. Used to live only inside main_simple.py's

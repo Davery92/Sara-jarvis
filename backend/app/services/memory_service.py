@@ -583,7 +583,8 @@ class MemoryService:
                                 LEAST(LN(COALESCE(e.access_count, 0) + 1) / 4.6, 1.0) * 0.10 +
                                 COALESCE(e.rating_boost, 0.0) * 0.05 +
                                 COALESCE(e.exploration_bonus, 0.0) * 0.05
-                            ) as composite_score
+                            ) as composite_score,
+                            COALESCE(e.importance, 0.5) as importance
                         FROM episode e
                         WHERE e.user_id = :user_id
                           AND e.embedding IS NOT NULL
@@ -605,6 +606,10 @@ class MemoryService:
                             "created_at": row[4].isoformat() if row[4] else "",
                             "similarity": float(row[5]),
                             "score": float(row[6]),
+                            # Arc 5.2: exposed so callers (memory_recall) can
+                            # derive a real graduated confidence tier instead
+                            # of a hardcoded per-kind label.
+                            "importance": float(row[7]),
                         })
 
             # Search notes if in scope

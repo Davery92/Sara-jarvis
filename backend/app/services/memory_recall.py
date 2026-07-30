@@ -92,6 +92,18 @@ async def _from_search_memory(user_id: str, query: str, kinds: List[str], per: i
         kind = {"episode": "episode", "note": "note", "doc": "document",
                 "document": "document", "summary": "summary"}.get(t, t)
         text = r.get("text") or r.get("title") or r.get("content") or ""
+        # Arc 5.2: episode kind grades its actual importance score through
+        # the shared ladder instead of a hardcoded "observed" — a
+        # heavily-accessed, high-importance episode is more than merely
+        # "observed" by the time it's this well-established. Every other
+        # kind here still has no numeric score of its own to grade
+        # (thread/summary/note/document/person/artifact), so they keep the
+        # fixed per-kind label until one of them grows one.
+        episode_confidence = None
+        if kind == "episode" and r.get("importance") is not None:
+            from app.services.confidence_ladder import tier_from_confidence
+            episode_confidence = tier_from_confidence(r["importance"])
+
         out.append(_trace(
             kind=kind,
             id_=r.get("episode_id") or r.get("note_id") or r.get("id") or r.get("doc_id"),
@@ -100,6 +112,7 @@ async def _from_search_memory(user_id: str, query: str, kinds: List[str], per: i
             provenance=f"store:{kind}:{r.get('source','')}".rstrip(":"),
             when=r.get("created_at") or r.get("updated_at"),
             role=r.get("role") if kind == "episode" else None,
+            confidence=episode_confidence,
         ))
 
     await _strengthen_recalled_episodes(user_id, [t["id"] for t in out if t["kind"] == "episode" and t["id"]])
@@ -170,18 +183,18 @@ async def _from_facts(query: str, per: int) -> List[Dict[str, Any]]:
     except Exception as e:
         logger.debug(f"[recall] fact query failed: {e}")
         return []
+    from app.services.confidence_ladder import tier_from_confidence
     out: List[Dict[str, Any]] = []
     for r in rows or []:
         sim = float(r.get("similarity", 0.0) or 0.0)
         conf = float(r.get("confidence", 0.0) or 0.0)
-        tier = "confirmed" if conf >= 0.75 else ("inferred" if conf >= 0.4 else "observed")
         out.append(_trace(
             kind="fact",
             id_=r.get("pkg_id") or r.get("id"),
             text=_fact_text(r),
             score=sim,
             provenance=f"pkg:{r.get('node_type','fact')}",
-            confidence=tier,
+            confidence=tier_from_confidence(conf),
         ))
     return out
 

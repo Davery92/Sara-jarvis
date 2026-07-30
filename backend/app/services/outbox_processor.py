@@ -54,7 +54,6 @@ class OutboxProcessor:
 
             # Insight and feedback events
             "insight_generated": self._handle_insight_backprop,
-            "importance_decay": self._handle_importance_decay,
         }
 
     async def start(self):
@@ -552,38 +551,16 @@ Return ONLY valid JSON in this exact format, no other text:
 
         return []
 
-    async def _handle_importance_decay(self, payload: Dict[str, Any], db: Session) -> list:
-        """Decay importance for episodes that haven't contributed to insights"""
-        from app.main_simple import Episode
-        from datetime import datetime, timedelta
-
-        user_id = payload.get("user_id")
-        decay_amount = payload.get("decay_amount", 0.05)
-        min_importance = payload.get("min_importance", 0.1)
-        days_threshold = payload.get("days_threshold", 30)
-
-        cutoff_date = datetime.now(timezone.utc) - timedelta(days=days_threshold)
-
-        # Find episodes that:
-        # - Are older than threshold
-        # - Have importance above floor
-        # - Haven't been referenced recently (last_accessed or similar)
-        fading_episodes = db.query(Episode).filter(
-            Episode.user_id == user_id,
-            Episode.importance > min_importance,
-            Episode.created_at < cutoff_date
-        ).all()
-
-        decayed_count = 0
-        for episode in fading_episodes:
-            new_importance = max(min_importance, (episode.importance or 0.5) - decay_amount)
-            if new_importance < episode.importance:
-                episode.importance = new_importance
-                decayed_count += 1
-
-        logger.info(f"📉 Decayed importance for {decayed_count} episodes (user {user_id})")
-        return []
-
+    # _handle_importance_decay removed (Arc 5.2, 2026-07-30): nothing emits
+    # "importance_decay" events anymore (was only nightly_dream_service.
+    # _emit_importance_decay_event, now removed). It was a flat -0.05/night
+    # subtraction on Episode.importance that ran alongside
+    # nightly_rescoring_job's recency-halflife recompute — both nightly,
+    # both writing the same column. rescore_episode() always recomputes
+    # `importance` fresh from `base_importance` + current recency/frequency
+    # signals, never reading the decayed value this handler produced, so
+    # whichever ran later in the same night silently erased the other's
+    # work. One confidence/decay scheme now, not two compounding ones.
 
 # Global instance
 outbox_processor = OutboxProcessor()

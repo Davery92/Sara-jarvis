@@ -186,9 +186,6 @@ class NightlyDreamService:
             # Extract personal knowledge for the PKG
             await self._extract_personal_knowledge(user_id, conversation_sessions, daily_episodes)
 
-            # Emit importance_decay event for memory self-curation
-            await self._emit_importance_decay_event(user_id)
-
             # (Day replay + pattern detection moved to _run_nightly_dream_cycle so
             # it runs even when there were no conversations yesterday.)
 
@@ -748,35 +745,6 @@ class NightlyDreamService:
 
         except Exception as e:
             logger.error(f"❌ PKG extraction failed (non-critical): {e}")
-
-    async def _emit_importance_decay_event(self, user_id: str):
-        """Emit an importance_decay event to gradually fade old, unreferenced memories"""
-        try:
-            from app.main_simple import SessionLocal, EventOutbox
-            import json
-
-            db = SessionLocal()
-            try:
-                outbox_event = EventOutbox(
-                    event_type="importance_decay",
-                    aggregate_type="User",
-                    aggregate_id=str(user_id),
-                    op="PROCESS",
-                    payload=json.dumps({
-                        "user_id": str(user_id),
-                        "days_threshold": 30,  # Episodes older than 30 days
-                        "decay_amount": 0.05,  # Reduce importance by 5%
-                        "min_importance": 0.1  # Floor to prevent complete fade
-                    }),
-                    status="pending"
-                )
-                db.add(outbox_event)
-                db.commit()
-                logger.info(f"   📉 Queued importance decay for user {user_id}")
-            finally:
-                db.close()
-        except Exception as e:
-            logger.error(f"❌ Failed to emit importance decay event: {e}")
 
     async def _consolidate_inbox_items(self, user_id: str):
         """Consolidate kept inbox items into episodic memory."""
