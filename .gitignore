@@ -101,3 +101,6 @@ backend/uploads/
 backend/_shot*.py
 backend/*.png
 backend/VERSION
+
+# DB backups — contain real personal data, never belong in git history
+backend/backups/

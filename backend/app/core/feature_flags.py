@@ -85,6 +85,16 @@ class Flag(str, Enum):
     # verified live in isolation before this flips on for real.
     KERNEL_HANDS = "KERNEL_HANDS"
 
+    # Work-order item 3 (2026-07-30): urgent lane. travel_nudge's leave-now
+    # message is time-critical enough that the normal judge/compose/deliver
+    # beat cadence (~9min worst case) doesn't fit its <=15min buffer — see
+    # travel_nudge.py's write-freeze comment. This flag routes it through
+    # app/services/urgent_lane.py (single-pass compose->review->deliver,
+    # inline, no beat latency) IN ADDITION TO the existing legacy send —
+    # dual-write, same as every other still-legacy sender, until a real
+    # (not synthesized) leave-now firing proves it end-to-end. Default OFF.
+    URGENT_LANE_TRAVEL_NUDGE = "URGENT_LANE_TRAVEL_NUDGE"
+
 
 ALL_FLAGS: List[str] = [f.value for f in Flag]
 _TRUE_VALUES = {"1", "true", "yes", "on"}

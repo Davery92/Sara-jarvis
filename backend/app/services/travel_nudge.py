@@ -186,8 +186,7 @@ async def check_and_send_leave_now_nudges(user_id: str) -> dict:
         # whose entire value is being on time, so this stays dual-write with
         # the legacy immediate send as primary (calendar_prep's 20-minute-
         # wide window comfortably absorbs the same latency and was cut over;
-        # see calendar_prep.py). Revisit if judge/compose/deliver ever get a
-        # promoted/expedited path instead of a flat beat interval.
+        # see calendar_prep.py).
         from app.core.feature_flags import Flag, is_enabled
         if is_enabled(Flag.MOUTH_ONLY_TRAVEL_NUDGE):
             logger.info(f"[mouth-only] travel_nudge legacy send skipped (candidate queued): {topic}")
@@ -206,6 +205,30 @@ async def check_and_send_leave_now_nudges(user_id: str) -> dict:
             if result.get("sent"):
                 sent += 1
                 logger.info(f"Leave-now nudge sent for '{title}' ({travel_min}min drive)")
+
+        # Urgent lane (work-order item 3, 2026-07-30): the latency fix, not
+        # just a latency workaround. Single-pass compose->review->deliver,
+        # inline, no beat-interval wait — proven to hit the <60s target with
+        # a synthesized trigger. Runs ALONGSIDE the legacy send above (not
+        # instead of it) until a real leave-now firing proves it end-to-end;
+        # see feature_flags.py's URGENT_LANE_TRAVEL_NUDGE docstring for why
+        # cutover isn't automatic just because this flag exists. Wrapped so
+        # a failure here never blocks the legacy send that already ran.
+        if is_enabled(Flag.URGENT_LANE_TRAVEL_NUDGE):
+            try:
+                from app.core.timezone import to_utc
+                from app.services.urgent_lane import deliver_urgent
+                urgent_result = await deliver_urgent(
+                    async_session, user_id, source="travel_nudge", kind="alert",
+                    summary=message, evidence=[{"event_id": event_id, "travel_minutes": travel_min}],
+                    topic_entities=[topic], valid_until=to_utc(start_time),
+                    dedupe_key=f"urgent:{topic}",
+                    notification_title="Time to head out",
+                    notification_category="location", notification_priority="high",
+                )
+                logger.info(f"[urgent_lane] travel_nudge result: {urgent_result}")
+            except Exception as e:
+                logger.warning(f"[urgent_lane] travel_nudge failed: {e}")
 
         # Mind V2 rewire plan Workstream B (long tail) — dual-write into the
         # say_candidate queue. valid_until = event start: a leave-now nudge
