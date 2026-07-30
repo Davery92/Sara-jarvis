@@ -250,6 +250,10 @@ def run_check():
                     source="system_wiring_check",
                     db=db,
                 )
+                # send_notification doesn't commit a caller-supplied session
+                # (see mindv2_deliver.py's identical fix, 2026-07-30) — without
+                # this the notification_log row silently rolled back.
+                await db.commit()
             logger.warning(f"[wiring-check] {len(all_problems)} problem(s): {all_problems}")
         else:
             logger.info("[wiring-check] all clear — no unscheduled tasks, no unhealthy jobs, learning tables fresh")

@@ -217,7 +217,7 @@ async def migrate_zones(db, user_id: str = DEFAULT_USER_ID) -> int:
     now = local_now()
     moved = 0
     for item in list(state["sections"].get("ahead", [])):
-        at = _parse_iso(item.get("at"))
+        at = _parse_iso(item.get("migrate_at") or item.get("at"))
         if at is None or at > now:
             continue
         await brief_patch(
@@ -243,9 +243,16 @@ async def sweep_brief(db, user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]:
         logger.warning(f"[world_brief] zone migration failed: {e}")
         await _safe_rollback(db)
 
-    # AHEAD: next 7 days of calendar (non-all-day). Anchor = end_time when
-    # present (so migrate_zones fires once the event is actually over, not
-    # the moment it starts) else start_time.
+    # AHEAD: next 7 days of calendar (non-all-day). `at` = start_time, so
+    # render_brief's "in Xh Ym: Event" is meaningful to anything reading the
+    # brief (judge/compose/review all cross-check claimed timing against
+    # this — found live 2026-07-30 when a real end-to-end sender-proof test
+    # surfaced the review stage killing correct drafts because `at` held
+    # end_time and got displayed as if it were "time until start", off by
+    # the event's full duration). `migrate_at` = end_time when present, a
+    # separate field migrate_zones alone reads, so an item still stays in
+    # AHEAD (not prematurely marked past-tense/HAPPENED) until it's actually
+    # over, not the moment it starts.
     #
     # calendar_event.start_time/end_time are `timestamp without time zone`
     # storing naive ET wall-clock (verified against live data — a 9:30
@@ -268,10 +275,13 @@ async def sweep_brief(db, user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]:
             ORDER BY start_time ASC LIMIT 20
         """), {"uid": user_id, "window_start": window_start, "window_end": window_end})).fetchall()
         for r in rows:
-            anchor = to_utc(r.end_time or r.start_time)  # naive ET -> aware UTC for storage
+            start_anchor = to_utc(r.start_time)  # naive ET -> aware UTC for storage
+            content = {"text": r.title, "at": start_anchor.isoformat(), "kind": "calendar"}
+            if r.end_time:
+                content["migrate_at"] = to_utc(r.end_time).isoformat()
             await brief_patch(
                 db, user_id, op="update", section="ahead", item_key=f"cal:{r.id}",
-                content={"text": r.title, "at": anchor.isoformat(), "kind": "calendar"},
+                content=content,
                 source="world_brief.sweep_brief:calendar",
                 evidence=[{"calendar_event_id": str(r.id)}],
             )

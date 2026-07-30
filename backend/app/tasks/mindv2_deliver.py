@@ -117,6 +117,17 @@ async def _run_async():
                     db=db,
                     _skip_phrasing=True,  # already composed in the one voice
                 )
+                # send_notification only self-commits when it opened its own
+                # session (db=None) — since we pass ours explicitly, we own
+                # the commit. Found live 2026-07-30: without this, the
+                # notification_log row (and any writes made after the
+                # attention item's own earlier commit inside the send path)
+                # silently rolled back on this `async with` block's exit —
+                # composed_utterance.delivered_at + delivery_result still got
+                # set below (unaffected, different session), so every past
+                # delivery looked successful while its notification_log
+                # audit row was actually never persisted.
+                await db.commit()
         except Exception as e:
             # A real delivery error (LLM/DB/network hiccup downstream) — leave
             # delivered_at NULL so the next cycle retries.

@@ -979,6 +979,11 @@ Synthesized summary:"""
                     cooldown_hours=24.0,
                     db=db,
                 )
+                # send_notification doesn't commit a caller-supplied session
+                # (see mindv2_deliver.py's identical fix, 2026-07-30) — without
+                # this the notification_log row silently rolled back and the
+                # 24h cooldown dedup could never see a prior send.
+                db.commit()
                 if result.get("sent"):
                     logger.info(f"📱 iOS push notification sent for morning brief to user {user_id}")
                     return True

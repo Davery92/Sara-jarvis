@@ -154,6 +154,13 @@ def send_morning_inbox_digest():
                     _bypass_attention=True,
                 )
 
+                # send_notification doesn't commit a caller-supplied session
+                # (see mindv2_deliver.py's identical fix, 2026-07-30) — without
+                # this the notification_log row silently rolled back, which
+                # for this job also meant the 24h cooldown dedup could never
+                # see a prior send and the digest could re-fire same-day.
+                db.commit()
+
                 if result.get("sent"):
                     users_notified += 1
                 else:

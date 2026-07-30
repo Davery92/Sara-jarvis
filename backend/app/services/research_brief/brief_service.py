@@ -293,6 +293,11 @@ class ResearchBriefService:
                 cooldown_hours=20.0,
                 db=db,
             )
+            # send_notification doesn't commit a caller-supplied session (see
+            # mindv2_deliver.py's identical fix, 2026-07-30) — without this
+            # the notification_log row silently rolled back and the 20h
+            # cooldown dedup could never see a prior send.
+            db.commit()
         except Exception as e:
             logger.error(f"Research brief notification failed: {e}")
 

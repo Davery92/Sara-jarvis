@@ -89,6 +89,9 @@ async def deliver_task_result(
                 overlay={"kind": "report", "payload": {"latest": True}},
                 db=db,
             )
+            # send_notification doesn't commit a caller-supplied session (see
+            # mindv2_deliver.py's identical fix, 2026-07-30).
+            await db.commit()
             logger.info(f"Delivered task {task_id} via desktop toast + report overlay")
             return
     except Exception as e:
@@ -162,6 +165,7 @@ async def deliver_task_result(
                 },
                 db=db,
             )
+            await db.commit()
             logger.info(f"Delivered task {task_id} via iOS push task_chat_inject")
         else:
             await send_notification(
@@ -181,6 +185,7 @@ async def deliver_task_result(
                 },
                 db=db,
             )
+            await db.commit()
             logger.info(f"Delivered task {task_id} via iOS push {note_push_type}")
         return
 
@@ -212,6 +217,7 @@ async def deliver_task_result(
         },
         db=db,
     )
+    await db.commit()
     logger.info(f"Delivered task {task_id} via fallback push notification ({note_push_type})")
 
 
