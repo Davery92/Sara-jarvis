@@ -73,6 +73,18 @@ class Flag(str, Enum):
     MOUTH_ONLY_TRAVEL_NUDGE = "MOUTH_ONLY_TRAVEL_NUDGE"
     MOUTH_ONLY_LEARNING_DIGEST = "MOUTH_ONLY_LEARNING_DIGEST"
 
+    # Work-order item 11 (2026-07-30): kernel-hands. The old daemon-local
+    # Mind.think() loop could call 15 tools inline (research, notes, goals/
+    # interests, Proxmox sandboxes) — real, actively-used capability the
+    # selves=1 daemon cutover left with no kernel-side equivalent (flagged,
+    # not silently dropped — see the daemon cutover's docstring). This gates
+    # ONE tool call per deliberation turn, lane-routed by trust per David's
+    # pre-authorized mapping (kernel_hands.py). Default OFF: it extends the
+    # core deliberation prompt/schema used by every wake reason, not just
+    # the daemon proxy — same write-freeze discipline as everything else,
+    # verified live in isolation before this flips on for real.
+    KERNEL_HANDS = "KERNEL_HANDS"
+
 
 ALL_FLAGS: List[str] = [f.value for f in Flag]
 _TRUE_VALUES = {"1", "true", "yes", "on"}

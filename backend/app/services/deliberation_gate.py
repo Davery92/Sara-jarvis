@@ -318,6 +318,7 @@ async def process_deliberation_result(
         "observations_consumed": 0,
         "state_updated": False,
         "journal_written": False,
+        "tool_call_status": None,
     }
 
     # Quiet mode (Phase 11E): a HARD gate. Suppress all proactive outreach and
@@ -409,6 +410,37 @@ async def process_deliberation_result(
     # 3b. Process research proposals
     if result.research_proposals:
         await _process_research_proposals(user_id, result.research_proposals, summary)
+
+    # 3c. Process tool_call (KERNEL_HANDS, work-order item 11) — only when
+    # the flag is on (the prompt doesn't describe the field otherwise, so
+    # this should never fire, but check explicitly rather than trusting
+    # that the model never hallucinates a field it wasn't shown). Not
+    # gated by quiet mode: read/write-lane tool calls are Sara's own
+    # background activity, not outreach to David; the propose-first lane's
+    # say_candidate goes through the normal pipeline's own quiet-hours gate
+    # downstream, so it isn't silenced twice.
+    if result.tool_call and result.tool_call.name:
+        try:
+            from app.core.feature_flags import Flag as _KhFlag, is_enabled as _kh_enabled
+            if _kh_enabled(_KhFlag.KERNEL_HANDS):
+                from app.services.kernel_hands import execute_kernel_tool
+                tool_result = await execute_kernel_tool(
+                    result.tool_call.name, result.tool_call.args, user_id,
+                    reason=result.tool_call.reason,
+                )
+                summary["tool_call_status"] = tool_result.get("status")
+                logger.info(
+                    f"[DeliberationGate] tool_call {result.tool_call.name!r} -> "
+                    f"{tool_result.get('status')}"
+                )
+            else:
+                logger.debug(
+                    f"[DeliberationGate] tool_call {result.tool_call.name!r} ignored — "
+                    f"KERNEL_HANDS is off"
+                )
+        except Exception as e:
+            _GATE_TRACKER.note(f"tool_call:{type(e).__name__}")
+            logger.error(f"[DeliberationGate] tool_call execution failed: {e}")
 
     # 4. Update Sara's internal state in working memory
     # Always bump deliberation timestamp and count (even on parse failure)

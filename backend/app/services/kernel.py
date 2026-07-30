@@ -243,6 +243,7 @@ async def ambient_turn(
             "observations_consumed": summary["observations_consumed"],
             "tasks_dispatched": summary.get("tasks_dispatched", 0),
             "tasks_proposed": summary.get("tasks_proposed", 0),
+            "tool_call_status": summary.get("tool_call_status"),
             "curiosity_pursued": curiosity_pursued,
             "duration": result.duration_seconds,
             "correlation_id": kernel_turn_id,

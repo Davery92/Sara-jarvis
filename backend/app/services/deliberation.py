@@ -51,6 +51,17 @@ class TaskProposal:
 
 
 @dataclass
+class ToolCall:
+    """Work-order item 11 (KERNEL_HANDS, 2026-07-30): at most one tool call
+    per deliberation turn — a lane-routed action (app/services/kernel_hands.py),
+    not a multi-round agentic loop. Kept to the same "one structured decision"
+    paradigm every other field in this schema already uses."""
+    name: str
+    args: Dict[str, Any] = field(default_factory=dict)
+    reason: str = ""
+
+
+@dataclass
 class DeliberationResult:
     thought: str = ""
     journal_note: str = ""
@@ -61,6 +72,7 @@ class DeliberationResult:
     state_update: Dict[str, Any] = field(default_factory=dict)
     handoff_note: str = ""
     watching_for: str = ""
+    tool_call: Optional[ToolCall] = None
     observations_consumed: List[str] = field(default_factory=list)
     raw_response: str = ""
     tokens_used: int = 0
@@ -189,6 +201,12 @@ class DeliberationEngine:
             logger.warning(f"Off-rhythm flag gather failed: {e}")
 
         # 3. Build prompt
+        kernel_hands_on = False
+        try:
+            from app.core.feature_flags import Flag as _KhFlag, is_enabled as _kh_enabled
+            kernel_hands_on = _kh_enabled(_KhFlag.KERNEL_HANDS)
+        except Exception:
+            pass
         system_msg, user_msg = build_deliberation_prompt(
             memory=memory,
             observations=observations,
@@ -196,6 +214,7 @@ class DeliberationEngine:
             off_rhythm_flags=off_rhythm_flags,
             deep=deep,
             wake_reason=wake_reason,
+            kernel_hands=kernel_hands_on,
         )
 
         # 3b. Interoception — inject a health digest so Sara can *feel* her own
@@ -360,6 +379,18 @@ class DeliberationEngine:
 
             # Parse state update
             result.state_update = parsed.get("state_update", {})
+
+            # Parse tool_call (KERNEL_HANDS, work-order item 11) — at most
+            # one, only meaningful when the flag is on (the prompt doesn't
+            # describe the schema field otherwise, so the model shouldn't
+            # emit it, but parse defensively either way).
+            tc = parsed.get("tool_call")
+            if isinstance(tc, dict) and tc.get("name"):
+                result.tool_call = ToolCall(
+                    name=str(tc["name"]),
+                    args=tc.get("args") if isinstance(tc.get("args"), dict) else {},
+                    reason=str(tc.get("reason", "")),
+                )
 
         except Exception as e:
             logger.error(f"[Deliberation] Response parse failed: {e}")

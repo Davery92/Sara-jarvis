@@ -108,6 +108,7 @@ class AmbientTurnOut(BaseModel):
     home_actions: int = 0
     tasks_dispatched: int = 0
     tasks_proposed: int = 0
+    tool_call_status: Optional[str] = None
     correlation_id: Optional[str] = None
 
 
@@ -300,9 +301,14 @@ async def daemon_ambient_turn(payload: AmbientTurnIn) -> AmbientTurnOut:
 
     result = await ambient_turn(DEFAULT_USER_ID, wake_reason=WakeReason.DAEMON_PROXY, force=True)
 
+    # A successful/proposed kernel-hands tool call counts as "did something"
+    # for backoff purposes too (work-order item 11) — an "error"/"no_lane"/
+    # "retired"/"duplicate_suppressed" tool_call_status does not.
+    tool_call_produced = result.get("tool_call_status") in ("ok", "proposed")
     produced = bool(
         result.get("notifications") or result.get("home_actions")
         or result.get("tasks_dispatched") or result.get("tasks_proposed")
+        or tool_call_produced
     )
     return AmbientTurnOut(
         status=result.get("status", result.get("skipped", "unknown")),
@@ -313,6 +319,7 @@ async def daemon_ambient_turn(payload: AmbientTurnIn) -> AmbientTurnOut:
         home_actions=result.get("home_actions", 0),
         tasks_dispatched=result.get("tasks_dispatched", 0),
         tasks_proposed=result.get("tasks_proposed", 0),
+        tool_call_status=result.get("tool_call_status"),
         correlation_id=result.get("correlation_id"),
     )
 

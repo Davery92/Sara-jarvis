@@ -4,7 +4,9 @@ Deliberation Prompt Builder — constructs the compact prompt for Sara's deliber
 The prompt is much shorter than the old unified agent prompt because:
 - Working memory IS the synthesis (no need to stuff raw DB data)
 - Observations are pre-scored and sorted
-- Output is structured JSON (no tool-calling loop)
+- Output is structured JSON (no multi-round tool-calling loop — KERNEL_HANDS,
+  when on, adds one optional single tool_call field to that same structured
+  decision, not an agentic loop; see app/services/kernel_hands.py)
 """
 
 import json
@@ -343,6 +345,7 @@ def build_deliberation_prompt(
     off_rhythm_flags: Optional[List[dict]] = None,
     deep: bool = False,
     wake_reason: Optional[str] = None,
+    kernel_hands: bool = False,
 ) -> Tuple[str, str]:
     """
     Build the system and user messages for deliberation.
@@ -357,9 +360,49 @@ def build_deliberation_prompt(
     reads differently from a promoted event without a second prompt or a
     dispatch branch ("wake reasons shape context, they never select a
     different cognition").
+
+    `kernel_hands` (Flag.KERNEL_HANDS, work-order item 11, 2026-07-30):
+    when true, describes the one-tool-call-per-turn schema field and its
+    trust lanes (app/services/kernel_hands.py). Default false — the model
+    never sees the tool_call field or its instructions, so it can't emit
+    one; this is additive, not a replacement of the existing schema.
     """
     heartbeat_rules = _read_heartbeat_rules()
     task_cap = 4 if deep else 2
+
+    # KERNEL_HANDS (work-order item 11): built as separate blocks, spliced
+    # into the f-string below only when the flag is on — the model never
+    # sees this field or its rules otherwise, so it can't emit a tool_call.
+    tool_call_schema_block = ""
+    tool_call_rules_block = ""
+    if kernel_hands:
+        tool_call_schema_block = """  "tool_call": {
+    "name": "web_search|web_fetch|search_notes|search_memory|list_goals|list_interests|list_containers|node_status|write_note|add_interest|touch_interest|create_goal|update_goal|provision_container|exec_in_container",
+    "args": {"...": "..."},
+    "reason": "One sentence: why this tool, right now"
+  },
+"""
+        tool_call_rules_block = """
+## Rules for tool_call
+- At most ONE tool call per deliberation cycle — omit the field entirely (or null) on cycles
+  with nothing to do. This is a single decision, not a multi-step agent loop.
+- Three trust lanes, not your call to pick which — the lane is determined by the tool name:
+  - read-only (web_search, web_fetch, search_notes, search_memory, list_goals, list_interests,
+    list_containers, node_status) — executes immediately, no approval needed.
+  - reversible writes (write_note, add_interest, touch_interest, create_goal, update_goal) —
+    executes immediately, logged to the ledger.
+  - irreversible / resource-creating (provision_container, exec_in_container) — NEVER executes
+    from here. It becomes a proposal David sees and approves separately — say what you want to
+    do and why in `reason`, the same as any other decision, and move on. Do not expect it to
+    have happened by your next turn.
+- `args` must match the tool's real parameters (e.g. search_notes needs "query"; write_note
+  needs "title" and "body"; create_goal needs "title"). Getting this wrong just means the call
+  fails harmlessly and it's logged — but a tool call is only worth making if you actually have
+  the real arguments it needs.
+- Use this the same way you'd use any other field: only when it's genuinely the right thing to
+  do this cycle, never to fill space. A cycle with nothing worth acting on and an empty
+  tool_call is correct, not a missed opportunity.
+"""
 
     system_msg = f"""You are Sara, David's personal AI partner. You are performing a deliberation cycle — reviewing what's happening and deciding whether to act.
 
@@ -403,7 +446,7 @@ Respond with ONLY valid JSON in this exact format:
     }}
   ],
   "research_proposals": ["Topic to research — only if genuine sustained interest"],
-  "state_update": {{
+{tool_call_schema_block}  "state_update": {{
     "focus": "What Sara is now paying attention to",
     "emotional_tone": "One word: curious|warm|concerned|playful|proud|attentive|protective",
     "curiosities": ["Thing Sara wants to explore later"]
@@ -488,7 +531,8 @@ Respond with ONLY valid JSON in this exact format:
 - Empty array [] unless you have a strong reason (this is common)
 - NEVER actuate heater (suggest only via notification if needed)
 - Late night: auto-off lights, check locks
-- All actions must have a clear reason"""
+- All actions must have a clear reason
+{tool_call_rules_block}"""
 
     whiteboard = _format_memory_whiteboard(memory, off_rhythm_flags)
     # ACS4 (Brain Alignment): each brain knows what the other is doing, so

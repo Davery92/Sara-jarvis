@@ -23,16 +23,25 @@ ARC_SIGNOFF_PACKAGE_2026_07_29.md, for the full resolution rationale):
     lock, delivery-side cooldowns) already cover the same "don't re-trigger
     right after a no-op turn" need.
 
-Known open gap (NOT resolved by this cutover, flagged not papered over):
-Mind's old think() loop could call 15 tools inline mid-turn (web_search,
-write_note, goal/interest CRUD, Proxmox container provisioning — real,
-actively-used capability, 1200+ historical calls). The kernel's
-`deliberation_engine.run()` is a single structured-JSON call with no
-tool-calling loop; follow-through only happens via `agent_dispatch_service`
-(a full VM Claude-Code session — disproportionate for a cheap, casual
-tool call). `mind.py`/`prompt.py` are therefore NOT deleted by this cutover
-even though the daemon's tick no longer calls them — see the sign-off
-report for the proposed resolution paths.
+Kernel-hands (work-order item 11, 2026-07-30 — resolves the gap this
+cutover originally flagged): Mind's old think() loop could call 15 tools
+inline mid-turn (web_search, write_note, goal/interest CRUD, Proxmox
+container provisioning — real, actively-used capability, 1200+ historical
+calls). That capability now lives kernel-side instead: `Flag.KERNEL_HANDS`
+(default off) adds one optional tool_call per deliberation turn, lane-
+routed by trust (backend `app/services/kernel_hands.py`) — read-only and
+reversible-write tools execute in-process against the same real backend
+implementations Mind used to call over HTTP; irreversible/resource-
+creating tools (provision_container, exec_in_container) never auto-
+execute, they become a proposal David approves separately. Not a full
+multi-round agentic loop like Mind's old MAX_TOOL_ITERATIONS=8 — one
+tool call per turn, same "single structured decision" shape as every
+other field the kernel already outputs. `mind.py`/`prompt.py`/`llm.py`
+are deleted — 1507 lines, zero remaining callers confirmed before
+deletion, no flag routes back to them (unlike the sender/context
+write-freezes elsewhere in this plan, there's no "flip it back off"
+path here; the daemon's own tick physically stopped calling them the
+moment this cutover shipped).
 """
 from __future__ import annotations
 
@@ -47,7 +56,21 @@ from typing import Optional
 
 from backend_client import BackendClient
 from config import config
-from mind import ALLOWED_TOOLS
+
+# Reported to the backend heartbeat as this body's tool capabilities
+# (feeds body_capability, not a live call path — mind.py/prompt.py are
+# retired as of the KERNEL_HANDS cutover, work-order item 11, 2026-07-30:
+# the kernel now executes these same 15 tools itself, lane-routed by trust,
+# see backend app/services/kernel_hands.py. destroy_container and
+# bump_interest are NOT listed — they were retired outright (zero calls
+# ever) rather than migrated. Kept as a local constant, not imported, since
+# the daemon and backend are separate deployments with no shared package.
+ALLOWED_TOOLS = frozenset({
+    "web_search", "web_fetch", "write_note", "search_notes", "search_memory",
+    "provision_container", "list_containers", "exec_in_container", "node_status",
+    "list_interests", "add_interest", "touch_interest",
+    "list_goals", "create_goal", "update_goal",
+})
 
 logging.basicConfig(
     level=getattr(logging, config.log_level.upper(), logging.INFO),
@@ -57,7 +80,7 @@ logging.basicConfig(
 logger = logging.getLogger("acs-daemon")
 
 
-VERSION = "0.10.0"  # selves=1: daemon proxies to kernel.ambient_turn, Gap A+B closed
+VERSION = "0.11.0"  # kernel-hands: mind.py/prompt.py/llm.py retired, capability moved kernel-side
 
 
 def _code_sha() -> str:
