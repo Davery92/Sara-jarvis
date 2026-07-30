@@ -8740,6 +8740,18 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
 
             _uid = str(current_user.id)
 
+            # SARA_ALIVE audit (2026-07-30): once SINGULAR_CONTEXT is live, the
+            # entire legacy assembly below still RUNS but its text output is
+            # unconditionally discarded (overwritten by the kernel-context
+            # render further down) — so every live chat turn was paying the
+            # DB/Redis/service latency of ~9 fetchers for text nobody reads.
+            # Fetchers with no side effect beyond their own text short-circuit
+            # below when the cutover is live; the two with real side effects
+            # (daily_brief's update_moment write, lessons' injected_lesson_ids
+            # feeding the lesson-effectiveness loop) keep running unchanged.
+            from app.core.feature_flags import Flag as _CtxFlag, is_enabled as _ctx_flag_enabled
+            _context_cutover_live = _ctx_flag_enabled(_CtxFlag.SINGULAR_CONTEXT)
+
             # --- Parallel fetch coroutines (all independent, safe to run concurrently) ---
 
             async def _fetch_memory():
@@ -8811,6 +8823,13 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     return None
 
             async def _fetch_daily_brief():
+                if _context_cutover_live:
+                    # Side effect only — the moment-layer write still needs to
+                    # happen every turn; the text below is discarded once the
+                    # kernel context is live. The DAILY_BRIEF_AVAILABLE-but-
+                    # inject_daily_brief-false fallback further down handles
+                    # firing update_moment() exactly once per turn either way.
+                    return None
                 if not (DAILY_BRIEF_AVAILABLE and context_decision.inject_daily_brief):
                     return None
 
@@ -8861,6 +8880,8 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                 return "\n\n".join(parts) if parts else None
 
             async def _fetch_journal():
+                if _context_cutover_live:
+                    return None
                 try:
                     from app.services.sara_journal_service import sara_journal
                     return await sara_journal.get_entries_for_conversation_context(
@@ -8871,7 +8892,7 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     return None
 
             async def _fetch_personality():
-                if not context_decision.inject_activity_context:
+                if _context_cutover_live or not context_decision.inject_activity_context:
                     return None
                 try:
                     _snap = None
@@ -8961,6 +8982,8 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     return None
 
             async def _fetch_device():
+                if _context_cutover_live:
+                    return None
                 try:
                     from app.services.device_orchestrator import device_orchestrator
                     return await device_orchestrator.get_device_context_for_chat(db, _uid)
@@ -8968,13 +8991,15 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     return None
 
             async def _fetch_workout():
+                if _context_cutover_live:
+                    return None
                 try:
                     return await workout_session_service.get_workout_context(current_user.id, db)
                 except Exception:
                     return None
 
             async def _fetch_fitness_context():
-                if not context_decision.inject_fitness:
+                if _context_cutover_live or not context_decision.inject_fitness:
                     return None
                 try:
                     from app.services.fitness_context import get_fitness_context
@@ -8987,7 +9012,7 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     return None
 
             async def _fetch_changes_brief():
-                if not context_decision.inject_changes_brief:
+                if _context_cutover_live or not context_decision.inject_changes_brief:
                     return None
                 try:
                     from app.services.unified_context import read_changes as _rc, read_snapshot as _rs2
@@ -9030,7 +9055,7 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     return None, []
 
             async def _fetch_daily_tasks():
-                if not context_decision.inject_daily_brief:
+                if _context_cutover_live or not context_decision.inject_daily_brief:
                     return None
                 try:
                     from sqlalchemy import text as sa_text
@@ -9058,6 +9083,8 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
 
             async def _fetch_autonomous_notes():
                 """Fetch Sara's autonomous journal + show_david buffer for chat context."""
+                if _context_cutover_live:
+                    return None
                 try:
                     import redis.asyncio as _aioredis
                     _redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
@@ -9166,7 +9193,7 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
 
             # Patterns (sync DB query)
             pattern_text = None
-            if context_decision.inject_patterns:
+            if context_decision.inject_patterns and not _context_cutover_live:
                 try:
                     from sqlalchemy import text as sa_text
                     patterns_result = db.execute(sa_text("""
@@ -9183,7 +9210,7 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
 
             # Chess (sync)
             chess_ctx = None
-            if CHESS_COMMANDS_AVAILABLE:
+            if CHESS_COMMANDS_AVAILABLE and not _context_cutover_live:
                 chess_ctx = get_chess_context_prompt(current_user.id, db)
                 if chess_ctx:
                     chess_ctx = "\n\n## Chess Context:\n" + chess_ctx
@@ -9202,8 +9229,11 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                 if wc_parts:
                     workspace_ctx = "\n\n[Workspace Context]\n" + "\n".join(wc_parts)
 
-            # Update daily brief moment layer if we didn't inject the brief
-            if DAILY_BRIEF_AVAILABLE and not context_decision.inject_daily_brief:
+            # Update daily brief moment layer if we didn't inject the brief —
+            # or, when the kernel context is live, unconditionally: the
+            # _fetch_daily_brief short-circuit above never calls it in that
+            # case, so this is now the sole place it fires per turn.
+            if DAILY_BRIEF_AVAILABLE and (_context_cutover_live or not context_decision.inject_daily_brief):
                 try:
                     await asyncio.wait_for(
                         daily_brief_service.update_moment(
@@ -9222,15 +9252,16 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
             # reflexes and a mind that is *about something*; chat-Sara genuinely
             # knows what the daemon did this morning because they share it.
             mind_ctx = None
-            try:
-                from app.db.session import get_async_session_factory as _get_wsf
-                from app.services.global_workspace import build_workspace as _build_ws, format_for_chat as _fmt_ws
-                _wsf = _get_wsf()
-                async with _wsf() as _wsdb:
-                    _ws = await asyncio.wait_for(_build_ws(_wsdb, str(current_user.id)), timeout=2.0)
-                mind_ctx = _fmt_ws(_ws)
-            except Exception as e:
-                logger.debug(f"Workspace (mind) context failed (non-critical): {e}")
+            if not _context_cutover_live:
+                try:
+                    from app.db.session import get_async_session_factory as _get_wsf
+                    from app.services.global_workspace import build_workspace as _build_ws, format_for_chat as _fmt_ws
+                    _wsf = _get_wsf()
+                    async with _wsf() as _wsdb:
+                        _ws = await asyncio.wait_for(_build_ws(_wsdb, str(current_user.id)), timeout=2.0)
+                    mind_ctx = _fmt_ws(_ws)
+                except Exception as e:
+                    logger.debug(f"Workspace (mind) context failed (non-critical): {e}")
 
             # --- World Brief (SARA_MIND_V2 Phase 1, MINDV2_BRIEF) ---
             # Additive A/B against global_workspace above during the overlap
@@ -9239,33 +9270,34 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
             # eventually replace (Phase 5 deletes global_workspace.py once
             # this is proven out).
             world_brief_ctx = None
-            try:
-                from app.core.feature_flags import Flag as _MFlag, is_enabled as _mind_enabled
-                if _mind_enabled(_MFlag.MINDV2_BRIEF):
-                    from app.services.world_brief import get_rendered_brief as _get_brief
-                    from app.db.session import get_async_session_factory as _get_bf
-                    _bf = _get_bf()
-                    async with _bf() as _bdb:
-                        rendered = await asyncio.wait_for(
-                            _get_brief(_bdb, str(current_user.id)), timeout=2.0
-                        )
-                    world_brief_ctx = "\n\n## World Brief (what Sara currently knows)\n" + rendered
-            except Exception as e:
-                logger.debug(f"World Brief context failed (non-critical): {e}")
-
-            # --- Interest Model (SARA_MIND_V2 §3.2, MINDV2_BRIEF) ---
             interest_model_ctx = None
-            try:
-                if _mind_enabled(_MFlag.MINDV2_BRIEF):
-                    from app.services.interest_model import get_rendered_interest_model as _get_im
-                    _imf2 = _get_bf()
-                    async with _imf2() as _imdb2:
-                        im_rendered = await asyncio.wait_for(
-                            _get_im(_imdb2, str(current_user.id)), timeout=2.0
-                        )
-                    interest_model_ctx = "\n\n" + im_rendered
-            except Exception as e:
-                logger.debug(f"Interest model context failed (non-critical): {e}")
+            if not _context_cutover_live:
+                try:
+                    from app.core.feature_flags import Flag as _MFlag, is_enabled as _mind_enabled
+                    if _mind_enabled(_MFlag.MINDV2_BRIEF):
+                        from app.services.world_brief import get_rendered_brief as _get_brief
+                        from app.db.session import get_async_session_factory as _get_bf
+                        _bf = _get_bf()
+                        async with _bf() as _bdb:
+                            rendered = await asyncio.wait_for(
+                                _get_brief(_bdb, str(current_user.id)), timeout=2.0
+                            )
+                        world_brief_ctx = "\n\n## World Brief (what Sara currently knows)\n" + rendered
+                except Exception as e:
+                    logger.debug(f"World Brief context failed (non-critical): {e}")
+
+                # --- Interest Model (SARA_MIND_V2 §3.2, MINDV2_BRIEF) ---
+                try:
+                    if _mind_enabled(_MFlag.MINDV2_BRIEF):
+                        from app.services.interest_model import get_rendered_interest_model as _get_im
+                        _imf2 = _get_bf()
+                        async with _imf2() as _imdb2:
+                            im_rendered = await asyncio.wait_for(
+                                _get_im(_imdb2, str(current_user.id)), timeout=2.0
+                            )
+                        interest_model_ctx = "\n\n" + im_rendered
+                except Exception as e:
+                    logger.debug(f"Interest model context failed (non-critical): {e}")
 
             # --- Apply token budget ---
             budget = ContextBudget(max_tokens=6000)
