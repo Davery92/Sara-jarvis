@@ -185,8 +185,8 @@ async def get_rollout_summary(
             SELECT
                 COUNT(*) FILTER (WHERE sent = TRUE)::int AS sent_total,
                 COUNT(*) FILTER (WHERE dedup_blocked = TRUE)::int AS dedup_blocked_total,
-                COUNT(*) FILTER (WHERE sent = TRUE AND attention_item_id IS NOT NULL)::int AS attention_linked_sent,
-                COUNT(*) FILTER (WHERE sent = TRUE AND attention_item_id IS NULL)::int AS direct_sent
+                COUNT(*) FILTER (WHERE sent = TRUE AND outbox_item_id IS NOT NULL)::int AS attention_linked_sent,
+                COUNT(*) FILTER (WHERE sent = TRUE AND outbox_item_id IS NULL)::int AS direct_sent
             FROM notification_log
             WHERE user_id = :user_id
               AND sent_at >= :since

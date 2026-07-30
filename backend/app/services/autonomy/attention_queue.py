@@ -872,7 +872,7 @@ class AttentionQueueService:
                 await _exec(db, text("""
                     UPDATE notification_log
                     SET read_at = COALESCE(read_at, NOW())
-                    WHERE attention_item_id = CAST(:item_id AS uuid)
+                    WHERE outbox_item_id = CAST(:item_id AS uuid)
                       AND read_at IS NULL
                 """), {"item_id": item_id})
             elif action == "engaged":
@@ -880,13 +880,13 @@ class AttentionQueueService:
                     UPDATE notification_log
                     SET read_at = COALESCE(read_at, NOW()),
                         engaged = TRUE
-                    WHERE attention_item_id = CAST(:item_id AS uuid)
+                    WHERE outbox_item_id = CAST(:item_id AS uuid)
                 """), {"item_id": item_id})
             elif action == "dismissed":
                 await _exec(db, text("""
                     UPDATE notification_log
                     SET dismissed_at = COALESCE(dismissed_at, NOW())
-                    WHERE attention_item_id = CAST(:item_id AS uuid)
+                    WHERE outbox_item_id = CAST(:item_id AS uuid)
                       AND dismissed_at IS NULL
                       AND engaged = FALSE
                 """), {"item_id": item_id})

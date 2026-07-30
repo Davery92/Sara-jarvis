@@ -28,7 +28,7 @@ async def get_unacked_notifications(user_id: str, hours: int = 24, limit: int = 
     factory = get_async_session_factory()
     async with factory() as db:
         rows = (await db.execute(text("""
-            SELECT id, title, message, category, sent_at, topic, attention_item_id
+            SELECT id, title, message, category, sent_at, topic, outbox_item_id AS attention_item_id
             FROM notification_log
             WHERE user_id = :uid AND sent = TRUE
               AND read_at IS NULL AND dismissed_at IS NULL
@@ -85,7 +85,7 @@ async def acknowledge(user_id: str, ids: Union[List[int], str],
                 SET read_at = NOW(), engaged = :eng,
                     response_text = COALESCE(:resp, response_text)
                 WHERE id = :id AND user_id = :uid
-                RETURNING attention_item_id, topic
+                RETURNING outbox_item_id, topic
             """), {"id": nid, "uid": user_id, "eng": engaged, "resp": resp})).first()
             if not row:
                 continue

@@ -39,7 +39,7 @@ ACTIVE_ATTENTION = "('new', 'sent', 'read')"
 # hundreds forever.
 BADGE_SQL = """
     SELECT
-        (SELECT COUNT(*) FROM autonomy_attention_item a
+        (SELECT COUNT(*) FROM outbox_item a
           WHERE a.user_id = :user_id AND a.status IN ('new', 'sent'))
       + (SELECT COUNT(*) FROM background_task t
           WHERE t.user_id = :user_id AND t.status = 'needs_clarification')
@@ -47,9 +47,9 @@ BADGE_SQL = """
           WHERE n.user_id = :user_id AND n.sent = TRUE
             AND n.read_at IS NULL AND n.dismissed_at IS NULL
             AND n.sent_at >= NOW() - INTERVAL '7 days'
-            AND (n.attention_item_id IS NULL OR NOT EXISTS (
-                SELECT 1 FROM autonomy_attention_item a2
-                WHERE a2.id = n.attention_item_id
+            AND (n.outbox_item_id IS NULL OR NOT EXISTS (
+                SELECT 1 FROM outbox_item a2
+                WHERE a2.id = n.outbox_item_id
                   AND a2.status IN ('new', 'sent', 'read')
             )))
 """
@@ -86,7 +86,7 @@ def build_unified_inbox(
     attention_rows = db.execute(text(f"""
         SELECT id::text, title, body, category, priority, source, status,
                payload, created_at, read_at
-        FROM autonomy_attention_item
+        FROM outbox_item
         WHERE user_id = :user_id AND status IN {ACTIVE_ATTENTION}
         ORDER BY
             CASE priority
@@ -153,7 +153,7 @@ def build_unified_inbox(
         SELECT CAST(id AS VARCHAR) AS id, title, message, category,
                COALESCE(priority, 'normal') AS priority, source, topic,
                sent_at, read_at, dismissed_at, engaged,
-               attention_item_id::text AS attention_item_id
+               outbox_item_id::text AS attention_item_id
         FROM notification_log
         WHERE user_id = :user_id AND sent = TRUE
           AND sent_at >= NOW() - MAKE_INTERVAL(days => :days)

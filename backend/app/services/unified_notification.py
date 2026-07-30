@@ -1571,7 +1571,7 @@ async def _log_notification(
         INSERT INTO notification_log
         (user_id, topic, category, title, message, priority, source,
          agent_run_id, cooldown_hours, sent, dedup_blocked, sent_at,
-         attention_item_id)
+         outbox_item_id)
         VALUES
         (:user_id, :topic, :category, :title, :message, :priority, :source,
          :agent_run_id, :cooldown_hours, :sent, :dedup_blocked, NOW(),
