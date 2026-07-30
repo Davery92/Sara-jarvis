@@ -188,6 +188,7 @@ ONE_MIND §5's four — **registers=1 · selves=1 · recall-paths=1 · unnoticed
 - **presence p50 <2s** (first token, engaged state)
 - **calibration slope > 0** (weekly, per-domain hit rate at stated confidence)
 - **one unprompted artifact/week** from her own intent lane
+- **utterance kill rate** (`composed_utterance.review_verdict='kill'` / total, rolling) — a rising trend means candidate generation is getting noisier upstream of review; a rising *meta-commentary-kill* share specifically (the composer narrating its own decline instead of the payload) means the compose prompt/decline-signal needs attention again. Measured baseline (2026-07-30, full history to date): **91.7% (22/24)**, zero of which were reviewer-over-strict (audited every kill reason — work-order item 5); 18% of kills (4/22) were the meta-commentary shape, fixed this session (explicit "Silence." decline instruction + a regex backstop). Not a gate — watch the trend, not the absolute number, since a real-payload candidate stream should still kill often by design (the review layer's whole job).
 
 These are dashboards for David to watch, rendered on the Interior. They are **never** gates: no arc, and no implementing agent, waits on them.
 
