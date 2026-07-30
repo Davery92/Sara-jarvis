@@ -135,6 +135,43 @@ interface Interest {
   last_acted_at: string | null;
 }
 
+// §8 singularity metrics — presence latency, calibration (from /api/mind/self,
+// already built and live) and self-story/kill-rate/batch-flush (new, work-
+// order item 5, 2026-07-30 — these had no surface until now).
+interface PresenceLatency {
+  p50: number | null;
+  p90: number | null;
+  red_line: boolean;
+  last_breach: string | null;
+}
+
+interface CalibrationByDomain {
+  [domain: string]: { hit_rate: number; n: number };
+}
+
+interface SelfModel {
+  calibration?: { by_domain?: CalibrationByDomain; error?: string };
+  presence_latency?: PresenceLatency | null;
+}
+
+interface KillRate {
+  total: number;
+  killed: number;
+  rate: number | null;
+  meta_commentary_share: number | null;
+}
+
+interface BatchFlush {
+  pending: number;
+  last_flushed_at: string | null;
+}
+
+interface InteriorMetrics {
+  self_story: string | null;
+  kill_rate: KillRate;
+  batch_flush: BatchFlush;
+}
+
 async function getJson<T>(path: string): Promise<T | null> {
   try {
     const res = await fetch(`${APP_CONFIG.apiUrl}${path}`, { credentials: 'include' });
@@ -201,12 +238,14 @@ export default function Interior() {
   const [schedulerJobs, setSchedulerJobs] = useState<SchedulerDietJob[]>([]);
   const [interests, setInterests] = useState<Interest[]>([]);
   const [interestBusy, setInterestBusy] = useState<string | null>(null);
+  const [selfModel, setSelfModel] = useState<SelfModel | null>(null);
+  const [interiorMetrics, setInteriorMetrics] = useState<InteriorMetrics | null>(null);
   const [loading, setLoading] = useState(true);
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
   const [showAdvanced, setShowAdvanced] = useState(false);
 
   const fetchAll = async () => {
-    const [ctx, body, intents, audit, attention, actions, events, capabilities, flags, scheduler, interestRows] = await Promise.all([
+    const [ctx, body, intents, audit, attention, actions, events, capabilities, flags, scheduler, interestRows, self, metrics] = await Promise.all([
       getJson<ContextSnapshot>('/api/diagnostics/context-snapshot'),
       getJson<BodyState>('/api/diagnostics/body-state'),
       getJson<IntentGraph>('/api/diagnostics/intent-graph'),
@@ -218,6 +257,8 @@ export default function Interior() {
       getJson<FeatureFlags>('/api/diagnostics/feature-flags'),
       getJson<{ jobs: SchedulerDietJob[] }>('/api/diagnostics/scheduler-diet'),
       getJson<Interest[]>('/api/acs/v2/interests?include_blocked=true&limit=20'),
+      getJson<SelfModel>('/api/mind/self'),
+      getJson<InteriorMetrics>('/api/diagnostics/interior-metrics'),
     ]);
     setContext(ctx);
     setBodyState(body);
@@ -230,6 +271,8 @@ export default function Interior() {
     setFeatureFlags(flags);
     setSchedulerJobs(scheduler?.jobs || []);
     setInterests(interestRows || []);
+    setSelfModel(self);
+    setInteriorMetrics(metrics);
     setLastRefresh(new Date());
     setLoading(false);
   };
@@ -331,6 +374,83 @@ export default function Interior() {
           )}
         </Section>
       </div>
+
+      {/* §8 singularity metrics — presence latency, calibration, self-story,
+          kill-rate, batch-flush health. Nearly all of this shipped this
+          week with no surface until now (work-order item 5, 2026-07-30). */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <Section title="Presence latency" subtitle="first-token time, engaged state — budget is <2s">
+          {!selfModel?.presence_latency ? <Empty label="No samples yet" /> : (
+            <div>
+              <div className="flex items-center gap-2">
+                <StatusDot ok={!selfModel.presence_latency.red_line} />
+                <span className={`text-2xl font-bold ${selfModel.presence_latency.red_line ? 'text-red-400' : 'text-white'}`}>
+                  {selfModel.presence_latency.p50 != null ? `${selfModel.presence_latency.p50.toFixed(1)}s` : '—'}
+                </span>
+                <span className="text-xs text-gray-500">p50</span>
+              </div>
+              <div className="text-xs text-gray-400 mt-1">
+                p90: {selfModel.presence_latency.p90 != null ? `${selfModel.presence_latency.p90.toFixed(1)}s` : '—'}
+                {selfModel.presence_latency.red_line && (
+                  <span className="text-red-400 ml-2">⚠ over budget</span>
+                )}
+              </div>
+            </div>
+          )}
+        </Section>
+
+        <Section title="Calibration" subtitle="per-domain hit rate at stated confidence, 30 days">
+          {!selfModel?.calibration?.by_domain || Object.keys(selfModel.calibration.by_domain).length === 0 ? (
+            <Empty label={selfModel?.calibration?.error ? 'Unavailable' : 'No resolved predictions yet'} />
+          ) : (
+            <div className="space-y-1.5">
+              {Object.entries(selfModel.calibration.by_domain).map(([domain, stats]) => (
+                <div key={domain} className="flex items-center justify-between text-xs">
+                  <span className="text-gray-400 capitalize">{domain}</span>
+                  <span className={stats.hit_rate < 0.35 ? 'text-yellow-400' : 'text-gray-200'}>
+                    {(stats.hit_rate * 100).toFixed(0)}% ({stats.n})
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </Section>
+
+        <Section title="Utterance kill rate" subtitle="review_verdict='kill' / total composed, all-time">
+          {!interiorMetrics?.kill_rate || interiorMetrics.kill_rate.total === 0 ? (
+            <Empty label="No composed utterances yet" />
+          ) : (
+            <div>
+              <div className="text-2xl font-bold text-white">
+                {((interiorMetrics.kill_rate.rate ?? 0) * 100).toFixed(0)}%
+              </div>
+              <div className="text-xs text-gray-400 mt-1">
+                {interiorMetrics.kill_rate.killed} killed / {interiorMetrics.kill_rate.total} total — watch the trend, not the number (review is supposed to kill often)
+              </div>
+            </div>
+          )}
+        </Section>
+
+        <Section title="Batch flush" subtitle="judged_batch → judged_send promotion health">
+          <div className="flex items-center gap-4">
+            <div>
+              <div className="text-2xl font-bold text-white">{interiorMetrics?.batch_flush.pending ?? '—'}</div>
+              <div className="text-xs text-gray-400">pending</div>
+            </div>
+            <div className="text-xs text-gray-400">
+              last flush: {relTime(interiorMetrics?.batch_flush.last_flushed_at ?? null)}
+            </div>
+          </div>
+        </Section>
+      </div>
+
+      {/* Self-story — the rolling consolidated narrative dreaming writes,
+          "yesterday's self constrains today's" (Arc 4.2). */}
+      <Section title="Self-story" subtitle="the rolling narrative every context reads from">
+        {!interiorMetrics?.self_story ? <Empty label="No self-story chapter yet" /> : (
+          <p className="text-sm text-gray-300 leading-relaxed whitespace-pre-wrap">{interiorMetrics.self_story}</p>
+        )}
+      </Section>
 
       {/* Intents + contradictions */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">

@@ -4,6 +4,7 @@ Mirrors the chat diagnostics tools over HTTP so the webapp can render a vitals
 strip: failing tasks, error counts, queue depths, drift, and version-match.
 All read-only; no endpoint mutates Sara's state.
 """
+import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -13,6 +14,8 @@ from sqlalchemy.orm import Session
 from app.core.deps import get_current_user
 from app.db.session import get_db
 from app.services import diagnostics_service as diag
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/diagnostics", tags=["Diagnostics"])
 
@@ -182,6 +185,69 @@ async def context_snapshot(db: Session = Depends(get_db), current_user=Depends(g
     through this yet."""
     from app.services.context_snapshot import get_context_snapshot
     return await get_context_snapshot(db, str(current_user.id))
+
+
+@router.get("/interior-metrics")
+async def interior_metrics(db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    """Arc 6.4 (work-order item 5, 2026-07-30): the §8 singularity-metrics
+    dashboard content that has no surface yet — self-story, utterance
+    kill-rate (with the meta-commentary-kill share the compose fix targets),
+    and judged_batch flush health. Calibration + presence-latency already
+    live at /api/mind/self; this is the remainder so Interior can render
+    everything in one page without duplicating those two. Read-only."""
+    from sqlalchemy import text as sa_text
+    user_id = str(current_user.id)
+
+    self_story = None
+    try:
+        from app.services.sara_journal_service import sara_journal
+        self_story = await sara_journal.get_self_story(db, user_id)
+    except Exception as e:
+        logger.debug(f"interior-metrics self_story skipped: {e}")
+
+    kill_rate = {"total": 0, "killed": 0, "rate": None, "meta_commentary_share": None}
+    try:
+        row = db.execute(sa_text("""
+            SELECT
+                count(*) AS total,
+                count(*) FILTER (WHERE cu.review_verdict = 'kill') AS killed
+            FROM composed_utterance cu
+            JOIN say_candidate sc ON sc.id = cu.candidate_id
+            WHERE sc.user_id = :uid
+        """), {"uid": user_id}).first()
+        if row and row.total:
+            kill_rate = {
+                "total": row.total, "killed": row.killed,
+                "rate": round(row.killed / row.total, 3),
+                "meta_commentary_share": None,  # historical baseline only (audited 2026-07-30, fixed same day) — not re-computed live
+            }
+    except Exception as e:
+        logger.debug(f"interior-metrics kill_rate skipped: {e}")
+
+    batch_flush = {"pending": 0, "last_flushed_at": None}
+    try:
+        pending = db.execute(sa_text("""
+            SELECT count(*) FROM say_candidate WHERE user_id = :uid AND status = 'judged_batch'
+        """), {"uid": user_id}).scalar() or 0
+        # say_candidate has no promotion timestamp or metadata column — the
+        # judge's own '[slot=morning]'/'[slot=evening]' marker in
+        # judge_reason survives the judged_batch -> judged_send promotion
+        # unchanged, so the most recent composed_utterance for a candidate
+        # carrying that marker is the best available proxy for "last flush."
+        last_flush = db.execute(sa_text("""
+            SELECT max(cu.created_at) FROM composed_utterance cu
+            JOIN say_candidate sc ON sc.id = cu.candidate_id
+            WHERE sc.user_id = :uid AND sc.judge_reason LIKE '%[slot=%'
+        """), {"uid": user_id}).scalar()
+        batch_flush = {"pending": pending, "last_flushed_at": last_flush.isoformat() if last_flush else None}
+    except Exception as e:
+        logger.debug(f"interior-metrics batch_flush skipped: {e}")
+
+    return {
+        "self_story": self_story,
+        "kill_rate": kill_rate,
+        "batch_flush": batch_flush,
+    }
 
 
 @router.post("/intent-graph/sync")
