@@ -220,6 +220,18 @@ class TestReflectionCycle:
                    new=AsyncMock(return_value=None)):
             yield
 
+    @pytest.fixture(autouse=True)
+    def _mock_verification_loop(self):
+        """Arc 5.2's verification-loop step calls the real PKG singleton
+        (personal_kg.get_needs_review/browse, live Neo4j) and, if it finds
+        an unverified fact, a real LLM call to phrase the question — same
+        real-network-call risk as self-story/theory-of-david, mocked for
+        the same reason. Tests that care about this step specifically
+        override it."""
+        with patch("app.services.verification_loop.generate_verification_candidate",
+                   new=AsyncMock(return_value=None)):
+            yield
+
     @pytest.fixture
     def reflection_agent(self):
         """Create a ReflectionAgent via the factory function pattern."""
@@ -329,6 +341,26 @@ class TestReflectionCycle:
             result = await reflection_agent.run_reflection_cycle()
 
         assert result.life_facts_decayed == 0
+        assert result.cycle_start is not None
+
+    @pytest.mark.asyncio
+    async def test_reflection_cycle_mints_verification_question(self, reflection_agent):
+        """Arc 5.2: the reflection cycle must call
+        generate_verification_candidate and carry the question on the
+        cycle result."""
+        with patch("app.services.verification_loop.generate_verification_candidate",
+                    new=AsyncMock(return_value="Are you still training at 1pm?")):
+            result = await reflection_agent.run_reflection_cycle()
+
+        assert result.verification_question == "Are you still training at 1pm?"
+
+    @pytest.mark.asyncio
+    async def test_verification_loop_failure_does_not_break_the_cycle(self, reflection_agent):
+        with patch("app.services.verification_loop.generate_verification_candidate",
+                    new=AsyncMock(side_effect=RuntimeError("db exploded"))):
+            result = await reflection_agent.run_reflection_cycle()
+
+        assert result.verification_question is None
         assert result.cycle_start is not None
 
 

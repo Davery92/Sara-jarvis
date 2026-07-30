@@ -54,6 +54,9 @@ class ReflectionCycleResult:
     theory_of_david: Optional[str] = None
     # Arc 5.2: how many stale inferred life_facts this cycle decayed.
     life_facts_decayed: int = 0
+    # Arc 5.2: the natural verification question minted this cycle, if
+    # any (None if nothing needed verification or budget already spent).
+    verification_question: Optional[str] = None
     duration_seconds: float = 0
 
     def to_dict(self) -> Dict[str, Any]:
@@ -74,6 +77,7 @@ class ReflectionCycleResult:
             "self_story": self.self_story,
             "theory_of_david": self.theory_of_david,
             "life_facts_decayed": self.life_facts_decayed,
+            "verification_question": self.verification_question,
             "duration_seconds": self.duration_seconds,
         }
 
@@ -214,7 +218,19 @@ class ReflectionAgent:
             except Exception as e:
                 logger.warning(f"life_fact decay failed (non-critical): {e}")
 
-            # 10. Self-assess this reflection cycle
+            # 10. Verification loop (Arc 5.2) — "retires unverified facts
+            # one natural question at a time, capped, anti-nag." Mints at
+            # most one say_candidate/day through the existing judge->
+            # compose->review pipeline; no new delivery mechanism.
+            try:
+                from app.services.verification_loop import generate_verification_candidate
+                result.verification_question = await generate_verification_candidate(self.db, _DAVID_USER_ID)
+                if result.verification_question:
+                    logger.info(f"Verification question minted: {result.verification_question[:80]}")
+            except Exception as e:
+                logger.warning(f"Verification loop failed (non-critical): {e}")
+
+            # 11. Self-assess this reflection cycle
             await self._self_assess(result)
 
         except Exception as e:
