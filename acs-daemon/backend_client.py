@@ -175,6 +175,36 @@ class BackendClient:
         except Exception as e:
             return {"_error": f"parse: {e}"}
 
+    # ── ambient turn (selves=1 daemon cutover) ──
+    async def ambient_turn(self, *, world_delta: Optional[list[str]] = None) -> Optional[dict]:
+        """Proxy this tick's cognition to kernel.ambient_turn(wake_reason=
+        DAEMON_PROXY) instead of running Mind's own think()/reflect(). Returns
+        the parsed AmbientTurnOut dict, or None on network/HTTP failure — the
+        caller (daemon._tick) treats None like a no-op turn (backs off,
+        doesn't crash the tick loop)."""
+        payload = {"world_delta": world_delta or []}
+        try:
+            r = await self._client.post(
+                "/api/acs/v2/ambient-turn", json=payload,
+                timeout=httpx.Timeout(120.0, connect=5.0),
+            )
+        except httpx.HTTPError as e:
+            err_str = str(e) or e.__class__.__name__
+            logger.warning("ambient_turn network error: %s", err_str)
+            return None
+        if r.status_code >= 400:
+            try:
+                detail = r.json().get("detail", r.text[:200])
+            except Exception:
+                detail = r.text[:200]
+            logger.warning("ambient_turn rejected (%s): %s", r.status_code, detail)
+            return None
+        try:
+            return r.json()
+        except Exception as e:
+            logger.warning("ambient_turn parse error: %s", e)
+            return None
+
     # ── recall ──
     async def list_related_activity(
         self, *, topic: str, limit: int = 5,

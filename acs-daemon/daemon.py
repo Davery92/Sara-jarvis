@@ -1,21 +1,38 @@
 """ACS daemon — Sara's continuous mind, resident in the Sara VM.
 
-Phase 2: ambient self-context. The daemon now thinks.
+selves=1 cutover (ONE_MIND §3.3/§3.4b, 2026-07-30): the daemon keeps systemd
+resilience and local hands, but no longer runs its own think()/reflect()
+prompt-identity (formerly `mind.py`/`prompt.py`, 705+579 lines). Its tick now
+proxies to the backend's kernel: `POST /api/acs/v2/ambient-turn` runs
+`kernel.ambient_turn(wake_reason=DAEMON_PROXY)` — the same single mind every
+other background wake (deliberation, check-ins, anticipation) already runs
+through, instead of a second, parallel self.
 
 Cadence:
   • TICK (every TICK_INTERVAL seconds): cheap, just heartbeat.
-  • THINK (every TICKS_PER_THINK ticks): one short LLM call. Builds a prompt
-    from the recent activity tail + current focus, gets a thought, appends it
-    to the activity log. May change focus.
-  • REFLECT (every THINKS_PER_REFLECT thinks): one longer LLM call. Honest
-    self-assessment — productive / looping / drifting / idle. May change focus
-    or request a quiet period.
+  • AMBIENT TURN (every TICKS_PER_THINK ticks, adaptive): one proxied kernel
+    turn. The old THINK/REFLECT cadence split is gone — the kernel's
+    ambient_turn has one shape regardless of which tick triggered it.
 
-If a reflection sets `should_quiet_minutes`, thinking is paused for that long.
-Heartbeats keep flowing so the backend still sees her alive.
+Two behavioral gaps closed in this cutover (see the sign-off package,
+ARC_SIGNOFF_PACKAGE_2026_07_29.md, for the full resolution rationale):
+  • Gap A: sleep-pressure backoff now reads the kernel's honest `produced`
+    bool instead of Mind's old tool_calls/focus_change/notify_david shape.
+  • Gap B: the quiet-directive mechanism (`should_quiet_minutes`) is dropped,
+    not rebuilt — the kernel's own gates (salience rate-limit, heavy_llm
+    lock, delivery-side cooldowns) already cover the same "don't re-trigger
+    right after a no-op turn" need.
 
-No tools yet; pure cognition. Phase 3 adds notify_david. Phase 4 adds the
-inbox + David-queued items.
+Known open gap (NOT resolved by this cutover, flagged not papered over):
+Mind's old think() loop could call 15 tools inline mid-turn (web_search,
+write_note, goal/interest CRUD, Proxmox container provisioning — real,
+actively-used capability, 1200+ historical calls). The kernel's
+`deliberation_engine.run()` is a single structured-JSON call with no
+tool-calling loop; follow-through only happens via `agent_dispatch_service`
+(a full VM Claude-Code session — disproportionate for a cheap, casual
+tool call). `mind.py`/`prompt.py` are therefore NOT deleted by this cutover
+even though the daemon's tick no longer calls them — see the sign-off
+report for the proposed resolution paths.
 """
 from __future__ import annotations
 
@@ -25,13 +42,12 @@ import os
 import signal
 import socket
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Optional
 
 from backend_client import BackendClient
 from config import config
-from llm import LLMClient
-from mind import ALLOWED_TOOLS, Mind
+from mind import ALLOWED_TOOLS
 
 logging.basicConfig(
     level=getattr(logging, config.log_level.upper(), logging.INFO),
@@ -41,7 +57,7 @@ logging.basicConfig(
 logger = logging.getLogger("acs-daemon")
 
 
-VERSION = "0.9.0"  # Brain Alignment ACS1+ACS2: world_delta senses + adaptive sleep pressure
+VERSION = "0.10.0"  # selves=1: daemon proxies to kernel.ambient_turn, Gap A+B closed
 
 
 def _code_sha() -> str:
@@ -74,7 +90,6 @@ class Daemon:
 
         self.tick_count = 0
         self.think_count = 0
-        self.quiet_until: Optional[datetime] = None
 
         # ACS2 (Brain Alignment): adaptive sleep pressure. The interval between
         # thinks doubles after each no-op think (5→10→20→40→80→120 min) and
@@ -87,8 +102,6 @@ class Daemon:
         self.ticks_since_think = 0
 
         self.backend: Optional[BackendClient] = None
-        self.llm: Optional[LLMClient] = None
-        self.mind: Optional[Mind] = None
         self._stop_event = asyncio.Event()
 
     async def start(self) -> None:
@@ -98,18 +111,13 @@ class Daemon:
         logger.info("  pid:            %s", self.pid)
         logger.info("  hostname:       %s", self.hostname)
         logger.info("  backend:        %s", config.backend_url)
-        logger.info("  llm:            %s (%s)", config.llm_url, config.llm_model)
+        logger.info("  cognition:      proxied to kernel.ambient_turn (selves=1)")
         logger.info("  tick:           %ss", config.tick_interval_seconds)
         logger.info("  think every:    %s ticks  (~%ss)",
                     config.ticks_per_think, config.tick_interval_seconds * config.ticks_per_think)
-        logger.info("  reflect every:  %s thinks (~%ss)",
-                    config.thinks_per_reflect,
-                    config.tick_interval_seconds * config.ticks_per_think * config.thinks_per_reflect)
         logger.info("=" * 60)
 
         self.backend = BackendClient(config.backend_url, config.daemon_token)
-        self.llm = LLMClient(config.llm_url, config.llm_model)
-        self.mind = Mind(self.backend, self.llm, started_at=self.started_at)
         self.running = True
         self.state = "idle"
 
@@ -164,15 +172,17 @@ class Daemon:
             self._reset_backoff()
             candidate = True
 
-        # 2. quiet-period gate (legacy reflection directive — still honored)
-        if self.quiet_until and datetime.now(timezone.utc) < self.quiet_until and not world_delta:
-            return
-
-        # 3. not time to think yet?
+        # 2. not time to think yet? (Gap B, selves=1 cutover: the old
+        #    reflection-directive quiet gate is gone — see _adjust_after_turn.
+        #    The kernel's own gates — salience_scorer.should_deliberate's rate
+        #    limit, the heavy_llm exclusive lock, and delivery-side quiet-
+        #    hours/cooldown checks — already cover "don't re-trigger right
+        #    after a turn that had nothing to do," so this isn't a second,
+        #    redundant gate sitting on top of those.)
         if not candidate and not past_floor:
             return
 
-        # 4. ACS1: skip the think entirely if there's genuinely nothing to think
+        # 3. ACS1: skip the think entirely if there's genuinely nothing to think
         #    about — empty delta, empty inbox, no goals, no interests — unless
         #    we've hit the 2h floor.
         self.ticks_since_think = 0
@@ -188,28 +198,21 @@ class Daemon:
                 )
                 return
 
-        # 5. think (or reflect, on the Mth think)
+        # 4. one ambient turn, proxied to the kernel (selves=1 — the daemon
+        #    keeps systemd resilience and local hands; the kernel is where it
+        #    thinks). No more think/reflect split: the kernel's ambient_turn
+        #    has one shape regardless of what the old cadence-based split
+        #    would have called this tick.
         self.think_count += 1
-        is_reflect = (self.think_count % max(1, config.thinks_per_reflect) == 0)
         try:
-            self.state = "thinking" if not is_reflect else "reflecting"
-            if is_reflect:
-                logger.info("reflect turn (think #%s)", self.think_count)
-                result = await self.mind.reflect(world_delta=world_delta)
-                self._apply_quiet_directive(result)
-                # ACS2: an honest "looping" verdict forces sleep pressure up two steps.
-                if isinstance(result, dict) and result.get("verdict") == "looping":
-                    self._backoff(steps=2)
-                else:
-                    self._adjust_after_turn(result)
-            else:
-                logger.info("think turn #%s", self.think_count)
-                result = await self.mind.think(world_delta=world_delta)
-                self._adjust_after_turn(result)
+            self.state = "thinking"
+            logger.info("ambient turn #%s (proxied)", self.think_count)
+            result = await self.backend.ambient_turn(world_delta=world_delta)
+            self._adjust_after_turn(result)
         except Exception:
-            logger.exception("cognitive turn failed")
+            logger.exception("ambient turn failed")
             await self.backend.append_activity(
-                kind="error", summary=f"{'reflect' if is_reflect else 'think'} turn raised",
+                kind="error", summary="ambient turn raised",
                 metadata={"think_count": self.think_count},
             )
         finally:
@@ -234,11 +237,14 @@ class Daemon:
         return True
 
     def _adjust_after_turn(self, result: Optional[dict]) -> None:
-        """ACS2: a productive think (tool call, focus change, or notify) resets
-        sleep pressure; a no-op think increases it."""
-        produced = isinstance(result, dict) and (
-            result.get("tool_calls") or result.get("focus_change") or result.get("notify_david")
-        )
+        """ACS2, Gap A (selves=1 cutover): backoff now hinges on ONE field —
+        `produced`, the kernel's own honest "did this turn actually do
+        anything" signal (notification sent, home action taken, task
+        dispatched/proposed) — instead of the old three-field tool_calls/
+        focus_change/notify_david check specific to Mind's return shape.
+        Same semantic, no information lost. `result` is None on a network/
+        HTTP failure (treated as unproductive, same as before)."""
+        produced = isinstance(result, dict) and bool(result.get("produced"))
         if produced:
             self._reset_backoff()
         else:
@@ -252,18 +258,7 @@ class Daemon:
             self.think_interval_ticks = min(self._max_think_ticks, self.think_interval_ticks * 2)
 
     def _compose_summary(self) -> str:
-        if self.quiet_until and datetime.now(timezone.utc) < self.quiet_until:
-            return f"quiet (until {self.quiet_until.strftime('%H:%M')})"
         return f"idle (tick #{self.tick_count}, think #{self.think_count})"
-
-    def _apply_quiet_directive(self, parsed: Optional[dict]) -> None:
-        if not isinstance(parsed, dict):
-            return
-        minutes = parsed.get("should_quiet_minutes")
-        if isinstance(minutes, (int, float)) and 1 <= int(minutes) <= 240:
-            self.quiet_until = datetime.now(timezone.utc) + timedelta(minutes=int(minutes))
-            logger.info("reflection asked for quiet period: %sm (until %s)",
-                        int(minutes), self.quiet_until.isoformat())
 
     async def _heartbeat(self, *, summary: Optional[str], want_delta: bool = False) -> dict:
         if not self.backend:
@@ -294,8 +289,6 @@ class Daemon:
             pass
         if self.backend:
             await self.backend.aclose()
-        if self.llm:
-            await self.llm.aclose()
         logger.info("ACS daemon — stopped")
 
     def request_stop(self) -> None:
