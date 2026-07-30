@@ -156,6 +156,8 @@ class AttentionQueueService:
             row = result.fetchone()
             if row:
                 new_item_id = row[0]
+                from app.services.outbox_usage import record_write_async
+                await record_write_async("attention_queue.create_item")
             elif dedupe_key:
                 # Dedup conflict — find existing item
                 existing = await _exec(db, text("""
@@ -360,6 +362,8 @@ class AttentionQueueService:
             """), params)
             # Propagate read feedback to linked notification_log entries
             await self._propagate_feedback(db, item_id, action="read")
+            from app.services.outbox_usage import record_write_async
+            await record_write_async("attention_queue.mark_read")
             return True
         except Exception as e:
             logger.error(f"Failed to mark attention item read: {e}")
@@ -397,6 +401,8 @@ class AttentionQueueService:
                     )
             except Exception as e:
                 logger.debug(f"Habituation engagement note skipped: {e}")
+            from app.services.outbox_usage import record_write_async
+            await record_write_async("attention_queue.mark_engaged")
             return True
         except Exception as e:
             logger.error(f"Failed to mark attention item engaged: {e}")
@@ -418,6 +424,8 @@ class AttentionQueueService:
             """), params)
             # Propagate dismissed feedback to linked notification_log entries
             await self._propagate_feedback(db, item_id, action="dismissed")
+            from app.services.outbox_usage import record_write_async
+            await record_write_async("attention_queue.mark_archived")
             return True
         except Exception as e:
             logger.error(f"Failed to archive attention item: {e}")
@@ -830,6 +838,8 @@ class AttentionQueueService:
                 WHERE {where}
             """), params)
             await self._propagate_feedback(db, item_id, action="engaged")
+            from app.services.outbox_usage import record_write_async
+            await record_write_async("attention_queue.mark_completed")
             return True
         except Exception as e:
             logger.error(f"Failed to mark attention item completed: {e}")

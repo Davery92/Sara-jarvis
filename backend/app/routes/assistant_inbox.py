@@ -59,6 +59,8 @@ def compute_badge(db: Session, user_id: str) -> int:
     """Single source of truth for the inbox badge number."""
     try:
         row = db.execute(text(BADGE_SQL), {"user_id": user_id}).fetchone()
+        from app.services.outbox_usage import record_read
+        record_read("compute_badge")
         return int(row[0]) if row else 0
     except Exception as e:
         logger.error(f"Badge computation failed: {e}")
@@ -242,6 +244,9 @@ def build_unified_inbox(
 
     fyi.sort(key=lambda i: i["created_at"] or "", reverse=True)
     fyi = fyi[:limit]
+
+    from app.services.outbox_usage import record_read
+    record_read("build_unified_inbox")
 
     return {
         "needs_you": needs_you,
