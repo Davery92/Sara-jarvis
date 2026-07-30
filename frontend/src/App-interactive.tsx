@@ -28,7 +28,6 @@ function App() {
   const [chatMessages, setChatMessages] = useState([])
   const [toasts, setToasts] = useState([])
   const [chatAutoSendToken, setChatAutoSendToken] = useState<number | undefined>(undefined)
-  const [inboxTab, setInboxTab] = useState<'attention' | 'content'>('content')
   const [confirmDialog, setConfirmDialog] = useState<{
     isOpen: boolean
     title: string
@@ -353,7 +352,6 @@ function App() {
     expandedJournalEntries,
     attentionItems,
     missions,
-    contentInboxStats,
     briefAudioPlaying,
     setBriefAudioPlaying,
     briefAudioRef,
@@ -419,7 +417,6 @@ function App() {
 
   const handleChatQuickAction = (actionId: 'inbox_attention' | 'missions' | 'standing_orders') => {
     if (actionId === 'inbox_attention') {
-      setInboxTab('attention')
       navigateToView('inbox')
       return
     }
@@ -554,7 +551,6 @@ function App() {
             calendarEvents={calendarEvents}
             weather={weather}
             weatherEmoji={WEATHER_EMOJI}
-            contentInboxStats={contentInboxStats}
             missionAwaitingCount={missionAwaitingCount}
             runningMissionCount={runningMissionCount}
             morningBrief={morningBrief}
@@ -569,7 +565,6 @@ function App() {
               showToast('Unable to load brief audio.', 'error')
             }}
             onReviewAttentionInbox={() => {
-              setInboxTab('attention')
               navigateToView('inbox')
             }}
             currentTime={currentTime}
@@ -609,21 +604,6 @@ function App() {
             onDeleteDocument={deleteDocument}
             onToast={showToast}
             onOrchestratorBack={() => navigateToView('settings')}
-            inboxTab={inboxTab}
-            onSelectInboxTab={setInboxTab}
-            onOpenContentChat={(inboxItemId, title, excerpt) => {
-              const trimmed = (excerpt || '').trim()
-              const clipped = trimmed.length > 600 ? `${trimmed.slice(0, 600)}…` : trimmed
-              const itemName = (title || '').trim() || 'this'
-              setMessage(
-                clipped
-                  ? `Let's talk about this: "${itemName}"\n\n${clipped}`
-                  : `Let's talk about this: ${itemName}`
-              )
-              setChatMessages([])
-              navigateToView('chat')
-              ;(window as any).__inboxItemId = inboxItemId
-            }}
             onOpenAttentionChat={(prompt) => {
               setMessage(prompt)
               navigateToView('chat')

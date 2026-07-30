@@ -93,7 +93,6 @@ interface ShellWorkspaceContentProps {
   calendarEvents: any[]
   weather: any
   weatherEmoji: Record<string, string>
-  contentInboxStats: any
   missionAwaitingCount: number
   runningMissionCount: number
   morningBrief: any
@@ -142,9 +141,6 @@ interface ShellWorkspaceContentProps {
   onDeleteDocument: (...args: any[]) => void
   onToast: (message: string, type?: string) => void
   onOrchestratorBack: () => void
-  inboxTab: 'attention' | 'content'
-  onSelectInboxTab: React.Dispatch<React.SetStateAction<'attention' | 'content'>>
-  onOpenContentChat: (inboxItemId: string, title: string, excerpt?: string) => void
   onOpenAttentionChat: (prompt: string) => void
   onAskSara: (prompt: string) => void
   chatAutoSendToken?: number
@@ -170,7 +166,6 @@ export default function ShellWorkspaceContent({
   calendarEvents,
   weather,
   weatherEmoji,
-  contentInboxStats,
   missionAwaitingCount,
   runningMissionCount,
   morningBrief,
@@ -219,9 +214,6 @@ export default function ShellWorkspaceContent({
   onDeleteDocument,
   onToast,
   onOrchestratorBack,
-  inboxTab,
-  onSelectInboxTab,
-  onOpenContentChat,
   onOpenAttentionChat,
   onAskSara,
   chatAutoSendToken,
@@ -248,7 +240,6 @@ export default function ShellWorkspaceContent({
         greeting={greeting}
         weather={weather}
         weatherEmoji={weatherEmoji}
-        contentInboxStats={contentInboxStats}
         missionAwaitingCount={missionAwaitingCount}
         runningMissionCount={runningMissionCount}
         morningBrief={morningBrief}
@@ -544,12 +535,7 @@ export default function ShellWorkspaceContent({
   if (targetView === 'inbox') {
     return (
       <InboxWorkspaceView
-        inboxUnreadCount={inboxUnreadCount}
-        inboxTab={inboxTab}
-        contentInboxStats={contentInboxStats}
         attentionUnreadCount={attentionUnreadCount}
-        onSelectInboxTab={onSelectInboxTab}
-        onOpenContentChat={onOpenContentChat}
         onOpenAttentionChat={onOpenAttentionChat}
         onOpenNote={onNavigateToWorkspace}
       />

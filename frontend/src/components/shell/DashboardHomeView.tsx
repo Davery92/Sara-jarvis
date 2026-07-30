@@ -16,7 +16,6 @@ interface DashboardHomeViewProps {
   greeting: string
   weather: any
   weatherEmoji: Record<string, string>
-  contentInboxStats: any
   missionAwaitingCount: number
   runningMissionCount: number
   morningBrief: any
@@ -312,7 +311,6 @@ export default function DashboardHomeView({
   greeting,
   weather,
   weatherEmoji,
-  contentInboxStats,
   missionAwaitingCount,
   runningMissionCount,
   morningBrief,
@@ -335,7 +333,6 @@ export default function DashboardHomeView({
 }: DashboardHomeViewProps) {
   const [askDraft, setAskDraft] = React.useState('')
 
-  const contentUnreadCount = Number(contentInboxStats?.unread || 0)
   const urgentAttention = attentionItems
     .filter((item) => item.status === 'new' || item.status === 'sent')
     .slice(0, 3)
@@ -384,11 +381,6 @@ export default function DashboardHomeView({
                 label="ahead today"
                 tone="teal"
                 onClick={() => onNavigate('calendar')}
-              />
-              <StatChip
-                count={contentUnreadCount}
-                label={contentUnreadCount === 1 ? 'capture' : 'captures'}
-                onClick={() => onNavigate('inbox')}
               />
               <StatChip
                 count={runningMissionCount}

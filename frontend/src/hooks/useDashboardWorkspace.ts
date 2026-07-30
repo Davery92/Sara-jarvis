@@ -30,7 +30,6 @@ export function useDashboardWorkspace({
   const [attentionCounts, setAttentionCounts] = useState<any>({ new: 0, sent: 0, read: 0, archived: 0, unread: 0 })
   const [attentionItems, setAttentionItems] = useState<any[]>([])
   const [missions, setMissions] = useState<any[]>([])
-  const [contentInboxStats, setContentInboxStats] = useState<any>({ unread: 0, read: 0, kept: 0, total: 0 })
   const [briefAudioPlaying, setBriefAudioPlaying] = useState(false)
   const briefAudioRef = useRef<HTMLAudioElement>(null)
   const briefAudioUrlRef = useRef<string | null>(null)
@@ -223,11 +222,10 @@ export function useDashboardWorkspace({
 
   const loadMissionControlData = useCallback(async () => {
     try {
-      const [attentionCountRes, attentionItemsRes, missionsRes, inboxStatsRes] = await Promise.all([
+      const [attentionCountRes, attentionItemsRes, missionsRes] = await Promise.all([
         fetch(`${APP_CONFIG.apiUrl}/autonomy/attention/count`, { credentials: 'include' }),
         fetch(`${APP_CONFIG.apiUrl}/autonomy/attention?limit=20`, { credentials: 'include' }),
         fetch(`${APP_CONFIG.apiUrl}/autonomy/missions?limit=20`, { credentials: 'include' }),
-        fetch(`${APP_CONFIG.apiUrl}/api/inbox/stats`, { credentials: 'include' }),
       ])
 
       if (attentionCountRes.ok) {
@@ -246,11 +244,6 @@ export function useDashboardWorkspace({
       if (missionsRes.ok) {
         const missionsData = await missionsRes.json()
         setMissions(missionsData.missions || [])
-      }
-
-      if (inboxStatsRes.ok) {
-        const inboxStatsData = await inboxStatsRes.json()
-        setContentInboxStats(inboxStatsData || { unread: 0, read: 0, kept: 0, total: 0 })
       }
     } catch (e) {
       console.warn('Mission control data load failed:', e)
@@ -389,7 +382,7 @@ export function useDashboardWorkspace({
 
   const attentionUnreadCount = Number(attentionCounts?.unread || 0)
   const awaitingDecisionCount = missions.filter((mission) => mission.state === 'awaiting_confirm').length + attentionUnreadCount
-  const inboxUnreadCount = attentionUnreadCount + Number(contentInboxStats?.unread || 0)
+  const inboxUnreadCount = attentionUnreadCount
   const missionAwaitingCount = missions.filter((mission) => mission.state === 'awaiting_confirm').length
   const runningMissionCount = missions.filter((mission) => mission.state === 'running').length
 
@@ -409,7 +402,6 @@ export function useDashboardWorkspace({
     attentionCounts,
     attentionItems,
     missions,
-    contentInboxStats,
     briefAudioPlaying,
     setBriefAudioPlaying,
     briefAudioRef,
