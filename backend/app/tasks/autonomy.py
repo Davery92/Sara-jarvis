@@ -1243,7 +1243,7 @@ def autonomy_retention_cleanup(self):
 
     Retention policy:
     - autonomy_action_trace: 90 days
-    - autonomy_attention_item: 30 days archived/dropped, 7 days stale new/sent
+    - outbox_item: 30 days archived/dropped, 7 days stale new/sent
     - autonomy_mission: 180 days terminal states
     - autonomy_policy_candidate: auto-expire new after 14 days, delete decided after 30 days
     """
@@ -1305,7 +1305,7 @@ async def _autonomy_retention_async():
         # Attention items: delete archived older than 30 days (Phase 2)
         try:
             r = await db.execute(text("""
-                DELETE FROM autonomy_attention_item
+                DELETE FROM outbox_item
                 WHERE status IN ('archived', 'dropped')
                   AND updated_at < NOW() - INTERVAL '30 days'
             """))
@@ -1313,7 +1313,7 @@ async def _autonomy_retention_async():
 
             # Auto-archive stale new/sent items after 7 days
             r = await db.execute(text("""
-                UPDATE autonomy_attention_item
+                UPDATE outbox_item
                 SET status = 'archived', updated_at = NOW()
                 WHERE status IN ('new', 'sent')
                   AND created_at < NOW() - INTERVAL '7 days'

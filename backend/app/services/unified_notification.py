@@ -1143,7 +1143,7 @@ async def route_through_attention_queue(
     # block would wrongly silence a second, later, genuinely-new occurrence.
     if dedupe_key and category == "checkin":
         ever = await _db_execute(db, text("""
-            SELECT 1 FROM autonomy_attention_item
+            SELECT 1 FROM outbox_item
             WHERE user_id = :user_id AND dedupe_key = :dedupe_key
             LIMIT 1
         """), {"user_id": user_id, "dedupe_key": dedupe_key})
@@ -1169,7 +1169,7 @@ async def route_through_attention_queue(
         effective_cooldown = _cooldown_for(category)
         if effective_cooldown > 0:
             recent = await _db_execute(db, text("""
-                SELECT COUNT(*) FROM autonomy_attention_item
+                SELECT COUNT(*) FROM outbox_item
                 WHERE user_id = :user_id AND category = :category
                   AND created_at > NOW() - MAKE_INTERVAL(secs => :cooldown_secs)
             """), {

@@ -203,7 +203,7 @@ async def get_rollout_summary(
     try:
         attention_rows = await db.execute(text("""
             SELECT status, COUNT(*)::int
-            FROM autonomy_attention_item
+            FROM outbox_item
             WHERE user_id = :user_id
               AND created_at >= :since
             GROUP BY status

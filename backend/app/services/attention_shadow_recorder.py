@@ -40,7 +40,7 @@ def _classify_decision(result: Dict[str, Any], priority: str) -> str:
     if sent:
         return "interruptive_notification" if priority in _INTERRUPTIVE_PRIORITIES else "quiet_notification"
     if result.get("attention_item_id"):
-        # A real autonomy_attention_item row exists — visible in Today/inbox
+        # A real outbox_item row exists — visible in Today/inbox
         # even though nothing pushed. Distinct from true silence.
         return "add_to_today"
     return "internal_only"
@@ -101,7 +101,7 @@ async def record_notification_decision(
         attention_item_id = result.get("attention_item_id")
         why_now = f"category={category}, reason={result.get('reason', 'sent')}"
         if attention_item_id:
-            why_now += f", autonomy_attention_item={attention_item_id}"
+            why_now += f", outbox_item={attention_item_id}"
 
         row = (await db.execute(text("""
             INSERT INTO outbound_intent (

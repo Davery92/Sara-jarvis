@@ -73,7 +73,7 @@ def send_morning_inbox_digest():
                 try:
                     attention_unread_row = db.execute(text("""
                         SELECT COUNT(*)::int AS unread_count
-                        FROM autonomy_attention_item
+                        FROM outbox_item
                         WHERE user_id = :user_id
                           AND status IN ('new', 'sent')
                     """), {"user_id": user_id}).fetchone()
@@ -100,7 +100,7 @@ def send_morning_inbox_digest():
                     try:
                         top_attention = db.execute(text("""
                             SELECT title, category, priority
-                            FROM autonomy_attention_item
+                            FROM outbox_item
                             WHERE user_id = :user_id
                               AND status IN ('new', 'sent')
                             ORDER BY

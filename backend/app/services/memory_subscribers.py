@@ -113,7 +113,7 @@ async def _resurface_snoozed_items(user_id: str, new_state: str) -> None:
         factory = get_async_session_factory()
         async with factory() as db:
             result = await db.execute(_text("""
-                UPDATE autonomy_attention_item
+                UPDATE outbox_item
                 SET status = 'sent', updated_at = NOW()
                 WHERE user_id = :uid
                   AND status = 'snoozed'

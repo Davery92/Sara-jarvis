@@ -3,7 +3,7 @@ Attention queue Celery tasks.
 
 SARA_PROACTIVENESS_AUDIT_AND_PLAN_2026_07_25 §5.3/§7.2 + IMPLEMENTATION_PLAN
 P2/P8.1: the old ``escalate_unread_attention`` used to push unread
-``autonomy_attention_item`` rows to David after ESCALATION_HOURS, bumping
+``outbox_item`` rows to David after ESCALATION_HOURS, bumping
 their priority to "high" regardless of the original judgment. That is
 exactly the "silence becomes urgency" bug the audit called out as the
 single largest dismissed-notification cohort (66 sent / 42 dismissed in the
@@ -66,7 +66,7 @@ async def _expire_stale_attention_async() -> dict:
     db = SessionLocal()
     try:
         archived_confirmations = db.execute(text("""
-            UPDATE autonomy_attention_item
+            UPDATE outbox_item
             SET status = 'archived', archived_at = NOW(), updated_at = NOW()
             WHERE status = 'new'
               AND payload->>'prediction_grade' = 'confirmation'
@@ -82,7 +82,7 @@ async def _expire_stale_attention_async() -> dict:
         # filters weren't updated. The payload tag distinguishes "expired
         # quietly" from a user-initiated archive for observability.
         expired = db.execute(text("""
-            UPDATE autonomy_attention_item
+            UPDATE outbox_item
             SET status = 'archived', archived_at = NOW(), updated_at = NOW(),
                 payload = COALESCE(payload, '{}'::jsonb) || '{"expired_stale": true}'::jsonb
             WHERE status = 'new'

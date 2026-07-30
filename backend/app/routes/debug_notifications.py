@@ -252,7 +252,7 @@ async def notification_funnel(
             SELECT
                 status,
                 COUNT(*) as count
-            FROM autonomy_attention_item
+            FROM outbox_item
             WHERE user_id = :user_id
               AND created_at >= :since
             GROUP BY status

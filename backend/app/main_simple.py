@@ -9560,7 +9560,7 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
             if request.attention_item_id:
                 try:
                     attn_row = db.execute(text("""
-                        SELECT title, body, category FROM autonomy_attention_item
+                        SELECT title, body, category FROM outbox_item
                         WHERE id = CAST(:id AS uuid) AND user_id = :uid
                     """), {"id": request.attention_item_id, "uid": current_user.id}).fetchone()
                     if attn_row:

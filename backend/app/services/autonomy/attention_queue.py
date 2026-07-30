@@ -135,7 +135,7 @@ class AttentionQueueService:
         new_item_id: Optional[str] = None
         try:
             result = await _exec(db, text("""
-                INSERT INTO autonomy_attention_item
+                INSERT INTO outbox_item
                 (user_id, title, body, category, priority, source, dedupe_key, payload)
                 VALUES (:user_id, :title, :body, :category, :priority, :source,
                         :dedupe_key, CAST(:payload AS jsonb))
@@ -159,7 +159,7 @@ class AttentionQueueService:
             elif dedupe_key:
                 # Dedup conflict — find existing item
                 existing = await _exec(db, text("""
-                    SELECT id::text FROM autonomy_attention_item
+                    SELECT id::text FROM outbox_item
                     WHERE user_id = :user_id AND dedupe_key = :dedupe_key
                       AND status IN ('new', 'sent')
                     LIMIT 1
@@ -254,7 +254,7 @@ class AttentionQueueService:
                 SELECT id::text, title, body, category, priority, source, status,
                        dedupe_key, payload, created_at, updated_at, read_at, archived_at,
                        completed_at
-                FROM autonomy_attention_item
+                FROM outbox_item
                 WHERE {where}
                 ORDER BY
                     CASE priority
@@ -293,7 +293,7 @@ class AttentionQueueService:
         try:
             result = await _exec(db, text("""
                 SELECT status, COUNT(*) as count
-                FROM autonomy_attention_item
+                FROM outbox_item
                 WHERE user_id = :user_id
                 GROUP BY status
             """), {"user_id": user_id})
@@ -316,7 +316,7 @@ class AttentionQueueService:
                 SELECT id::text, user_id, title, body, category, priority, source, status,
                        dedupe_key, payload, created_at, updated_at, read_at, archived_at,
                        completed_at
-                FROM autonomy_attention_item
+                FROM outbox_item
                 WHERE {where}
                 LIMIT 1
             """), params)
@@ -354,7 +354,7 @@ class AttentionQueueService:
                 params["user_id"] = user_id
             where = " AND ".join(conditions)
             await _exec(db, text(f"""
-                UPDATE autonomy_attention_item
+                UPDATE outbox_item
                 SET status = 'read', read_at = NOW(), updated_at = NOW()
                 WHERE {where}
             """), params)
@@ -375,7 +375,7 @@ class AttentionQueueService:
                 params["user_id"] = user_id
             where = " AND ".join(conditions)
             await _exec(db, text(f"""
-                UPDATE autonomy_attention_item
+                UPDATE outbox_item
                 SET status = CASE WHEN status IN ('new', 'sent') THEN 'read' ELSE status END,
                     read_at = COALESCE(read_at, NOW()),
                     updated_at = NOW()
@@ -384,7 +384,7 @@ class AttentionQueueService:
             await self._propagate_feedback(db, item_id, action="engaged")
             try:
                 row = (await _exec(db, text("""
-                    SELECT payload FROM autonomy_attention_item
+                    SELECT payload FROM outbox_item
                     WHERE id = CAST(:id AS uuid)
                 """), {"id": item_id})).fetchone()
                 payload = row.payload if row else None
@@ -412,7 +412,7 @@ class AttentionQueueService:
                 params["user_id"] = user_id
             where = " AND ".join(conditions)
             await _exec(db, text(f"""
-                UPDATE autonomy_attention_item
+                UPDATE outbox_item
                 SET status = 'archived', archived_at = NOW(), updated_at = NOW()
                 WHERE {where}
             """), params)
@@ -696,7 +696,7 @@ class AttentionQueueService:
                 params["user_id"] = user_id
             where = " AND ".join(conditions)
             await _exec(db, text(f"""
-                UPDATE autonomy_attention_item
+                UPDATE outbox_item
                 SET status = 'snoozed',
                     payload = jsonb_set(COALESCE(payload, '{{}}'::jsonb), '{{snoozed_from_context}}', to_jsonb(CAST(:context AS text))),
                     updated_at = NOW()
@@ -825,7 +825,7 @@ class AttentionQueueService:
                 params["user_id"] = user_id
             where = " AND ".join(conditions)
             await _exec(db, text(f"""
-                UPDATE autonomy_attention_item
+                UPDATE outbox_item
                 SET status = 'completed', completed_at = NOW(), updated_at = NOW()
                 WHERE {where}
             """), params)
@@ -845,7 +845,7 @@ class AttentionQueueService:
                 "at": datetime.now(timezone.utc).isoformat(),
             })
             await _exec(db, text("""
-                UPDATE autonomy_attention_item
+                UPDATE outbox_item
                 SET action_history = COALESCE(action_history, '[]'::jsonb) || CAST(:entry AS jsonb),
                     updated_at = NOW()
                 WHERE id = CAST(:id AS uuid)
@@ -897,7 +897,7 @@ class AttentionQueueService:
         """Archive all active items for a user."""
         try:
             result = await _exec(db, text("""
-                UPDATE autonomy_attention_item
+                UPDATE outbox_item
                 SET status = 'archived', archived_at = NOW(), updated_at = NOW()
                 WHERE user_id = :user_id AND status NOT IN ('archived', 'dropped', 'completed')
             """), {"user_id": user_id})
@@ -915,7 +915,7 @@ class AttentionQueueService:
         try:
             result = await _exec(db, text("""
                 SELECT id::text, title, body, category, priority, source, payload
-                FROM autonomy_attention_item
+                FROM outbox_item
                 WHERE user_id = :user_id
                   AND status = 'new'
                   AND priority IN ('urgent', 'high', 'critical')
@@ -932,7 +932,7 @@ class AttentionQueueService:
             if items:
                 ids = [i["id"] for i in items]
                 await _exec(db, text("""
-                    UPDATE autonomy_attention_item
+                    UPDATE outbox_item
                     SET status = 'sent', updated_at = NOW()
                     WHERE id = ANY(CAST(:ids AS uuid[]))
                 """), {"ids": ids})

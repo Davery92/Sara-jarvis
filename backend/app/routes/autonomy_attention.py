@@ -178,7 +178,7 @@ async def reply_to_attention_item(
     from sqlalchemy import text as _sql
     try:
         update_result = db.execute(_sql("""
-            UPDATE autonomy_attention_item
+            UPDATE outbox_item
             SET status = 'completed',
                 completed_at = NOW(),
                 updated_at   = NOW(),

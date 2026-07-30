@@ -96,7 +96,7 @@ async def acknowledge(user_id: str, ids: Union[List[int], str],
             # Clear the linked attention item so web Needs-You + iOS badge drop.
             if attn_id:
                 await db.execute(text("""
-                    UPDATE autonomy_attention_item
+                    UPDATE outbox_item
                     SET status = 'archived', archived_at = NOW(), updated_at = NOW()
                     WHERE id = :aid AND status IN ('new', 'sent', 'read')
                 """), {"aid": attn_id})

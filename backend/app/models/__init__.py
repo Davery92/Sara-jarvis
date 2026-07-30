@@ -35,7 +35,6 @@ from .tangent_queue import TangentQueue
 from .known_domain import KnownDomain
 from .anchor_point import AnchorPoint
 from .action_trace import ActionTrace
-from .attention_item import AttentionItem
 from .daily_task import DailyTask
 from .mission import Mission, MissionStep
 from .policy_candidate import PolicyCandidate
