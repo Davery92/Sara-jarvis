@@ -1,8 +1,10 @@
-# Sign-off package — three items for David, one sitting
+# Sign-off package — items for David, one sitting
 
 Everything below is either already done (informational — no action needed) or a single yes/no decision with a recommendation attached. Nothing here requires a design discussion; where a decision has real tradeoffs, the tradeoff and the recommendation are both stated so a read is enough.
 
-**Update 2026-07-30 (still current — the one open ask below is unchanged):** since this was written, the standing work order's floor items closed: the garden leak is confirmed genuinely zero (not stragglers — David's account had no leak, two leftover test accounts did), the verification loop's retire half shipped (parse answer → confidence_ladder graduation/retirement → question consumed, no third state), the Arc 5.2 minter ruling is written into the plan and enforced (entry-tier minting anywhere, dreaming-only promotion), and the three pre-Arc-6 floor items are closed — the 4-source context cutover is live (`SINGULAR_CONTEXT=true`), the 7-sender write-freeze audit found 5/7 senders flipped live with one real regression fixed (`morning_proactive_service`'s behavioral-learning loop had silently stopped recording), and the Phase G outbox schema proposal exists as a separate design-only artifact. None of that changes anything below — **item 3, the daemon retirement cutover, is still the single open decision waiting on you.**
+**Update 2026-07-30 (still current):** since this was written, the standing work order's floor items closed: the garden leak is confirmed genuinely zero (not stragglers — David's account had no leak, two leftover test accounts did), the verification loop's retire half shipped (parse answer → confidence_ladder graduation/retirement → question consumed, no third state), the Arc 5.2 minter ruling is written into the plan and enforced (entry-tier minting anywhere, dreaming-only promotion), and the three pre-Arc-6 floor items are closed — the 4-source context cutover is live (`SINGULAR_CONTEXT=true`), the 7-sender write-freeze audit found 5/7 senders flipped live with one real regression fixed (`morning_proactive_service`'s behavioral-learning loop had silently stopped recording), and the Phase G outbox schema proposal exists as a separate design-only artifact.
+
+**Item 3 (daemon cutover) is now DONE, not waiting** — you said yes to both gaps 2026-07-30; the diff is built, deployed, and live-verifying (see the work-order status report). **Item 4 below is new** (a parked product decision, not a yes/no ask) — nothing else here changed.
 
 ---
 
@@ -30,7 +32,7 @@ No action needed. Listed here only because it was one of the three items origina
 
 ---
 
-## 3. Daemon retirement cutover — status: needs your yes
+## 3. Daemon retirement cutover — status: APPROVED 2026-07-30, executed
 
 **What's built and live-verified:** `POST /api/acs/v2/ambient-turn` on the backend, proxying to `kernel.ambient_turn(wake_reason=DAEMON_PROXY)`, auth'd with the daemon's existing shared token. Tested against the running backend: correct 401 on a bad token, correct honest pass-through of lock contention.
 
@@ -45,6 +47,12 @@ Reading `daemon.py`'s tick loop turned up two places where the old and new behav
 **Proposed resolution: drop it, don't rebuild it.** The original purpose (avoid re-triggering an unhelpful ambient turn right after one that decided "nothing to do") is already covered by the kernel's own gates that run on every call regardless of caller: `salience_scorer.should_deliberate()` (rate limit + accumulated-salience threshold), the `heavy_llm` exclusive-lock coordinator, and delivery-side quiet-hours/cooldown checks in `unified_notification`. A daemon-local "stay quiet" flag on top of those would be a second, redundant gate — exactly the kind of thing this whole plan is trying to remove, not add back. If you've seen a real case where the kernel's existing gates aren't quiet enough, say so and this gets designed properly instead of dropped; absent that, dropping it is the simpler, more honest choice.
 
 **If you say yes to both:** next session's daemon-cutover work is a scoped, two-gap diff to `acs-daemon/daemon.py` (swap the HTTP call, remap one field, delete one now-dead method) plus a deploy + restart on the VM — small, well-understood, no open design questions left.
+
+---
+
+## 4. Batch-digest shape — parked, not designed (work-order item 9)
+
+When `mindv2-batch-flush` promotes multiple `judged_batch` candidates in the same window, each currently composes and delivers as its own separate message — so a morning with three batched items reads as three pings, not one. **Recommendation: one combined digest message per flush window, not several.** Reasoning: the whole point of batching was "worth mentioning, not worth an interruption right now" — delivering N separate pings at flush time defeats that by turning N deferred interruptions into N simultaneous ones. A single digest ("three things from this morning: ...") reads as one attention-economy transaction instead of N, matching what "batch" is supposed to mean. The real design work this needs before building it: how staleness interacts across a batch (does a 6-hour-old item get the same treatment as a 20-minute-old one in the same digest?), whether the composer writes one message from N candidates or N candidates get pre-merged into one before composing, and whether a digest ever gets dropped as a whole vs. per-item. Not designed here — parked per your instruction.
 
 ---
 
