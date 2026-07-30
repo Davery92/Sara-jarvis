@@ -8,9 +8,9 @@ safely routed through here. These tests lock in the fix and the new
 query-free "top confidence" path + the shared prose formatter.
 """
 import pytest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from app.services.memory_recall import _fact_text, _from_facts, recall_facts_prose
+from app.services.memory_recall import _fact_text, _from_facts, _from_search_memory, recall_facts_prose
 
 
 class TestFactText:
@@ -112,3 +112,77 @@ class TestRecallFactsProse:
         with patch("app.services.memory_recall.recall", new=AsyncMock(return_value=fake_result)):
             prose = await recall_facts_prose(query="")
         assert prose == ""
+
+
+class TestRetrievalStrengthening:
+    """Brain Alignment H4: a recalled episode earns a small, capped bump to
+    its intrinsic importance. Used to live only inside main_simple.py's
+    IntelligentMemoryService.intelligent_memory_search — every caller
+    already going through memory.recall() for episodes (the live
+    post-Arc-2.3 chat context path included) had been silently missing it,
+    since recall() never called that method. Moved into the door itself
+    (_from_search_memory) so every present and future caller gets it."""
+
+    def _mock_db_factory(self):
+        mock_db = MagicMock()
+        mock_db.execute = AsyncMock()
+        mock_db.commit = AsyncMock()
+        mock_session_cm = MagicMock()
+        mock_session_cm.__aenter__ = AsyncMock(return_value=mock_db)
+        mock_session_cm.__aexit__ = AsyncMock(return_value=False)
+        mock_factory = MagicMock(return_value=mock_session_cm)
+        return mock_factory, mock_db
+
+    @pytest.mark.asyncio
+    async def test_episode_results_trigger_strengthening_update(self):
+        mock_factory, mock_db = self._mock_db_factory()
+        with patch("app.services.memory_service.get_memory_service") as mock_get_svc, \
+             patch("app.db.session.get_async_session_factory", return_value=mock_factory):
+            mock_svc = MagicMock()
+            mock_svc.SessionLocal = MagicMock()
+            mock_svc.search_memory = AsyncMock(return_value=[
+                {"type": "episode", "episode_id": "ep-1", "text": "hello", "role": "user",
+                 "source": "chat", "created_at": "2026-01-01", "score": 0.6},
+            ])
+            mock_get_svc.return_value = mock_svc
+
+            traces = await _from_search_memory("user-1", "hello", ["episode"], 5)
+
+        assert len(traces) == 1
+        mock_db.execute.assert_awaited_once()
+        call_args = mock_db.execute.call_args
+        assert call_args[0][1]["ids"] == ["ep-1"]
+        assert call_args[0][1]["uid"] == "user-1"
+        mock_db.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_note_only_results_do_not_trigger_strengthening(self):
+        mock_factory, mock_db = self._mock_db_factory()
+        with patch("app.services.memory_service.get_memory_service") as mock_get_svc, \
+             patch("app.db.session.get_async_session_factory", return_value=mock_factory):
+            mock_svc = MagicMock()
+            mock_svc.SessionLocal = MagicMock()
+            mock_svc.search_memory = AsyncMock(return_value=[
+                {"type": "note", "note_id": "n-1", "title": "t", "text": "body", "score": 0.5},
+            ])
+            mock_get_svc.return_value = mock_svc
+
+            traces = await _from_search_memory("user-1", "hello", ["note"], 5)
+
+        assert len(traces) == 1
+        mock_db.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_strengthening_failure_does_not_break_recall(self):
+        with patch("app.services.memory_service.get_memory_service") as mock_get_svc, \
+             patch("app.db.session.get_async_session_factory", side_effect=RuntimeError("db down")):
+            mock_svc = MagicMock()
+            mock_svc.SessionLocal = MagicMock()
+            mock_svc.search_memory = AsyncMock(return_value=[
+                {"type": "episode", "episode_id": "ep-1", "text": "hello", "score": 0.6},
+            ])
+            mock_get_svc.return_value = mock_svc
+
+            traces = await _from_search_memory("user-1", "hello", ["episode"], 5)
+
+        assert len(traces) == 1  # the recall itself still succeeds

@@ -101,7 +101,39 @@ async def _from_search_memory(user_id: str, query: str, kinds: List[str], per: i
             when=r.get("created_at") or r.get("updated_at"),
             role=r.get("role") if kind == "episode" else None,
         ))
+
+    await _strengthen_recalled_episodes(user_id, [t["id"] for t in out if t["kind"] == "episode" and t["id"]])
     return out
+
+
+async def _strengthen_recalled_episodes(user_id: str, episode_ids: List[str]) -> None:
+    """Retrieval strengthening / reconsolidation (Brain Alignment H4) — a
+    memory that keeps getting used earns a small, capped bump to its
+    intrinsic importance, surviving nightly rescoring. This used to live
+    only inside main_simple.py's IntelligentMemoryService.intelligent_
+    memory_search — every caller that already goes through memory.recall()
+    for episodes (the live post-Arc-2.3 chat context path included) has
+    been silently missing it since recall() never called that method.
+    Moved here instead of copied per-caller so the one door carries the
+    one side effect for every present and future caller, not just the
+    ones that happened to route through the old assembly."""
+    if not episode_ids:
+        return
+    try:
+        from sqlalchemy import text
+        from app.db.session import get_async_session_factory
+        factory = get_async_session_factory()
+        async with factory() as db:
+            await db.execute(text("""
+                UPDATE episode
+                SET access_count = COALESCE(access_count, 0) + 1,
+                    last_accessed = NOW(),
+                    base_importance = LEAST(0.95, COALESCE(base_importance, importance, 0.3) + 0.01)
+                WHERE id = ANY(:ids) AND user_id = :uid
+            """), {"ids": episode_ids, "uid": user_id})
+            await db.commit()
+    except Exception as e:
+        logger.debug(f"[recall] retrieval strengthening failed: {e}")
 
 
 def _fact_text(r: Dict[str, Any]) -> str:
