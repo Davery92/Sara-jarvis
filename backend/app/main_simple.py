@@ -6743,15 +6743,14 @@ You are now in workspace mode. The user is working on their Windows PC with the 
                     if not context_decision.inject_memory:
                         return None
                     try:
-                        mems = await intelligent_memory_service.intelligent_memory_search(
-                            user_id=user_id, query=message, use_semantic=True
-                        )
-                        if not mems:
+                        from app.services.memory_recall import recall as _recall
+                        result = await _recall(user_id=user_id, query=message, kinds=["episode"], k=3)
+                        traces = [t for t in result["traces"] if t.get("text")]
+                        if not traces:
                             return None
                         ctx = "\n\n## Relevant Past Context:\n"
-                        for i, mem in enumerate(mems[:3], 1):
-                            preview = mem.get("content", "")[:200]
-                            ctx += f"{i}. {preview}\n"
+                        for i, t in enumerate(traces[:3], 1):
+                            ctx += f"{i}. {t['text'][:200]}\n"
                         return ctx
                     except Exception:
                         return None

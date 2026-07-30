@@ -165,16 +165,16 @@ class AutonomousSweepService:
                 # Generate search query based on insight content
                 search_queries = self._generate_memory_queries(insight)
                 
-                # Search for relevant memories
+                # Search for relevant memories.
+                # Arc 5.1: routed through the one recall door — this
+                # consumer only ever reads count/text (never the
+                # type-specific fields a raw search_memory() row carries),
+                # so the generic trace shape is a clean fit.
+                from app.services.memory_recall import recall as _recall
                 relevant_memories = []
                 for query in search_queries:
-                    memory_results = await self.memory_service.search_memory(
-                        user_id=user_id,
-                        query=query,
-                        limit=5,
-                        scopes=["episodes", "notes"]
-                    )
-                    relevant_memories.extend(memory_results[:3])  # Top 3 per query
+                    result = await _recall(user_id=user_id, query=query, kinds=["episode", "note"], k=5)
+                    relevant_memories.extend(result["traces"][:3])  # Top 3 per query
                 
                 # Add memory context to insight
                 if relevant_memories:
@@ -261,14 +261,11 @@ class AutonomousSweepService:
                 "reflection on past experience"
             ]
             
+            from app.services.memory_recall import recall as _recall
             pattern_findings = {}
             for theme in theme_searches:
-                memories = await self.memory_service.search_memory(
-                    user_id=user_id,
-                    query=theme,
-                    limit=10,
-                    scopes=["episodes"]
-                )
+                result = await _recall(user_id=user_id, query=theme, kinds=["episode"], k=10)
+                memories = result["traces"]
                 
                 if len(memories) >= 3:  # Found a pattern
                     pattern_findings[theme] = memories[:5]

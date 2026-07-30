@@ -421,37 +421,25 @@ async def search_memory(payload: SearchMemoryIn) -> list[MemoryHit]:
     user_id = getattr(settings, "acs_owner_user_id", "") or ""
     if not user_id:
         raise HTTPException(status_code=503, detail="acs_owner_user_id not configured")
-    try:
-        from app.services.embeddings import get_embedding
-        vec = await get_embedding(payload.query)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"embedding failed: {e}")
 
-    async_session = get_async_session_factory()
-    async with async_session() as db:
-        rows = (await db.execute(
-            text(
-                """
-                SELECT id, created_at, role, content,
-                       1 - (embedding <=> CAST(:vec AS vector)) AS similarity
-                FROM episode
-                WHERE user_id = :uid AND embedding IS NOT NULL
-                ORDER BY embedding <=> CAST(:vec AS vector) ASC
-                LIMIT :lim
-                """
-            ),
-            {"vec": str(vec), "uid": user_id, "lim": payload.limit},
-        )).mappings().all()
+    # Arc 5.1: routed through the one recall door instead of a private
+    # pgvector query — same underlying episode/embedding search, no quality
+    # loss (unlike search_notes below, which is NOT migrated for that
+    # reason). `role` isn't part of a generic recall trace's fixed shape
+    # everywhere else, so memory_recall._trace carries it as an
+    # episode-only optional field this endpoint's response model needs.
+    from app.services.memory_recall import recall as _recall
+    result = await _recall(user_id=user_id, query=payload.query, kinds=["episode"], k=payload.limit)
 
     return [
         MemoryHit(
-            id=str(r["id"]),
-            when=r["created_at"],
-            role=r["role"],
-            content=(r["content"] or "").strip()[:600],
-            similarity=float(r["similarity"]),
+            id=t["id"],
+            when=t["when"],
+            role=t.get("role"),
+            content=t["text"],
+            similarity=t["score"],
         )
-        for r in rows
+        for t in result["traces"] if t.get("text")
     ]
 
 

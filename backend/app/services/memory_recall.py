@@ -51,7 +51,7 @@ _KIND_CONFIDENCE = {
 
 def _trace(kind: str, id_: Any, text: str, score: float,
            provenance: str, when: Optional[str] = None,
-           confidence: Optional[str] = None) -> Dict[str, Any]:
+           confidence: Optional[str] = None, role: Optional[str] = None) -> Dict[str, Any]:
     return {
         "kind": kind,
         "id": str(id_) if id_ is not None else None,
@@ -60,6 +60,10 @@ def _trace(kind: str, id_: Any, text: str, score: float,
         "confidence": confidence or _KIND_CONFIDENCE.get(kind, "inferred"),
         "provenance": provenance,
         "when": when,
+        # Episode-specific (None for every other kind) — who said it.
+        # Callers that need the David/assistant distinction (e.g. the ACS
+        # daemon's search_memory) read this instead of re-querying.
+        "role": role,
     }
 
 
@@ -95,6 +99,7 @@ async def _from_search_memory(user_id: str, query: str, kinds: List[str], per: i
             score=r.get("score", 0.5),
             provenance=f"store:{kind}:{r.get('source','')}".rstrip(":"),
             when=r.get("created_at") or r.get("updated_at"),
+            role=r.get("role") if kind == "episode" else None,
         ))
     return out
 
