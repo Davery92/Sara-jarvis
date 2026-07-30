@@ -5446,9 +5446,7 @@ except Exception as e:
 
 # Include Jarvis mode routes
 try:
-    from app.routes.calendar import router as calendar_router
     from app.routes.threads import router as threads_router
-    app.include_router(calendar_router, prefix="/events")
     app.include_router(threads_router, prefix="/threads")
     logger.info("Jarvis mode routes loaded successfully")
 except Exception as e:
