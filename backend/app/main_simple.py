@@ -1902,20 +1902,10 @@ class SimpleLLMClient:
             result = await self.list_notes_tool(user_id)
         elif function_name == "list_folders":
             result = await self.list_folders_tool(user_id)
-        elif function_name == "delete_note":
-            result = await self.delete_note_tool(arguments["note_id"], user_id)
         elif function_name == "create_reminder":
             result = await self.create_reminder_tool(arguments["title"], arguments.get("description", ""), arguments["reminder_time"], user_id)
-        elif function_name == "list_reminders":
-            result = await self.list_reminders_tool(user_id)
-        elif function_name == "complete_reminder":
-            result = await self.complete_reminder_tool(arguments["reminder_id"], user_id)
         elif function_name == "start_timer":
             result = await self.start_timer_tool(arguments["title"], arguments["duration_minutes"], user_id)
-        elif function_name == "list_timers":
-            result = await self.list_timers_tool(user_id)
-        elif function_name == "stop_timer":
-            result = await self.stop_timer_tool(arguments["timer_id"], user_id)
         elif function_name == "search_documents":
             result = await self.search_documents_tool(arguments["query"], user_id)
         elif function_name == "search_memory":
@@ -2298,36 +2288,6 @@ class SimpleLLMClient:
             logger.error(f"Error listing folders: {e}")
             return f"Error listing folders: {str(e)}"
 
-    async def delete_note_tool(self, note_id, user_id):
-        """Delete a specific note by ID"""
-        try:
-            # Delete from Neo4j first
-            from app.services.neo4j_service import neo4j_service
-            if neo4j_service.driver:
-                try:
-                    await neo4j_service.delete_note(note_id, user_id)
-                    logger.info(f"✅ Tool: Note {note_id} deleted from Neo4j")
-                except Exception as neo_error:
-                    logger.warning(f"Neo4j note deletion failed: {neo_error}")
-            
-            # Delete from PostgreSQL
-            db = SessionLocal()
-            try:
-                note = db.query(Note).filter(Note.id == note_id, Note.user_id == user_id).first()
-                if not note:
-                    return f"Note with ID {note_id} not found."
-                
-                note_title = note.title or "Untitled"
-                db.delete(note)
-                db.commit()
-                
-                return f"Deleted note: {note_title}"
-            finally:
-                db.close()
-        except Exception as e:
-            logger.error(f"Error deleting note: {e}")
-            return f"Error deleting note: {str(e)}"
-
     async def create_reminder_tool(self, title, description, reminder_time, user_id):
         """Create a new reminder for the user"""
         try:
@@ -2352,57 +2312,6 @@ class SimpleLLMClient:
         except Exception as e:
             logger.error(f"Error creating reminder: {e}")
             return f"Error creating reminder: {str(e)}"
-
-    async def list_reminders_tool(self, user_id):
-        """List active reminders for the user"""
-        try:
-            db = SessionLocal()
-            try:
-                reminders = db.query(Reminder).filter(
-                    Reminder.user_id == user_id,
-                    Reminder.is_completed == False
-                ).order_by(Reminder.reminder_time).limit(10).all()
-                
-                if not reminders:
-                    return "No active reminders found."
-                
-                results = []
-                for reminder in reminders:
-                    time_str = reminder.reminder_time.strftime('%Y-%m-%d %H:%M')
-                    results.append(f"• {reminder.title} ({time_str})")
-                    if reminder.description:
-                        results.append(f"  {reminder.description}")
-                
-                return "\n".join(results)
-            finally:
-                db.close()
-        except Exception as e:
-            logger.error(f"Error listing reminders: {e}")
-            return f"Error listing reminders: {str(e)}"
-
-    async def complete_reminder_tool(self, reminder_id, user_id):
-        """Mark a reminder as completed"""
-        try:
-            db = SessionLocal()
-            try:
-                reminder = db.query(Reminder).filter(
-                    Reminder.id == reminder_id,
-                    Reminder.user_id == user_id
-                ).first()
-                
-                if not reminder:
-                    return "Reminder not found."
-                
-                reminder.is_completed = True
-                reminder.updated_at = naive_local_now()
-                db.commit()
-                
-                return f"Marked reminder '{reminder.title}' as completed"
-            finally:
-                db.close()
-        except Exception as e:
-            logger.error(f"Error completing reminder: {e}")
-            return f"Error completing reminder: {str(e)}"
 
     async def start_timer_tool(self, title, duration_minutes, user_id):
         """Start a new timer"""
@@ -2436,105 +2345,6 @@ class SimpleLLMClient:
         except Exception as e:
             logger.error(f"Error starting timer: {e}")
             return f"Error starting timer: {str(e)}"
-
-    async def list_timers_tool(self, user_id):
-        """List active timers for the user"""
-        try:
-            db = SessionLocal()
-            try:
-                now = datetime.now(timezone.utc)
-                timers = db.query(Timer).filter(
-                    Timer.user_id == user_id,
-                    Timer.is_active == True
-                ).order_by(Timer.created_at.desc()).limit(10).all()
-                
-                if not timers:
-                    return "No active timers found."
-                
-                results = []
-                for timer in timers:
-                    # Ensure both datetimes are timezone-aware
-                    end_time = timer.end_time
-                    if end_time.tzinfo is None:
-                        end_time = end_time.replace(tzinfo=timezone.utc)
-                    
-                    time_left = end_time - now
-                    if time_left.total_seconds() > 0:
-                        minutes_left = int(time_left.total_seconds() / 60)
-                        status = f"{minutes_left}m left"
-                    else:
-                        status = "FINISHED"
-                    
-                    results.append(f"• {timer.title} ({timer.duration_minutes}m) - {status} (ID: {timer.id})")
-                
-                return "\n".join(results)
-            finally:
-                db.close()
-        except Exception as e:
-            logger.error(f"Error listing timers: {e}")
-            return f"Error listing timers: {str(e)}"
-
-    async def stop_timer_tool(self, timer_id, user_id):
-        """Stop/cancel an active timer"""
-        try:
-            db = SessionLocal()
-            try:
-                timer = db.query(Timer).filter(
-                    Timer.id == timer_id,
-                    Timer.user_id == user_id,
-                    Timer.is_active == True
-                ).first()
-                
-                if not timer:
-                    return "Active timer not found."
-                
-                timer.is_active = False
-                timer.is_completed = True
-                db.commit()
-
-                # Evaluate standing orders triggered by this timer
-                try:
-                    from app.services.standing_order_service import standing_order_service
-                    executed = await standing_order_service.evaluate_trigger(
-                        trigger_type="timer",
-                        context={
-                            "timer_id": str(timer.id),
-                            "timer_title": timer.title or "",
-                            "duration_minutes": timer.duration_minutes,
-                        },
-                        db=db,
-                    )
-                    if executed:
-                        logger.info(f"Timer '{timer.title}' triggered {len(executed)} standing order(s)")
-                except Exception as e:
-                    logger.warning(f"Timer standing order eval failed: {e}")
-
-                # Also emit event for reactive engine subscribers
-                try:
-                    from app.services.event_bus import emit_event, EventType
-                    await emit_event(
-                        event_type=EventType.TIMER_COMPLETED,
-                        user_id=user_id,
-                        payload={
-                            "timer_id": str(timer.id),
-                            "timer_title": timer.title or "",
-                            "duration_minutes": timer.duration_minutes,
-                        },
-                        source="stop_timer_tool",
-                    )
-                except Exception as e:
-                    logger.debug(f"Timer event emit failed: {e}")
-
-                # Send AI-generated NTFY notification for timer completion
-                duration_str = f"{timer.duration_minutes}min"
-                await ntfy_service.send_timer_notification(timer.title, duration_str, timer_id, user_id)
-
-                return f"Stopped timer '{timer.title}'"
-            finally:
-                db.close()
-        except Exception as e:
-            logger.error(f"Error stopping timer: {e}")
-            return f"Error stopping timer: {str(e)}"
 
     async def search_documents_tool(self, query, user_id):
         """🧠 Advanced hybrid search through uploaded documents using Neo4j knowledge graph + PostgreSQL fallback"""
