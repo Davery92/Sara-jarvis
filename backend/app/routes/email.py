@@ -432,13 +432,16 @@ Email Content:
     if related_emails:
         context_used.append("sender_history")
 
-    # Call LLM
+    # Call LLM — Arc 6 broker migration (work-order item 5, 2026-07-30):
+    # "utility" capability, same underlying settings, one rename point.
+    from app.services.llm_broker import resolve as _resolve_capability
+    _cap = _resolve_capability("utility")
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
-                f"{settings.openai_base_url}/chat/completions",
+                f"{_cap['base_url']}/chat/completions",
                 json={
-                    "model": settings.openai_model,
+                    "model": _cap["model"],
                     "messages": [
                         {
                             "role": "system",

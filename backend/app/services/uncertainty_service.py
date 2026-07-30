@@ -61,9 +61,14 @@ class UncertaintyService:
 
         start_time = time.time()
 
-        # Read settings dynamically
-        base_url = settings.openai_base_url
-        model = settings.openai_model
+        # Arc 6 broker migration (work-order item 5, 2026-07-30): "utility"
+        # capability resolves the same openai_model/openai_base_url settings,
+        # but through the one place a rename touches every row instead of
+        # this file separately hard-coding the key.
+        from app.services.llm_broker import resolve as _resolve_capability
+        _cap = _resolve_capability("utility")
+        base_url = _cap["base_url"]
+        model = _cap["model"]
         api_key = settings.openai_api_key
 
         payload = {

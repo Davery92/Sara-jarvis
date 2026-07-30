@@ -2135,7 +2135,6 @@ async def fitness_chat_stream(
         logger = logging.getLogger("app.main_simple")
         logger.info(f"🏋️ Fitness chat: user_id={user_id}, type={type(user_id)}")
 
-        OPENAI_MODEL = settings.openai_model
         ASSISTANT_NAME = settings.assistant_name
 
         # Build context (same as non-streaming version)

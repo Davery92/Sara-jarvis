@@ -142,8 +142,11 @@ Search Results:
 
 Please provide a comprehensive summary answering the query based on these search results."""
 
-            # 5. Stream AI summary
-            model = request.model or settings.openai_model
+            # 5. Stream AI summary — Arc 6 broker migration (work-order item 5,
+            # 2026-07-30): "utility" capability for the default, same
+            # underlying setting, one rename point.
+            from app.services.llm_broker import resolve as _resolve_capability
+            model = request.model or _resolve_capability("utility")["model"]
             logger.info(f"Generating summary with model: {model}")
 
             messages = [
