@@ -9371,6 +9371,11 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     f"instead of the {len(combined_context or '')}-char legacy assembly"
                 )
                 combined_context = _new_rendered
+                try:
+                    from app.services.context_diet_usage import record_clean_turn
+                    record_clean_turn(str(current_user.id))
+                except Exception:
+                    pass
 
             if combined_context:
                 system_message = ChatMessage(
