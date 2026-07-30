@@ -363,6 +363,25 @@ class TestReflectionCycle:
         assert result.verification_question is None
         assert result.cycle_start is not None
 
+    @pytest.mark.asyncio
+    async def test_reflection_cycle_promotes_corroborated_facts(self, reflection_agent):
+        """Arc 5.2 minter ruling: the reflection cycle must call
+        promote_corroborated_facts and carry the count on the result."""
+        with patch("app.services.personal_knowledge_graph.personal_kg.promote_corroborated_facts",
+                    return_value=4):
+            result = await reflection_agent.run_reflection_cycle()
+
+        assert result.facts_promoted == 4
+
+    @pytest.mark.asyncio
+    async def test_fact_promotion_failure_does_not_break_the_cycle(self, reflection_agent):
+        with patch("app.services.personal_knowledge_graph.personal_kg.promote_corroborated_facts",
+                    side_effect=RuntimeError("neo4j exploded")):
+            result = await reflection_agent.run_reflection_cycle()
+
+        assert result.facts_promoted == 0
+        assert result.cycle_start is not None
+
 
 # ==========================================
 # NOTIFICATION INTEGRATION TESTS

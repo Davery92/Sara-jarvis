@@ -142,8 +142,9 @@ class RememberAboutDavidTool(BaseTool):
                 },
                 "confidence": {
                     "type": "number",
-                    "description": "How confident Sara is (0.0-1.0). Use 0.9+ for explicit statements.",
-                    "default": 0.9
+                    "description": "How confident Sara is (0.0-1.0). Capped at entry tier "
+                                   "regardless of what's passed here — see execute().",
+                    "default": 0.6
                 }
             },
             "required": ["fact_type", "properties"]
@@ -152,10 +153,21 @@ class RememberAboutDavidTool(BaseTool):
     async def execute(self, user_id: str, **kwargs) -> ToolResult:
         try:
             from app.services.personal_knowledge_graph import personal_kg
+            from app.services.confidence_ladder import CONFIRMED_AT
 
             fact_type = kwargs.get("fact_type", "Fact")
             properties = kwargs.get("properties", {})
-            confidence = min(max(kwargs.get("confidence", 0.9), 0.1), 0.99)
+            # Arc 5.2 minter ruling: any path may mint at entry tier; only
+            # dreaming promotes. This tool is LLM-self-assessed (Sara
+            # decides both whether to call it and what confidence to
+            # claim) with no independent check that a "David said X"
+            # interpretation was actually explicit rather than Sara's own
+            # inference — real David statements get to confirmed tier for
+            # real either via the verification loop's retire half
+            # (CONFIRMED graduates immediately) or via
+            # promote_corroborated_facts() once corroborated, not by
+            # trusting the tool call's own confidence claim at write time.
+            confidence = min(max(kwargs.get("confidence", 0.6), 0.1), CONFIRMED_AT - 0.01)
 
             if not properties:
                 return ToolResult(

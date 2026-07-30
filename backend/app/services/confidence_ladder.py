@@ -21,17 +21,17 @@ CONFIRMED = "confirmed"
 # lands; episode importance and life_fact now read through the same
 # numbers instead of their own private schemes (episode had none, PKG had
 # one only for itself).
-_CONFIRMED_AT = 0.75
-_INFERRED_AT = 0.4
+CONFIRMED_AT = 0.75
+INFERRED_AT = 0.4
 
 
 def tier_from_confidence(value: float) -> str:
     """The one numeric->tier mapping every raw confidence float goes
     through, regardless of which system produced the number."""
     v = float(value or 0.0)
-    if v >= _CONFIRMED_AT:
+    if v >= CONFIRMED_AT:
         return CONFIRMED
-    if v >= _INFERRED_AT:
+    if v >= INFERRED_AT:
         return INFERRED
     return OBSERVED
 

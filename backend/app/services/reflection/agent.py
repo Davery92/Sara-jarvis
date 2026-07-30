@@ -57,6 +57,9 @@ class ReflectionCycleResult:
     # Arc 5.2: the natural verification question minted this cycle, if
     # any (None if nothing needed verification or budget already spent).
     verification_question: Optional[str] = None
+    # Arc 5.2 minter ruling: how many PKG facts this cycle promoted
+    # through the confidence ladder (dreaming is the sole promoter).
+    facts_promoted: int = 0
     duration_seconds: float = 0
 
     def to_dict(self) -> Dict[str, Any]:
@@ -78,6 +81,7 @@ class ReflectionCycleResult:
             "theory_of_david": self.theory_of_david,
             "life_facts_decayed": self.life_facts_decayed,
             "verification_question": self.verification_question,
+            "facts_promoted": self.facts_promoted,
             "duration_seconds": self.duration_seconds,
         }
 
@@ -230,7 +234,17 @@ class ReflectionAgent:
             except Exception as e:
                 logger.warning(f"Verification loop failed (non-critical): {e}")
 
-            # 11. Self-assess this reflection cycle
+            # 11. Promote well-corroborated PKG facts (Arc 5.2 minter
+            # ruling) — the only place PKG confidence increases now;
+            # upsert_fact() only records observations, any caller, any
+            # time, at entry tier.
+            try:
+                from app.services.personal_knowledge_graph import personal_kg
+                result.facts_promoted = personal_kg.promote_corroborated_facts()
+            except Exception as e:
+                logger.warning(f"PKG fact promotion failed (non-critical): {e}")
+
+            # 12. Self-assess this reflection cycle
             await self._self_assess(result)
 
         except Exception as e:

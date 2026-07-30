@@ -292,18 +292,23 @@ class PersonalKnowledgeGraph:
                                 """, {"pkg_id": existing["pkg_id"], **properties})
                         return existing["pkg_id"]
 
-                    # Confirmation: bump confidence and update
-                    new_confidence = min(existing["confidence"] + 0.1, 0.99)
+                    # Confirmation: record the repeat observation, but do NOT
+                    # bump confidence here (Arc 5.2 minter ruling — any path
+                    # may mint at entry tier, but only dreaming promotes;
+                    # this was the one structural violation: every minter
+                    # that calls upsert_fact, dreaming or not, was silently
+                    # promoting confidence on every repeat match).
+                    # promote_corroborated_facts() is the dreaming-only
+                    # place confidence now moves upward, reading the
+                    # times_confirmed count this still increments.
                     new_times = (existing["times_confirmed"] or 0) + 1
 
                     session.run(f"""
                         MATCH (n:{label} {{pkg_id: $pkg_id}})
-                        SET n.confidence = $confidence,
-                            n.last_confirmed = $now,
+                        SET n.last_confirmed = $now,
                             n.times_confirmed = $times_confirmed
                     """, {
                         "pkg_id": existing["pkg_id"],
-                        "confidence": new_confidence,
                         "now": now,
                         "times_confirmed": new_times
                     })
@@ -321,9 +326,10 @@ class PersonalKnowledgeGraph:
                             """, {"pkg_id": existing["pkg_id"], **properties})
 
                     logger.debug(f"PKG: Confirmed {label} (dedup={dedup_key[:30]}, "
-                               f"confidence {existing['confidence']:.2f} -> {new_confidence:.2f})")
+                               f"confidence unchanged at {existing['confidence']:.2f}, "
+                               f"times_confirmed -> {new_times})")
                     # Update embedding in background
-                    self._schedule_embedding(existing["pkg_id"], fact_type, properties, new_confidence)
+                    self._schedule_embedding(existing["pkg_id"], fact_type, properties, existing["confidence"])
                     return existing["pkg_id"]
                 else:
                     # New fact: create node
@@ -531,6 +537,63 @@ class PersonalKnowledgeGraph:
                               f"(not confirmed in {days_threshold} days)")
         except Exception as e:
             logger.error(f"PKG: decay_stale_knowledge failed: {e}")
+
+    def promote_corroborated_facts(
+        self, min_confirmations_for_inferred: int = 3, min_confirmations_for_confirmed: int = 8
+    ) -> int:
+        """Arc 5.2 minter ruling: 'any path may mint facts at entry tiers
+        (observed/inferred) provided it goes through confidence_ladder with
+        provenance — but dreaming is the sole promotion authority: only it
+        graduates, decays, consolidates, prunes.' This is that promotion
+        authority — the ONLY place PKG confidence increases now.
+        upsert_fact() used to bump confidence by +0.1 on every repeat
+        confirmation, from ANY caller (dreaming or not) — the one
+        structural violation the audit found; fixed by having
+        upsert_fact() only record the observation (times_confirmed,
+        last_confirmed) and leaving graduation to here.
+
+        Idempotent by construction: promotion sets confidence TO a tier
+        floor (INFERRED_AT / CONFIRMED_AT) rather than adding to it, so a
+        fact that's already cleared a floor never re-triggers on the same
+        threshold being crossed again — only the next, higher one. Call
+        this from the dreaming cycle only. Returns the number promoted."""
+        from app.services.confidence_ladder import CONFIRMED_AT, INFERRED_AT
+
+        if not self._ensure_driver():
+            return 0
+        try:
+            with self.driver.session() as session:
+                promoted = 0
+                # observed -> inferred
+                rec = session.run(f"""
+                    MATCH (n)
+                    WHERE ({" OR ".join(f"n:{label}" for label in PKG_LABELS)})
+                    AND n.superseded_by IS NULL
+                    AND n.confidence < {INFERRED_AT}
+                    AND n.times_confirmed >= $min_confirmations
+                    SET n.confidence = {INFERRED_AT}
+                    RETURN count(n) as promoted
+                """, {"min_confirmations": min_confirmations_for_inferred}).single()
+                promoted += (rec["promoted"] if rec else 0) or 0
+
+                # inferred -> confirmed
+                rec = session.run(f"""
+                    MATCH (n)
+                    WHERE ({" OR ".join(f"n:{label}" for label in PKG_LABELS)})
+                    AND n.superseded_by IS NULL
+                    AND n.confidence >= {INFERRED_AT} AND n.confidence < {CONFIRMED_AT}
+                    AND n.times_confirmed >= $min_confirmations
+                    SET n.confidence = {CONFIRMED_AT}
+                    RETURN count(n) as promoted
+                """, {"min_confirmations": min_confirmations_for_confirmed}).single()
+                promoted += (rec["promoted"] if rec else 0) or 0
+
+                if promoted:
+                    logger.info(f"PKG: promoted {promoted} well-corroborated facts (dreaming-only)")
+                return promoted
+        except Exception as e:
+            logger.error(f"PKG: promote_corroborated_facts failed: {e}")
+            return 0
 
     def validate_against_recent(self, db_session=None) -> Dict[str, Any]:
         """
