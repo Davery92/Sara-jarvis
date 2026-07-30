@@ -5,7 +5,7 @@ SARA_ALIVE_BUILD_PLAN has verified live so far (Arc 0-2).
 
 Run from inside the backend container (needs DB/Redis/service access):
   docker compose -f docker-compose.dev.yml exec -T backend \\
-    python scripts/verify_sara_alive.py [--section arc0|arc1|arc2] [--user-id UUID]
+    python scripts/verify_sara_alive.py [--section arc0|arc1|arc2|arc5] [--user-id UUID]
 
 Each section is a list of independent checks. A check either passes,
 fails (with a reason), or is marked SKIP when its precondition isn't met
@@ -266,7 +266,47 @@ async def arc2_checks(user_id: str) -> list:
     return checks
 
 
-SECTIONS = {"arc0": arc0_checks, "arc1": arc1_checks, "arc2": arc2_checks}
+# ─────────────────────────── Arc 5 ───────────────────────────
+
+async def arc5_checks(user_id: str) -> list:
+    from sqlalchemy import text
+    from app.db.session import SessionLocal
+
+    checks = []
+
+    async def garden_has_no_machine_generated_notes():
+        """Arc 5.3: 'the garden — David's notes, zero machine-generated
+        content, ever.' Scoped to user_id, not a bare title-prefix count
+        across the whole note table — two leftover dev/test accounts
+        (test_agent@example.com, test@example.com) also have
+        'Agent Result:' notes from Feb/June 2026 that were never part of
+        David's garden to begin with (the original migration's manifest
+        script was correctly user_id-scoped and never matched them); an
+        unscoped count conflates "the garden is dirty" with "unrelated
+        test accounts exist," which is a different, already-decided-to-
+        leave-alone situation (David, 2026-07-30)."""
+        db = SessionLocal()
+        try:
+            patterns = ["Agent Result:%", "✅ Agent Report:%", "Background Research:%"]
+            counts = {}
+            for pat in patterns:
+                counts[pat] = db.execute(text(
+                    "SELECT COUNT(*) FROM note WHERE title LIKE :p AND user_id = :uid"
+                ), {"p": pat, "uid": user_id}).scalar() or 0
+        finally:
+            db.close()
+        total = sum(counts.values())
+        if total > 0:
+            return Check("5.acc garden has zero machine-generated notes").fail(
+                f"David-owned matches: {counts}")
+        return Check("5.acc garden has zero machine-generated notes").ok(
+            "0 across all 3 known machine-generated title patterns, scoped to David's user_id")
+    checks.append(await _check("5a", garden_has_no_machine_generated_notes()))
+
+    return checks
+
+
+SECTIONS = {"arc0": arc0_checks, "arc1": arc1_checks, "arc2": arc2_checks, "arc5": arc5_checks}
 
 
 async def main():
