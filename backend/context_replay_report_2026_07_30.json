@@ -1,0 +1,33 @@
+{
+  "run_at": "2026-07-30T21:31:39.040711+00:00",
+  "sample_size": 200,
+  "succeeded": 200,
+  "errored": 0,
+  "error_rate": 0.0,
+  "chars": {
+    "min": 8693,
+    "p10": 8850.2,
+    "median": 9230.0,
+    "p90": 9669.0,
+    "max": 9884
+  },
+  "zero_length_count": 0,
+  "world_slice_coverage": {
+    "0": 0,
+    "1": 0,
+    "2": 0,
+    "3": 0,
+    "4": 0,
+    "5": 0,
+    "6": 200
+  },
+  "extended_key_frequency": {
+    "daily_brief": 200,
+    "device": 200,
+    "emotional_tone": 200,
+    "journal": 200,
+    "patterns": 200,
+    "pkg": 200
+  },
+  "errors": []
+}
