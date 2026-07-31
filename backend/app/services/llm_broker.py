@@ -16,6 +16,20 @@ callers can migrate onto `resolve(capability)` incrementally. And it provides
 `rename_model(old, new)` that rewrites *every* app_settings row holding a model
 name in one operation — making "a rename is one action" true instead of a
 scavenger hunt.
+
+Calling pattern for a caller that builds its own request (2026-07-31): use
+`resolve(capability)` for the model/base_url, then a raw `httpx` POST to
+`{base_url}/chat/completions` — this codebase's actual, proven transport
+(every real LLM call site already uses httpx; see deliberation.py's
+`_deep_llm_call` for a worked example). An earlier `get_broker_client()`
+factory tried to wrap this in a plain `openai.AsyncOpenAI` client instead —
+deleted (2026-07-31): `openai` was never an installed dependency in this
+codebase, so that factory could not have been called successfully by
+anything, ever, in any environment this has run in. Its own test suite
+(deleted alongside it) mocked `sys.modules["openai"]` before importing it,
+which is exactly why nothing caught it. Don't re-add it without first
+adding `openai` as a real dependency and proving a live call — a mocked
+unit test isn't proof a network client actually works.
 """
 
 import logging
@@ -148,36 +162,6 @@ def resolve(capability: str) -> Dict[str, Optional[str]]:
 def all_capabilities() -> Dict[str, Dict[str, Optional[str]]]:
     """The full class→model map — the auditable view for the Dial / settings."""
     return {name: resolve(name) for name in CAPABILITIES}
-
-
-async def get_broker_client(capability: str):
-    """Arc 6.2 (work-order item 6): the client-factory layer `resolve()`
-    was missing — until this, nothing outside the two admin settings
-    endpoints ever actually called `resolve()`, so "migrate call sites
-    to llm_broker capability classes" had no factory to migrate *onto*.
-    Returns a plain `openai.AsyncOpenAI` client pointed at the
-    capability's resolved model/endpoint, for callers that build their
-    own request payloads and just need model+base_url (the shape most
-    of the ~15 raw `openai_model` call sites already use).
-
-    Deliberately NOT wired into `app/core/llm.py`'s two existing hubs
-    (`get_background_llm_client()`/`llm_client`) this pass — those are
-    the most widely-used, business-critical LLM clients in the whole
-    system (compose/judge/curiosity/sara_journal/verification_loop all
-    route through them), and `BackgroundLLMClient` already has its own
-    DB-persisted-override mechanism for `bg_llm_*` settings
-    (`_load_persisted_ai_setting_overrides()`) that substantially
-    achieves "rename = one row" for that axis already, just via older,
-    parallel code rather than this broker. Rewiring that internal
-    resolution path is real, valuable follow-up work — not something
-    to do as a drive-by inside an unrelated client-factory addition."""
-    cap = resolve(capability)
-    from openai import AsyncOpenAI
-    from app.core.config import settings
-    return AsyncOpenAI(
-        base_url=cap["base_url"],
-        api_key=getattr(settings, "openai_api_key", "") or "not-needed",
-    ), cap["model"]
 
 
 # app_settings key -> the main_simple.py module-level global it seeded at

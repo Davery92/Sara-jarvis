@@ -92,12 +92,14 @@ async def _deep_llm_call(messages: List[Dict[str, str]], max_tokens: int = 3000)
     call uses — deliberation/ambient turns/consolidation — resolved to the
     local Qwen 27B host).
 
-    Uses `resolve("kernel")` + a raw httpx POST rather than
-    `get_broker_client()`'s AsyncOpenAI wrapper — found while wiring this up
-    that `openai` isn't an installed dependency in this container, so that
-    factory has never actually been callable (a separate, pre-existing bug,
-    out of scope for this fix). httpx is already this module's proven,
-    working transport.
+    Uses `resolve("kernel")` + a raw httpx POST — the pattern llm_broker's
+    module docstring now documents as canonical. The broker used to also
+    offer `get_broker_client()`, an AsyncOpenAI-wrapper factory; found
+    while wiring this up that `openai` was never an installed dependency
+    in this codebase, so that factory could never have been called
+    successfully anywhere — deleted rather than fixed (2026-07-31),
+    reviving a never-used path by adding a new dependency would have been
+    backwards. httpx is this module's already-proven, working transport.
     """
     import httpx
     from app.core.config import settings
