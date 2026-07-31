@@ -169,14 +169,62 @@ async def get_broker_client(capability: str):
     ), cap["model"]
 
 
+# app_settings key -> the main_simple.py module-level global it seeded at
+# import time. Item 2.5 dry-run (2026-07-31): rename_model() only ever
+# wrote the DB — proven by a real dry-run (renamed openai_model, immediately
+# reverted) that GET /settings/ai, backed by main_simple.py's OPENAI_MODEL
+# global, kept showing the OLD name with no restart, while llm_broker.
+# resolve() (a fresh DB read every call) correctly showed the new one
+# instantly. "Rename = one action" was only true for broker-based callers.
+# Rather than migrate the ~15 main_simple.py call sites still reading these
+# globals directly onto resolve() (a much larger, riskier change touching
+# the app's hottest file again), rename_model() now also pokes the already-
+# running process's cached copies directly — the same thing the /settings/
+# ai PATCH endpoint's `global ...; OPENAI_MODEL = ...` lines do, just
+# triggered from here too.
+_GLOBAL_NAME_BY_SETTINGS_KEY: Dict[str, str] = {
+    "openai_model": "OPENAI_MODEL",
+    "chat_default_model": "CHAT_DEFAULT_MODEL",
+    "openai_notification_model": "OPENAI_NOTIFICATION_MODEL",
+    "bg_llm_primary_model": "BG_LLM_PRIMARY_MODEL",
+    "bg_llm_fallback_model": "BG_LLM_FALLBACK_MODEL",
+    "embedding_model": "EMBEDDING_MODEL",
+}
+
+
+def _refresh_main_simple_globals(updated_keys: List[str], new_value: str) -> List[str]:
+    """Best-effort: push the new model name into the already-running
+    process's main_simple.py globals for every key that has one. Returns
+    the global names actually updated (for the caller's proof-of-work).
+    Import is local and defensive — llm_broker must stay usable from
+    contexts where main_simple hasn't been imported (tests, scripts)."""
+    refreshed: List[str] = []
+    try:
+        import sys
+        main_simple = sys.modules.get("app.main_simple")
+        if main_simple is None:
+            return refreshed
+        for key in updated_keys:
+            global_name = _GLOBAL_NAME_BY_SETTINGS_KEY.get(key)
+            if global_name and hasattr(main_simple, global_name):
+                setattr(main_simple, global_name, new_value)
+                refreshed.append(global_name)
+    except Exception as e:
+        logger.debug(f"[llm_broker] main_simple global refresh skipped: {e}")
+    return refreshed
+
+
 def rename_model(old: str, new: str) -> Dict[str, object]:
     """Rewrite every app_settings row whose value is exactly `old` model name to
     `new`, in one operation. This is the "rename = one action" primitive: no
-    hunting across bg_llm_primary/fallback, openai_model, openai_notification.
+    hunting across bg_llm_primary/fallback, openai_model, openai_notification —
+    and, since the 2026-07-31 dry-run found the gap, no restart needed either
+    for the still-legacy main_simple.py call sites (see
+    _refresh_main_simple_globals above).
 
-    Returns {updated_keys, count}. (The ACS daemon's own ACS_LLM_MODEL env on
-    the VM is outside the DB and still needs its deploy — surfaced here so it's
-    not silently missed.)"""
+    Returns {updated_keys, refreshed_globals, count}. (The ACS daemon's own
+    ACS_LLM_MODEL env on the VM is outside the DB and still needs its
+    deploy — surfaced here so it's not silently missed.)"""
     updated: List[str] = []
     try:
         from sqlalchemy import text
@@ -200,9 +248,15 @@ def rename_model(old: str, new: str) -> Dict[str, object]:
         logger.error(f"[llm_broker] rename_model failed: {e}")
         return {"error": str(e), "updated_keys": updated, "count": len(updated)}
 
-    logger.info(f"[llm_broker] renamed model {old!r} -> {new!r} across {len(updated)} keys: {updated}")
+    refreshed_globals = _refresh_main_simple_globals(updated, new)
+
+    logger.info(
+        f"[llm_broker] renamed model {old!r} -> {new!r} across {len(updated)} keys: {updated} "
+        f"(live-refreshed globals: {refreshed_globals})"
+    )
     return {
         "old": old, "new": new,
         "updated_keys": updated, "count": len(updated),
+        "refreshed_globals": refreshed_globals,
         "note": "ACS daemon ACS_LLM_MODEL env on the sara-VM is outside the DB — redeploy it if this model backs the daemon.",
     }
