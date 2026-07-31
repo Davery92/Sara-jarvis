@@ -29,6 +29,7 @@ const loadSystemDashboard = () => import('../system/SystemDashboard')
 const loadMachinesDashboard = () => import('../machines/MachinesDashboard')
 const loadMindDashboard = () => import('../mind/MindDashboard')
 const loadInterior = () => import('../../pages/Interior')
+const loadDial = () => import('../../pages/Dial')
 const loadLife = () => import('../../pages/Life')
 const loadWork = () => import('../../pages/Work')
 const loadMemory = () => import('../../pages/Memory')
@@ -54,6 +55,7 @@ const SystemDashboard = lazy(loadSystemDashboard)
 const MachinesDashboard = lazy(loadMachinesDashboard)
 const MindDashboard = lazy(loadMindDashboard)
 const Interior = lazy(loadInterior)
+const Dial = lazy(loadDial)
 const Life = lazy(loadLife)
 const Work = lazy(loadWork)
 const Memory = lazy(loadMemory)
@@ -387,6 +389,10 @@ export default function ShellWorkspaceContent({
         {renderDeferredView('Loading Interior…', <Interior onNavigate={(v: string) => onNavigate(v as AppView)} />)}
       </div>
     )
+  }
+
+  if (targetView === 'dial') {
+    return renderDeferredView('Loading the Dial…', <Dial />)
   }
 
   if (targetView === 'life') {

@@ -478,6 +478,7 @@ function App() {
     { view: 'knowledge', label: 'Facts & People', icon: 'psychology' },
     { view: 'acs', label: 'ACS', icon: 'smart_toy' },
     { view: 'machines', label: 'Machines', icon: 'dns' },
+    { view: 'dial', label: 'The Dial', icon: 'tune' },
     { view: 'privacy-dashboard', label: 'Privacy', icon: 'lock' },
   ]
   // item 2.3 (2026-07-30): System/Mind/System Status/Sensory Monitor/

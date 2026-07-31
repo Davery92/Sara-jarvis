@@ -6,6 +6,7 @@ const CATEGORY_LABELS: Record<string, string> = {
   notifications: 'Notifications & Quiet Hours',
   acs: 'Autonomous Cognition Thresholds',
   morning_brief: 'Morning Brief',
+  system: 'System',
 }
 
 function TunableRow({ tunable, onSave, onReset, saving }: {
@@ -33,6 +34,29 @@ function TunableRow({ tunable, onSave, onReset, saving }: {
       : 'text'
 
   const step = tunable.value_type === 'float' ? '0.1' : '1'
+
+  if (!tunable.editable) {
+    // The Dial (Arc 6.3, work-order item 3): tunables classified "Learned"
+    // in the settings mapping only move through dreaming — no Save control,
+    // just the current value and why it's here.
+    return (
+      <div className="rounded-lg px-3 py-2.5">
+        <div className="flex items-baseline justify-between gap-3">
+          <div className="flex-1 min-w-0">
+            <div className="text-[15px] text-slate-300">{tunable.display_name}</div>
+            {tunable.description && (
+              <div className="text-xs text-slate-500 mt-0.5">{tunable.description}</div>
+            )}
+          </div>
+          <span className="text-[10px] text-emerald-400/80 uppercase tracking-wider whitespace-nowrap">learned</span>
+        </div>
+        <div className="mt-2 text-sm text-slate-400 font-mono">
+          {JSON.stringify(tunable.value)}
+          {tunable.unit && <span className="text-slate-600"> {tunable.unit}</span>}
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="rounded-lg px-3 py-2.5 hover:bg-white/[0.04] transition-colors">
@@ -149,6 +173,10 @@ export default function TunablesSection() {
           Behavior tunables
         </h2>
       </div>
+      <p className="text-xs text-slate-500 mb-4">
+        Most of these are tuned by dreaming, not hand-edited — see the "learned" tag. The few David actually sets by hand live on{' '}
+        <a href="/dial" className="text-teal-300 hover:underline">the Dial</a>.
+      </p>
 
       {isLoading && <p className="text-sm text-slate-500">Loading tunables…</p>}
       {error && <p className="text-sm text-slate-500">Failed to load tunables.</p>}
