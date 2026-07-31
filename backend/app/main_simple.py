@@ -5463,127 +5463,6 @@ CANVAS_TRIGGERS = [
     "time to work",
 ]
 
-async def _build_learning_recall_context(user_id: str, message: str, db) -> Optional[str]:
-    """Build learning recall context for the system prompt.
-
-    When David asks about something he's actively studying, Sara should
-    briefly test his recall before answering directly.
-    """
-    from sqlalchemy import text as sql_text
-    from datetime import datetime, timedelta
-
-    if not message or len(message) < 20:
-        return None
-
-    message_lower = message.lower()
-
-    try:
-        # Check if we've already tested recall recently (last 2 hours)
-        recent_recall = db.execute(sql_text("""
-            SELECT COUNT(*) as cnt FROM episode
-            WHERE user_id = :user_id
-              AND role = 'assistant'
-              AND (content LIKE :pattern1 OR content LIKE :pattern2)
-              AND created_at >= NOW() - INTERVAL '2 hours'
-        """), {"user_id": user_id, "pattern1": "%what do you remember about%", "pattern2": "%remember how we compared%"})
-        recall_row = recent_recall.fetchone()
-        if recall_row and (recall_row.cnt or 0) >= 2:
-            return None  # Already tested recall recently
-
-        # Get active learning topics
-        topics_result = db.execute(sql_text("""
-            SELECT id, title, mastery_level FROM learning_topic
-            WHERE user_id = :user_id AND status = 'active'
-        """), {"user_id": user_id})
-        topics = topics_result.fetchall()
-
-        if not topics:
-            return None
-
-        # Simple keyword matching: check if any topic title words appear in the message
-        matched_topic = None
-        for t in topics:
-            title_words = [w.lower() for w in t.title.split() if len(w) > 3]
-            if any(word in message_lower for word in title_words):
-                matched_topic = t
-                break
-
-        if not matched_topic:
-            return None
-
-        # Get concepts due for review or with low mastery for this topic
-        progress_result = db.execute(sql_text("""
-            SELECT concept, repetitions, next_review_at
-            FROM learning_progress
-            WHERE user_id = :user_id AND topic_id = :topic_id
-            ORDER BY next_review_at ASC NULLS FIRST
-            LIMIT 5
-        """), {"user_id": user_id, "topic_id": matched_topic.id})
-        progress_items = progress_result.fetchall()
-
-        if not progress_items:
-            return None
-
-        concepts = [p.concept for p in progress_items if p.concept]
-        if not concepts:
-            return None
-
-        mastery_pct = int((matched_topic.mastery_level or 0) * 100)
-
-        # Pick the most due concept for the recall question
-        test_concept = concepts[0]
-
-        # Try to get an anchor analogy for the topic
-        anchor_hint = ""
-        try:
-            anchor_row = db.execute(sql_text("""
-                SELECT anchor_concept, anchor_domain, bridge_description
-                FROM anchor_point
-                WHERE topic_id = :topic_id AND rejected = false
-                ORDER BY validated DESC, confidence DESC
-                LIMIT 1
-            """), {"topic_id": matched_topic.id}).fetchone()
-            if anchor_row and anchor_row.bridge_description:
-                anchor_hint = f'\nYou previously mapped this through an analogy: "{anchor_row.anchor_concept}" from {anchor_row.anchor_domain} ({anchor_row.bridge_description}). Reference that analogy in your recall prompt.'
-        except Exception:
-            pass
-
-        # Record passive mastery signal: David used a learning concept in main chat
-        try:
-            # Find a progress record for this topic to log natural usage
-            progress_row = db.execute(sql_text("""
-                SELECT id, quality_history FROM learning_progress
-                WHERE topic_id = :topic_id AND user_id = :user_id
-                LIMIT 1
-            """), {"topic_id": matched_topic.id, "user_id": user_id}).fetchone()
-            if progress_row:
-                import json as _json
-                history = _json.loads(progress_row.quality_history) if isinstance(progress_row.quality_history, str) else (progress_row.quality_history or [])
-                history.append({
-                    "type": "natural_usage",
-                    "date": local_now().isoformat(),
-                    "context": message[:100]
-                })
-                # Keep last 50 entries
-                db.execute(sql_text("""
-                    UPDATE learning_progress SET quality_history = :history
-                    WHERE id = :id
-                """), {"history": _json.dumps(history[-50:]), "id": progress_row.id})
-                db.commit()
-        except Exception as e:
-            logger.debug(f"Passive mastery signal failed (non-critical): {e}")
-
-        return f"""## Learning Recall Opportunity
-David is studying "{matched_topic.title}" (mastery: {mastery_pct}%). He has {len(concepts)} concepts tracked.
-Related concepts: {', '.join(concepts[:4])}{anchor_hint}
-
-Remember the analogy we used for {test_concept}? Reference it and ask David how it applies here — e.g., "You've been studying this — remember how we compared {test_concept} to...? How does that map to what you're asking about?"
-Then fill in gaps and correct any misconceptions. Keep it natural and brief — don't force it if the question isn't closely related to {test_concept}."""
-
-    except Exception as e:
-        logger.debug(f"Learning recall context build failed: {e}")
-        return None
-
 
 _relationship_phase_cache: dict = {"phase": None, "duration": None, "ts": 0.0}
 
@@ -8157,521 +8036,23 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
             except Exception as e:
                 logger.debug(f"Implicit feedback detection failed (non-critical): {e}")
 
-            # ── PARALLEL CONTEXT ASSEMBLY ──
-            # Fetch all independent context sources concurrently, then apply
-            # token budget allocation before injecting into system prompt.
-            from app.services.context_budget import ContextBudget
-
+            # ── CONTEXT ASSEMBLY (the kernel path — the only assembly, since 2026-07-31) ──
+            # Item 1.3 full closure (2026-07-31): the ~600-line legacy assembly
+            # (13 parallel fetchers, a ContextBudget merge, and a "compare old
+            # vs new" side-by-side log) is deleted. It was already 100%
+            # discarded work under SINGULAR_CONTEXT — its entire output got
+            # overwritten by this same kernel render every single turn — kept
+            # alive this long only for its two real side effects: daily_
+            # brief's update_moment write (kept below, now unconditional) and
+            # lessons' effectiveness-feedback recording (ported into
+            # get_extended_signals' "lessons"/"lesson_ids" signal — see
+            # context_snapshot.py). SINGULAR_CONTEXT has been the stable, sole
+            # live path all session; write-freeze says that fallback is
+            # deleted, not deferred. The flag stays a real kill-switch below
+            # (off ⇒ chat proceeds with no injected context, a degraded-but-
+            # safe fallback, not a crash) rather than hardcoded away entirely.
             _uid = str(current_user.id)
 
-            # SARA_ALIVE audit (2026-07-30): once SINGULAR_CONTEXT is live, the
-            # entire legacy assembly below still RUNS but its text output is
-            # unconditionally discarded (overwritten by the kernel-context
-            # render further down) — so every live chat turn was paying the
-            # DB/Redis/service latency of ~9 fetchers for text nobody reads.
-            # Fetchers with no side effect beyond their own text short-circuit
-            # below when the cutover is live; the two with real side effects
-            # (daily_brief's update_moment write, lessons' injected_lesson_ids
-            # feeding the lesson-effectiveness loop) keep running unchanged.
-            from app.core.feature_flags import Flag as _CtxFlag, is_enabled as _ctx_flag_enabled
-            _context_cutover_live = _ctx_flag_enabled(_CtxFlag.SINGULAR_CONTEXT)
-
-            # --- Parallel fetch coroutines (all independent, safe to run concurrently) ---
-
-            async def _fetch_memory():
-                # Item 1.3 (2026-07-31): missing guard found via the presence-
-                # latency investigation — every other legacy fetcher here
-                # short-circuits under _context_cutover_live; this one didn't,
-                # so it ran a full intelligent_memory_search() every turn even
-                # though the kernel-context path independently calls
-                # memory_recall.recall() and combined_context gets replaced
-                # wholesale by _new_rendered once cutover is live. Its own
-                # output (and the cited-memory boost tied to that output) was
-                # pure discarded work under cutover.
-                if _context_cutover_live:
-                    return None
-                if not (last_user_message and context_decision.inject_memory):
-                    return None
-                try:
-                    # Route query: factual questions answered by PKG (already always-on),
-                    # skip expensive episodic search for pure factual queries
-                    try:
-                        from app.services.query_router import classify_query, QueryTarget
-                        target, confidence = classify_query(last_user_message)
-                        if target == QueryTarget.PKG and confidence >= 0.6:
-                            logger.info(f"🎯 Query routed to PKG-only (confidence={confidence:.2f}), skipping episodic search")
-                            return None  # PKG context will be injected via _fetch_pkg
-                    except Exception:
-                        pass  # Fall through to normal memory search
-
-                    mems = await intelligent_memory_service.intelligent_memory_search(
-                        user_id=current_user.id, query=last_user_message, use_semantic=True
-                    )
-                    if not mems:
-                        return None
-                    ctx = "\n\n## Relevant Past Context:\n"
-                    ctx += "**Note: Pay attention to when these memories occurred - prioritize recent context over older memories.**\n\n"
-                    used_ids = []
-                    for i, mem in enumerate(mems[:5], 1):
-                        preview = mem.get("content", "")[:300]
-                        sim = mem.get("similarity", 0)
-                        cat = mem.get("created_at", "")
-                        if isinstance(cat, datetime):
-                            ts = format_memory_timestamp(cat)
-                        elif isinstance(cat, str) and cat:
-                            try:
-                                ts = format_memory_timestamp(datetime.fromisoformat(cat.replace('Z', '+00:00')))
-                            except (ValueError, TypeError):
-                                ts = cat
-                        else:
-                            ts = "unknown time"
-                        ctx += f"{i}. **{ts}** (relevance: {sim:.0%})\n   {preview}\n\n"
-                        if mem.get("id"):
-                            used_ids.append(mem["id"])
-
-                    # Fire-and-forget: boost rating for cited memories
-                    if used_ids:
-                        try:
-                            from app.services.event_bus import emit_event, EventType as _EvtType
-                            await emit_event(
-                                event_type=_EvtType.MEMORY_ACCESSED,
-                                user_id=str(current_user.id),
-                                payload={"episode_ids": used_ids},
-                            )
-                        except Exception:
-                            pass  # Non-critical
-                    return ctx
-                except Exception as e:
-                    logger.warning(f"Memory retrieval failed (non-critical): {e}")
-                    return None
-
-            async def _fetch_pkg():
-                # Item 1.3 (2026-07-31): same missing-guard finding as
-                # _fetch_memory above — get_extended_signals()'s own _pkg()
-                # already covers this for the kernel-context path ("##
-                # Knowledge Graph" section), so this fetcher's output is
-                # discarded work once cutover is live.
-                if _context_cutover_live:
-                    return None
-                if not context_decision.inject_pkg:
-                    return None
-                try:
-                    from app.services.pkg_context_provider import pkg_context
-                    return await pkg_context.get_relevant_context(
-                        user_id=current_user.id, message=last_user_message, intent=user_intent
-                    )
-                except Exception as e:
-                    logger.warning(f"PKG context failed (non-critical): {e}")
-                    return None
-
-            async def _fetch_daily_brief():
-                if _context_cutover_live:
-                    # Side effect only — the moment-layer write still needs to
-                    # happen every turn; the text below is discarded once the
-                    # kernel context is live. The DAILY_BRIEF_AVAILABLE-but-
-                    # inject_daily_brief-false fallback further down handles
-                    # firing update_moment() exactly once per turn either way.
-                    return None
-                if not (DAILY_BRIEF_AVAILABLE and context_decision.inject_daily_brief):
-                    return None
-
-                compiled_brief = None
-                morning_brief_text = None
-
-                # Fetch the 4-layer compiled daily brief
-                try:
-                    try:
-                        await asyncio.wait_for(
-                            daily_brief_service.update_moment(
-                                user_id=current_user.id,
-                                current_message=last_user_message,
-                                conversation_id=request.conversation_id,
-                                db=db
-                            ), timeout=2.0
-                        )
-                    except (asyncio.TimeoutError, Exception):
-                        pass
-                    compiled_brief = await asyncio.wait_for(
-                        daily_brief_service.get_compiled_brief(current_user.id),
-                        timeout=2.0
-                    )
-                except (asyncio.TimeoutError, Exception) as e:
-                    logger.warning(f"Daily brief failed (non-critical): {e}")
-
-                # Also fetch today's morning brief (weather, calendar, news)
-                try:
-                    from sqlalchemy import text as sa_text
-                    from datetime import date as date_cls
-                    row = db.execute(sa_text(
-                        "SELECT full_text FROM morning_brief "
-                        "WHERE user_id = :uid AND brief_date = :today "
-                        "ORDER BY created_at DESC LIMIT 1"
-                    ), {"uid": current_user.id, "today": date_cls.today()}).fetchone()
-                    if row and row[0]:
-                        morning_brief_text = row[0].strip()
-                except Exception as e:
-                    logger.debug(f"Morning brief lookup failed: {e}")
-
-                # Combine: morning brief first, then compiled daily brief
-                parts = []
-                if morning_brief_text:
-                    parts.append(f"## Today's Morning Briefing\n{morning_brief_text}")
-                if compiled_brief:
-                    parts.append(compiled_brief)
-
-                return "\n\n".join(parts) if parts else None
-
-            async def _fetch_journal():
-                if _context_cutover_live:
-                    return None
-                try:
-                    from app.services.sara_journal_service import sara_journal
-                    return await sara_journal.get_entries_for_conversation_context(
-                        db=db, user_id=current_user.id, max_entries=5
-                    )
-                except Exception as e:
-                    logger.debug(f"Journal context failed: {e}")
-                    return None
-
-            async def _fetch_personality():
-                if _context_cutover_live or not context_decision.inject_activity_context:
-                    return None
-                try:
-                    _snap = None
-                    try:
-                        from app.services.unified_context import read_snapshot as _rs
-                        _snap = await _rs(_uid)
-                    except Exception:
-                        pass
-
-                    _act_state = _act_conf = _act_room = _interrupt = None
-                    if _snap and _snap.activity_state != "UNKNOWN":
-                        _act_state = _snap.activity_state
-                        _act_conf = _snap.activity_confidence
-                        _act_room = _snap.room
-                        _interrupt = _snap.interruptibility
-                    else:
-                        try:
-                            ar = db.execute(text("""
-                                SELECT activity_state, activity_confidence, activity_room, interruptibility_score
-                                FROM subconscious_state WHERE user_id = :user_id
-                            """), {"user_id": current_user.id}).fetchone()
-                            if ar and ar.activity_state:
-                                _act_state, _act_conf = ar.activity_state, ar.activity_confidence
-                                _act_room = ar.activity_room
-                                _interrupt = ar.interruptibility_score or 0.5
-                        except Exception:
-                            pass
-
-                    if not _act_state:
-                        return None
-
-                    memory_nudges = []
-                    try:
-                        from app.services.personality_engine import extract_memory_nudges
-                        memory_nudges = await extract_memory_nudges(
-                            user_id=_uid, message=last_user_message, db=db, max_nudges=3
-                        )
-                    except Exception:
-                        pass
-
-                    _cal_data = None
-                    try:
-                        from app.services.personality_engine import _load_calibration_data
-                        _cal_data = await _load_calibration_data(_uid)
-                    except Exception:
-                        pass
-
-                    _sara_tone = _sara_intensity = None
-                    try:
-                        from app.services.working_memory import read_memory
-                        _wm = await read_memory(_uid)
-                        if _wm and _wm.sara_emotional_tone:
-                            _sara_tone = _wm.sara_emotional_tone
-                            _sara_intensity = getattr(_wm, 'sara_emotional_intensity', None) or 0.5
-                    except Exception:
-                        pass
-
-                    ctx = _build_activity_context(
-                        activity_state=_act_state, confidence=_act_conf,
-                        room=_act_room, interruptibility=_interrupt or 0.5,
-                        turn_count=turn_count,
-                        conversation_depth=turn_count // 2 if turn_count else 0,
-                        memory_nudges=memory_nudges, calibration_data=_cal_data,
-                        sara_emotional_tone=_sara_tone, sara_emotional_intensity=_sara_intensity,
-                    )
-
-                    if _snap and _snap.current_place and _snap.current_place != "unknown":
-                        loc_line = f"Location: {_snap.current_place}"
-                        if _snap.current_place_type:
-                            loc_line += f" ({_snap.current_place_type})"
-                        if _snap.at_place_since:
-                            try:
-                                since = datetime.fromisoformat(_snap.at_place_since)
-                                mins = int((datetime.now(since.tzinfo) - since).total_seconds() / 60)
-                                if mins >= 1:
-                                    loc_line += f", arrived {mins}m ago" if mins < 120 else f", there since {since.strftime('%-I:%M %p')}"
-                            except Exception:
-                                pass
-                        ctx = (ctx or "") + "\n" + loc_line
-
-                    if _snap and _snap.rhythm_summary:
-                        ctx = (ctx or "") + "\n" + _snap.rhythm_summary
-
-                    return ctx
-                except Exception as e:
-                    logger.warning(f"Personality context failed (non-critical): {e}")
-                    return None
-
-            async def _fetch_device():
-                if _context_cutover_live:
-                    return None
-                try:
-                    from app.services.device_orchestrator import device_orchestrator
-                    return await device_orchestrator.get_device_context_for_chat(db, _uid)
-                except Exception:
-                    return None
-
-            async def _fetch_workout():
-                if _context_cutover_live:
-                    return None
-                try:
-                    return await workout_session_service.get_workout_context(current_user.id, db)
-                except Exception:
-                    return None
-
-            async def _fetch_fitness_context():
-                if _context_cutover_live or not context_decision.inject_fitness:
-                    return None
-                try:
-                    from app.services.fitness_context import get_fitness_context
-                    return await asyncio.wait_for(
-                        get_fitness_context(str(current_user.id), db),
-                        timeout=2.0
-                    )
-                except (asyncio.TimeoutError, Exception) as e:
-                    logger.debug(f"Fitness context fetch failed: {e}")
-                    return None
-
-            async def _fetch_changes_brief():
-                if _context_cutover_live or not context_decision.inject_changes_brief:
-                    return None
-                try:
-                    from app.services.unified_context import read_changes as _rc, read_snapshot as _rs2
-                    _snap = await asyncio.wait_for(_rs2(_uid), timeout=1.0)
-                    _changes = await asyncio.wait_for(_rc(_uid), timeout=1.0)
-                    if _changes and _snap.hours_since_last_chat > 0.5:
-                        ctx = "\n\n## What's Happened Recently\n"
-                        for ch in _changes[-8:]:
-                            ctx += f"- {ch}\n"
-                        if _snap.next_event_title and _snap.next_event_minutes_away and _snap.next_event_minutes_away < 120:
-                            ctx += f"\n**Coming up:** {_snap.next_event_title} in {_snap.next_event_minutes_away} minutes\n"
-                        return ctx
-                except (asyncio.TimeoutError, Exception) as e:
-                    logger.debug(f"Changes brief failed: {e}")
-                return None
-
-            async def _fetch_learning_recall():
-                # Item 1.3 (2026-07-31): pure text, no side effect — same
-                # already-accepted-gap shape as workout/fitness_context/
-                # changes_brief/personality/daily_tasks/autonomous_notes
-                # above, just never guarded before now.
-                if _context_cutover_live:
-                    return None
-                if not context_decision.inject_learning_recall:
-                    return None
-                try:
-                    return await _build_learning_recall_context(_uid, last_user_message, db)
-                except Exception:
-                    return None
-
-            async def _fetch_lessons():
-                # Item 1.3 ruling 2 (2026-07-31): ported into the kernel
-                # path (get_extended_signals' "lessons" + "lesson_ids") —
-                # injected_lesson_ids is now sourced from there when
-                # cutover is live (see below), so this fetcher's real
-                # side effect (the feedback loop) has a home and this
-                # duplicate computation is safe to skip.
-                if _context_cutover_live:
-                    return None, []
-                if not context_decision.inject_lessons:
-                    return None, []
-                try:
-                    es = STARTUP_HEALTH.get("embedding_service", {}).get("status")
-                    if es != "healthy":
-                        return None, []
-                    from app.services.lesson_injection_service import lesson_injection_service
-                    return await asyncio.wait_for(
-                        lesson_injection_service.get_lessons_for_injection(
-                            db=db, query=last_user_message, domain_hint=user_intent, limit=3
-                        ), timeout=2.5
-                    )
-                except (asyncio.TimeoutError, Exception) as e:
-                    logger.debug(f"Lesson injection failed: {e}")
-                    return None, []
-
-            async def _fetch_daily_tasks():
-                if _context_cutover_live or not context_decision.inject_daily_brief:
-                    return None
-                try:
-                    from sqlalchemy import text as sa_text
-                    from datetime import date as date_cls
-                    rows = db.execute(sa_text(
-                        "SELECT title, priority, is_completed FROM daily_task "
-                        "WHERE user_id = :uid AND task_date = :today "
-                        "ORDER BY is_completed, priority DESC, created_at"
-                    ), {"uid": current_user.id, "today": date_cls.today()}).fetchall()
-                    if not rows:
-                        return None
-                    lines = ["## Today's Tasks"]
-                    done = 0
-                    for r in rows:
-                        check = "[x]" if r[2] else "[ ]"
-                        pri = f" ({r[1]} priority)" if r[1] and r[1] != "normal" else ""
-                        lines.append(f"- {check} {r[0]}{pri}")
-                        if r[2]:
-                            done += 1
-                    lines.append(f"\n{done}/{len(rows)} completed")
-                    return "\n".join(lines)
-                except Exception as e:
-                    logger.debug(f"Daily tasks context failed: {e}")
-                    return None
-
-            async def _fetch_autonomous_notes():
-                """Fetch Sara's autonomous journal + show_david buffer for chat context."""
-                if _context_cutover_live:
-                    return None
-                try:
-                    import redis.asyncio as _aioredis
-                    _redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-                    parts = []
-
-                    # Recent autonomous session summary
-                    _r = await _aioredis.from_url(_redis_url, decode_responses=True)
-                    try:
-                        summary_raw = await _r.get("sara:subconscious:autonomous_summary")
-                        if summary_raw:
-                            s = json.loads(summary_raw)
-                            parts.append(
-                                f"Your last autonomous session: {s.get('turns', 0)} turns, "
-                                f"{s.get('notes_created', 0)} notes created, "
-                                f"ended: {s.get('end_reason', 'unknown')}"
-                            )
-                    finally:
-                        await _r.close()
-
-                    from app.db.session import get_async_session_factory
-                    _async_session = get_async_session_factory()
-                    async with _async_session() as _adb:
-                        # Today's journal note
-                        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-                        journal_title = f"Sara's Journal — {today}"
-                        result = await _adb.execute(text(
-                            "SELECT content FROM note WHERE user_id = :uid AND title = :title LIMIT 1"
-                        ), {"uid": _uid, "title": journal_title})
-                        row = result.fetchone()
-                        if row and row[0]:
-                            content = row[0]
-                            if len(content) > 1500:
-                                content = "..." + content[-1500:]
-                            parts.append(f"Your autonomous journal today:\n{content}")
-
-                        # Unshown show_david items
-                        sd_result = await _adb.execute(text("""
-                            SELECT title, content, category
-                            FROM acs_show_david_buffer
-                            WHERE user_id = :uid AND shown = FALSE
-                            ORDER BY priority DESC
-                            LIMIT 5
-                        """), {"uid": _uid})
-                        sd_rows = sd_result.fetchall()
-                        if sd_rows:
-                            sd_lines = []
-                            for sdr in sd_rows:
-                                sd_lines.append(f"- [{sdr[2]}] **{sdr[0]}**: {sdr[1]}")
-                            parts.append(
-                                "## Things From Your Autonomous Exploration\n"
-                                "While David was away, you came across a few things he might find interesting.\n"
-                                "Don't force these into conversation — only mention them if they're relevant "
-                                "to what David is talking about, or if there's a natural opening. "
-                                "If David asks what you've been up to, you can share these.\n\n"
-                                + "\n".join(sd_lines)
-                            )
-
-                    if parts:
-                        return "\n\n## Your Autonomous Session Notes\n" + "\n\n".join(parts)
-                    return None
-                except Exception:
-                    return None
-
-            # --- Run all fetches in parallel ---
-            _t0 = datetime.now(timezone.utc)
-            (
-                memory_ctx, pkg_ctx, daily_brief_ctx, journal_ctx,
-                personality_ctx, device_ctx, workout_ctx, fitness_ctx,
-                changes_ctx, recall_ctx, lessons_result, daily_tasks_ctx,
-                autonomous_ctx
-            ) = await asyncio.gather(
-                _fetch_memory(), _fetch_pkg(), _fetch_daily_brief(), _fetch_journal(),
-                _fetch_personality(), _fetch_device(), _fetch_workout(), _fetch_fitness_context(),
-                _fetch_changes_brief(), _fetch_learning_recall(), _fetch_lessons(),
-                _fetch_daily_tasks(), _fetch_autonomous_notes(),
-                return_exceptions=True,
-            )
-
-            # Unpack lessons (returns tuple)
-            lessons_text = None
-            if isinstance(lessons_result, tuple):
-                lessons_text, injected_lesson_ids = lessons_result
-            elif isinstance(lessons_result, Exception):
-                logger.debug(f"Lessons fetch exception: {lessons_result}")
-
-            # Convert exceptions to None
-            for _name, _val in [
-                ("memory", memory_ctx), ("pkg", pkg_ctx), ("daily_brief", daily_brief_ctx),
-                ("journal", journal_ctx), ("personality", personality_ctx),
-                ("device", device_ctx), ("workout", workout_ctx), ("fitness", fitness_ctx),
-                ("changes", changes_ctx), ("recall", recall_ctx),
-                ("daily_tasks", daily_tasks_ctx),
-            ]:
-                if isinstance(_val, Exception):
-                    logger.debug(f"Context fetch '{_name}' failed: {_val}")
-                    # Set to None via locals trick — handled below
-
-            # Safe string extraction (exceptions → None)
-            def _safe(v):
-                return v if isinstance(v, str) else None
-
-            _elapsed = (datetime.now(timezone.utc) - _t0).total_seconds()
-            logger.info(f"⚡ Parallel context assembly completed in {_elapsed:.2f}s")
-
-            # --- Sync-only context (fast, must stay sequential) ---
-
-            # Patterns (sync DB query)
-            pattern_text = None
-            if context_decision.inject_patterns and not _context_cutover_live:
-                try:
-                    from sqlalchemy import text as sa_text
-                    patterns_result = db.execute(sa_text("""
-                        SELECT description, confidence FROM behavioral_pattern
-                        WHERE user_id = :uid AND status = 'active'
-                        ORDER BY confidence DESC LIMIT 5
-                    """), {"uid": current_user.id}).fetchall()
-                    if patterns_result:
-                        pattern_text = "\n\n## Active Patterns Sara Has Noticed\n"
-                        for p in patterns_result:
-                            pattern_text += f"- {p.description} (confidence: {p.confidence:.0%})\n"
-                except Exception as e:
-                    logger.debug(f"Pattern context failed: {e}")
-
-            # Chess (sync)
-            chess_ctx = None
-            if CHESS_COMMANDS_AVAILABLE and not _context_cutover_live:
-                chess_ctx = get_chess_context_prompt(current_user.id, db)
-                if chess_ctx:
-                    chess_ctx = "\n\n## Chess Context:\n" + chess_ctx
-
-            # Workspace (sync, from request)
             workspace_ctx = None
             if request.workspace_context:
                 wc = request.workspace_context
@@ -8685,11 +8066,7 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                 if wc_parts:
                     workspace_ctx = "\n\n[Workspace Context]\n" + "\n".join(wc_parts)
 
-            # Update daily brief moment layer if we didn't inject the brief —
-            # or, when the kernel context is live, unconditionally: the
-            # _fetch_daily_brief short-circuit above never calls it in that
-            # case, so this is now the sole place it fires per turn.
-            if DAILY_BRIEF_AVAILABLE and (_context_cutover_live or not context_decision.inject_daily_brief):
+            if DAILY_BRIEF_AVAILABLE:
                 try:
                     await asyncio.wait_for(
                         daily_brief_service.update_moment(
@@ -8700,121 +8077,15 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                 except Exception:
                     pass
 
-            # --- Global workspace (§3.1 enforcement) ---
-            # Chat STARTS from what Sara is holding in mind right now — the same
-            # working memory the background daemon writes: today's predictions and
-            # any violations, open loops, in-flight autonomous work, current
-            # concern, David-state. This is the difference between a bag of
-            # reflexes and a mind that is *about something*; chat-Sara genuinely
-            # knows what the daemon did this morning because they share it.
-            mind_ctx = None
-            if not _context_cutover_live:
+            combined_context = None
+            from app.core.feature_flags import Flag as _CtxFlag, is_enabled as _ctx_flag_enabled
+            if _ctx_flag_enabled(_CtxFlag.SINGULAR_CONTEXT):
                 try:
-                    from app.db.session import get_async_session_factory as _get_wsf
-                    from app.services.global_workspace import build_workspace as _build_ws, format_for_chat as _fmt_ws
-                    _wsf = _get_wsf()
-                    async with _wsf() as _wsdb:
-                        _ws = await asyncio.wait_for(_build_ws(_wsdb, str(current_user.id)), timeout=2.0)
-                    mind_ctx = _fmt_ws(_ws)
-                except Exception as e:
-                    logger.debug(f"Workspace (mind) context failed (non-critical): {e}")
-
-            # --- World Brief (SARA_MIND_V2 Phase 1, MINDV2_BRIEF) ---
-            # Additive A/B against global_workspace above during the overlap
-            # window (D3 cutover discipline) — both render into context so
-            # brief quality can be judged against the workspace it will
-            # eventually replace (Phase 5 deletes global_workspace.py once
-            # this is proven out).
-            world_brief_ctx = None
-            interest_model_ctx = None
-            if not _context_cutover_live:
-                try:
-                    from app.core.feature_flags import Flag as _MFlag, is_enabled as _mind_enabled
-                    if _mind_enabled(_MFlag.MINDV2_BRIEF):
-                        from app.services.world_brief import get_rendered_brief as _get_brief
-                        from app.db.session import get_async_session_factory as _get_bf
-                        _bf = _get_bf()
-                        async with _bf() as _bdb:
-                            rendered = await asyncio.wait_for(
-                                _get_brief(_bdb, str(current_user.id)), timeout=2.0
-                            )
-                        world_brief_ctx = "\n\n## World Brief (what Sara currently knows)\n" + rendered
-                except Exception as e:
-                    logger.debug(f"World Brief context failed (non-critical): {e}")
-
-                # --- Interest Model (SARA_MIND_V2 §3.2, MINDV2_BRIEF) ---
-                try:
-                    if _mind_enabled(_MFlag.MINDV2_BRIEF):
-                        from app.services.interest_model import get_rendered_interest_model as _get_im
-                        _imf2 = _get_bf()
-                        async with _imf2() as _imdb2:
-                            im_rendered = await asyncio.wait_for(
-                                _get_im(_imdb2, str(current_user.id)), timeout=2.0
-                            )
-                        interest_model_ctx = "\n\n" + im_rendered
-                except Exception as e:
-                    logger.debug(f"Interest model context failed (non-critical): {e}")
-
-            # --- Apply token budget ---
-            budget = ContextBudget(max_tokens=6000)
-            # Workspace first — it is the base the rest of retrieval adds to.
-            budget.add("workspace_mind", _safe(mind_ctx), priority=1)
-            budget.add("world_brief", _safe(world_brief_ctx), priority=1)
-            budget.add("interest_model", _safe(interest_model_ctx), priority=2)
-            budget.add("memory", _safe(memory_ctx), priority=1)
-            budget.add("personality", _safe(personality_ctx), priority=1)
-            budget.add("daily_brief", _safe(daily_brief_ctx), priority=2)
-            budget.add("daily_tasks", _safe(daily_tasks_ctx), priority=2)
-            budget.add("pkg", _safe(pkg_ctx), priority=2)
-            budget.add("fitness", _safe(fitness_ctx), priority=2)
-            budget.add("journal", _safe(journal_ctx), priority=3)
-            budget.add("autonomous", _safe(autonomous_ctx), priority=3)
-            budget.add("lessons", lessons_text, priority=3)
-            budget.add("patterns", pattern_text, priority=4)
-            budget.add("changes_brief", _safe(changes_ctx), priority=4)
-            budget.add("device", _safe(device_ctx), priority=4)
-            budget.add("learning_recall", _safe(recall_ctx), priority=5)
-            budget.add("workout", _safe(workout_ctx), priority=5)
-            budget.add("chess", chess_ctx, priority=5)
-            budget.add("workspace", workspace_ctx, priority=5)
-
-            combined_context = budget.build_context_text()
-
-            # Arc 2.3 staged rollout (SARA_ALIVE_BUILD_PLAN, per review): same
-            # mechanism as Arc 3.4's tool diet — log the old ~19-source
-            # assembly and the new 4-source kernel assembly (now extended
-            # with the pkg/daily_brief/journal/patterns/device/emotional_tone
-            # categories the first comparison round measured missing) side
-            # by side on every real turn. `Flag.SINGULAR_CONTEXT` (separate
-            # from `SINGULAR_KERNEL`, which gates unrelated ambient-cognition
-            # routing) is the dedicated, narrowly-scoped switch — default
-            # OFF. When on, the new assembly actually replaces the old one;
-            # any failure in building it falls back to the old assembly
-            # (fail-open, revert-on-regression is "turn the flag back off").
-            _new_rendered = None
-            _context_cutover_live = False
-            try:
-                from app.core.feature_flags import Flag as _CtxFlag, is_enabled as _ctx_flag_enabled
-                _context_cutover_live = _ctx_flag_enabled(_CtxFlag.SINGULAR_CONTEXT)
-                if _ctx_flag_enabled(_CtxFlag.SINGULAR_KERNEL) or _context_cutover_live:
                     from app.services.context_snapshot import (
                         get_context_snapshot_cached, get_extended_signals, render_engaged_context,
                     )
-                    from app.services.memory_recall import recall as _memory_recall
+                    from app.services.memory_recall import recall as _memory_recall, ALL_KINDS as _ALL_RECALL_KINDS
                     from app.services.intent_graph_projection import get_intent_graph
-
-                    # Item 1.3 Session 1 (2026-07-31): profiling (first pass,
-                    # sequential + individually timed) found memory_recall as
-                    # the dominant cost (~2.25s of ~2.86s total) — context_
-                    # snapshot/intent_graph/extended_signals combined were
-                    # already cheap (~0.6s). context_snapshot, intent_graph,
-                    # and extended_signals all take the same sync `db:
-                    # Session` and stay sequential relative to each other
-                    # (concurrent use of one SQLAlchemy sync Session across
-                    # coroutines isn't safe); memory_recall opens its own
-                    # sessions and has no such constraint, so it now runs
-                    # concurrently with that sequential trio instead of after
-                    # it — real wall-clock win with no new correctness risk.
                     import asyncio as _kctx_asyncio
                     import time as _kctx_time
 
@@ -8835,82 +8106,49 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                         )
                         return ctx, intents, ext
 
-                    # Item 1.3 Session 1 (2026-07-31): profiling _pkg() inside
-                    # get_extended_signals found it costing ~1.5-3.6s per
-                    # turn — traced to personal_kg.query_semantic()'s
-                    # embedding call (confirmed fast in isolation, ~20-100ms;
-                    # slow only during a real turn, i.e. genuine contention
-                    # on the shared embedding host from concurrent background
-                    # cognition). extended_signals' _pkg() and this call both
-                    # independently ran a "fact"-kind semantic search for the
-                    # SAME query — real, measured duplicate work, not just a
-                    # theoretical one. Excluding "fact" here (extended_signals'
-                    # _pkg() keeps its dedicated, guaranteed-visible fact
-                    # lookup — recall_traces' shared top-5 cap could otherwise
-                    # crowd facts out) cuts the redundant half of that cost
-                    # without touching the actual contention.
-                    from app.services.memory_recall import ALL_KINDS as _ALL_RECALL_KINDS
+                    # context_snapshot/intent_graph/extended_signals all take
+                    # the same sync `db: Session` and stay sequential relative
+                    # to each other (concurrent use of one SQLAlchemy sync
+                    # Session across coroutines isn't safe); memory_recall
+                    # opens its own sessions, so it runs concurrently with
+                    # that trio instead of after it.
                     _kctx_t0 = _kctx_time.monotonic()
                     (_new_context, _new_open_intents, _extended), _new_recalled = await _kctx_asyncio.gather(
                         _sync_db_trio(),
                         _memory_recall(
                             user_id=str(current_user.id), query=last_user_text or "", k=5,
+                            # "fact" excluded: extended_signals' _pkg() already
+                            # does a dedicated fact-kind lookup (kept separate
+                            # since recall_traces' shared top-5 cap could
+                            # otherwise crowd facts out) — this avoided a
+                            # confirmed, measured duplicate embedding call.
                             kinds=[k for k in _ALL_RECALL_KINDS if k != "fact"],
                         ),
                     )
-                    _kctx_t_end = _kctx_time.monotonic()
                     logger.info(
                         f"⏱️ [kernel-context-timing] sync_trio || memory_recall, "
-                        f"combined_wall_clock={_kctx_t_end-_kctx_t0:.2f}s"
+                        f"combined_wall_clock={_kctx_time.monotonic()-_kctx_t0:.2f}s"
                     )
-                    _new_rendered = render_engaged_context(
+                    combined_context = render_engaged_context(
                         _new_context, _new_open_intents, _new_recalled.get("traces") or [], extended=_extended,
                         workspace_ctx=workspace_ctx,
                     )
-                    # Item 1.3 ruling 2 (2026-07-31): lessons ported into
-                    # the kernel path (extended_signals' new "lessons"
-                    # entry) — this is now the sole source of
-                    # injected_lesson_ids once cutover is live, so the
-                    # post-response feedback loop (record_lesson_
-                    # application etc.) keeps recording against the real
-                    # lessons actually shown, not the legacy fetcher's
-                    # (now-guarded, non-running) duplicate computation.
-                    if _context_cutover_live:
-                        injected_lesson_ids = _extended.get("lesson_ids") or []
-                    _old_source_names = [getattr(s, "name", "?") for s in (getattr(budget, "sources", []) or [])]
-                    logger.info(
-                        f"📐 [context-diet-compare] old={len(combined_context or '')}chars "
-                        f"sources={_old_source_names} "
-                        f"new={len(_new_rendered)}chars "
-                        f"(world_slices={sum(1 for k in ('david','home','calendar_horizon','health_today','work','fleet') if (_new_context.get('world_state') or {}).get(k))}, "
-                        f"extended={sorted(k for k, v in _extended.items() if v)}, "
-                        f"recall_traces={len(_new_recalled.get('traces') or [])}, open_intents={_new_open_intents})"
-                    )
-            except Exception as _ctx_cmp_err:
-                logger.debug(f"[context-diet-compare] skipped: {_ctx_cmp_err}")
-                _new_rendered = None
-
-            if _new_rendered and _context_cutover_live:
-                logger.info(
-                    f"📐 [context-diet-live] using the {len(_new_rendered)}-char kernel assembly "
-                    f"instead of the {len(combined_context or '')}-char legacy assembly"
-                )
-                combined_context = _new_rendered
-                try:
-                    from app.services.context_diet_usage import record_clean_turn
-                    record_clean_turn(str(current_user.id))
-                except Exception:
-                    pass
+                    injected_lesson_ids = _extended.get("lesson_ids") or []
+                    try:
+                        from app.services.context_diet_usage import record_clean_turn
+                        record_clean_turn(str(current_user.id))
+                    except Exception:
+                        pass
+                except Exception as _kctx_err:
+                    logger.warning(f"[kernel-context] assembly failed (non-critical, chat continues without it): {_kctx_err}")
+                    combined_context = None
 
             if combined_context:
                 system_message = ChatMessage(
                     role="system",
                     content=system_message.content + "\n\n" + combined_context
                 )
-                logger.info(
-                    f"📝 Context injected: {budget.total_tokens} est. tokens from "
-                    f"{len(budget.sources)} sources → {len(budget.allocate())} kept"
-                )
+                logger.info(f"📝 Context injected: {len(combined_context)} chars (kernel assembly)")
             _mark_stage("context_assembled")
 
             # H3 (Brain Alignment): one-shot correction encoding. If David just
