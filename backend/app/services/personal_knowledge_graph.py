@@ -1718,7 +1718,7 @@ class PersonalKnowledgeGraph:
             try:
                 from app.services.embedding_service import EmbeddingService
                 svc = EmbeddingService()
-                embedding = await svc.generate_embedding(content_text)
+                embedding = await svc.generate_embedding(content_text, capability="embedding_cognition")  # fire-and-forget write, never blocks presence
                 if not embedding:
                     return
                 from sqlalchemy import text as sa_text, create_engine
@@ -1877,7 +1877,7 @@ class PersonalKnowledgeGraph:
 
             from app.services.embedding_service import EmbeddingService
             svc = EmbeddingService()
-            embedding = await svc.generate_embedding(content_text)
+            embedding = await svc.generate_embedding(content_text, capability="embedding_cognition")  # write path, never blocks presence
             if not embedding:
                 logger.warning(f"PKG: Failed to generate embedding for {pkg_id}")
                 return False

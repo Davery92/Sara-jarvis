@@ -189,7 +189,7 @@ Example response: ["machine learning", "neural networks", "gradient descent"]"""
                     break
 
                 # Generate embedding
-                embedding = await embedding_service.generate_embedding(chunk_text)
+                embedding = await embedding_service.generate_embedding(chunk_text, capability="embedding_cognition")  # background source ingestion
 
                 if embedding:
                     # Extract concepts using LLM (only for first few chunks to save tokens)
@@ -857,7 +857,7 @@ Example response: ["machine learning", "neural networks", "gradient descent"]"""
                     break
 
                 # Generate embedding
-                embedding = await embedding_service.generate_embedding(chunk_text)
+                embedding = await embedding_service.generate_embedding(chunk_text, capability="embedding_cognition")  # background source ingestion
 
                 if embedding:
                     # Extract concepts using LLM (only for first few chunks)
@@ -1008,7 +1008,7 @@ Example response: ["machine learning", "neural networks", "gradient descent"]"""
         ancestor topics using vector similarity.
         """
         try:
-            query_embedding = await embedding_service.generate_embedding(query)
+            query_embedding = await embedding_service.generate_embedding(query, capability="embedding_cognition")  # Learning UI search, not the hot chat loop
 
             if not query_embedding:
                 logger.error("Failed to generate query embedding")
@@ -1090,7 +1090,7 @@ Example response: ["machine learning", "neural networks", "gradient descent"]"""
             return await self.search_chunks(topic_id, query, db, limit=limit, prefer_analogy=False)
 
         try:
-            query_embedding = await embedding_service.generate_embedding(query)
+            query_embedding = await embedding_service.generate_embedding(query, capability="embedding_cognition")  # Learning UI search, not the hot chat loop
             if not query_embedding:
                 return []
 

@@ -57,7 +57,9 @@ async def create_episode(payload: EpisodeCreate, current_user=Depends(get_curren
                          db: Session = Depends(get_db)):
     """Create a new episode (memory trace). Generates embedding automatically."""
     try:
-        emb = await embedding_service.generate_embedding(payload.content)
+        # Manual API call, not the hot chat loop — presence-latency
+        # ruling 1 (2026-07-31): CPU fallback host.
+        emb = await embedding_service.generate_embedding(payload.content, capability="embedding_cognition")
     except Exception:
         emb = None
 

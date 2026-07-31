@@ -1424,7 +1424,8 @@ async def _backfill_episode_embeddings(limit: int = 500) -> int:
     # in this batch.
     for row in rows:
         try:
-            vec = await svc.generate_embedding(row.content)
+            # Celery task — presence-latency ruling 1 (2026-07-31): CPU fallback host.
+            vec = await svc.generate_embedding(row.content, capability="embedding_cognition")
         except Exception:
             continue
         if not vec:

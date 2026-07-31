@@ -226,9 +226,10 @@ class IntelligencePipeline:
             
             content_text = content_data.get('content', '') or content_data.get('content_text', '')
             
-            # 1. Generate embedding (fast)
+            # 1. Generate embedding (fast). Background pipeline task —
+            # presence-latency ruling 1 (2026-07-31): CPU fallback host.
             logger.info(f"⚡ Generating embedding for {task.content_id}")
-            embedding = await embedding_service.generate_embedding(content_text)
+            embedding = await embedding_service.generate_embedding(content_text, capability="embedding_cognition")
             
             # 2. Update Neo4j with embedding
             await neo4j_service.update_node_embedding(task.content_id, embedding)

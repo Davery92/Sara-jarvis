@@ -254,7 +254,7 @@ class TopicConnectionService:
             if not source_chunks:
                 # Fall back to title/description embedding
                 text_to_embed = f"{topic.title}. {topic.description or ''}"
-                source_embedding = await embedding_service.generate_embedding(text_to_embed)
+                source_embedding = await embedding_service.generate_embedding(text_to_embed, capability="embedding_cognition")  # user-triggered background discovery, not the hot chat loop
                 if not source_embedding:
                     return {"topic_id": topic_id, "suggestions": [], "error": "Could not generate embedding"}
                 source_embeddings = [source_embedding]
@@ -278,7 +278,7 @@ class TopicConnectionService:
                 else:
                     # Fall back to title/description
                     text_to_embed = f"{other_topic.title}. {other_topic.description or ''}"
-                    other_embedding = await embedding_service.generate_embedding(text_to_embed)
+                    other_embedding = await embedding_service.generate_embedding(text_to_embed, capability="embedding_cognition")
                     if other_embedding:
                         other_embeddings = [other_embedding]
                     else:

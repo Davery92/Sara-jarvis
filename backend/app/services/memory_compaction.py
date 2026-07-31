@@ -184,7 +184,9 @@ async def _summarize_cluster(members: List[Any], week: str, topic: str) -> str:
 async def _embed(text_str: str):
     try:
         from app.services.embedding_service import EmbeddingService
-        return await EmbeddingService().generate_embedding(text_str)
+        # Background consolidation — presence-latency ruling 1 (2026-07-31):
+        # CPU fallback host, never the GPU host a real chat turn needs.
+        return await EmbeddingService().generate_embedding(text_str, capability="embedding_cognition")
     except Exception as e:
         logger.debug(f"compaction embed failed: {e}")
         return None

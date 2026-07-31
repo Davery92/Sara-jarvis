@@ -454,13 +454,18 @@ class ContentInboxService:
             logger.error(f"Failed to dispatch extraction task: {e}")
 
     async def _generate_embedding(self, title: Optional[str], text_content: str) -> Optional[list]:
-        """Generate embedding for title + first 500 chars of text."""
+        """Generate embedding for title + first 500 chars of text.
+
+        Background ingestion write path (presence-latency ruling 1,
+        2026-07-31) — CPU fallback host. search_inbox's own query
+        embedding stays on the default presence host since it's wrapped
+        as a live chat tool (app/tools/content_inbox.py)."""
         try:
             from app.services.embedding_service import embedding_service
             embed_text = f"{title or ''} {text_content[:500]}".strip()
             if not embed_text:
                 return None
-            return await embedding_service.generate_embedding(embed_text)
+            return await embedding_service.generate_embedding(embed_text, capability="embedding_cognition")
         except Exception as e:
             logger.warning(f"Embedding generation failed: {e}")
             return None

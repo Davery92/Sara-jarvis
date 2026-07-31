@@ -792,8 +792,11 @@ class NightlyDreamService:
                             base_importance=0.6,
                         )
 
-                        # Generate embedding for the episode
-                        emb = await embedding_service.generate_embedding(summary)
+                        # Generate embedding for the episode. Background
+                        # dreaming — presence-latency ruling 1 (2026-07-31):
+                        # routes to the CPU fallback host, never the GPU
+                        # host a real chat turn needs.
+                        emb = await embedding_service.generate_embedding(summary, capability="embedding_cognition")
                         if emb:
                             episode.embedding = emb
 

@@ -241,9 +241,11 @@ class LessonExtractor:
     async def _store_lesson(self, db: Session, lesson: ExtractedLesson) -> None:
         """Store the lesson in sara_reflection table."""
         try:
-            # Generate embedding for the lesson
+            # Generate embedding for the lesson. Runs after the response is
+            # already sent (post-response self-learning processing) —
+            # presence-latency ruling 1 (2026-07-31): CPU fallback host.
             embedding = await embedding_service.generate_embedding(
-                f"{lesson.lesson} {lesson.when_to_apply}"
+                f"{lesson.lesson} {lesson.when_to_apply}", capability="embedding_cognition"
             )
 
             # Insert into sara_reflection as a "mistake" type reflection
