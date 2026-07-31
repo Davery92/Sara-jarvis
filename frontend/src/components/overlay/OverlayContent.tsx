@@ -131,11 +131,21 @@ export function NutritionContent() {
     const today = localDateStr()
     Promise.all([
       getJson(`/api/fitness/food-log/summary?start_date=${today}&end_date=${today}`).catch(() => null),
+      getJson('/api/fitness/today-target').catch(() => null),
       getJson('/api/fitness/goals').catch(() => null),
     ])
-      .then(([summary, goals]) => {
+      .then(([summary, todayTarget, goals]) => {
         const totals = summary?.statistics?.totals || summary?.totals || {}
-        setData({ totals, goals: goals || {} })
+        // item 2.1 (2026-07-30): today-target is the one phase-aware brain
+        // for "what should today's numbers be" — goals is only the static
+        // fallback for a day with no active program (today-target.target
+        // is null then). Falling back to the stale static /goals value
+        // otherwise is exactly the two-answers bug this fix closes.
+        const t = todayTarget?.target
+        const resolvedGoals = t
+          ? { calories: t.calories, protein: t.protein, carbs: t.carbs, fats: t.fat }
+          : (goals || {})
+        setData({ totals, goals: resolvedGoals })
       })
       .catch(() => setError("Could not load today's nutrition."))
   }, [])
