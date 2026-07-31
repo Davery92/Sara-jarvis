@@ -225,7 +225,26 @@ function relTime(iso: string | null): string {
   return `${Math.floor(h / 24)}d ago`;
 }
 
-export default function Interior() {
+// item 2.3 (2026-07-30): the 5 legacy standalone dashboards below (system,
+// mind, system-status, sensory-monitor, orchestrator-lab) read as pure
+// engineering/diagnostics views — the same nature as Interior itself — so
+// they're demoted out of the primary nav registry and reachable only from
+// here, same "Advanced" disclosure pattern as the migration-status section
+// below. Machines and ACS stayed in the main nav (David's call): real
+// features he reaches directly, not internals sprawl.
+const LEGACY_OPS_VIEWS: Array<{ view: 'system' | 'mind' | 'system-status' | 'sensory-monitor' | 'orchestrator-lab'; label: string }> = [
+  { view: 'system', label: 'System' },
+  { view: 'mind', label: 'Mind' },
+  { view: 'system-status', label: 'System Status' },
+  { view: 'sensory-monitor', label: 'Sensory Monitor' },
+  { view: 'orchestrator-lab', label: 'Orchestrator Lab' },
+];
+
+interface InteriorProps {
+  onNavigate?: (view: string) => void;
+}
+
+export default function Interior({ onNavigate }: InteriorProps) {
   const [context, setContext] = useState<ContextSnapshot | null>(null);
   const [bodyState, setBodyState] = useState<BodyState | null>(null);
   const [intentGraph, setIntentGraph] = useState<IntentGraph | null>(null);
@@ -627,6 +646,22 @@ export default function Interior() {
                 ))}
               </div>
             </Section>
+
+            {onNavigate && (
+              <Section title="Legacy dashboards" subtitle="demoted out of the main nav — still fully live">
+                <div className="flex flex-wrap gap-2">
+                  {LEGACY_OPS_VIEWS.map(({ view, label }) => (
+                    <button
+                      key={view}
+                      onClick={() => onNavigate(view)}
+                      className="text-xs bg-gray-700/50 hover:bg-gray-700 text-gray-300 px-2 py-1 rounded"
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </Section>
+            )}
           </div>
         )}
       </div>

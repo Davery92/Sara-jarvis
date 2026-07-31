@@ -384,7 +384,7 @@ export default function ShellWorkspaceContent({
   if (targetView === 'interior') {
     return (
       <div className="flex-1 overflow-y-auto min-h-0">
-        {renderDeferredView('Loading Interior…', <Interior />)}
+        {renderDeferredView('Loading Interior…', <Interior onNavigate={(v: string) => onNavigate(v as AppView)} />)}
       </div>
     )
   }

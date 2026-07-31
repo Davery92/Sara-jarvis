@@ -477,14 +477,15 @@ function App() {
     { view: 'automations', label: 'Agent Tasks', icon: 'bolt' },
     { view: 'knowledge', label: 'Facts & People', icon: 'psychology' },
     { view: 'acs', label: 'ACS', icon: 'smart_toy' },
-    { view: 'sensory-monitor', label: 'Sensory', icon: 'sensors' },
     { view: 'machines', label: 'Machines', icon: 'dns' },
-    { view: 'system', label: 'System', icon: 'hub' },
-    { view: 'mind', label: 'Mind', icon: 'psychology_alt' },
-    { view: 'orchestrator-lab', label: 'Orchestrator Lab', icon: 'science' },
-    { view: 'system-status', label: 'System Status', icon: 'monitoring' },
     { view: 'privacy-dashboard', label: 'Privacy', icon: 'lock' },
   ]
+  // item 2.3 (2026-07-30): System/Mind/System Status/Sensory Monitor/
+  // Orchestrator Lab demoted out of the nav registry — pure engineering/
+  // diagnostics views, same nature as Interior itself. Routes and
+  // components are untouched (nothing deleted), reachable now only via
+  // Interior's "Legacy dashboards" advanced disclosure. Machines and ACS
+  // stayed — real features David reaches directly.
 
   const mobileBottomNavItems: ShellNavItem[] = primaryNavItems
 
