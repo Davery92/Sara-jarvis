@@ -244,35 +244,6 @@ class BehaviorRouter:
     then executes the intent against that system.
     """
 
-    def __init__(self):
-        self._client = None
-
-    async def _get_llm_client(self):
-        """Get or create the OpenAI client.
-
-        Arc 6.2 (work-order item 6): this used to read settings.OPENAI_
-        BASE_URL / settings.OPENAI_MODEL — uppercase attributes that
-        don't exist on Settings (only lowercase openai_base_url/
-        openai_model do) — so this path raised AttributeError every
-        time it actually ran. Fixed and migrated onto llm_broker's
-        "utility" capability in the same move, rather than just
-        swapping in the lowercase names."""
-        if self._client is None:
-            from openai import AsyncOpenAI
-            from app.core.config import settings
-            from app.services.llm_broker import resolve
-            cap = resolve("utility")
-            self._client = AsyncOpenAI(
-                base_url=cap["base_url"],
-                api_key=settings.openai_api_key or "not-needed",
-            )
-        return self._client
-
-    def _get_model(self) -> str:
-        """Get the model name via the broker's "utility" capability."""
-        from app.services.llm_broker import resolve
-        return resolve("utility")["model"]
-
     def _get_existing_skills_summary(self) -> str:
         """Get a summary of existing skills for the classification prompt"""
         try:
@@ -303,8 +274,6 @@ class BehaviorRouter:
         Returns:
             RoutingResult with destination and parameters
         """
-        client = await self._get_llm_client()
-
         # Get existing skills for context
         existing_skills = self._get_existing_skills_summary()
 
@@ -314,17 +283,44 @@ class BehaviorRouter:
         )
 
         try:
-            response = await client.chat.completions.create(
-                model=self._get_model(),
-                messages=[
+            # resolve() + httpx — the canonical pattern (llm_broker.py's
+            # module docstring); the class used to build an openai.
+            # AsyncOpenAI client here, but `openai` was never an installed
+            # dependency in this codebase, so this call site raised
+            # ModuleNotFoundError every single time it actually ran,
+            # silently swallowed by route_and_execute's caller into a
+            # generic "Failed to route behavior" tool result (2026-07-31,
+            # same landmine as deliberation.py's deep path and llm_broker's
+            # deleted get_broker_client() — confirmed live: a real
+            # route_behavior tool call failed with exactly this error).
+            import httpx
+            from app.core.config import settings
+            from app.services.llm_broker import resolve
+
+            cap = resolve("utility")
+            base_url = (cap["base_url"] or "").rstrip("/")
+            payload = {
+                "model": cap["model"],
+                "messages": [
                     {"role": "system", "content": "You are a classification system. Return only valid JSON."},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.1,  # Low temperature for consistent classification
-                max_tokens=1000,
-            )
+                "temperature": 0.1,  # Low temperature for consistent classification
+                "max_tokens": 1000,
+                # gotcha_qwen_thinking: without this, `content` comes back
+                # empty for structured/short outputs like this JSON turn.
+                "chat_template_kwargs": {"enable_thinking": False},
+            }
+            async with httpx.AsyncClient(timeout=60.0) as http_client:
+                response = await http_client.post(
+                    f"{base_url}/chat/completions",
+                    json=payload,
+                    headers={"Authorization": f"Bearer {getattr(settings, 'openai_api_key', '') or 'not-needed'}"},
+                )
+                response.raise_for_status()
+                result_json = response.json()
 
-            content = response.choices[0].message.content.strip()
+            content = result_json["choices"][0]["message"]["content"].strip()
 
             # Parse the JSON response - handle markdown code blocks
             if content.startswith("```"):

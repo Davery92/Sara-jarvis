@@ -220,6 +220,121 @@ async def arc1_checks(user_id: str) -> list:
             "0 non-chat rows — every Claude call in the ledger is chat-persona")
     checks.append(await _check("1e", local_first_no_non_chat_claude_usage()))
 
+    async def every_referenced_import_actually_resolves():
+        """The guard for the whole 2026-07-31 openai-import incident class
+        (llm_broker.get_broker_client, deliberation.py's deep path,
+        behavior_router.py's classify) -- all three depended on `openai`,
+        a package never installed in this codebase, and all three stayed
+        invisible for a full day because a plain "does the module import
+        cleanly" check WOULDN'T have caught any of them: every broken
+        import was function-local (`from openai import AsyncOpenAI` inside
+        a method body, not at module top-level), so importing the module
+        alone never executes it -- confirmed directly (2026-07-31): a
+        reconstructed repro of the exact broken shape imports cleanly with
+        zero errors. A real per-module import sweep is still checked
+        separately as its own thing below (it catches a *different*, real
+        class of bug -- module-level import errors) — this check is the
+        one built to catch what actually happened: it AST-walks every .py
+        file in app/services and app/tasks for every import statement
+        anywhere in the file (top-level or nested inside any function),
+        collects every distinct package name referenced, and verifies each
+        one is actually resolvable via importlib -- regardless of whether
+        anything ever calls the function that imports it.
+
+        Two known, deliberately-guarded optional dependencies are
+        allowlisted (both confirmed 2026-07-31, both real `except
+        ImportError` fallbacks to an equivalent working path, not a
+        degraded one): riva/soundfile in services/audio/riva_client.py
+        (RivaASRClient falls back to HTTP transcription when riva.client
+        fails to import; soundfile is only reachable through the gRPC path
+        that same guard already prevents). Nothing else is allowlisted --
+        a new hit here should be investigated with the same rigor those
+        three got, not silently added to the list."""
+        import ast
+        import importlib.util
+        import app.services as _svc_pkg
+        import app.tasks as _tasks_pkg
+        from pathlib import Path
+
+        ALLOWLIST = {
+            ("services/audio/riva_client.py", "riva"),
+            ("services/audio/riva_client.py", "soundfile"),
+        }
+
+        def collect_import_names(filepath):
+            names = set()
+            tree = ast.parse(Path(filepath).read_text())
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        names.add(alias.name.split(".")[0])
+                elif isinstance(node, ast.ImportFrom):
+                    if node.module and node.level == 0:
+                        names.add(node.module.split(".")[0])
+            return names
+
+        app_root = Path(__file__).parent.parent / "app"
+        failures = []
+        resolve_cache = {}
+        for pkg in (_svc_pkg, _tasks_pkg):
+            pkg_root = Path(pkg.__path__[0])
+            for py_file in pkg_root.rglob("*.py"):
+                rel = str(py_file.relative_to(app_root))
+                try:
+                    names = collect_import_names(py_file)
+                except SyntaxError as e:
+                    failures.append(f"{rel}: SyntaxError: {e}")
+                    continue
+                for name in names:
+                    if (rel, name) in ALLOWLIST:
+                        continue
+                    if name not in resolve_cache:
+                        try:
+                            resolve_cache[name] = importlib.util.find_spec(name) is not None
+                        except (ImportError, ModuleNotFoundError, ValueError):
+                            resolve_cache[name] = False
+                    if not resolve_cache[name]:
+                        failures.append(f"{rel}: {name}")
+        if failures:
+            return Check("1.import-guard every referenced import resolves (app/services + app/tasks)").fail(
+                str(failures))
+        return Check("1.import-guard every referenced import resolves (app/services + app/tasks)").ok(
+            f"{len(resolve_cache)} distinct import names checked, all resolve")
+    checks.append(await _check("1f", every_referenced_import_actually_resolves()))
+
+    async def every_module_imports_cleanly():
+        """Companion check, real but narrower than the one above: a plain
+        per-module import sweep of app/services + app/tasks. Catches a
+        genuinely different bug class (module-level import errors — a
+        typo'd internal import, a circular import, a missing top-level
+        dependency) that the AST-based check above doesn't cover the same
+        way (it checks names resolve, not that the whole module actually
+        executes cleanly end to end). Named honestly: this would NOT have
+        caught the openai incident (confirmed above) — it's here because
+        it's still a real, cheap, worthwhile guard on its own terms."""
+        import importlib
+        import pkgutil
+        import app.services as _svc_pkg
+        import app.tasks as _tasks_pkg
+
+        failures = []
+        total = 0
+        for pkg in (_svc_pkg, _tasks_pkg):
+            for _finder, name, ispkg in pkgutil.walk_packages(pkg.__path__, prefix=pkg.__name__ + "."):
+                if ispkg:
+                    continue
+                total += 1
+                try:
+                    importlib.import_module(name)
+                except Exception as e:
+                    failures.append(f"{name}: {type(e).__name__}: {e}")
+        if failures:
+            return Check("1.import-guard every module imports cleanly (app/services + app/tasks)").fail(
+                str(failures))
+        return Check("1.import-guard every module imports cleanly (app/services + app/tasks)").ok(
+            f"{total} modules imported, 0 failures")
+    checks.append(await _check("1g", every_module_imports_cleanly()))
+
     return checks
 
 
