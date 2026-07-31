@@ -23,7 +23,6 @@ const loadPrivacyDashboard = async () => {
 }
 const loadMorningBrief = () => import('../MorningBrief')
 const loadOrchestratorLab = () => import('../OrchestratorLab')
-const loadSystemStatus = () => import('../../pages/SystemStatus')
 const loadACSPage = () => import('../../pages/ACSPage')
 const loadSystemDashboard = () => import('../system/SystemDashboard')
 const loadMachinesDashboard = () => import('../machines/MachinesDashboard')
@@ -50,7 +49,6 @@ const ProjectSection = lazy(loadProjectSection)
 const PrivacyDashboard = lazy(loadPrivacyDashboard)
 const MorningBrief = lazy(loadMorningBrief)
 const OrchestratorLab = lazy(loadOrchestratorLab)
-const SystemStatus = lazy(loadSystemStatus)
 const SystemDashboard = lazy(loadSystemDashboard)
 const MachinesDashboard = lazy(loadMachinesDashboard)
 const MindDashboard = lazy(loadMindDashboard)
@@ -485,14 +483,6 @@ export default function ShellWorkspaceContent({
     return (
       <div className="flex-1 overflow-y-auto min-h-0">
         {renderDeferredView('Loading lab…', <OrchestratorLab onBack={onOrchestratorBack} />)}
-      </div>
-    )
-  }
-
-  if (targetView === 'system-status') {
-    return (
-      <div className="flex-1 overflow-y-auto min-h-0">
-        {renderDeferredView('Loading system status…', <SystemStatus />)}
       </div>
     )
   }

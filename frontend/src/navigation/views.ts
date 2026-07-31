@@ -22,7 +22,8 @@ export type AppView =
   | 'automations'
   | 'orchestrator-lab'
   | 'acs'
-  | 'system-status'
+  // NOTE: 'system-status' removed 2026-07-31 (item 2.3 ruling 4) — embedded
+  // into Interior's "Legacy dashboards" section instead of a standalone view.
   | 'system'
   | 'machines'
   | 'mind'
@@ -65,7 +66,6 @@ export const APP_VIEWS: AppViewConfig[] = [
   { view: 'privacy-dashboard', path: '/privacy-dashboard', title: 'Privacy', icon: 'lock', keywords: ['privacy', 'security'], includeInPalette: false },
   { view: 'orchestrator-lab', path: '/orchestrator-lab', title: 'Orchestrator Lab', icon: 'science', keywords: ['orchestrator', 'automation', 'lab'], includeInPalette: false },
   { view: 'acs', path: '/acs', title: 'ACS', icon: 'smart_toy', keywords: ['acs', 'mind', 'thoughts', 'autonomous', 'cognition', 'sara', 'inner', 'queue', 'inbox'] },
-  { view: 'system-status', path: '/system-status', title: 'System Status', icon: 'monitoring', keywords: ['system', 'status', 'health', 'metrics', 'monitoring'] },
   { view: 'system', path: '/system', title: 'The System', icon: 'hub', keywords: ['system', 'awareness', 'world', 'mind', 'god view', 'attention', 'balance', 'thoughts'] },
   { view: 'machines', path: '/machines', title: 'Machines', icon: 'dns', keywords: ['machines', 'fleet', 'servers', 'hosts', 'infrastructure', 'boxes', 'health', 'disk', 'agent'] },
   { view: 'mind', path: '/mind', title: 'Mind', icon: 'psychology_alt', keywords: ['mind', 'workspace', 'self', 'self-model', 'health', 'calibration', 'trust', 'autonomy', 'predictions', 'concern', 'audit'] },

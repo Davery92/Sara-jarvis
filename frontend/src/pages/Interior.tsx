@@ -1,5 +1,9 @@
-import { useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useState, type ComponentType } from 'react';
 import { APP_CONFIG } from '../config';
+
+// item 2.3 (2026-07-31, ruling 4): embedded in place of a standalone route,
+// one view at a time — lazy so an unexpanded dashboard costs nothing.
+const SystemStatus = lazy(() => import('./SystemStatus'));
 
 // ── Types (mirror backend/app/schemas/contracts.py + the diagnostics
 // endpoints in backend/app/routes/diagnostics.py — SINGULAR_SARA_MASTER_
@@ -195,9 +199,9 @@ async function postJson<T>(path: string): Promise<T | null> {
   }
 }
 
-function Section({ title, subtitle, children }: { title: string; subtitle?: string; children: React.ReactNode }) {
+function Section({ title, subtitle, children, className = '' }: { title: string; subtitle?: string; children: React.ReactNode; className?: string }) {
   return (
-    <div className="bg-gray-800/50 rounded-lg p-4 border border-gray-700">
+    <div className={`bg-gray-800/50 rounded-lg p-4 border border-gray-700 ${className}`}>
       <div className="mb-3">
         <h3 className="text-sm font-semibold text-gray-300 uppercase tracking-wide">{title}</h3>
         {subtitle && <p className="text-xs text-gray-500 mt-0.5">{subtitle}</p>}
@@ -228,20 +232,29 @@ function relTime(iso: string | null): string {
   return `${Math.floor(h / 24)}d ago`;
 }
 
-// item 2.3 (2026-07-30): the 5 legacy standalone dashboards below (system,
-// mind, system-status, sensory-monitor, orchestrator-lab) read as pure
-// engineering/diagnostics views — the same nature as Interior itself — so
-// they're demoted out of the primary nav registry and reachable only from
-// here, same "Advanced" disclosure pattern as the migration-status section
-// below. Machines and ACS stayed in the main nav (David's call): real
-// features he reaches directly, not internals sprawl.
-const LEGACY_OPS_VIEWS: Array<{ view: 'system' | 'mind' | 'system-status' | 'sensory-monitor' | 'orchestrator-lab'; label: string }> = [
+// item 2.3 (2026-07-30, extended 2026-07-31 ruling 4): the 5 legacy
+// standalone dashboards below read as pure engineering/diagnostics views —
+// the same nature as Interior itself — so they're demoted out of the
+// primary nav registry, same "Advanced" disclosure pattern as the
+// migration-status section below. Machines and ACS stayed in the main nav
+// (David's call): real features he reaches directly, not internals sprawl.
+//
+// Ruling 4: one at a time, each one's `embedded: true` means its button
+// expands the real component inline (via EMBEDDED_LEGACY_COMPONENTS)
+// instead of navigating away — the standalone route gets deleted the same
+// pass its embed is verified. The rest still navigate away until their
+// turn.
+const LEGACY_OPS_VIEWS: Array<{ view: 'system' | 'mind' | 'system-status' | 'sensory-monitor' | 'orchestrator-lab'; label: string; embedded?: boolean }> = [
   { view: 'system', label: 'System' },
   { view: 'mind', label: 'Mind' },
-  { view: 'system-status', label: 'System Status' },
+  { view: 'system-status', label: 'System Status', embedded: true },
   { view: 'sensory-monitor', label: 'Sensory Monitor' },
   { view: 'orchestrator-lab', label: 'Orchestrator Lab' },
 ];
+
+const EMBEDDED_LEGACY_COMPONENTS: Partial<Record<(typeof LEGACY_OPS_VIEWS)[number]['view'], ComponentType>> = {
+  'system-status': SystemStatus,
+};
 
 interface InteriorProps {
   onNavigate?: (view: string) => void;
@@ -265,6 +278,7 @@ export default function Interior({ onNavigate }: InteriorProps) {
   const [loading, setLoading] = useState(true);
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [expandedLegacyView, setExpandedLegacyView] = useState<string | null>(null);
 
   const fetchAll = async () => {
     const [ctx, body, intents, audit, attention, actions, events, capabilities, flags, scheduler, interestRows, self, metrics] = await Promise.all([
@@ -689,21 +703,40 @@ export default function Interior({ onNavigate }: InteriorProps) {
               </div>
             </Section>
 
-            {onNavigate && (
-              <Section title="Legacy dashboards" subtitle="demoted out of the main nav — still fully live">
-                <div className="flex flex-wrap gap-2">
-                  {LEGACY_OPS_VIEWS.map(({ view, label }) => (
-                    <button
-                      key={view}
-                      onClick={() => onNavigate(view)}
-                      className="text-xs bg-gray-700/50 hover:bg-gray-700 text-gray-300 px-2 py-1 rounded"
-                    >
-                      {label}
-                    </button>
-                  ))}
-                </div>
-              </Section>
-            )}
+            <Section title="Legacy dashboards" subtitle="demoted out of the main nav — still fully live" className="md:col-span-2">
+              <div className="flex flex-wrap gap-2">
+                {LEGACY_OPS_VIEWS.map(({ view, label, embedded }) => (
+                  <button
+                    key={view}
+                    onClick={() =>
+                      embedded
+                        ? setExpandedLegacyView((v) => (v === view ? null : view))
+                        : onNavigate?.(view)
+                    }
+                    className={`text-xs px-2 py-1 rounded ${
+                      expandedLegacyView === view
+                        ? 'bg-gray-600 text-gray-100'
+                        : 'bg-gray-700/50 hover:bg-gray-700 text-gray-300'
+                    }`}
+                  >
+                    {embedded ? (expandedLegacyView === view ? '▾ ' : '▸ ') : ''}
+                    {label}
+                  </button>
+                ))}
+              </div>
+              {expandedLegacyView &&
+                (() => {
+                  const EmbeddedView = EMBEDDED_LEGACY_COMPONENTS[expandedLegacyView as (typeof LEGACY_OPS_VIEWS)[number]['view']];
+                  if (!EmbeddedView) return null;
+                  return (
+                    <div className="mt-3 -mx-4 border-t border-gray-700 pt-3">
+                      <Suspense fallback={<div className="text-xs text-gray-500 px-4">Loading…</div>}>
+                        <EmbeddedView />
+                      </Suspense>
+                    </div>
+                  );
+                })()}
+            </Section>
           </div>
         )}
       </div>
