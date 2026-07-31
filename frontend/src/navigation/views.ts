@@ -22,11 +22,11 @@ export type AppView =
   | 'automations'
   | 'orchestrator-lab'
   | 'acs'
-  // NOTE: 'system-status' removed 2026-07-31 (item 2.3 ruling 4) — embedded
-  // into Interior's "Legacy dashboards" section instead of a standalone view.
+  // NOTE: 'system-status' and 'mind' removed 2026-07-31 (item 2.3 ruling 4)
+  // — embedded into Interior's "Legacy dashboards" section instead of a
+  // standalone view.
   | 'system'
   | 'machines'
-  | 'mind'
   | 'interior'
   | 'life'
   | 'work'
@@ -68,7 +68,6 @@ export const APP_VIEWS: AppViewConfig[] = [
   { view: 'acs', path: '/acs', title: 'ACS', icon: 'smart_toy', keywords: ['acs', 'mind', 'thoughts', 'autonomous', 'cognition', 'sara', 'inner', 'queue', 'inbox'] },
   { view: 'system', path: '/system', title: 'The System', icon: 'hub', keywords: ['system', 'awareness', 'world', 'mind', 'god view', 'attention', 'balance', 'thoughts'] },
   { view: 'machines', path: '/machines', title: 'Machines', icon: 'dns', keywords: ['machines', 'fleet', 'servers', 'hosts', 'infrastructure', 'boxes', 'health', 'disk', 'agent'] },
-  { view: 'mind', path: '/mind', title: 'Mind', icon: 'psychology_alt', keywords: ['mind', 'workspace', 'self', 'self-model', 'health', 'calibration', 'trust', 'autonomy', 'predictions', 'concern', 'audit'] },
   { view: 'interior', path: '/interior', title: 'Interior', icon: 'insights', keywords: ['interior', 'kernel', 'intents', 'attention', 'actions', 'contradictions', 'singular', 'truth', 'body state'] },
   { view: 'life', path: '/life', title: 'Life', icon: 'favorite', keywords: ['life', 'calendar', 'email', 'fitness', 'recipes', 'routines', 'home'] },
   { view: 'work', path: '/work', title: 'Work', icon: 'work', keywords: ['work', 'projects', 'automations', 'agent tasks', 'machines', 'standing orders'] },
