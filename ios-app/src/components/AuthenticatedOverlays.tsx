@@ -20,6 +20,7 @@ import { navigateToChat, navigationRef, getCurrentViewName } from '../services/n
 import apiClient from '../services/api';
 import { consumeSiriPrompt } from '../services/siriDeepLink';
 import { refreshWidgetData } from '../services/widgetBridge';
+import { flushPendingCaptures } from '../services/universalCapture';
 import { watchWorkout } from '../services/watchWorkout';
 import { workoutCoordinator } from '../services/workoutCoordinator';
 
@@ -253,6 +254,10 @@ export const AuthenticatedOverlays: React.FC = () => {
     // Siri "Ask Sara": consume any prompt stashed by the App Intent (cold start).
     consumeSiriPrompt();
 
+    // Universal capture (§5.2): flush anything the share extension queued
+    // while this app wasn't running (cold start).
+    void flushPendingCaptures();
+
     // Log presence on app resume + pause heartbeat when backgrounded
     const appStateSubscription = AppState.addEventListener('change', (nextState: AppStateStatus) => {
       if (nextState === 'active') {
@@ -261,6 +266,8 @@ export const AuthenticatedOverlays: React.FC = () => {
         refreshWidgetData();
         // The App Intent foregrounds the app via openAppWhenRun → pick up the prompt.
         consumeSiriPrompt();
+        // Same hand-off, for whatever was shared while the app was backgrounded.
+        void flushPendingCaptures();
         // Sync badge to real unread count when app comes to foreground
         syncBadge();
         // Keep native geofence regions current with armed triggers/places

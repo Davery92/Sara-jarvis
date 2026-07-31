@@ -48,6 +48,38 @@ public class SaraNativeModule: Module {
       return prompt
     }
 
+    // Universal capture (§5.2): reads & clears whatever the share extension
+    // queued (a separate process — see targets/share/ShareViewController.swift
+    // for why this hand-off, not a direct network call, is the right shape).
+    // Image entries get their file bytes inlined as base64 here (the JS side
+    // has no App-Group file access of its own) and the backing file is
+    // deleted once handed off — the queue is the only durable copy until the
+    // caller actually uploads it.
+    Function("consumePendingShares") { () -> [[String: Any]] in
+      guard let defaults = UserDefaults(suiteName: SaraNativeModule.appGroup) else { return [] }
+      let queue = (defaults.array(forKey: "pending_shares") as? [[String: Any]]) ?? []
+      defaults.removeObject(forKey: "pending_shares")
+      guard !queue.isEmpty else { return [] }
+
+      let container = FileManager.default.containerURL(
+        forSecurityApplicationGroupIdentifier: SaraNativeModule.appGroup
+      )
+
+      return queue.map { item -> [String: Any] in
+        var out = item
+        if (item["type"] as? String) == "image",
+           let relPath = item["content"] as? String,
+           let container = container {
+          let fileURL = container.appendingPathComponent(relPath)
+          if let data = try? Data(contentsOf: fileURL) {
+            out["content_base64"] = data.base64EncodedString()
+          }
+          try? FileManager.default.removeItem(at: fileURL)
+        }
+        return out
+      }
+    }
+
     Function("areActivitiesEnabled") { () -> Bool in
       #if canImport(ActivityKit)
       if #available(iOS 16.2, *) {

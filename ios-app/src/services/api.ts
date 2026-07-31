@@ -727,6 +727,28 @@ class ApiClient {
     return response.data;
   }
 
+  /** Universal capture (§5.2): images from the share extension. Raw fetch +
+   * FormData, matching the documents.ts upload pattern — RN's FormData
+   * needs a real file:// uri, and content-type must NOT be set manually
+   * (RN's multipart handling sets its own boundary). POST /api/inbox/upload
+   * has no title/note field today, unlike the URL/text share endpoints. */
+  async uploadImageToInbox(fileUri: string): Promise<any> {
+    const formData = new FormData();
+    formData.append('file', {
+      uri: fileUri,
+      type: 'image/jpeg',
+      name: 'capture.jpg',
+    } as any);
+    const token = await this.getToken();
+    const response = await fetch(`${this.baseURL}/api/inbox/upload`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: formData,
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.json();
+  }
+
   async updateInboxItemStatus(id: string, status: 'kept' | 'discarded'): Promise<any> {
     const response = await this.client.patch(`/api/inbox/${id}/status`, { status });
     return response.data;

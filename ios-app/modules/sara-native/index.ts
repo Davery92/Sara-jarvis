@@ -18,11 +18,21 @@ export interface WidgetData {
   next_event_time?: string // ISO8601
 }
 
+export interface PendingShare {
+  type: 'url' | 'text' | 'image'
+  content: string // URL string, plain text, or (image) a container-relative path — consumed already, ignore
+  content_base64?: string // present only for type 'image'
+  note: string
+  queued_at: string // ISO8601
+}
+
 interface SaraNativeModuleType {
   setWidgetData(data: Record<string, string>): void
   reloadWidgets(): void
   /** Reads & clears the prompt left by the "Ask Sara" Siri App Intent. */
   consumePendingSiriPrompt(): string | null
+  /** Reads & clears whatever the share extension queued since last consumed. */
+  consumePendingShares(): PendingShare[]
   areActivitiesEnabled(): boolean
   /** Returns the ActivityKit activity id, or null on failure / unsupported. */
   startTimerActivity(timerId: string, title: string, endEpochMs: number): string | null
@@ -54,6 +64,10 @@ export function setWidgetData(data: WidgetData): void {
 
 export function consumePendingSiriPrompt(): string | null {
   return SaraNative?.consumePendingSiriPrompt() ?? null
+}
+
+export function consumePendingShares(): PendingShare[] {
+  return SaraNative?.consumePendingShares() ?? []
 }
 
 export function areActivitiesEnabled(): boolean {
