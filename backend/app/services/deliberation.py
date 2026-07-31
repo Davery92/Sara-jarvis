@@ -78,25 +78,34 @@ class DeliberationResult:
     tokens_used: int = 0
     duration_seconds: float = 0.0
     is_deep: bool = False
+    success: bool = True
+    error: str = ""
 
 
 async def _deep_llm_call(messages: List[Dict[str, str]], max_tokens: int = 3000) -> Dict[str, Any]:
-    """One-off Anthropic call for deep deliberation (SARA_UNLEASHED Phase C.3).
+    """Deep-deliberation LLM call — local-first fix (2026-07-31): this used to
+    dispatch directly to the Anthropic API (`claude-sonnet-5` via a raw
+    httpx POST), a local-first violation — deep deliberation is background
+    cognition (2x/day, unattended), and Claude models are chat-persona only
+    (feedback_local_first_llm). Routed through llm_broker's "kernel"
+    capability instead (the same class every other background-cognition
+    call uses — deliberation/ambient turns/consolidation — resolved to the
+    local Qwen 27B host).
 
-    Deliberately NOT routed through LLMClientWithFailover/BackgroundLLMClient —
-    those are built for a persistent local-model client with health-check
-    loops and local/local failover, neither of which fits two calls a day
-    against Anthropic. Reuses the same request-shaping rules as
-    core.llm._anthropic_chat_completion (temperature omitted for models that
-    reject sampling params — gotcha_claude_model_sampling_params) without
-    paying for that class's background health-check task.
+    Uses `resolve("kernel")` + a raw httpx POST rather than
+    `get_broker_client()`'s AsyncOpenAI wrapper — found while wiring this up
+    that `openai` isn't an installed dependency in this container, so that
+    factory has never actually been callable (a separate, pre-existing bug,
+    out of scope for this fix). httpx is already this module's proven,
+    working transport.
     """
     import httpx
     from app.core.config import settings
-    from app.core.text_utils import claude_rejects_sampling_params, claude_thinking_always_on
-    from app.services.tunables import get_tunable_str
+    from app.services.llm_broker import resolve
 
-    model = get_tunable_str("deliberation.deep_model", "claude-sonnet-5")
+    cap = resolve("kernel")
+    base_url = (cap["base_url"] or "").rstrip("/")
+    model = cap["model"]
 
     system_content = None
     filtered = []
@@ -105,40 +114,40 @@ async def _deep_llm_call(messages: List[Dict[str, str]], max_tokens: int = 3000)
             system_content = m.get("content", "")
         else:
             filtered.append(m)
-
-    payload: Dict[str, Any] = {"model": model, "messages": filtered, "max_tokens": max_tokens}
-    if claude_rejects_sampling_params(model):
-        if not claude_thinking_always_on(model):
-            payload["thinking"] = {"type": "disabled"}
-    else:
-        payload["temperature"] = 0.4
     if system_content:
-        payload["system"] = system_content
+        filtered = [{"role": "system", "content": system_content}] + filtered
 
-    # 180s, not 90s: hourly deliberations measure 53–61s and any slow sample on
-    # the local 27B was a coin-flip against the old 90s kill threshold (Phase 4).
+    payload: Dict[str, Any] = {
+        "model": model,
+        "messages": filtered,
+        "max_tokens": max_tokens,
+        "temperature": 0.4,
+        # gotcha_qwen_thinking: without this, `content` comes back empty for
+        # structured/short outputs like this JSON turn.
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+
+    # Same 180s the old Anthropic call used ("hourly deliberations measure
+    # 53-61s, any slow sample on the local 27B was a coin-flip against the
+    # old 90s kill threshold") — still the right budget on the same host.
     async with httpx.AsyncClient(timeout=180.0) as client:
         response = await client.post(
-            "https://api.anthropic.com/v1/messages",
+            f"{base_url}/chat/completions",
             json=payload,
-            headers={
-                "x-api-key": settings.anthropic_api_key,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
+            headers={"Authorization": f"Bearer {getattr(settings, 'openai_api_key', '') or 'not-needed'}"},
         )
         response.raise_for_status()
-        anthropic_result = response.json()
+        result = response.json()
 
-    content_blocks = anthropic_result.get("content", [])
-    text = "".join(b.get("text", "") for b in content_blocks if b.get("type") == "text")
-    usage = anthropic_result.get("usage", {})
+    choices = result.get("choices", [])
+    text = choices[0].get("message", {}).get("content", "") if choices else ""
+    usage = result.get("usage", {})
     return {
         "choices": [{"message": {"content": text}}],
         "usage": {
-            "prompt_tokens": usage.get("input_tokens", 0),
-            "completion_tokens": usage.get("output_tokens", 0),
-            "total_tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
+            "prompt_tokens": usage.get("prompt_tokens", 0),
+            "completion_tokens": usage.get("completion_tokens", 0),
+            "total_tokens": usage.get("total_tokens", 0),
         },
     }
 
@@ -170,10 +179,11 @@ class DeliberationEngine:
         4. Single LLM call for structured JSON
         5. Parse and return result
 
-        SARA_UNLEASHED Phase C.3: `deep=True` runs on the strong model
-        (tunable `deliberation.deep_model`, default claude-sonnet-5) with a
-        wider observation window and a higher task-proposal cap, instead of
-        the hourly qwen pass. Intended for 2x/day scheduled runs, not the
+        SARA_UNLEASHED Phase C.3: `deep=True` runs with a wider observation
+        window and a higher task-proposal cap than the hourly pass, on the
+        same local Qwen "kernel" capability (local-first fix, 2026-07-31 —
+        previously ran on Anthropic, a background-cognition local-first
+        violation). Intended for 2x/day scheduled runs, not the
         salience-triggered hourly path.
 
         `wake_reason` (Arc 3.1) is passed straight through to the prompt
@@ -294,8 +304,8 @@ class DeliberationEngine:
         except Exception as _tode:
             logger.debug(f"theory-of-david injection skipped: {_tode}")
 
-        # 4. LLM call — deep runs use the strong model (Anthropic), hourly
-        # runs stay on the local BackgroundLLMClient (qwen).
+        # 4. LLM call — deep and hourly both stay local (qwen): deep via
+        # llm_broker's "kernel" capability, hourly via BackgroundLLMClient.
         try:
             if deep:
                 response = await _deep_llm_call(
@@ -329,7 +339,16 @@ class DeliberationEngine:
             result.raw_response = raw
 
         except Exception as e:
+            # Was a swallowed failure: this returned a normal-looking result
+            # (empty proposals, no exception raised) with only a truncated
+            # message buried in `thought` — the caller (kernel.ambient_turn)
+            # had no way to distinguish "LLM call failed" from "legitimately
+            # nothing to do," so it always reported status=completed and the
+            # failure was invisible to interoception. `success`/`error` give
+            # the caller an honest signal to act on.
             logger.error(f"[Deliberation] LLM call failed (deep={deep}): {e}")
+            result.success = False
+            result.error = str(e)
             result.thought = f"Deliberation failed: {e}"
             result.duration_seconds = (datetime.now(timezone.utc) - start_time).total_seconds()
             return result

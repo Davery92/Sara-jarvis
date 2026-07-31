@@ -1630,6 +1630,18 @@ async def _deep_deliberation_async(user_id: str):
             "correlation_id": result.get("correlation_id"),
             "routed_via": "kernel",
         }
+    if result.get("status") == "failed":
+        # Was a swallowed failure: ambient_turn's LLM call raised, deliberation.py
+        # caught it and returned a normal-looking result, and this task returned
+        # {"skipped": ...} — Celery recorded SUCCESS, no task_failure row, no
+        # interoception signal. Raising here (matching this task's own outer
+        # "failures must fail" contract) makes the failure real: Celery's
+        # task_failure handler (celery_app.py) writes the task_failure ledger row
+        # and escalates, which body_state_projection already folds into the self
+        # slice every context/self-model read goes through — Sara can feel a
+        # dead LLM provider the same way she already feels a dead host or a
+        # stuck job, no new interoception plumbing needed.
+        raise RuntimeError(result.get("error") or "deep deliberation LLM call failed")
     return {"skipped": result.get("skipped", "kernel_skipped"), "routed_via": "kernel"}
 
 

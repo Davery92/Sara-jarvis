@@ -218,7 +218,10 @@ async def ambient_turn(
             and not summary.get("tasks_dispatched") and not summary.get("tasks_proposed")
             and not summary.get("research_dispatched")
         )
-        if no_david_work:
+        # A failed turn (LLM call error) also looks like "no David work" —
+        # empty proposals — but it isn't idleness, it's a broken turn. Don't
+        # let curiosity pursuit fire off the back of a failure.
+        if no_david_work and result.success:
             try:
                 from app.db.session import get_async_session_factory
                 from app.services.curiosity import generate_candidates, pursued_today, select_and_pursue
@@ -234,10 +237,11 @@ async def ambient_turn(
         await set_state(user_id, KernelState.AMBIENT, None, detail="resting", correlation_id=kernel_turn_id)
 
         return {
-            "status": "completed",
+            "status": "completed" if result.success else "failed",
             "state": KernelState.AMBIENT.value,
             "wake_reason": wake_reason.value,
             "thought": (result.thought or "")[:200],
+            "error": result.error if not result.success else None,
             "notifications": summary["notifications_sent"],
             "home_actions": summary["home_actions_executed"],
             "observations_consumed": summary["observations_consumed"],
