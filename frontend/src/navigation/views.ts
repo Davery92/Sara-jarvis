@@ -22,10 +22,9 @@ export type AppView =
   | 'automations'
   | 'orchestrator-lab'
   | 'acs'
-  // NOTE: 'system-status' and 'mind' removed 2026-07-31 (item 2.3 ruling 4)
-  // — embedded into Interior's "Legacy dashboards" section instead of a
-  // standalone view.
-  | 'system'
+  // NOTE: 'system-status', 'mind', and 'system' removed 2026-07-31 (item
+  // 2.3 ruling 4) — embedded into Interior's "Legacy dashboards" section
+  // instead of a standalone view.
   | 'machines'
   | 'interior'
   | 'life'
@@ -66,7 +65,6 @@ export const APP_VIEWS: AppViewConfig[] = [
   { view: 'privacy-dashboard', path: '/privacy-dashboard', title: 'Privacy', icon: 'lock', keywords: ['privacy', 'security'], includeInPalette: false },
   { view: 'orchestrator-lab', path: '/orchestrator-lab', title: 'Orchestrator Lab', icon: 'science', keywords: ['orchestrator', 'automation', 'lab'], includeInPalette: false },
   { view: 'acs', path: '/acs', title: 'ACS', icon: 'smart_toy', keywords: ['acs', 'mind', 'thoughts', 'autonomous', 'cognition', 'sara', 'inner', 'queue', 'inbox'] },
-  { view: 'system', path: '/system', title: 'The System', icon: 'hub', keywords: ['system', 'awareness', 'world', 'mind', 'god view', 'attention', 'balance', 'thoughts'] },
   { view: 'machines', path: '/machines', title: 'Machines', icon: 'dns', keywords: ['machines', 'fleet', 'servers', 'hosts', 'infrastructure', 'boxes', 'health', 'disk', 'agent'] },
   { view: 'interior', path: '/interior', title: 'Interior', icon: 'insights', keywords: ['interior', 'kernel', 'intents', 'attention', 'actions', 'contradictions', 'singular', 'truth', 'body state'] },
   { view: 'life', path: '/life', title: 'Life', icon: 'favorite', keywords: ['life', 'calendar', 'email', 'fitness', 'recipes', 'routines', 'home'] },

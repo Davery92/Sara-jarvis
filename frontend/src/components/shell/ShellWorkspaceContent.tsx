@@ -24,7 +24,6 @@ const loadPrivacyDashboard = async () => {
 const loadMorningBrief = () => import('../MorningBrief')
 const loadOrchestratorLab = () => import('../OrchestratorLab')
 const loadACSPage = () => import('../../pages/ACSPage')
-const loadSystemDashboard = () => import('../system/SystemDashboard')
 const loadMachinesDashboard = () => import('../machines/MachinesDashboard')
 const loadInterior = () => import('../../pages/Interior')
 const loadDial = () => import('../../pages/Dial')
@@ -48,7 +47,6 @@ const ProjectSection = lazy(loadProjectSection)
 const PrivacyDashboard = lazy(loadPrivacyDashboard)
 const MorningBrief = lazy(loadMorningBrief)
 const OrchestratorLab = lazy(loadOrchestratorLab)
-const SystemDashboard = lazy(loadSystemDashboard)
 const MachinesDashboard = lazy(loadMachinesDashboard)
 const Interior = lazy(loadInterior)
 const Dial = lazy(loadDial)
@@ -359,14 +357,6 @@ export default function ShellWorkspaceContent({
     return (
       <div className="flex-1 overflow-y-auto min-h-0">
         {renderDeferredView('Loading fitness…', <FitnessSection />)}
-      </div>
-    )
-  }
-
-  if (targetView === 'system') {
-    return (
-      <div className="flex-1 overflow-y-auto min-h-0">
-        {renderDeferredView('Loading the system…', <SystemDashboard />)}
       </div>
     )
   }

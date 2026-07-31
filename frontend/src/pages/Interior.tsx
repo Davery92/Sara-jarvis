@@ -5,6 +5,7 @@ import { APP_CONFIG } from '../config';
 // one view at a time — lazy so an unexpanded dashboard costs nothing.
 const SystemStatus = lazy(() => import('./SystemStatus'));
 const MindDashboard = lazy(() => import('../components/mind/MindDashboard'));
+const SystemDashboard = lazy(() => import('../components/system/SystemDashboard'));
 
 // ── Types (mirror backend/app/schemas/contracts.py + the diagnostics
 // endpoints in backend/app/routes/diagnostics.py — SINGULAR_SARA_MASTER_
@@ -246,7 +247,7 @@ function relTime(iso: string | null): string {
 // pass its embed is verified. The rest still navigate away until their
 // turn.
 const LEGACY_OPS_VIEWS: Array<{ view: 'system' | 'mind' | 'system-status' | 'sensory-monitor' | 'orchestrator-lab'; label: string; embedded?: boolean }> = [
-  { view: 'system', label: 'System' },
+  { view: 'system', label: 'System', embedded: true },
   { view: 'mind', label: 'Mind', embedded: true },
   { view: 'system-status', label: 'System Status', embedded: true },
   { view: 'sensory-monitor', label: 'Sensory Monitor' },
@@ -256,6 +257,7 @@ const LEGACY_OPS_VIEWS: Array<{ view: 'system' | 'mind' | 'system-status' | 'sen
 const EMBEDDED_LEGACY_COMPONENTS: Partial<Record<(typeof LEGACY_OPS_VIEWS)[number]['view'], ComponentType>> = {
   'system-status': SystemStatus,
   mind: MindDashboard,
+  system: SystemDashboard,
 };
 
 interface InteriorProps {
