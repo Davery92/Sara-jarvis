@@ -538,7 +538,9 @@ class MemoryService:
             )
             return results
 
+        _t_embed_start = _time.monotonic()
         query_embedding = await embedding_fn(query)
+        _t_embed = _time.monotonic() - _t_embed_start
         if not query_embedding:
             logger.error("Failed to generate query embedding")
             retrieval_observer.record(
@@ -564,9 +566,12 @@ class MemoryService:
             logger.error("No database session available")
             return results
 
+        _t_episodes = 0.0
+        _t_notes = 0.0
         try:
             # Search episodes if in scope
             if "episodes" in scopes:
+                _t_ep_start = _time.monotonic()
                 from app.main_simple import Episode, PGVECTOR_AVAILABLE, DATABASE_URL
 
                 if PGVECTOR_AVAILABLE and DATABASE_URL.startswith("postgresql"):
@@ -611,9 +616,11 @@ class MemoryService:
                             # of a hardcoded per-kind label.
                             "importance": float(row[7]),
                         })
+                _t_episodes = _time.monotonic() - _t_ep_start
 
             # Search notes if in scope
             if "notes" in scopes:
+                _t_notes_start = _time.monotonic()
                 from app.main_simple import Note
 
                 # For now, basic text search on notes
@@ -638,11 +645,17 @@ class MemoryService:
                         "created_at": note.created_at.isoformat() if note.created_at else "",
                         "score": score
                     })
+                _t_notes = _time.monotonic() - _t_notes_start
 
             # Sort all results by score
             results.sort(key=lambda x: x.get("score", 0), reverse=True)
 
             top = results[:limit * 2]
+            logger.info(
+                f"⏱️ [search-memory-timing] embedding={_t_embed:.2f}s "
+                f"episodes={_t_episodes:.2f}s notes={_t_notes:.2f}s "
+                f"total={_time.monotonic()-_funnel_start:.2f}s scopes={scopes}"
+            )
             retrieval_observer.record(
                 "memory_service.search_memory", query, len(top),
                 (_time.monotonic() - _funnel_start) * 1000.0,

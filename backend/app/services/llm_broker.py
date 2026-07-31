@@ -71,6 +71,17 @@ CAPABILITIES: Dict[str, Capability] = {
     # fallback (1-3.5s is irrelevant when nothing interactive is waiting).
     # Same "presence and cognition never share a blocking resource" rule
     # the chat-model routing fix already enforces, applied one layer down.
+    #
+    # Ruling 1 20-turn measurement (2026-07-31) found the split alone
+    # hadn't fixed anything: the app_settings row for embedding_base_url
+    # still held "http://embeddings:8100" (the CPU container) from before
+    # this split existed, silently overriding the GPU default below on
+    # every resolve() — so "embedding" was quietly routing to the same
+    # host as "embedding_cognition" the whole time. real turns showed
+    # 2.5-3.4s embedding steps that measured 20-100ms in isolation against
+    # the GPU host directly, which is what surfaced it. Fixed by updating
+    # the DB row; leaving this note so a future stale override doesn't
+    # cost someone another multi-hour trace to rediscover.
     "embedding": Capability(
         "embedding", "embedding_model", "embedding_base_url",
         default_model="bge-m3", default_url="http://10.185.1.8:8100",
