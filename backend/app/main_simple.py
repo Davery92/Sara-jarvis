@@ -1481,13 +1481,27 @@ class SimpleLLMClient:
             # catalog — stale clients still request retired models (e.g. the old
             # iOS default "gpt-oss:120b"), which would otherwise fall through to
             # the global provider and 404 against Anthropic/Gemini.
-            effective_model = model or OPENAI_MODEL
+            #
+            # Presence-latency investigation (SARA_ALIVE §6 follow-up,
+            # 2026-07-31): this fell back to OPENAI_MODEL — the shared
+            # utility/cognition model (Qwen) — not CHAT_DEFAULT_MODEL, the
+            # three-speed contract's actual presence model (Claude Sonnet 5).
+            # Confirmed live via real request logs: every real chat turn with
+            # no client-supplied model override ("requested=None") was being
+            # served by qwen3.6-27b, sharing an inference host/queue with all
+            # of Sara's background cognition (ambient turns, judge/compose,
+            # dreaming) — the load-bearing suspect behind the measured
+            # p50=66.2s/p90=167.5s presence latency. This is the routing fix;
+            # OPENAI_MODEL stays the last-resort fallback only if
+            # CHAT_DEFAULT_MODEL is somehow unset.
+            _default_model = CHAT_DEFAULT_MODEL or OPENAI_MODEL
+            effective_model = model or _default_model
             _known_model_ids = {(m.get("id") or "").lower() for m in AVAILABLE_MODELS}
             if model and model.lower() not in _known_model_ids:
                 logger.warning(
-                    f"Requested model '{model}' not in catalog — using default '{OPENAI_MODEL}'"
+                    f"Requested model '{model}' not in catalog — using default '{_default_model}'"
                 )
-                effective_model = OPENAI_MODEL
+                effective_model = _default_model
             model_config = get_model_config(effective_model)
             logger.info(f"🤖 Model selection: requested={model}, effective={effective_model}, provider={model_config['provider']}, base_url={model_config['base_url']}")
 
@@ -7741,6 +7755,20 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
     except Exception:
         pass  # Non-critical
 
+    # Presence-latency investigation (SARA_ALIVE §6 follow-up, 2026-07-31):
+    # per-turn stage timestamps so a slow turn's *shape* is visible (which
+    # stage ate the time), not just the single black-box first-token number
+    # _timed_generate_events already recorded. Shared with that closure via
+    # this dict; logged once, best-effort, never raises into the real path.
+    import time as _stage_time
+    _stage_marks: Dict[str, float] = {"request_received": _stage_time.monotonic()}
+
+    def _mark_stage(name: str) -> None:
+        try:
+            _stage_marks[name] = _stage_time.monotonic()
+        except Exception:
+            pass
+
     async def generate_events():
         try:
             # CHESS COMMAND INTERCEPTION
@@ -8762,6 +8790,7 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     f"📝 Context injected: {budget.total_tokens} est. tokens from "
                     f"{len(budget.sources)} sources → {len(budget.allocate())} kept"
                 )
+            _mark_stage("context_assembled")
 
             # H3 (Brain Alignment): one-shot correction encoding. If David just
             # stated a durable schedule fact ("I leave at 7", "gym's at 1"),
@@ -9262,12 +9291,27 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                         logger.info(f"🔧 Intent={user_intent}: Capability fallback ({len(tools)} tools)")
 
                     # Process chat with loaded tools
-                    logger.info("⏳ Starting chat_with_tools...")
+                    _mark_stage("tools_loaded")
+                    logger.info(f"⏳ Starting chat_with_tools... ({len(tools)} tools)")
+                    _mark_stage("llm_dispatched")
                     response_content = await streaming_client.chat_with_tools(
                         all_messages, tools, current_user.id, request.conversation_id,
                         model=request.model, ephemeral=request.ephemeral or False
                     )
+                    _mark_stage("turn_complete")
                     logger.info(f"✅ chat_with_tools completed, response length: {len(response_content)}")
+                    try:
+                        _s = _stage_marks
+                        _t0 = _s.get("request_received")
+                        if _t0:
+                            _line = " ".join(
+                                f"{k}=+{(_s[k]-_t0):.2f}s" for k in
+                                ("context_assembled", "tools_loaded", "llm_dispatched", "turn_complete")
+                                if k in _s
+                            )
+                            logger.info(f"⏱️ [stage-timing] {_line}")
+                    except Exception:
+                        pass
 
                     # Leak guard: raw <tool_call>/<function=...> markup that wasn't
                     # salvaged into a real tool call must never reach the user.
@@ -9504,7 +9548,20 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     if _evt.get("type") == "text_chunk":
                         _logged = True
                         from app.services.presence_latency import record_first_token_latency
-                        await record_first_token_latency(_time.monotonic() - _start)
+                        _elapsed = _time.monotonic() - _start
+                        await record_first_token_latency(_elapsed)
+                        _mark_stage("first_token")
+                        try:
+                            _t0 = _stage_marks.get("request_received")
+                            if _t0:
+                                _line = " ".join(
+                                    f"{k}=+{(_stage_marks[k]-_t0):.2f}s" for k in
+                                    ("context_assembled", "tools_loaded", "llm_dispatched", "first_token")
+                                    if k in _stage_marks
+                                )
+                                logger.info(f"⏱️ [stage-timing] {_line}")
+                        except Exception:
+                            pass
                 except Exception:
                     pass
             yield _event_str
