@@ -61,9 +61,23 @@ CAPABILITIES: Dict[str, Capability] = {
         "notification", "openai_notification_model", "bg_llm_primary_url",
         default_model="qwen3.6-27b", default_url="http://100.104.68.115:8081/v1",
     ),
+    # Presence-latency follow-up, ruling 1 (2026-07-31): split embedding
+    # traffic by who's waiting on it. "embedding" serves real chat turns —
+    # the fast GPU host (~20-100ms) — and must never queue behind
+    # background cognition's own embedding calls. "embedding_cognition" is
+    # for exactly that background work (consolidation, PKG ingestion,
+    # ambient-turn processing, lesson matching) — routed to the CPU
+    # embedding container that already runs in the stack as an idle
+    # fallback (1-3.5s is irrelevant when nothing interactive is waiting).
+    # Same "presence and cognition never share a blocking resource" rule
+    # the chat-model routing fix already enforces, applied one layer down.
     "embedding": Capability(
-        "embedding", "embedding_model", None,
-        default_model="bge-m3",
+        "embedding", "embedding_model", "embedding_base_url",
+        default_model="bge-m3", default_url="http://10.185.1.8:8100",
+    ),
+    "embedding_cognition": Capability(
+        "embedding_cognition", "embedding_model", "embedding_cognition_base_url",
+        default_model="bge-m3", default_url="http://embeddings:8100",
     ),
     "rpg": Capability(
         "rpg", "temerant_rpg_model", None,

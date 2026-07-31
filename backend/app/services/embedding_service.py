@@ -18,9 +18,24 @@ class EmbeddingService:
         # that fires when a pooled connection is reused after its source loop is gone.
         pass
 
-    def _get_current_settings(self) -> Tuple[str, str, int]:
-        """Get current settings dynamically so runtime updates work"""
-        base = (settings.embedding_base_url or "").strip().rstrip("/")
+    def _get_current_settings(self, capability: str = "embedding") -> Tuple[str, str, int]:
+        """Get current settings dynamically so runtime updates work.
+
+        Presence-latency follow-up, ruling 1 (2026-07-31): resolves through
+        the model broker's capability classes so presence ("embedding",
+        the fast GPU host) and background cognition ("embedding_cognition",
+        the local CPU fallback container) route to different hosts and can
+        never queue behind each other — same fix already applied to chat's
+        own model routing, one layer down."""
+        try:
+            from app.services.llm_broker import resolve as _resolve_capability
+            cap = _resolve_capability(capability)
+            base = (cap.get("base_url") or "").strip().rstrip("/")
+            model = cap.get("model") or settings.embedding_model
+        except Exception as e:
+            logger.debug(f"[embedding] broker resolve failed for {capability!r}, falling back: {e}")
+            base = (settings.embedding_base_url or "").strip().rstrip("/")
+            model = settings.embedding_model
         try:
             p = urlparse(base)
             if not p.scheme or not p.netloc:
@@ -31,13 +46,40 @@ class EmbeddingService:
         # Strip /v1 suffix — this service appends /v1/embeddings itself
         if base.endswith("/v1"):
             base = base[:-3].rstrip("/")
-        return base, settings.embedding_model, settings.embedding_dim
+        return base, model, settings.embedding_dim
 
-    async def generate_embedding(self, text: str) -> Optional[List[float]]:
-        """Generate embedding for text using BGE-M3 model"""
+    async def generate_embedding(self, text: str, capability: str = "embedding") -> Optional[List[float]]:
+        """Generate embedding for text using BGE-M3 model.
+
+        `capability`: "embedding" (default) for real chat turns — the fast
+        GPU host; "embedding_cognition" for background/non-interactive work
+        (consolidation, PKG ingestion, lesson matching) — the local CPU
+        fallback container. Passing the wrong one for a presence-critical
+        call silently reintroduces the exact contention this split fixes.
+
+        Presence-latency follow-up, ruling 1 (2026-07-31) second win: a
+        short Redis cache keyed by exact text — repeated text produces an
+        identical vector regardless of which host generated it (same
+        model/weights either side of the presence/cognition split), so a
+        turn that re-embeds the same query (e.g. a quick back-and-forth
+        referencing the same thing) gets a free cache hit instead of a
+        real network round-trip."""
+        cache_key = None
+        try:
+            import hashlib
+            from app.services.unified_context import _get_redis
+            cache_key = f"sara:embedding_cache:{hashlib.sha256(text.encode('utf-8')).hexdigest()}"
+            r = await _get_redis()
+            cached = await r.get(cache_key)
+            if cached:
+                import json as _json
+                return _json.loads(cached if isinstance(cached, str) else cached.decode("utf-8"))
+        except Exception as e:
+            logger.debug(f"[embedding] cache read skipped: {e}")
+
         try:
             # Get current settings dynamically for runtime updates to work
-            base_url, model, dimension = self._get_current_settings()
+            base_url, model, dimension = self._get_current_settings(capability)
 
             # NOTE: httpx 0.25 + httpcore 1.0 inside the long-running uvicorn process
             # was raising "All connection attempts failed" (ConnectError) intermittently
@@ -85,6 +127,15 @@ class EmbeddingService:
                     embedding.extend([0.0] * (dimension - actual_dim))
                 else:
                     embedding = embedding[:dimension]
+
+            if cache_key:
+                try:
+                    import json as _json
+                    from app.services.unified_context import _get_redis as _get_redis_w
+                    r = await _get_redis_w()
+                    await r.set(cache_key, _json.dumps(embedding), ex=3600)
+                except Exception as e:
+                    logger.debug(f"[embedding] cache write skipped: {e}")
 
             return embedding
 

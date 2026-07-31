@@ -467,7 +467,10 @@ async def get_context_snapshot_cached(db: Session, user_id: str = DEFAULT_USER_I
     return snapshot
 
 
-async def get_extended_signals(db: Session, user_id: str = DEFAULT_USER_ID, message: str = "") -> Dict[str, Optional[str]]:
+async def get_extended_signals(
+    db: Session, user_id: str = DEFAULT_USER_ID, message: str = "",
+    domain_hint: Optional[str] = None,
+) -> Dict[str, Any]:
     """Arc 2.3 gap-closing (2026-07-29): the categories the side-by-side
     comparison log measured present in the old ~19-source assembly and
     missing from the 4-source shadow — pkg, daily_brief, journal, patterns,
@@ -476,13 +479,29 @@ async def get_extended_signals(db: Session, user_id: str = DEFAULT_USER_ID, mess
     there's one source of truth per category, just two callers of it during
     the overlap window. Best-effort per category — one failing must never
     block the others or the turn.
+
+    Item 1.3 ruling 2 (2026-07-31): added `lessons` — the one legacy
+    fetcher (`_fetch_lessons` in main_simple.py) with a real side effect
+    (recording which lessons were shown, feeding the effectiveness/recall-
+    testing loop) and no home in the new path until now. Ported here
+    rather than left to run twice: same lesson_injection_service call the
+    legacy fetcher made, same self-contained side-effect-free computation
+    (the actual `record_lesson_application` write still happens in
+    main_simple.py's post-response processing, unchanged — this only
+    supplies the lesson_ids that call needs). Returns `lesson_ids`
+    alongside the text fields so the caller can wire up that recording.
     """
     import asyncio
 
     async def _pkg() -> Optional[str]:
         try:
             from app.services.memory_recall import recall_facts_prose
-            return await recall_facts_prose(query=message, user_id=user_id)
+            # Presence-latency follow-up, ruling 1 (2026-07-31): this is
+            # the one recall_facts_prose caller inside a real, live chat
+            # turn — explicit "embedding" (the fast GPU host) rather than
+            # the default "embedding_cognition", so it never queues behind
+            # background cognition's own embedding traffic.
+            return await recall_facts_prose(query=message, user_id=user_id, embedding_capability="embedding")
         except Exception as e:
             logger.debug(f"[extended_signals] pkg failed: {e}")
             return None
@@ -538,7 +557,27 @@ async def get_extended_signals(db: Session, user_id: str = DEFAULT_USER_ID, mess
             logger.debug(f"[extended_signals] emotional_tone failed: {e}")
         return None
 
-    # Presence-latency follow-up (item 1.3 Session 1, 2026-07-31): these 6
+    async def _lessons() -> tuple:
+        try:
+            from app.core.health_state import STARTUP_HEALTH
+            es = (STARTUP_HEALTH.get("embedding_service") or {}).get("status")
+            if es != "healthy":
+                return None, []
+        except Exception:
+            pass  # health snapshot not available in every context this runs from
+        try:
+            from app.services.lesson_injection_service import lesson_injection_service
+            return await asyncio.wait_for(
+                lesson_injection_service.get_lessons_for_injection(
+                    db=db, query=message, domain_hint=domain_hint, limit=3,
+                    embedding_capability="embedding",
+                ), timeout=2.5
+            )
+        except Exception as e:
+            logger.debug(f"[extended_signals] lessons failed: {e}")
+            return None, []
+
+    # Presence-latency follow-up (item 1.3 Session 1, 2026-07-31): these
     # already run in parallel, so total time = the slowest one, not the
     # sum — timed individually to find which one that is (measured 0.45s-
     # 8s total across real turns, wide enough variance to suspect a shared
@@ -551,11 +590,13 @@ async def get_extended_signals(db: Session, user_id: str = DEFAULT_USER_ID, mess
         logger.info(f"⏱️ [extended-signals-timing] {name}={_t.monotonic()-t0:.2f}s")
         return result
 
-    pkg, brief, journal, patterns, device, tone = await asyncio.gather(
+    pkg, brief, journal, patterns, device, tone, lessons_result = await asyncio.gather(
         _timed("pkg", _pkg()), _timed("daily_brief", _daily_brief()),
         _timed("journal", _journal()), _timed("patterns", _patterns()),
         _timed("device", _device()), _timed("emotional_tone", _emotional_tone()),
+        _timed("lessons", _lessons()),
     )
+    lessons_text, lesson_ids = lessons_result if isinstance(lessons_result, tuple) else (None, [])
 
     def _s(v: Any) -> Optional[str]:
         return v if isinstance(v, str) and v.strip() else None
@@ -563,12 +604,14 @@ async def get_extended_signals(db: Session, user_id: str = DEFAULT_USER_ID, mess
     return {
         "pkg": _s(pkg), "daily_brief": _s(brief), "journal": _s(journal),
         "patterns": _s(patterns), "device": _s(device), "emotional_tone": _s(tone),
+        "lessons": _s(lessons_text), "lesson_ids": lesson_ids or [],
     }
 
 
 def render_engaged_context(
     context: Dict[str, Any], open_intents: int, recall_traces: list,
-    extended: Optional[Dict[str, Optional[str]]] = None,
+    extended: Optional[Dict[str, Any]] = None,
+    workspace_ctx: Optional[str] = None,
 ) -> str:
     """Render kernel.engaged_turn()'s assembled context (world/self/
     relationship + recall) into the markdown block chat's system prompt
@@ -581,8 +624,13 @@ def render_engaged_context(
 
     `extended` (get_extended_signals) folds in the categories the Arc 2.3
     comparison log measured present in the old assembly and missing here —
-    pkg/daily_brief/journal/patterns/device/emotional_tone — closing the
-    measured gap before the flag flips, not after."""
+    pkg/daily_brief/journal/patterns/device/emotional_tone/lessons —
+    closing the measured gap before the flag flips, not after.
+
+    `workspace_ctx` (item 1.3 ruling 2, 2026-07-31): the Desktop Jarvis
+    workspace-scene string main_simple.py builds straight from the
+    request (active scene, open windows) — cheap, synchronous, request-
+    scoped, so it's passed in rather than re-fetched here."""
     lines = ["## Current Situation (world_state + self_state + relationship_state)"]
 
     world = context.get("world_state") or {}
@@ -633,5 +681,10 @@ def render_engaged_context(
             lines.append(f"\n## Knowledge Graph\n{extended['pkg'][:1000]}")
         if extended.get("journal"):
             lines.append(f"\n## Recent Journal\n{extended['journal'][:1000]}")
+        if extended.get("lessons"):
+            lines.append(f"\n{extended['lessons']}")
+
+    if workspace_ctx:
+        lines.append(workspace_ctx)
 
     return "\n".join(lines)

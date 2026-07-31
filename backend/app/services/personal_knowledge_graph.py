@@ -1920,10 +1920,18 @@ class PersonalKnowledgeGraph:
             return False
 
     async def query_semantic(
-        self, query_text: str, limit: int = 10, min_similarity: float = 0.3
+        self, query_text: str, limit: int = 10, min_similarity: float = 0.3,
+        embedding_capability: str = "embedding",
     ) -> List[Dict]:
         """
         Semantic search over PKG nodes using pgvector cosine similarity.
+
+        `embedding_capability`: "embedding" (default, GPU host) for callers
+        inside a real chat turn; "embedding_cognition" (CPU fallback host)
+        for background/non-interactive callers (lesson matching,
+        consolidation, sweeps) — presence-latency follow-up ruling 1
+        (2026-07-31), so background work can never queue behind (or be
+        queued behind by) a real chat turn's own PKG lookup.
 
         Returns list of dicts with pkg_id, node_type, content_text, similarity.
         Then fetches full node data from Neo4j.
@@ -1933,7 +1941,7 @@ class PersonalKnowledgeGraph:
         try:
             from app.services.embedding_service import EmbeddingService
             svc = EmbeddingService()
-            query_embedding = await svc.generate_embedding(query_text)
+            query_embedding = await svc.generate_embedding(query_text, capability=embedding_capability)
             _t_embed = _t.monotonic()
             if not query_embedding:
                 return []

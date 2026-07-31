@@ -170,11 +170,11 @@ def _fact_text(r: Dict[str, Any]) -> str:
             or r.get("content") or "").strip()
 
 
-async def _from_facts(query: str, per: int) -> List[Dict[str, Any]]:
+async def _from_facts(query: str, per: int, embedding_capability: str = "embedding_cognition") -> List[Dict[str, Any]]:
     try:
         from app.services.personal_knowledge_graph import personal_kg
         if query and query.strip():
-            rows = await personal_kg.query_semantic(query, limit=per)
+            rows = await personal_kg.query_semantic(query, limit=per, embedding_capability=embedding_capability)
         else:
             # No query to embed/compare against — e.g. a context-free "brief
             # summary of what you know about David" caller. Top-confidence
@@ -341,11 +341,19 @@ async def recall(
     query: str = "",
     k: int = 10,
     kinds: Optional[List[str]] = None,
+    embedding_capability: str = "embedding_cognition",
 ) -> Dict[str, Any]:
     """One call, every store. Returns:
         {"query", "traces": [ {kind,id,text,score,confidence,provenance,when} ],
          "by_kind": {kind: count}, "paths": [stores queried]}
-    Every source is best-effort — one store failing never fails the recall."""
+    Every source is best-effort — one store failing never fails the recall.
+
+    `embedding_capability`: only "fact" recall embeds a query (via PKG's
+    semantic search) — passed through to it. Defaults to
+    "embedding_cognition" (the background/CPU-fallback host) since most
+    callers of this shared door are background/kernel/sweep-oriented, not
+    a live chat turn; pass "embedding" explicitly from a presence-critical
+    caller (ruling 1, 2026-07-31)."""
     kinds = kinds or ALL_KINDS
     per = max(3, min(k, 20))
 
@@ -354,7 +362,7 @@ async def recall(
     if memory_kinds:
         tasks.append(_from_search_memory(user_id, query, memory_kinds, per))
     if "fact" in kinds:
-        tasks.append(_from_facts(query, per))
+        tasks.append(_from_facts(query, per, embedding_capability=embedding_capability))
     if "person" in kinds:
         tasks.append(_from_people(user_id, query, per))
     if "thread" in kinds:
@@ -387,7 +395,10 @@ async def recall(
     }
 
 
-async def recall_facts_prose(query: str = "", k: int = 8, user_id: str = DEFAULT_USER_ID) -> str:
+async def recall_facts_prose(
+    query: str = "", k: int = 8, user_id: str = DEFAULT_USER_ID,
+    embedding_capability: str = "embedding_cognition",
+) -> str:
     """Arc 5.1: the one "what does Sara know about David" formatter, for
     callers that want prose to inject into a prompt rather than raw traces
     — chat context, voice, and brief bootstrap all used to call
@@ -399,7 +410,7 @@ async def recall_facts_prose(query: str = "", k: int = 8, user_id: str = DEFAULT
     graduated confidence tier (observed/inferred/confirmed) instead of
     PKG's raw float bucketed three ways — the actual point of routing
     every caller through here instead of round-tripping PKG's own scale."""
-    result = await recall(user_id=user_id, query=query, k=k, kinds=["fact"])
+    result = await recall(user_id=user_id, query=query, k=k, kinds=["fact"], embedding_capability=embedding_capability)
     lines = [f"- {t['text']} ({t['confidence']})" for t in result["traces"] if t.get("text")]
     if not lines:
         return ""

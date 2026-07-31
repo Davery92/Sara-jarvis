@@ -8472,6 +8472,12 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                 return None
 
             async def _fetch_learning_recall():
+                # Item 1.3 (2026-07-31): pure text, no side effect — same
+                # already-accepted-gap shape as workout/fitness_context/
+                # changes_brief/personality/daily_tasks/autonomous_notes
+                # above, just never guarded before now.
+                if _context_cutover_live:
+                    return None
                 if not context_decision.inject_learning_recall:
                     return None
                 try:
@@ -8480,6 +8486,14 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     return None
 
             async def _fetch_lessons():
+                # Item 1.3 ruling 2 (2026-07-31): ported into the kernel
+                # path (get_extended_signals' "lessons" + "lesson_ids") —
+                # injected_lesson_ids is now sourced from there when
+                # cutover is live (see below), so this fetcher's real
+                # side effect (the feedback loop) has a home and this
+                # duplicate computation is safe to skip.
+                if _context_cutover_live:
+                    return None, []
                 if not context_decision.inject_lessons:
                     return None, []
                 try:
@@ -8810,7 +8824,9 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                         _t1 = _kctx_time.monotonic()
                         intents = get_intent_graph(db, str(current_user.id))["total"]
                         _t2 = _kctx_time.monotonic()
-                        ext = await get_extended_signals(db, str(current_user.id), last_user_text or "")
+                        ext = await get_extended_signals(
+                            db, str(current_user.id), last_user_text or "", domain_hint=user_intent,
+                        )
                         _t3 = _kctx_time.monotonic()
                         logger.info(
                             f"⏱️ [kernel-context-timing] context_snapshot={_t1-_t0:.2f}s "
@@ -8849,7 +8865,18 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     )
                     _new_rendered = render_engaged_context(
                         _new_context, _new_open_intents, _new_recalled.get("traces") or [], extended=_extended,
+                        workspace_ctx=workspace_ctx,
                     )
+                    # Item 1.3 ruling 2 (2026-07-31): lessons ported into
+                    # the kernel path (extended_signals' new "lessons"
+                    # entry) — this is now the sole source of
+                    # injected_lesson_ids once cutover is live, so the
+                    # post-response feedback loop (record_lesson_
+                    # application etc.) keeps recording against the real
+                    # lessons actually shown, not the legacy fetcher's
+                    # (now-guarded, non-running) duplicate computation.
+                    if _context_cutover_live:
+                        injected_lesson_ids = _extended.get("lesson_ids") or []
                     _old_source_names = [getattr(s, "name", "?") for s in (getattr(budget, "sources", []) or [])]
                     logger.info(
                         f"📐 [context-diet-compare] old={len(combined_context or '')}chars "

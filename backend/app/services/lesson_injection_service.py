@@ -62,7 +62,8 @@ class LessonInjectionService:
         query: str,
         domain_hint: Optional[str] = None,
         limit: int = 5,
-        min_effectiveness: float = 0.3
+        min_effectiveness: float = 0.3,
+        embedding_capability: str = "embedding_cognition",
     ) -> List[RetrievedLesson]:
         """
         Retrieve lessons relevant to the current query.
@@ -73,6 +74,10 @@ class LessonInjectionService:
             domain_hint: Optional domain to prioritize
             limit: Maximum number of lessons to return
             min_effectiveness: Minimum effectiveness score threshold
+            embedding_capability: "embedding_cognition" (default, CPU
+                fallback host) for background callers; "embedding" (GPU
+                host) when this runs inside a real, live chat turn —
+                ruling 1 (2026-07-31).
 
         Returns:
             List of relevant lessons sorted by composite score
@@ -80,7 +85,7 @@ class LessonInjectionService:
         try:
             # Generate embedding for the query
             query_embedding = await asyncio.wait_for(
-                embedding_service.generate_embedding(query),
+                embedding_service.generate_embedding(query, capability=embedding_capability),
                 timeout=2.5
             )
             if not query_embedding:
@@ -238,7 +243,8 @@ class LessonInjectionService:
         db: Session,
         query: str,
         domain_hint: Optional[str] = None,
-        limit: int = 5
+        limit: int = 5,
+        embedding_capability: str = "embedding_cognition",
     ) -> tuple[str, List[str]]:
         """
         Get formatted lessons ready for prompt injection.
@@ -250,7 +256,8 @@ class LessonInjectionService:
             db=db,
             query=query,
             domain_hint=domain_hint,
-            limit=limit
+            limit=limit,
+            embedding_capability=embedding_capability,
         )
 
         if not lessons:
