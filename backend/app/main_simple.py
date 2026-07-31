@@ -4745,13 +4745,11 @@ try:
 except Exception as e:
     logger.warning(f"Notes routes not available from module: {e}")
 
-# Recipes routes
-try:
-    from app.routes.recipes import router as recipes_router
-    app.include_router(recipes_router, tags=["Recipes"])
-    logger.info("✅ Recipes routes loaded from app.routes.recipes")
-except Exception as e:
-    logger.warning(f"Recipes routes not available from module: {e}")
+# item 2.2 (2026-07-30): the legacy top-level /recipes router (routes/recipes.py)
+# had zero live callers — web (RecipesSection), iOS (recipesService), and the
+# chat tool layer (app/tools/recipes.py, direct ORM) all exclusively use
+# /api/fitness/recipes or the Recipe model directly. Deleted the dead route
+# module + its schemas/recipes.py (which nothing else imported).
 
 # Reminders routes (extracted from main_simple.py)
 try:
