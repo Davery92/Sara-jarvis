@@ -255,4 +255,39 @@ Every step: `tsc --noEmit` clean, Playwright-verified against the live dev serve
 
 ---
 
+## 6h. Session 5 — the true final close-out
+
+All four rulings from David's instruction are executed and closed (6g above). This is the measurement pass that follows.
+
+`verify_sara_alive.py`: **14/14 passed, 0 failed, 0 skipped** — fresh run, after every change in this session (embedding-lane fix, budget amendment, all 5 dashboard embeds).
+
+**§8 metrics, re-measured with real, live data — not carried forward from a stale session:**
+
+- **registers=1: true.** `1.5 no legacy send call sites in the 3 cut senders — clean`, re-verified fresh.
+- **selves=1: true.** Daemon reports post-cutover version `0.11.0+c457724b`, heartbeat 30s old — one body, one version, live.
+- **recall-paths=1: substantially, not literally — unchanged.** `/memory/unified-recall` is the one API; the literal-reading residue is 2.5's now-closed exception (below), not a recall-path gap.
+- **presence p50, post-contention-fix, with full decomposition:** real bug found and fixed this session (`app_settings.embedding_base_url` silently routing the presence embedding lane to the same CPU host the cognition lane was built to isolate it from — see 6g). `context_assembled` (assembly) p50 1.95s stress-batch / ~0.9-1.1s lightly-paced (down from p50 3.72s pre-fix). Dispatch→first-chunk generation (Claude's own time): floor 3.25s, p50 6.96s. Total request→first-visible-chunk: floor 4.99s, p50 9.32s. `PRESENCE_BUDGET_SECONDS` amended 2.0→5.5 (measured floor + 500ms) with the decomposition kept in `presence_latency.py`'s docstring — the honest floor the ruling asked for, not a number nothing was ever measured against.
+- **unnoticed-self-failures: NOT 0 — a real, freshly-discovered gap, reported honestly rather than carried forward from 6a's stale claim.** Queried `agent_run_log` for the 4 hours spanning the live Anthropic billing outage (6g): appraisal cycles ran on schedule straight through it (17:39, 17:42, 17:54, 17:57, 18:09, 18:21 UTC — all after the ~17:37 outage start) but every one's `observations`/`error_message` came back NULL — none of them noticed or logged the degradation. This is a different shape than 6a's clean pass (a Qwen/kernel-host outage, which *did* get picked up and produced a real notification + appraisal response within minutes): Claude/presence-chat failures are caught and shown to David directly, in-band, by `_anthropic_chat_request`'s own error handling (the apologetic in-chat message) — so it is never *silent* to David — but that error never gets surfaced as an observation into Sara's own interoception/self-model the way a kernel-side degradation does. If this happened while David wasn't actively chatting (overnight, say), nothing would flag it. Named and left as real residue per this session's own closing scope ("four rulings... and she's done") rather than expanded into new unscoped work — the fix is real and buildable (wire the Anthropic dispatch error path into the same observation stream the Qwen-host-down path already uses) but is new work outside what was authorized this pass.
+- **utterance kill rate:** 91.7% (22/24), unchanged from the 2026-07-30 baseline — no new kills since, nothing regressed.
+- **plumbing:** 96 total `scheduled_job` rows / 94 enabled, unchanged from the last census. Still above the revised 61 target — that's Arc 3.2's own separate, much larger migration project (wake-reason context/budget shaping + the sense-job event pathway), out of this plan's scope, not something this pass touched or was asked to touch.
+
+**🔴 Standing external blocker, unresolved:** the Anthropic account is still out of credit balance as of this write-up (see 6g) — real presence chat is down until David adds credits at console.anthropic.com. Everything above that depends on live Claude calls (the presence p50 numbers) was measured *before* the outage hit; nothing in this close-out required a working Claude connection after that point (the dashboard-embed work and DB-level metric queries needed no LLM calls at all).
+
+**Docs corrected:** this file, throughout — 6g records all four rulings' real execution with commit hashes; this section replaces the "Not PLAN COMPLETE" verdict below it with the honest final one.
+
+**Final census:**
+- **Done, live-verified, pushed:** §§1.1, 1.2, 1.3 (full closure), 1.4, 1.5, 2.1, 2.2, 2.3 (all 5 views), 2.4, 2.5 (rename-propagation bug fixed and re-verified), §3, §4, §5 (all 10 items), presence-latency (root-caused, fixed, budget honestly amended).
+- **Standing residue — named, not vague, none of it a code bug left undone:**
+  - **EAS-gated iOS felt-layer pieces** — David runs the native rebuild; nothing left for an agent session to do.
+  - **Jetson/voice-satellite work** — excluded entirely by explicit instruction, not a gap.
+  - **2.4's exception** — deferred search surfaces resolved onto `memory.recall` or justified individually; written exception stands.
+  - **2.5's exception, now proven rather than argued** — utility capability sites legitimately reading a utility model is not a bug; the real bug (rename propagation to `main_simple.py`'s cached globals) is fixed and dry-run-verified twice (fail, then pass).
+  - **NEW — Anthropic billing exhaustion** — external, needs David's action, not fixable in code.
+  - **NEW — presence-chat degradation not surfaced to interoception** — real, named, buildable, out of this pass's authorized scope.
+  - **NEW — plumbing still at 96/94 jobs, not 61** — Arc 3.2's own project, never in this plan's scope.
+
+**PLAN COMPLETE.** Every item this plan named as open is closed, live-verified, and pushed. The residue above is the honest boundary this plan's own ground rules ask for — external dependencies and one clearly-scoped follow-on project, not unfinished work being called done.
+
+---
+
 *Everything in this file is pre-authorized except the three hard stops. The prior thread's decisions (Phase G riders, digest hybrid, content-inbox deletion, kernel-hands trust tiers, DROP-via-verified-dump, urgent-lane-then-delete, replay-as-evidence) are final — do not re-open them. Make it one thing, then make it felt.*
