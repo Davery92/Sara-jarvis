@@ -204,6 +204,25 @@ async def get_body_state_projection(user_id: str = DEFAULT_USER_ID) -> BodyState
             confidence=1.0,
         )
 
+    # Layer in chat-provider (Anthropic/presence) degradations — a real-time
+    # signal from the chat dispatch path itself, not the heartbeat's 5-minute
+    # tick (2026-07-31: closes "can't feel Claude failing" for the one path
+    # task_failure→ledger doesn't cover, since /chat/stream isn't a Celery task).
+    from app.services.body_sense import current_chat_provider_status
+    chat_status = await current_chat_provider_status()
+    for d in chat_status.get("degraded") or []:
+        subsystem = d["subsystem"]
+        components[subsystem] = BodyComponentV1(
+            name=subsystem,
+            label=d.get("name", subsystem),
+            status=ComponentStatus.DEGRADED,
+            impact=d.get("impact"),
+            severity=d.get("severity"),
+            source="interoception",
+            as_of=now,
+            confidence=1.0,
+        )
+
     # Layer in the DB-derived signals self_model._health() used to compute
     # independently (task failures, failed scheduled jobs, stalled email
     # cursors) — this is the fold-in that makes /mind/self agree with

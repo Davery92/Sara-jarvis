@@ -687,11 +687,30 @@ class SimpleLLMClient:
             else:
                 logger.info(f"Anthropic chat completed - {input_tokens} input, {output_tokens} output")
 
+            # Interoception (2026-07-31): best-effort self-heal signal — a
+            # no-op unless "anthropic" was actually marked down, so this
+            # doesn't cost anything on the normal path.
+            try:
+                from app.services.body_sense import record_chat_provider_recovery
+                await record_chat_provider_recovery("anthropic")
+            except Exception:
+                pass
+
             # Convert Anthropic response to OpenAI format
             return self._convert_anthropic_to_openai(anthropic_result)
 
         except httpx.HTTPError as e:
             logger.error(f"HTTP error in Anthropic chat request: {e}")
+            # Interoception: a real 4xx/5xx or connection failure talking to
+            # the provider — the chat-path counterpart to the Celery
+            # task_failure→ledger signal deep deliberation now gets (both
+            # 2026-07-31). /chat/stream isn't a Celery task, so nothing else
+            # would ever surface this to the self slice.
+            try:
+                from app.services.body_sense import record_chat_provider_failure
+                await record_chat_provider_failure("anthropic", type(e).__name__, str(e))
+            except Exception:
+                pass
             raise
         except Exception as e:
             logger.error(f"Unexpected error in Anthropic chat request: {e}")

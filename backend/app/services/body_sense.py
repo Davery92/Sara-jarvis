@@ -61,10 +61,15 @@ _SUBSYSTEM_LABEL = {
 
 
 def _label(subsystem: str) -> Tuple[str, str]:
-    """(friendly_name, impact) for a subsystem key. Handles host:<name>."""
+    """(friendly_name, impact) for a subsystem key. Handles host:<name> and
+    llm_chat:<provider> (2026-07-31: closes "can't feel Claude failing" —
+    see record_chat_provider_failure below)."""
     if subsystem.startswith("host:"):
         name = subsystem.split(":", 1)[1]
         return (f"the {name} host", f"I've lost access to {name}")
+    if subsystem.startswith("llm_chat:"):
+        provider = subsystem.split(":", 1)[1]
+        return (f"my presence-chat model ({provider})", "real-time conversation is down — David sees an error instead of a reply")
     return _SUBSYSTEM_LABEL.get(subsystem, (subsystem, "a part of me is degraded"))
 
 
@@ -389,4 +394,128 @@ async def current_self_status(user_id: str = DAVID_USER_ID) -> Dict[str, Any]:
         return {"healthy": not degraded, "degraded": degraded}
     except Exception as e:
         logger.debug(f"[body_sense] current_self_status failed: {e}")
+        return {"healthy": True, "degraded": []}
+
+
+# ─── Chat-provider degradation (2026-07-31) ──────────────────────────────
+#
+# `reflect()` above is heartbeat-driven: a periodic report, diffed tick over
+# tick. It can't be reused as-is for a chat-path failure that needs to be
+# felt the instant it happens, not on the next 5-minute tick — and folding
+# an ad-hoc key into `_STATE_KEY` would break `reflect()`'s own diffing: it
+# rebuilds that dict from scratch every tick from only 3 sources (heartbeat
+# checks, daemon, hosts), so any key it doesn't itself track would compute
+# as "recovered" on the very next tick regardless of whether the chat
+# provider actually recovered. Kept fully separate — same event/alert shape
+# (`_emit_and_alert`, unchanged), a second, independent state key, no
+# interaction with the report-diffing path at all.
+#
+# Closes the "she can't feel Claude failing" residue: presence chat
+# (`/chat/stream`'s Anthropic dispatch) runs outside Celery entirely, so
+# the task_failure→ledger→self-slice path the deep-deliberation fix wired
+# up (2026-07-31, same day) never sees it — this is that same shape of
+# signal for the one real path it doesn't cover.
+_CHAT_STATE_KEY = "system:interoception_chat_state"
+
+
+async def record_chat_provider_failure(provider: str, error_class: str, detail: str = "") -> bool:
+    """Call from a chat provider's own dispatch error handler (e.g.
+    `_anthropic_chat_request`'s `except httpx.HTTPError` branch) — a
+    genuine 4xx/5xx or connection failure talking to the provider, not a
+    downstream bug in Sara's own response handling. Best-effort, fires on
+    state transition only (repeated failures while already down are a
+    no-op past the first). Returns True iff this was a new transition."""
+    key = f"llm_chat:{provider}"
+    try:
+        r = await _get_redis()
+        try:
+            state = await r.hgetall(_CHAT_STATE_KEY)
+            was_down = key in (state or {})
+            await r.hset(_CHAT_STATE_KEY, key, json.dumps({
+                "severity": "error", "error_class": error_class, "detail": detail[:300],
+            }))
+            if not was_down:
+                result: Dict[str, Any] = {"events": [], "alerts": []}
+                delivered = await _emit_and_alert(
+                    user_id=DAVID_USER_ID, kind="degraded",
+                    subsystems={key: "error"}, severity="error", result=result,
+                )
+                if delivered:
+                    await _mark_announced(r, [key])
+                logger.info(f"[body_sense] chat provider degraded: {key} ({error_class})")
+            return not was_down
+        finally:
+            try:
+                await r.close()
+            except Exception:
+                pass
+    except Exception as e:
+        logger.debug(f"[body_sense] record_chat_provider_failure failed: {e}")
+        return False
+
+
+async def record_chat_provider_recovery(provider: str) -> bool:
+    """Call from the same dispatch path on a successful response — cheap
+    (one Redis read) and a no-op unless this provider was actually marked
+    down, matching `reflect()`'s own "only close what was announced"
+    discipline. Returns True iff this cleared a real degradation."""
+    key = f"llm_chat:{provider}"
+    try:
+        r = await _get_redis()
+        try:
+            state = await r.hgetall(_CHAT_STATE_KEY)
+            if key not in (state or {}):
+                return False
+            await r.hdel(_CHAT_STATE_KEY, key)
+            announced = await _load_announced(r)
+            to_close = key in announced
+            result: Dict[str, Any] = {"events": [], "alerts": []}
+            await _emit_and_alert(
+                user_id=DAVID_USER_ID, kind="recovered",
+                subsystems={key: "error"}, severity="normal", result=result,
+                notify=to_close,
+            )
+            if to_close:
+                await _clear_announced(r, [key])
+            logger.info(f"[body_sense] chat provider recovered: {key}")
+            return True
+        finally:
+            try:
+                await r.close()
+            except Exception:
+                pass
+    except Exception as e:
+        logger.debug(f"[body_sense] record_chat_provider_recovery failed: {e}")
+        return False
+
+
+async def current_chat_provider_status() -> Dict[str, Any]:
+    """Same shape as `current_self_status()` (cheap, no live probing) —
+    for `body_state_projection` to fold into the canonical self slice
+    alongside the heartbeat-driven degradations."""
+    try:
+        r = await _get_redis()
+        try:
+            raw = await r.hgetall(_CHAT_STATE_KEY)
+        finally:
+            try:
+                await r.close()
+            except Exception:
+                pass
+        degraded = []
+        for key, payload in (raw or {}).items():
+            try:
+                entry = json.loads(payload)
+            except Exception:
+                entry = {"severity": "error"}
+            degraded.append({
+                "subsystem": key,
+                "name": _label(key)[0],
+                "impact": _label(key)[1],
+                "severity": entry.get("severity", "error"),
+                "error_class": entry.get("error_class"),
+            })
+        return {"healthy": not degraded, "degraded": degraded}
+    except Exception as e:
+        logger.debug(f"[body_sense] current_chat_provider_status failed: {e}")
         return {"healthy": True, "degraded": []}

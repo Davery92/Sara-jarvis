@@ -189,6 +189,37 @@ async def arc1_checks(user_id: str) -> list:
         return Check("1.1 say_candidate status constraint allows composed/declined").ok("constraint includes both")
     checks.append(await _check("1d", candidate_status_constraint_allows_new_states()))
 
+    async def local_first_no_non_chat_claude_usage():
+        """feedback_local_first_llm: Claude models are chat-persona only —
+        every other operation type (deliberation, embedding, tool_call,
+        etc.) must run local. token_usage is the ledger real LLM calls log
+        to via main_simple.py's/core/llm.py's usage callback, so "zero
+        non-chat Claude rows" there is a real, live invariant, not a
+        point-in-time grep — for whatever DOES reach the ledger.
+
+        Honest limitation, checked directly (2026-07-31): this would NOT
+        have caught deliberation.py's deep-path violation on its own —
+        that path's old raw-httpx Anthropic call never wired the usage
+        callback at all, so it was invisible to token_usage entirely (0
+        rows, not mislabeled ones) rather than logged with the wrong
+        operation_type. This check covers the "logged but mislabeled"
+        failure mode; a call that bypasses the ledger outright needs a
+        different check (e.g. auditing which LLM call sites *don't* call
+        the usage callback) — not built here, named so it isn't assumed
+        covered."""
+        async with factory() as db:
+            rows = (await db.execute(text("""
+                SELECT model, operation_type, COUNT(*) FROM token_usage
+                WHERE model ILIKE '%claude%' AND operation_type != 'chat'
+                GROUP BY model, operation_type ORDER BY COUNT(*) DESC LIMIT 10
+            """))).fetchall()
+        if rows:
+            return Check("1.local-first zero non-chat Claude token_usage rows").fail(
+                f"{[(r[0], r[1], r[2]) for r in rows]}")
+        return Check("1.local-first zero non-chat Claude token_usage rows").ok(
+            "0 non-chat rows — every Claude call in the ledger is chat-persona")
+    checks.append(await _check("1e", local_first_no_non_chat_claude_usage()))
+
     return checks
 
 
