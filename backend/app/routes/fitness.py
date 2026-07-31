@@ -5169,29 +5169,51 @@ async def log_workout_set(
     try:
         # Verify session exists
         check_query = text("""
-            SELECT id FROM workout_session
-            WHERE id = :session_id AND user_id = :user_id
+            SELECT ws.id, ws.session_date, ft.name AS template_name
+            FROM workout_session ws
+            LEFT JOIN fitness_template ft ON ws.template_id = ft.id
+            WHERE ws.id = :session_id AND ws.user_id = :user_id
         """)
         session = db.execute(check_query, {"session_id": session_id, "user_id": user_id}).fetchone()
 
         if not session:
             raise HTTPException(status_code=404, detail="Workout session not found")
 
+        # item 2.1 (2026-07-30): this INSERT 500'd unconditionally — it named
+        # a `logged_at` column workout_log has never had (real column is
+        # created_at, defaulted; see GET /sessions/{id}'s own
+        # COALESCE(session_time, created_at)) and omitted workout_id, which
+        # is NOT NULL with a real FK to `workout`. The live v2 command path
+        # (workout_session_service/workout_command_service) satisfies that FK
+        # by creating a `workout` placeholder row sharing the session's own
+        # id — same pattern here, so this calendar-scheduled flow's sets
+        # land in the same table shape the rest of the app already reads.
+        db.execute(text("""
+            INSERT INTO workout (id, user_id, title, calendar_event_id, created_at, updated_at)
+            VALUES (:id, :user_id, :title, NULL, NOW(), NOW())
+            ON CONFLICT (id) DO NOTHING
+        """), {
+            "id": session_id,
+            "user_id": user_id,
+            "title": session.template_name or f"Workout {session.session_date}",
+        })
+
         # Insert set log
         log_id = str(uuid.uuid4())
         insert_query = text("""
             INSERT INTO workout_log (
-                id, user_id, session_id, exercise_id, set_index,
-                weight, reps, rpe, notes, logged_at
+                id, workout_id, user_id, session_id, exercise_id, set_index,
+                weight, reps, rpe, notes, created_at
             )
             VALUES (
-                :id, :user_id, :session_id, :exercise_id, :set_index,
+                :id, :workout_id, :user_id, :session_id, :exercise_id, :set_index,
                 :weight, :reps, :rpe, :notes, NOW()
             )
         """)
 
         db.execute(insert_query, {
             "id": log_id,
+            "workout_id": session_id,
             "user_id": user_id,
             "session_id": session_id,
             "exercise_id": set_data.exercise_name,  # Using exercise name as ID for simplicity
