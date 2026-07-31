@@ -47,7 +47,6 @@ const ShellNavigation: React.FC<ShellNavigationProps> = ({
     acs: 'Sara’s mind',
     notes: 'Notes, graph, connections',
     knowledge: 'Facts and people',
-    'sensory-monitor': 'Sensors and presence',
     automations: 'Background work',
     settings: 'System controls',
     'orchestrator-lab': 'Automation lab',

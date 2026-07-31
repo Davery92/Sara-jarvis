@@ -6,6 +6,7 @@ import { APP_CONFIG } from '../config';
 const SystemStatus = lazy(() => import('./SystemStatus'));
 const MindDashboard = lazy(() => import('../components/mind/MindDashboard'));
 const SystemDashboard = lazy(() => import('../components/system/SystemDashboard'));
+const SensoryMonitor = lazy(() => import('../components/SensoryMonitor'));
 
 // ── Types (mirror backend/app/schemas/contracts.py + the diagnostics
 // endpoints in backend/app/routes/diagnostics.py — SINGULAR_SARA_MASTER_
@@ -250,7 +251,7 @@ const LEGACY_OPS_VIEWS: Array<{ view: 'system' | 'mind' | 'system-status' | 'sen
   { view: 'system', label: 'System', embedded: true },
   { view: 'mind', label: 'Mind', embedded: true },
   { view: 'system-status', label: 'System Status', embedded: true },
-  { view: 'sensory-monitor', label: 'Sensory Monitor' },
+  { view: 'sensory-monitor', label: 'Sensory Monitor', embedded: true },
   { view: 'orchestrator-lab', label: 'Orchestrator Lab' },
 ];
 
@@ -258,6 +259,7 @@ const EMBEDDED_LEGACY_COMPONENTS: Partial<Record<(typeof LEGACY_OPS_VIEWS)[numbe
   'system-status': SystemStatus,
   mind: MindDashboard,
   system: SystemDashboard,
+  'sensory-monitor': SensoryMonitor,
 };
 
 interface InteriorProps {

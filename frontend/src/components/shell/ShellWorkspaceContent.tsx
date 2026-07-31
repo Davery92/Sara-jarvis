@@ -30,7 +30,6 @@ const loadDial = () => import('../../pages/Dial')
 const loadLife = () => import('../../pages/Life')
 const loadWork = () => import('../../pages/Work')
 const loadMemory = () => import('../../pages/Memory')
-const loadSensoryMonitor = () => import('../SensoryMonitor')
 const loadEmailPage = () => import('../EmailPage')
 const loadPersonalKnowledge = () => import('../PersonalKnowledge')
 const loadAutomationsView = () => import('../AutomationsView')
@@ -54,7 +53,6 @@ const Life = lazy(loadLife)
 const Work = lazy(loadWork)
 const Memory = lazy(loadMemory)
 const ACSPage = lazy(loadACSPage)
-const SensoryMonitor = lazy(loadSensoryMonitor)
 const EmailPage = lazy(loadEmailPage)
 const PersonalKnowledge = lazy(loadPersonalKnowledge)
 const AutomationsView = lazy(loadAutomationsView)
@@ -483,13 +481,6 @@ export default function ShellWorkspaceContent({
     )
   }
 
-  if (targetView === 'sensory-monitor') {
-    return (
-      <div className="flex-1 overflow-y-auto min-h-0">
-        {renderDeferredView('Loading sensory monitor…', <SensoryMonitor />)}
-      </div>
-    )
-  }
 
 
   if (targetView === 'knowledge') {

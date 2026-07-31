@@ -12,7 +12,6 @@ export type AppView =
   | 'projects'
   | 'recipes'
   | 'briefings'
-  | 'sensory-monitor'
   | 'inbox'
   | 'workspace'
   | 'tasks'
@@ -22,9 +21,9 @@ export type AppView =
   | 'automations'
   | 'orchestrator-lab'
   | 'acs'
-  // NOTE: 'system-status', 'mind', and 'system' removed 2026-07-31 (item
-  // 2.3 ruling 4) — embedded into Interior's "Legacy dashboards" section
-  // instead of a standalone view.
+  // NOTE: 'system-status', 'mind', 'system', and 'sensory-monitor' removed
+  // 2026-07-31 (item 2.3 ruling 4) — embedded into Interior's "Legacy
+  // dashboards" section instead of a standalone view.
   | 'machines'
   | 'interior'
   | 'life'
@@ -56,7 +55,6 @@ export const APP_VIEWS: AppViewConfig[] = [
   { view: 'projects', path: '/projects', title: 'Projects', icon: 'work', keywords: ['projects', 'work', 'planning'] },
   { view: 'recipes', path: '/recipes', title: 'Recipes', icon: 'restaurant_menu', keywords: ['recipes', 'cooking', 'food'] },
   { view: 'briefings', path: '/briefings', title: 'Briefings', icon: 'wb_sunny', keywords: ['brief', 'briefings', 'morning', 'research', 'papers'] },
-  { view: 'sensory-monitor', path: '/sensory-monitor', title: 'Sensory', icon: 'sensors', keywords: ['sensory', 'monitor'] },
   { view: 'inbox', path: '/inbox', title: 'Today', icon: 'inbox', keywords: ['today', 'inbox', 'priorities', 'attention', 'content'] },
   { view: 'knowledge', path: '/knowledge', title: 'Knowledge', icon: 'psychology', keywords: ['knowledge', 'pkg', 'personal', 'facts', 'preferences', 'people'] },
   { view: 'workspace', path: '/workspace', title: 'Canvas', icon: 'grid_view', keywords: ['canvas', 'workspace', 'workbench'] },
