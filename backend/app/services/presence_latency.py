@@ -1,17 +1,34 @@
 """
 Presence latency (Arc 6.1, work-order item 6) — "the three-speed contract,
-enforced." Presence (chat persona) has a real budget: <2s to first token.
-This is the timing-assertion + red-line half of that: black-box measured
-from outside the streaming generator (start of the request to the first
-real content chunk yielded), not by threading a timer through main_simple.
-py's chat_stream internals — the same number the plan's own baseline
-("85s first token") was framed around, and the only measurement that
-actually reflects what David experiences.
+enforced." This is the timing-assertion + red-line half of that: black-box
+measured from outside the streaming generator (start of the request to the
+first real content chunk yielded), not by threading a timer through
+main_simple.py's chat_stream internals — the same number the plan's own
+baseline ("85s first token") was framed around, and the only measurement
+that actually reflects what David experiences.
 
 Same Redis-as-operational-telemetry precedent as `system:health_status`
 (the heartbeat's health dict) — not a new memory/fact store, a rolling
 operational signal for the Interior to render.
-"""
+
+Ruling 1 budget amendment (2026-07-31): the original <2s target was
+never measured, just asserted. A real 20-turn measurement pass, after
+root-causing and fixing the actual contention bug (a stale app_settings
+row silently routing the "presence" embedding lane to the same slow CPU
+host "cognition" was supposed to be isolated from — see llm_broker.py's
+CAPABILITIES["embedding"] comment), found:
+  - context assembly: p50 0.9-1.1s organic pace / 1.95s back-to-back
+    stress pace (down from p50 3.72s pre-fix)
+  - dispatch->first-chunk generation (Claude's own time, non-streaming
+    dispatch so this is close to full-generation time for anything past
+    a trivial reply): floor 3.25s, p50 6.96s, max 20.41s across the
+    sample
+  - total request-start->first-chunk: floor 4.99s (the best real sample
+    observed), p50 9.32s
+2.0s was never reachable once real context assembly and a real Claude
+call are both in the critical path — 4.99s is. Budget set to that floor
++ 500ms so a breach still means something (an honest floor beats a
+fictional ceiling nothing was ever measured against)."""
 import json
 import logging
 from typing import Any, Dict, List, Optional
@@ -20,7 +37,7 @@ from app.core.timezone import now as local_now
 
 logger = logging.getLogger(__name__)
 
-PRESENCE_BUDGET_SECONDS = 2.0
+PRESENCE_BUDGET_SECONDS = 5.5
 _RECENT_KEY = "sara:presence_latency:recent"
 _LAST_BREACH_KEY = "sara:presence_latency:last_breach"
 _RECENT_MAX = 50
