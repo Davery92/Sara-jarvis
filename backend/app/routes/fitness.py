@@ -4979,7 +4979,7 @@ async def get_workout_session(
         session_query = text("""
             SELECT
                 ws.id, ws.user_id, ws.template_id, ws.session_date, ws.status,
-                ws.started_at, ws.completed_at, ws.created_at,
+                ws.started_at, ws.completed_at, ws.created_at, ws.active_session_id,
                 ft.name as template_name, ft.exercises, ft.notes as template_notes,
                 ft.starting_weights, ft.phase_id
             FROM workout_session ws
@@ -5007,16 +5007,31 @@ async def get_workout_session(
             except:
                 starting_weights = None
 
-        # Get logged sets for this session
-        sets_query = text("""
-            SELECT id, exercise_id, set_index, weight, reps, rpe, notes,
-                   set_kind, set_group_id, group_sequence, parent_set_id,
-                   COALESCE(session_time, created_at) AS logged_at
-            FROM workout_log
-            WHERE session_id = :session_id AND voided_at IS NULL
-            ORDER BY COALESCE(session_time, created_at), group_sequence
-        """)
-        logged_sets = db.execute(sets_query, {"session_id": session_id}).fetchall()
+        # Get logged sets for this session. item 2.1 remainder (2026-07-31):
+        # once started through workout_command_service, sets land tagged
+        # with active_session_id (the real v2 session), not this row's own
+        # id — read via that link when present. Falls back to the legacy
+        # session_id-tagged rows for any workout started before this cutover.
+        if session_dict.get('active_session_id'):
+            sets_query = text("""
+                SELECT id, exercise_id, set_index, weight, reps, rpe, notes,
+                       set_kind, set_group_id, group_sequence, parent_set_id,
+                       COALESCE(session_time, created_at) AS logged_at
+                FROM workout_log
+                WHERE active_session_id = :active_session_id AND voided_at IS NULL
+                ORDER BY COALESCE(session_time, created_at), group_sequence
+            """)
+            logged_sets = db.execute(sets_query, {"active_session_id": session_dict['active_session_id']}).fetchall()
+        else:
+            sets_query = text("""
+                SELECT id, exercise_id, set_index, weight, reps, rpe, notes,
+                       set_kind, set_group_id, group_sequence, parent_set_id,
+                       COALESCE(session_time, created_at) AS logged_at
+                FROM workout_log
+                WHERE session_id = :session_id AND voided_at IS NULL
+                ORDER BY COALESCE(session_time, created_at), group_sequence
+            """)
+            logged_sets = db.execute(sets_query, {"session_id": session_id}).fetchall()
         session_dict['logged_sets'] = [dict(row._mapping) for row in logged_sets]
 
         # Morning recovery snapshot (frozen at the AM sync — not intraday).
@@ -5119,14 +5134,19 @@ async def start_workout_session(
     db: Session = Depends(get_db)
 ):
     """
-    Start a workout session
-    - Updates status to 'in_progress'
-    - Sets started_at timestamp
+    Start a calendar-scheduled workout session.
+
+    item 2.1 remainder (2026-07-31): hands off to workout_command_service —
+    the same coached, progression-aware, cross-device-conflict-checked path
+    the phone/Watch use — instead of a disconnected raw-SQL status flip.
+    `workout_session.active_session_id` records which active_workout_session
+    now backs this calendar slot, so /log-set and /complete below can find
+    it again.
     """
+    from app.services.workout_command_service import workout_command_service, WorkoutConflict, _v2_enabled
     try:
-        # Verify session exists and belongs to user
         check_query = text("""
-            SELECT status FROM workout_session
+            SELECT status, template_id FROM workout_session
             WHERE id = :session_id AND user_id = :user_id
         """)
         session = db.execute(check_query, {"session_id": session_id, "user_id": user_id}).fetchone()
@@ -5137,17 +5157,29 @@ async def start_workout_session(
         if session.status == 'completed':
             raise HTTPException(status_code=400, detail="Cannot start a completed workout")
 
-        # Update session
-        update_query = text("""
+        if not session.template_id:
+            raise HTTPException(status_code=400, detail="This calendar workout has no template to start from")
+
+        result = await workout_command_service.start(
+            db, user_id, session.template_id,
+            origin_device="phone",
+            on_conflict="abandon" if not _v2_enabled() else "error",
+        )
+        active_session_id = (result.get("projection") or {}).get("session_id")
+
+        db.execute(text("""
             UPDATE workout_session
-            SET status = 'in_progress', started_at = NOW(), updated_at = NOW()
+            SET status = 'in_progress', started_at = COALESCE(started_at, NOW()),
+                active_session_id = :aid, updated_at = NOW()
             WHERE id = :session_id AND user_id = :user_id
-        """)
-        db.execute(update_query, {"session_id": session_id, "user_id": user_id})
+        """), {"aid": active_session_id, "session_id": session_id, "user_id": user_id})
         db.commit()
 
         return {"message": "Workout session started", "session_id": session_id, "status": "in_progress"}
 
+    except WorkoutConflict as c:
+        db.rollback()
+        raise HTTPException(status_code=409, detail={"code": c.code, "message": c.message})
     except HTTPException:
         raise
     except Exception as e:
@@ -5164,74 +5196,62 @@ async def log_workout_set(
     db: Session = Depends(get_db)
 ):
     """
-    Log a single set during an active workout session
+    Log a single set during an active calendar-scheduled workout session.
+
+    item 2.1 remainder (2026-07-31): delegates to workout_command_service
+    (via the active_workout_session this calendar slot started), the same
+    path the phone/Watch use, instead of the old disconnected raw INSERT.
     """
+    from app.services.workout_command_service import workout_command_service, WorkoutConflict
     try:
-        # Verify session exists
-        check_query = text("""
-            SELECT ws.id, ws.session_date, ft.name AS template_name
-            FROM workout_session ws
-            LEFT JOIN fitness_template ft ON ws.template_id = ft.id
-            WHERE ws.id = :session_id AND ws.user_id = :user_id
-        """)
-        session = db.execute(check_query, {"session_id": session_id, "user_id": user_id}).fetchone()
+        link = db.execute(text("""
+            SELECT active_session_id FROM workout_session
+            WHERE id = :session_id AND user_id = :user_id
+        """), {"session_id": session_id, "user_id": user_id}).fetchone()
 
-        if not session:
+        if not link:
             raise HTTPException(status_code=404, detail="Workout session not found")
+        if not link.active_session_id:
+            raise HTTPException(status_code=400, detail="Workout session has not been started")
 
-        # item 2.1 (2026-07-30): this INSERT 500'd unconditionally — it named
-        # a `logged_at` column workout_log has never had (real column is
-        # created_at, defaulted; see GET /sessions/{id}'s own
-        # COALESCE(session_time, created_at)) and omitted workout_id, which
-        # is NOT NULL with a real FK to `workout`. The live v2 command path
-        # (workout_session_service/workout_command_service) satisfies that FK
-        # by creating a `workout` placeholder row sharing the session's own
-        # id — same pattern here, so this calendar-scheduled flow's sets
-        # land in the same table shape the rest of the app already reads.
-        db.execute(text("""
-            INSERT INTO workout (id, user_id, title, calendar_event_id, created_at, updated_at)
-            VALUES (:id, :user_id, :title, NULL, NOW(), NOW())
-            ON CONFLICT (id) DO NOTHING
-        """), {
-            "id": session_id,
-            "user_id": user_id,
-            "title": session.template_name or f"Workout {session.session_date}",
+        active = workout_command_service._load_by_id(db, link.active_session_id)
+        if not active:
+            raise HTTPException(status_code=400, detail="Linked active session no longer exists")
+
+        exercises = (active["workout_snapshot"] or {}).get("exercises") or []
+        ex_idx = next(
+            (i for i, e in enumerate(exercises)
+             if e.get("name") == set_data.exercise_name or (e.get("variant") or "") == set_data.exercise_name),
+            None,
+        )
+        if ex_idx is None:
+            raise HTTPException(status_code=400, detail=f"Exercise '{set_data.exercise_name}' not in this workout")
+
+        result = await workout_command_service.execute(db, user_id, {
+            "command_id": str(uuid.uuid4()),
+            "kind": "log_set",
+            "origin_device": "phone",
+            "session_id": link.active_session_id,
+            "payload": {
+                "exercise_index": ex_idx,
+                "weight": set_data.weight,
+                "reps": set_data.reps,
+                "rpe": set_data.rpe,
+                "notes": set_data.notes,
+            },
         })
-
-        # Insert set log
-        log_id = str(uuid.uuid4())
-        insert_query = text("""
-            INSERT INTO workout_log (
-                id, workout_id, user_id, session_id, exercise_id, set_index,
-                weight, reps, rpe, notes, created_at
-            )
-            VALUES (
-                :id, :workout_id, :user_id, :session_id, :exercise_id, :set_index,
-                :weight, :reps, :rpe, :notes, NOW()
-            )
-        """)
-
-        db.execute(insert_query, {
-            "id": log_id,
-            "workout_id": session_id,
-            "user_id": user_id,
-            "session_id": session_id,
-            "exercise_id": set_data.exercise_name,  # Using exercise name as ID for simplicity
-            "set_index": set_data.set_number,
-            "weight": set_data.weight,
-            "reps": set_data.reps,
-            "rpe": set_data.rpe,
-            "notes": set_data.notes
-        })
-        db.commit()
+        logged = result.get("logged") or {}
 
         return {
             "message": "Set logged successfully",
-            "log_id": log_id,
-            "exercise": set_data.exercise_name,
-            "set_number": set_data.set_number
+            "log_id": logged.get("id"),
+            "exercise": logged.get("exercise"),
+            "set_number": logged.get("set_number"),
         }
 
+    except WorkoutConflict as c:
+        db.rollback()
+        raise HTTPException(status_code=409, detail={"code": c.code, "message": c.message})
     except HTTPException:
         raise
     except Exception as e:
@@ -5247,60 +5267,59 @@ async def complete_workout_session(
     db: Session = Depends(get_db)
 ):
     """
-    Complete a workout session
-    - Updates status to 'completed'
-    - Sets completed_at timestamp
+    Complete a calendar-scheduled workout session.
+
+    item 2.1 remainder (2026-07-31): delegates to workout_command_service
+    for the actual completion (progression proposals, PR/summary math —
+    the same the phone/Watch get), then marks the calendar-side
+    `workout_session` row completed too so the Calendar view reflects it.
     """
+    from app.services.workout_command_service import workout_command_service, WorkoutConflict
     try:
-        # Verify session exists
-        check_query = text("""
-            SELECT id, status FROM workout_session
+        link = db.execute(text("""
+            SELECT status, active_session_id FROM workout_session
             WHERE id = :session_id AND user_id = :user_id
-        """)
-        session = db.execute(check_query, {"session_id": session_id, "user_id": user_id}).fetchone()
+        """), {"session_id": session_id, "user_id": user_id}).fetchone()
 
-        if not session:
+        if not link:
             raise HTTPException(status_code=404, detail="Workout session not found")
-
-        if session.status == 'completed':
+        if link.status == 'completed':
             raise HTTPException(status_code=400, detail="Workout session already completed")
+        if not link.active_session_id:
+            raise HTTPException(status_code=400, detail="Workout session has not been started")
 
-        # Update session status
-        update_query = text("""
+        result = await workout_command_service.execute(db, user_id, {
+            "command_id": str(uuid.uuid4()),
+            "kind": "complete",
+            "origin_device": "phone",
+            "session_id": link.active_session_id,
+            "payload": {},
+        })
+
+        db.execute(text("""
             UPDATE workout_session
             SET status = 'completed', completed_at = NOW(), updated_at = NOW()
             WHERE id = :session_id AND user_id = :user_id
-        """)
-        db.execute(update_query, {"session_id": session_id, "user_id": user_id})
+        """), {"session_id": session_id, "user_id": user_id})
         db.commit()
 
-        # Get completion summary
-        summary_query = text("""
-            SELECT
-                COUNT(DISTINCT exercise_id) as exercises_completed,
-                -- Working sets only: a three-segment drop set is one set done,
-                -- and volume still counts every segment (§4.4).
-                COUNT(*) FILTER (WHERE COALESCE(counts_toward_target, true)) as total_sets,
-                SUM(weight * reps) as total_volume
-            FROM workout_log
-            WHERE session_id = :session_id AND voided_at IS NULL
-        """)
-        summary = db.execute(summary_query, {"session_id": session_id}).fetchone()
-
-        summary_dict = dict(summary._mapping) if summary else {}
+        summary = result.get("summary") or {}
         _emit_domain_event_safe(EventType.WORKOUT_COMPLETED, user_id, {
             "type": "workout",
-            "exercises": summary_dict.get("exercises_completed"),
-            "total_sets": summary_dict.get("total_sets"),
+            "exercises": summary.get("exercises_completed"),
+            "total_sets": summary.get("total_sets"),
         })
 
         return {
             "message": "Workout session completed successfully",
             "session_id": session_id,
             "status": "completed",
-            "summary": summary_dict
+            "summary": summary,
         }
 
+    except WorkoutConflict as c:
+        db.rollback()
+        raise HTTPException(status_code=409, detail={"code": c.code, "message": c.message})
     except HTTPException:
         raise
     except Exception as e:
