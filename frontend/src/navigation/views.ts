@@ -19,11 +19,11 @@ export type AppView =
   | 'knowledge'
   | 'privacy-dashboard'
   | 'automations'
-  | 'orchestrator-lab'
   | 'acs'
-  // NOTE: 'system-status', 'mind', 'system', and 'sensory-monitor' removed
-  // 2026-07-31 (item 2.3 ruling 4) — embedded into Interior's "Legacy
-  // dashboards" section instead of a standalone view.
+  // NOTE: 'system-status', 'mind', 'system', 'sensory-monitor', and
+  // 'orchestrator-lab' removed 2026-07-31 (item 2.3 ruling 4) — embedded
+  // into Interior's "Legacy dashboards" section instead of a standalone
+  // view.
   | 'machines'
   | 'interior'
   | 'life'
@@ -61,7 +61,6 @@ export const APP_VIEWS: AppViewConfig[] = [
   { view: 'automations', path: '/automations', title: 'Agent Tasks', icon: 'bolt', keywords: ['automations', 'agent', 'tasks', 'background', 'dispatch', 'missions'] },
   { view: 'settings', path: '/settings', title: 'Settings', icon: 'settings', keywords: ['settings', 'preferences', 'config'] },
   { view: 'privacy-dashboard', path: '/privacy-dashboard', title: 'Privacy', icon: 'lock', keywords: ['privacy', 'security'], includeInPalette: false },
-  { view: 'orchestrator-lab', path: '/orchestrator-lab', title: 'Orchestrator Lab', icon: 'science', keywords: ['orchestrator', 'automation', 'lab'], includeInPalette: false },
   { view: 'acs', path: '/acs', title: 'ACS', icon: 'smart_toy', keywords: ['acs', 'mind', 'thoughts', 'autonomous', 'cognition', 'sara', 'inner', 'queue', 'inbox'] },
   { view: 'machines', path: '/machines', title: 'Machines', icon: 'dns', keywords: ['machines', 'fleet', 'servers', 'hosts', 'infrastructure', 'boxes', 'health', 'disk', 'agent'] },
   { view: 'interior', path: '/interior', title: 'Interior', icon: 'insights', keywords: ['interior', 'kernel', 'intents', 'attention', 'actions', 'contradictions', 'singular', 'truth', 'body state'] },
@@ -71,9 +70,7 @@ export const APP_VIEWS: AppViewConfig[] = [
   { view: 'dial', path: '/dial', title: 'The Dial', icon: 'tune', keywords: ['dial', 'quiet hours', 'autonomy', 'initiative', 'calendar ownership', 'ungag'] },
 ]
 
-const VIEW_ALIASES: Record<string, AppView> = {
-  orchestrator: 'orchestrator-lab',
-}
+const VIEW_ALIASES: Record<string, AppView> = {}
 
 export const PATH_TO_VIEW: Record<string, AppView> = APP_VIEWS.reduce((acc, item) => {
   acc[item.path] = item.view

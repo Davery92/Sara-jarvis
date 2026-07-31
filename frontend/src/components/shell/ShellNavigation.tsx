@@ -49,7 +49,6 @@ const ShellNavigation: React.FC<ShellNavigationProps> = ({
     knowledge: 'Facts and people',
     automations: 'Background work',
     settings: 'System controls',
-    'orchestrator-lab': 'Automation lab',
     'privacy-dashboard': 'Privacy and security',
     workspace: 'Canvas workbench',
     tasks: 'Daily checklist',

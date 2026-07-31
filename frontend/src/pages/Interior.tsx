@@ -7,6 +7,7 @@ const SystemStatus = lazy(() => import('./SystemStatus'));
 const MindDashboard = lazy(() => import('../components/mind/MindDashboard'));
 const SystemDashboard = lazy(() => import('../components/system/SystemDashboard'));
 const SensoryMonitor = lazy(() => import('../components/SensoryMonitor'));
+const OrchestratorLab = lazy(() => import('../components/OrchestratorLab'));
 
 // ── Types (mirror backend/app/schemas/contracts.py + the diagnostics
 // endpoints in backend/app/routes/diagnostics.py — SINGULAR_SARA_MASTER_
@@ -252,7 +253,7 @@ const LEGACY_OPS_VIEWS: Array<{ view: 'system' | 'mind' | 'system-status' | 'sen
   { view: 'mind', label: 'Mind', embedded: true },
   { view: 'system-status', label: 'System Status', embedded: true },
   { view: 'sensory-monitor', label: 'Sensory Monitor', embedded: true },
-  { view: 'orchestrator-lab', label: 'Orchestrator Lab' },
+  { view: 'orchestrator-lab', label: 'Orchestrator Lab', embedded: true },
 ];
 
 const EMBEDDED_LEGACY_COMPONENTS: Partial<Record<(typeof LEGACY_OPS_VIEWS)[number]['view'], ComponentType>> = {
@@ -732,6 +733,19 @@ export default function Interior({ onNavigate }: InteriorProps) {
               </div>
               {expandedLegacyView &&
                 (() => {
+                  // orchestrator-lab needs a real prop (its "back" button) that
+                  // no other embedded view does — special-cased rather than
+                  // forcing every entry in EMBEDDED_LEGACY_COMPONENTS through
+                  // a props interface only one of them needs.
+                  if (expandedLegacyView === 'orchestrator-lab') {
+                    return (
+                      <div className="mt-3 -mx-4 border-t border-gray-700 pt-3">
+                        <Suspense fallback={<div className="text-xs text-gray-500 px-4">Loading…</div>}>
+                          <OrchestratorLab onBack={() => setExpandedLegacyView(null)} />
+                        </Suspense>
+                      </div>
+                    );
+                  }
                   const EmbeddedView = EMBEDDED_LEGACY_COMPONENTS[expandedLegacyView as (typeof LEGACY_OPS_VIEWS)[number]['view']];
                   if (!EmbeddedView) return null;
                   return (

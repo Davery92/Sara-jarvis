@@ -612,7 +612,6 @@ function App() {
             onDownloadDocument={downloadDocument}
             onDeleteDocument={deleteDocument}
             onToast={showToast}
-            onOrchestratorBack={() => navigateToView('settings')}
             onOpenAttentionChat={(prompt) => {
               setMessage(prompt)
               navigateToView('chat')

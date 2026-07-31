@@ -22,7 +22,6 @@ const loadPrivacyDashboard = async () => {
   return { default: module.PrivacyDashboard }
 }
 const loadMorningBrief = () => import('../MorningBrief')
-const loadOrchestratorLab = () => import('../OrchestratorLab')
 const loadACSPage = () => import('../../pages/ACSPage')
 const loadMachinesDashboard = () => import('../machines/MachinesDashboard')
 const loadInterior = () => import('../../pages/Interior')
@@ -45,7 +44,6 @@ const LearningSection = lazy(loadLearningSection)
 const ProjectSection = lazy(loadProjectSection)
 const PrivacyDashboard = lazy(loadPrivacyDashboard)
 const MorningBrief = lazy(loadMorningBrief)
-const OrchestratorLab = lazy(loadOrchestratorLab)
 const MachinesDashboard = lazy(loadMachinesDashboard)
 const Interior = lazy(loadInterior)
 const Dial = lazy(loadDial)
@@ -134,7 +132,6 @@ interface ShellWorkspaceContentProps {
   onDownloadDocument: (...args: any[]) => void
   onDeleteDocument: (...args: any[]) => void
   onToast: (message: string, type?: string) => void
-  onOrchestratorBack: () => void
   onOpenAttentionChat: (prompt: string) => void
   onAskSara: (prompt: string) => void
   chatAutoSendToken?: number
@@ -207,7 +204,6 @@ export default function ShellWorkspaceContent({
   onDownloadDocument,
   onDeleteDocument,
   onToast,
-  onOrchestratorBack,
   onOpenAttentionChat,
   onAskSara,
   chatAutoSendToken,
@@ -453,14 +449,6 @@ export default function ShellWorkspaceContent({
     return (
       <div className="flex-1 min-h-0">
         {renderDeferredView('Loading automations…', <AutomationsView />)}
-      </div>
-    )
-  }
-
-  if (targetView === 'orchestrator-lab') {
-    return (
-      <div className="flex-1 overflow-y-auto min-h-0">
-        {renderDeferredView('Loading lab…', <OrchestratorLab onBack={onOrchestratorBack} />)}
       </div>
     )
   }
