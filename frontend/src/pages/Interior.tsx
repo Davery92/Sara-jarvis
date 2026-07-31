@@ -95,6 +95,9 @@ interface ActionReceipt {
   permission_tier: string;
   status: string;
   executed_at: string | null;
+  ledger_id: number | null;
+  undo_expires_at: string | null;
+  undone: boolean;
 }
 
 interface EventEnvelope {
@@ -294,6 +297,26 @@ export default function Interior({ onNavigate }: InteriorProps) {
     setInteriorMetrics(metrics);
     setLastRefresh(new Date());
     setLoading(false);
+  };
+
+  const [undoingLedgerId, setUndoingLedgerId] = useState<number | null>(null);
+
+  // item 5.10: same endpoint SystemDashboard's Undo already uses — Interior
+  // is David's actual home surface, so the ledger's Undo belongs here too,
+  // not only on the demoted System Dashboard.
+  const undoAction = async (ledgerId: number) => {
+    setUndoingLedgerId(ledgerId);
+    try {
+      await fetch(`${APP_CONFIG.apiUrl}/api/system/actions/undo`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ ledger_id: ledgerId }),
+      });
+      await fetchAll();
+    } finally {
+      setUndoingLedgerId(null);
+    }
   };
 
   const toggleInterestBlock = async (interest: Interest) => {
@@ -569,17 +592,36 @@ export default function Interior({ onNavigate }: InteriorProps) {
         <Section title="Recent actions" subtitle="permission tier + true status, never a bare flag">
           {actionReceipts.length === 0 ? <Empty label="No actions recorded yet" /> : (
             <div className="space-y-2">
-              {actionReceipts.map((a) => (
-                <div key={a.action_id} className="flex items-center justify-between text-sm">
-                  <span className="text-gray-200">{a.action_type.replace(/_/g, ' ')}</span>
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs text-gray-500">{a.permission_tier.replace(/_/g, ' ')}</span>
-                    <span className={`text-xs px-1.5 py-0.5 rounded ${a.status === 'completed' ? 'bg-green-500/20 text-green-300' : a.status === 'failed' ? 'bg-red-500/20 text-red-300' : 'bg-gray-500/20 text-gray-300'}`}>
-                      {a.status}
-                    </span>
+              {actionReceipts.map((a) => {
+                const canUndo =
+                  a.ledger_id != null &&
+                  !a.undone &&
+                  a.status === 'completed' &&
+                  !!a.undo_expires_at &&
+                  new Date(a.undo_expires_at).getTime() > Date.now();
+                return (
+                  <div key={a.action_id} className="flex items-center justify-between text-sm">
+                    <span className="text-gray-200">{a.action_type.replace(/_/g, ' ')}</span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-gray-500">{a.permission_tier.replace(/_/g, ' ')}</span>
+                      <span className={`text-xs px-1.5 py-0.5 rounded ${a.status === 'completed' ? 'bg-green-500/20 text-green-300' : a.status === 'failed' ? 'bg-red-500/20 text-red-300' : 'bg-gray-500/20 text-gray-300'}`}>
+                        {a.status}
+                      </span>
+                      {a.undone ? (
+                        <span className="text-xs text-gray-500 italic">undone</span>
+                      ) : canUndo ? (
+                        <button
+                          onClick={() => undoAction(a.ledger_id as number)}
+                          disabled={undoingLedgerId === a.ledger_id}
+                          className="text-xs px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 hover:bg-amber-500/30 disabled:opacity-50"
+                        >
+                          {undoingLedgerId === a.ledger_id ? 'Undoing…' : 'Undo'}
+                        </button>
+                      ) : null}
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </Section>

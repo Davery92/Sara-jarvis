@@ -615,13 +615,14 @@ class StandingOrderService:
             **trigger_context,
             "reason": f"Standing order '{description}' triggered by {trigger_context.get('trigger_type', 'unknown')} at {now.strftime('%I:%M %p')}",
         }
-        db.execute(text("""
+        ledger_row = db.execute(text("""
             INSERT INTO action_ledger
             (user_id, standing_order_id, action_type, action_config, trigger_context,
              success, executed_at, undo_available, undo_expires_at)
             VALUES
             (:user_id, :order_id, :action_type, CAST(:action_config AS jsonb), CAST(:trigger_context AS jsonb),
              :success, NOW(), :undo_available, NOW() + INTERVAL '5 minutes')
+            RETURNING id
         """), {
             "user_id": DAVID_USER_ID,
             "order_id": order_id,
@@ -629,8 +630,15 @@ class StandingOrderService:
             "action_config": json.dumps(action_config),
             "trigger_context": json.dumps(enriched_context, default=str),
             "success": success,
-            "undo_available": action_type in ("home_control", "all_lights_off", "lock_all"),
-        })
+            # item 5.10: kept in sync with action_receipt_service's
+            # _REVERSIBLE_ACTION_TYPES and undo_action()'s own reversal
+            # cases below — light/lock/switch_control were always
+            # reversible there but never flagged undo_available here.
+            "undo_available": action_type in (
+                "home_control", "all_lights_off", "lock_all",
+                "light_control", "lock_control", "switch_control",
+            ),
+        }).fetchone()
 
         # SINGULAR_SARA_MASTER_PLAN §C10 — shadow-record the same execution
         # into the canonical action_receipt shape, alongside (not instead of)
@@ -642,6 +650,10 @@ class StandingOrderService:
                 db, user_id=DAVID_USER_ID, order_id=order_id, action_type=action_type,
                 success=success, verified=verified,
                 correlation_id=get_current_correlation().kernel_turn_id,
+                # item 5.10: the receipt needs the ledger row's own id (not
+                # just the standing_order's) to ever be undoable from a
+                # surface reading action_receipt instead of action_ledger.
+                ledger_id=ledger_row.id if ledger_row else None,
             )
         except Exception as e:
             logger.debug(f"action_receipt shadow record failed (non-fatal): {e}")
@@ -709,6 +721,13 @@ class StandingOrderService:
 
             db.execute(
                 text("UPDATE action_ledger SET undone = TRUE, undone_at = NOW() WHERE id = :id"),
+                {"id": ledger_id},
+            )
+            # item 5.10: keep the shadow-recorded receipt in sync so any
+            # surface reading action_receipt (not action_ledger directly)
+            # also stops offering an Undo button for this action.
+            db.execute(
+                text("UPDATE action_receipt SET undone = TRUE WHERE ledger_id = :id"),
                 {"id": ledger_id},
             )
 

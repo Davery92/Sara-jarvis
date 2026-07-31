@@ -28,7 +28,16 @@ logger = logging.getLogger(__name__)
 # reversible-local by definition; everything else defaults to consequential
 # (requires standing-order/explicit approval per §4.7's tier table) rather
 # than assuming safety for an action type we haven't classified.
-_REVERSIBLE_ACTION_TYPES = {"home_control", "all_lights_off", "lock_all"}
+# item 5.10 (2026-07-31): light_control/lock_control/switch_control
+# (PHENOMENAL_ASSISTANT_PLAN.md Phase 4 deliberation-driven home actions)
+# were reversible in standing_order_service.undo_action()'s actual logic
+# the whole time but missing here and from _log_action's undo_available
+# flag — both silently marked them non-reversible everywhere a receipt or
+# ledger row was ever shown, so Undo could never appear for them.
+_REVERSIBLE_ACTION_TYPES = {
+    "home_control", "all_lights_off", "lock_all",
+    "light_control", "lock_control", "switch_control",
+}
 
 
 def record_standing_order_action(
@@ -40,6 +49,7 @@ def record_standing_order_action(
     success: bool,
     verified: Optional[bool] = None,
     correlation_id: Optional[str] = None,
+    ledger_id: Optional[int] = None,
 ) -> None:
     """Record one standing-order action execution's receipt.
 
@@ -63,11 +73,11 @@ def record_standing_order_action(
             INSERT INTO action_receipt (
                 user_id, action_type, target, permission_tier, reversible,
                 undo_expires_at, idempotency_key, status, executed_at,
-                correlation_id, source_table, source_id
+                correlation_id, source_table, source_id, ledger_id
             ) VALUES (
                 :user_id, :action_type, :target, :permission_tier, :reversible,
                 CASE WHEN :reversible THEN NOW() + INTERVAL '5 minutes' ELSE NULL END,
-                :idempotency_key, :status, NOW(), :correlation_id, 'standing_order', :order_id
+                :idempotency_key, :status, NOW(), :correlation_id, 'standing_order', :order_id, :ledger_id
             )
         """), {
             "user_id": user_id,
@@ -79,6 +89,7 @@ def record_standing_order_action(
             "status": status,
             "correlation_id": correlation_id,
             "order_id": str(order_id),
+            "ledger_id": ledger_id,
         })
     except Exception as e:
         logger.debug(f"[action_receipt_service] standing-order shadow record failed: {e}")
@@ -87,7 +98,8 @@ def record_standing_order_action(
 def list_recent_receipts(db: Session, user_id: str, limit: int = 20) -> List[Dict[str, Any]]:
     rows = db.execute(text("""
         SELECT action_id, action_type, target, permission_tier, reversible,
-               status, executed_at, source_table, source_id
+               status, executed_at, source_table, source_id,
+               ledger_id, undo_expires_at, undone
         FROM action_receipt
         WHERE user_id = :uid
         ORDER BY created_at DESC
