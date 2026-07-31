@@ -719,13 +719,20 @@ class SimpleLLMClient:
                 })
 
         # Log token usage for Anthropic
+        # Item 2.5 (2026-07-31): this logged OPENAI_MODEL — the shared
+        # cognition/utility model name — for every Anthropic-routed call,
+        # misattributing cost/usage tracking regardless of which model
+        # actually served the request. self._current_model is set by
+        # chat_with_tools (the sole caller path that reaches here) to the
+        # model that was actually dispatched; same fix already applied at
+        # the "model": self._current_model line below in _stream_response.
         usage = anthropic_response.get("usage", {})
         if usage:
             self._log_token_usage(
                 prompt_tokens=usage.get("input_tokens", 0),
                 completion_tokens=usage.get("output_tokens", 0),
                 total_tokens=usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
-                model=OPENAI_MODEL,
+                model=getattr(self, "_current_model", None) or OPENAI_MODEL,
                 operation_type="chat"
             )
 
@@ -1033,7 +1040,7 @@ class SimpleLLMClient:
                 prompt_tokens=usage_data.get("prompt_tokens", 0),
                 completion_tokens=usage_data.get("completion_tokens", 0),
                 total_tokens=usage_data.get("total_tokens", 0),
-                model=payload.get("model", OPENAI_MODEL),
+                model=payload.get("model") or "unknown",  # item 2.5: payload always sets this from effective_model; OPENAI_MODEL was a misleading fallback
                 operation_type="chat",
             )
 
@@ -1253,7 +1260,7 @@ class SimpleLLMClient:
                     prompt_tokens=estimated_prompt_tokens,
                     completion_tokens=estimated_completion_tokens,
                     total_tokens=estimated_total,
-                    model=payload.get("model", OPENAI_MODEL),
+                    model=payload.get("model") or "unknown",  # item 2.5: payload always sets this from effective_model; OPENAI_MODEL was a misleading fallback
                     operation_type="chat"
                 )
 
@@ -1290,7 +1297,7 @@ class SimpleLLMClient:
                     prompt_tokens=usage_data.get("prompt_tokens", 0),
                     completion_tokens=usage_data.get("completion_tokens", 0),
                     total_tokens=usage_data.get("total_tokens", 0),
-                    model=payload.get("model", OPENAI_MODEL),
+                    model=payload.get("model") or "unknown",  # item 2.5: payload always sets this from effective_model; OPENAI_MODEL was a misleading fallback
                     operation_type="chat"
                 )
             else:
@@ -1301,7 +1308,7 @@ class SimpleLLMClient:
                     prompt_tokens=estimated_prompt_tokens,
                     completion_tokens=estimated_completion_tokens,
                     total_tokens=estimated_total,
-                    model=payload.get("model", OPENAI_MODEL),
+                    model=payload.get("model") or "unknown",  # item 2.5: payload always sets this from effective_model; OPENAI_MODEL was a misleading fallback
                     operation_type="chat"
                 )
 
