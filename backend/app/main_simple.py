@@ -8157,6 +8157,17 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
             # --- Parallel fetch coroutines (all independent, safe to run concurrently) ---
 
             async def _fetch_memory():
+                # Item 1.3 (2026-07-31): missing guard found via the presence-
+                # latency investigation — every other legacy fetcher here
+                # short-circuits under _context_cutover_live; this one didn't,
+                # so it ran a full intelligent_memory_search() every turn even
+                # though the kernel-context path independently calls
+                # memory_recall.recall() and combined_context gets replaced
+                # wholesale by _new_rendered once cutover is live. Its own
+                # output (and the cited-memory boost tied to that output) was
+                # pure discarded work under cutover.
+                if _context_cutover_live:
+                    return None
                 if not (last_user_message and context_decision.inject_memory):
                     return None
                 try:
@@ -8213,6 +8224,13 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     return None
 
             async def _fetch_pkg():
+                # Item 1.3 (2026-07-31): same missing-guard finding as
+                # _fetch_memory above — get_extended_signals()'s own _pkg()
+                # already covers this for the kernel-context path ("##
+                # Knowledge Graph" section), so this fetcher's output is
+                # discarded work once cutover is live.
+                if _context_cutover_live:
+                    return None
                 if not context_decision.inject_pkg:
                     return None
                 try:
