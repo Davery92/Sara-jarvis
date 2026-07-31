@@ -17,10 +17,30 @@ from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
-# Local LLM for workout coaching — centralized config
+# Local LLM for workout coaching — centralized config. WORKOUT_LLM_MODEL/
+# _BASE_URL are a deliberate per-feature override; absent that, resolve the
+# "utility" capability at call time (Arc 6 broker migration, work-order item
+# 2.5, 2026-07-30) instead of caching an OPENAI_MODEL env read at import time,
+# which would never see a live rename_model() DB update.
 from app.core.llm_config import llm_config as _llm_cfg
-WORKOUT_LLM_BASE_URL = os.getenv("OPENAI_BASE_URL", _llm_cfg.primary_url)
-WORKOUT_LLM_MODEL = os.getenv("WORKOUT_LLM_MODEL", os.getenv("OPENAI_MODEL", _llm_cfg.fast_model))
+_WORKOUT_LLM_MODEL_OVERRIDE = os.getenv("WORKOUT_LLM_MODEL")
+_WORKOUT_LLM_BASE_URL_OVERRIDE = os.getenv("OPENAI_BASE_URL")
+
+
+def _resolve_workout_llm() -> tuple:
+    if _WORKOUT_LLM_MODEL_OVERRIDE and _WORKOUT_LLM_BASE_URL_OVERRIDE:
+        return _WORKOUT_LLM_BASE_URL_OVERRIDE, _WORKOUT_LLM_MODEL_OVERRIDE
+    try:
+        from app.services.llm_broker import resolve as _resolve_capability
+        _cap = _resolve_capability("utility")
+        base_url = _WORKOUT_LLM_BASE_URL_OVERRIDE or _cap["base_url"] or _llm_cfg.primary_url
+        model = _WORKOUT_LLM_MODEL_OVERRIDE or _cap["model"] or _llm_cfg.fast_model
+        return base_url, model
+    except Exception:
+        return (
+            _WORKOUT_LLM_BASE_URL_OVERRIDE or _llm_cfg.primary_url,
+            _WORKOUT_LLM_MODEL_OVERRIDE or _llm_cfg.fast_model,
+        )
 
 _VOICE_SNIPPET_CACHE: Dict[str, Optional[str]] = {"text": None}
 _VOICE_SNIPPET_FALLBACK = (
@@ -470,11 +490,12 @@ Current situation:
 
         # Try LLM, fall back to simple template if it fails
         try:
+            base_url, model = _resolve_workout_llm()
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.post(
-                    f"{WORKOUT_LLM_BASE_URL}/chat/completions",
+                    f"{base_url}/chat/completions",
                     json={
-                        "model": WORKOUT_LLM_MODEL,
+                        "model": model,
                         "messages": [{"role": "user", "content": context}],
                         "max_tokens": 100,
                         "temperature": 0.7,

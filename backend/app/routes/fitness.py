@@ -1799,10 +1799,15 @@ async def fitness_chat(
         import uuid
         import json
 
-        # Get LLM configuration
-        OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://100.104.68.115:8081/v1")
-        OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "dummy")
-        OPENAI_MODEL = os.getenv("OPENAI_MODEL", "Qwen3.5-35B-A3B")
+        # Get LLM configuration. OPENAI_BASE_URL/API_KEY were dead (the
+        # actual call further down goes through SimpleLLMClient, which
+        # resolves its own endpoint/auth) — deleted both. OPENAI_MODEL is
+        # used only to label the response's "model" field, so resolve the
+        # "utility" capability (Arc 6 broker migration, work-order item 2.5,
+        # 2026-07-30) instead of a stale OPENAI_MODEL env read that would
+        # never see a live rename_model() DB update.
+        from app.services.llm_broker import resolve as _resolve_capability
+        OPENAI_MODEL = _resolve_capability("utility")["model"]
 
         # ===== GATHER FITNESS CONTEXT =====
 

@@ -189,8 +189,13 @@ Return ONLY valid JSON, no other text."""
 
     try:
         from app.core.llm_config import llm_config
-        openai_base = os.getenv("OPENAI_BASE_URL", llm_config.primary_url)
-        openai_model = model or os.getenv("OPENAI_MODEL", llm_config.fast_model)
+        # Arc 6 broker migration (work-order item 2.5, 2026-07-30): resolve
+        # "utility" instead of an OPENAI_MODEL env read, so a live
+        # rename_model() DB update actually takes effect here.
+        from app.services.llm_broker import resolve as _resolve_capability
+        _cap = _resolve_capability("utility")
+        openai_base = os.getenv("OPENAI_BASE_URL") or _cap["base_url"] or llm_config.primary_url
+        openai_model = model or _cap["model"] or llm_config.fast_model
         openai_key = os.getenv("OPENAI_API_KEY", "")
 
         headers = {}
