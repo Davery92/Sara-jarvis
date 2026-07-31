@@ -1991,12 +1991,37 @@ class SimpleLLMClient:
                 "message": reg_result.message,
                 "data": reg_result.data
             })
+            _tool_call_success = reg_result.success
+            _tool_call_error = None if reg_result.success else reg_result.message
         except Exception as e:
             result = f"Unknown tool: {function_name} ({e})"
+            _tool_call_success = False
+            _tool_call_error = f"{type(e).__name__}: {e}"
 
         # STORE IN CACHE
         if session_cache and conversation_id:
             session_cache.set(conversation_id, function_name, arguments, str(result))
+
+        # Arc 6.5 (skill minting, work-order item 4, 2026-07-31): fumble
+        # detector B needs a real record of which tools get called together
+        # in one conversation — kernel-hands already logs its own (capped at
+        # 1 call/turn, so no sequence to find there) via the same
+        # sara_activity_log shape; regular chat tool-calling had no record
+        # at all until now. Fire-and-forget, never blocks the chat response.
+        try:
+            from app.routes.acs_daemon import append_activity, ActivityIn
+            await append_activity(ActivityIn(
+                kind="tool_result",
+                summary=f"{function_name}(...)" + (" → error" if not _tool_call_success else ""),
+                body=(_tool_call_error or "")[:2000],
+                tags=["error"] if not _tool_call_success else [],
+                metadata={
+                    "tool": function_name, "args": arguments, "source": "chat",
+                    "conversation_id": conversation_id, "error": _tool_call_error,
+                },
+            ))
+        except Exception as _log_e:
+            logger.debug(f"chat tool-call activity log skipped: {_log_e}")
 
         logger.info(f"Tool {function_name} result length: {len(str(result))} chars")
         if function_name == "documents_search":

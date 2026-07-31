@@ -95,6 +95,15 @@ class Flag(str, Enum):
     # (not synthesized) leave-now firing proves it end-to-end. Default OFF.
     URGENT_LANE_TRAVEL_NUDGE = "URGENT_LANE_TRAVEL_NUDGE"
 
+    # Arc 6.5 (skill minting, work-order item 4, 2026-07-31): the kill-switch
+    # for dreaming proposing new tools. Gates only the write path (fumble
+    # detection -> draft authoring -> define_tool) — never /invoke itself,
+    # so flipping this off stops new proposals without touching tools David
+    # has already enabled. Default off: the propose->validate->enable path
+    # is real but nothing should author code autonomously until this is
+    # deliberately turned on.
+    SKILL_MINTING = "SKILL_MINTING"
+
 
 ALL_FLAGS: List[str] = [f.value for f in Flag]
 _TRUE_VALUES = {"1", "true", "yes", "on"}

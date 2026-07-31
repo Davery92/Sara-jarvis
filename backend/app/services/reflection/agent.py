@@ -64,6 +64,8 @@ class ReflectionCycleResult:
     proof_of_memory_card: Optional[str] = None
     # §5.9: how many "Sara made you something" unwrap cards this cycle minted.
     artifact_cards_minted: int = 0
+    # §4/Arc 6.5: name of the tool skill minting proposed this cycle, if any.
+    skill_proposed: Optional[str] = None
     duration_seconds: float = 0
 
     def to_dict(self) -> Dict[str, Any]:
@@ -88,6 +90,7 @@ class ReflectionCycleResult:
             "facts_promoted": self.facts_promoted,
             "proof_of_memory_card": self.proof_of_memory_card,
             "artifact_cards_minted": self.artifact_cards_minted,
+            "skill_proposed": self.skill_proposed,
             "duration_seconds": self.duration_seconds,
         }
 
@@ -272,6 +275,20 @@ class ReflectionAgent:
                     result.artifact_cards_minted = await mint_artifact_unwrap_cards(sync_db, _DAVID_USER_ID)
             except Exception as e:
                 logger.warning(f"Artifact unwrap card minting failed (non-critical): {e}")
+
+            # 16. Skill minting (§4/Arc 6.5) — dreaming notices a repeated
+            # fumble and may propose a new tool. Same sync-session shape as
+            # steps 7/8/13/14; flag-gated internally (SKILL_MINTING, default
+            # off) so this is a no-op until deliberately turned on.
+            try:
+                from app.db.session import SessionLocal
+                from app.services.skill_minting_service import maybe_propose_skill
+                with SessionLocal() as sync_db:
+                    result.skill_proposed = await maybe_propose_skill(sync_db, _DAVID_USER_ID)
+                if result.skill_proposed:
+                    logger.info(f"Skill proposed: {result.skill_proposed}")
+            except Exception as e:
+                logger.warning(f"Skill minting failed (non-critical): {e}")
 
             # 15. Self-assess this reflection cycle
             await self._self_assess(result)
