@@ -72,6 +72,10 @@ Infrastructure already exists and is solid: `sara_tool` / `sara_tool_version` / 
 4. **Hard caps in code:** David-gated enable untouched; minted tools cannot mint/enable/modify tools; everything on the ledger; one kill-switch flag for the whole lane.
 *Accept:* first tool through the complete propose→validate→David-enable→invoke path. (The enable click is David's by design — that's the feature, not a stop violation.)
 
+**Design artifact: DONE (2026-07-31).** [Published](https://claude.ai/code/artifact/aa35b186-8023-4991-9a37-dc0b5867c921) — full audit of what already exists (propose/version/activate API, schema + static-analysis validation, the resource-limited sandbox, David-gated enable/disable/delete, the invocation ledger — all verified directly against code, not assumed) vs. what's genuinely new work (fumble detector B — sequence-repeat, a dry-run endpoint, the self-test-case authoring requirement, a SKILL_MINTING kill-switch flag, and the dreaming step itself). Headline finding, verified against `acs-tool-runner/app.py` + its Dockerfile + compose config: the sandbox has **no network isolation at all** — an explicit, documented threat-model choice (`httpx` is a whitelisted import), not an oversight. A minted tool can reach the open internet and every other container on `jarvis_default` by name. The design doesn't pretend otherwise: the real safety boundary in this system is David reading the code before he clicks Enable, not the runtime sandbox.
+
+**Build: not started this pass.** The dreaming-step wiring (an LLM authoring real Python from fumble evidence, autonomously) is meaningfully higher-risk and more novel than anything else built this session — it's new autonomous-code-generation infrastructure, not a caller migration or a reused-component page build. Needs its own dedicated session with room to iterate carefully, same reasoning as §2.1's remaining session-lifecycle unification.
+
 ---
 
 ## 5. Felt layer (Arc 6.6 — strict rank order; this is where David finally *feels* the week)
