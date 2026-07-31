@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm'
 
 import { APP_CONFIG } from '../../config'
 import { AppView } from '../../navigation/views'
+import { MomentCardStack } from '../MomentCardStack'
 
 interface DashboardHomeViewProps {
   attentionItems: any[]
@@ -362,6 +363,10 @@ export default function DashboardHomeView({
   return (
     <div className="relative flex-1 overflow-y-auto min-h-0">
       <div className="mx-auto w-full max-w-[1180px] px-4 pb-36 pt-4 md:px-8 md:pt-10">
+        {/* items 5.8/5.9: rare minted cards — a memory callback or "Sara made
+            you something." Renders nothing when there's nothing to show. */}
+        <MomentCardStack />
+
         {/* Header band — greeting + glanceable stats on the left, weather on the right */}
         <header className="flex flex-wrap items-start justify-between gap-6">
           <div className="min-w-0">

@@ -60,6 +60,10 @@ class ReflectionCycleResult:
     # Arc 5.2 minter ruling: how many PKG facts this cycle promoted
     # through the confidence ladder (dreaming is the sole promoter).
     facts_promoted: int = 0
+    # §5.8: title of the proof-of-memory card minted this cycle, if any.
+    proof_of_memory_card: Optional[str] = None
+    # §5.9: how many "Sara made you something" unwrap cards this cycle minted.
+    artifact_cards_minted: int = 0
     duration_seconds: float = 0
 
     def to_dict(self) -> Dict[str, Any]:
@@ -82,6 +86,8 @@ class ReflectionCycleResult:
             "life_facts_decayed": self.life_facts_decayed,
             "verification_question": self.verification_question,
             "facts_promoted": self.facts_promoted,
+            "proof_of_memory_card": self.proof_of_memory_card,
+            "artifact_cards_minted": self.artifact_cards_minted,
             "duration_seconds": self.duration_seconds,
         }
 
@@ -244,7 +250,30 @@ class ReflectionAgent:
             except Exception as e:
                 logger.warning(f"PKG fact promotion failed (non-critical): {e}")
 
-            # 12. Self-assess this reflection cycle
+            # 13. Proof-of-memory callback card (§5.8) — a rare, right-moment
+            # echo of something old surfacing against something David just
+            # said. Same sync-session shape as steps 7/8.
+            try:
+                from app.db.session import SessionLocal
+                from app.services.moment_card_service import maybe_mint_proof_of_memory_card
+                with SessionLocal() as sync_db:
+                    result.proof_of_memory_card = await maybe_mint_proof_of_memory_card(sync_db, _DAVID_USER_ID)
+                if result.proof_of_memory_card:
+                    logger.info(f"Proof-of-memory card minted: {result.proof_of_memory_card}")
+            except Exception as e:
+                logger.warning(f"Proof-of-memory card minting failed (non-critical): {e}")
+
+            # 14. "Sara made you something" unwrap cards (§5.9) — artifacts
+            # that landed without David watching them happen.
+            try:
+                from app.db.session import SessionLocal
+                from app.services.moment_card_service import mint_artifact_unwrap_cards
+                with SessionLocal() as sync_db:
+                    result.artifact_cards_minted = await mint_artifact_unwrap_cards(sync_db, _DAVID_USER_ID)
+            except Exception as e:
+                logger.warning(f"Artifact unwrap card minting failed (non-critical): {e}")
+
+            # 15. Self-assess this reflection cycle
             await self._self_assess(result)
 
         except Exception as e:

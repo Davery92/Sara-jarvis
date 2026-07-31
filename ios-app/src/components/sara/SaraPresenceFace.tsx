@@ -12,6 +12,7 @@ import { useNavigation } from '@react-navigation/native';
 import apiClient from '../../services/api';
 import { colors, spacing, borderRadius, fontSizes } from '../../styles/theme';
 import SaraOrb from './SaraOrb';
+import MomentCardStack from './MomentCardStack';
 
 /**
  * SaraPresenceFace — the first-person, Jarvis/Cortana face of the ACS.
@@ -283,6 +284,9 @@ export default function SaraPresenceFace({
         <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.textMuted} />
       }
     >
+      {/* items 5.8/5.9: rare minted cards — renders nothing when empty */}
+      <MomentCardStack />
+
       {/* ── Header: orb + greeting + mood ── */}
       <View style={styles.header}>
         <SaraOrb size={72} />

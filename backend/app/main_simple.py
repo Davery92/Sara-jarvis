@@ -4976,6 +4976,13 @@ except Exception as e:
     logger.error(f"❌ Diagnostics routes failed to load: {e}")
 
 try:
+    from app.routes.moment_cards import router as moment_cards_router
+    app.include_router(moment_cards_router)
+    logger.info("✅ Moment cards routes loaded successfully")
+except Exception as e:
+    logger.error(f"❌ Moment cards routes failed to load: {e}")
+
+try:
     from app.routes.browse_shots import router as browse_shots_router
     app.include_router(browse_shots_router, prefix="/api", tags=["Browse Screenshots"])
     logger.info("✅ Browse screenshot routes loaded successfully")
