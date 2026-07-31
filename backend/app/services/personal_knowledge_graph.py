@@ -1928,10 +1928,13 @@ class PersonalKnowledgeGraph:
         Returns list of dicts with pkg_id, node_type, content_text, similarity.
         Then fetches full node data from Neo4j.
         """
+        import time as _t
+        _t0 = _t.monotonic()
         try:
             from app.services.embedding_service import EmbeddingService
             svc = EmbeddingService()
             query_embedding = await svc.generate_embedding(query_text)
+            _t_embed = _t.monotonic()
             if not query_embedding:
                 return []
 
@@ -1943,11 +1946,17 @@ class PersonalKnowledgeGraph:
                 # Ensure we use psycopg (v3) driver, not psycopg2
                 database_url = database_url.replace("postgresql://", "postgresql+psycopg://", 1)
 
+            # Presence-latency follow-up (item 1.3 Session 1, 2026-07-31):
+            # timed separately below to confirm/refute the suspicion that
+            # create_engine() fresh on every single call (no pooling reuse)
+            # is the real cost here, before touching it.
             from sqlalchemy import create_engine
             from sqlalchemy.orm import sessionmaker as sync_sm
+            _t_pre_engine = _t.monotonic()
             engine = create_engine(database_url, echo=False)
             Session = sync_sm(bind=engine)
             session = Session()
+            _t_engine_ready = _t.monotonic()
             try:
                 rows = session.execute(sa_text("""
                     SELECT pkg_id, node_type, content_text,
@@ -1970,6 +1979,12 @@ class PersonalKnowledgeGraph:
             finally:
                 session.close()
                 engine.dispose()
+            _t_query_done = _t.monotonic()
+            logger.info(
+                f"⏱️ [pkg-query-semantic-timing] embedding={_t_embed-_t0:.2f}s "
+                f"engine_create={_t_engine_ready-_t_pre_engine:.2f}s "
+                f"pgvector_query={_t_query_done-_t_engine_ready:.2f}s"
+            )
 
             if not matches:
                 # Zero semantic matches is legitimate when nothing is relevant,
@@ -1984,6 +1999,7 @@ class PersonalKnowledgeGraph:
             if not self._ensure_driver():
                 return matches  # return partial data without Neo4j props
 
+            _t_neo4j_start = _t.monotonic()
             pkg_ids = [m["pkg_id"] for m in matches]
             try:
                 with self.driver.session() as neo_session:
@@ -2007,6 +2023,7 @@ class PersonalKnowledgeGraph:
             except Exception as e:
                 logger.warning(f"PKG: Neo4j fetch for semantic results failed: {e}")
                 neo4j_data = {}
+            logger.info(f"⏱️ [pkg-query-semantic-timing] neo4j_fetch={_t.monotonic()-_t_neo4j_start:.2f}s")
 
             # Merge: prefer Neo4j data, fall back to content_text
             results = []

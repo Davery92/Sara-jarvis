@@ -7692,12 +7692,27 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
 
     # SINGULAR_SARA_MASTER_PLAN §C4 — shadow-only kernel.engaged_turn() call.
     # Fire-and-forget: never awaited inline, never touches the response
-    # David gets. Off by default (SINGULAR_KERNEL flag); exists purely to
-    # prove the engaged-state context assembly is correct against real
-    # conversations before anything is asked to depend on it.
+    # David gets. Existed purely to prove the engaged-state context assembly
+    # is correct against real conversations before anything is asked to
+    # depend on it.
+    #
+    # Presence-latency follow-up (item 1.3 Session 1, 2026-07-31): that
+    # proof is done — SINGULAR_CONTEXT has been live for a while, and the
+    # inline kernel-context assembly a few hundred lines below IS the real
+    # path chat responses depend on now, not a hypothesis being validated.
+    # This shadow call built the exact same context_snapshot + intent_graph
+    # + memory_recall (default k=5, ALL_KINDS, including "fact") a second
+    # time, fully redundant, on every single real turn — confirmed via
+    # direct instrumentation: two independent embedding calls per turn
+    # (one from this shadow path's fact-kind recall, one from the real
+    # extended_signals' pkg lookup) racing for the same embedding host,
+    # each taking 1.5-5s instead of its ~20-100ms isolated baseline. Now
+    # gated to only run the comparison BEFORE a real cutover exists to
+    # compare against — once SINGULAR_CONTEXT is live, running this
+    # shadow path is pure waste, not validation.
     try:
         from app.core.feature_flags import Flag, is_enabled as _singular_flag_enabled
-        if _singular_flag_enabled(Flag.SINGULAR_KERNEL):
+        if _singular_flag_enabled(Flag.SINGULAR_KERNEL) and not _singular_flag_enabled(Flag.SINGULAR_CONTEXT):
             import asyncio as _aio_kernel
             from app.services.kernel import engaged_turn as _kernel_engaged_turn
 
@@ -8762,15 +8777,69 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                 _context_cutover_live = _ctx_flag_enabled(_CtxFlag.SINGULAR_CONTEXT)
                 if _ctx_flag_enabled(_CtxFlag.SINGULAR_KERNEL) or _context_cutover_live:
                     from app.services.context_snapshot import (
-                        get_context_snapshot, get_extended_signals, render_engaged_context,
+                        get_context_snapshot_cached, get_extended_signals, render_engaged_context,
                     )
                     from app.services.memory_recall import recall as _memory_recall
                     from app.services.intent_graph_projection import get_intent_graph
 
-                    _new_context = await get_context_snapshot(db, str(current_user.id))
-                    _new_open_intents = get_intent_graph(db, str(current_user.id))["total"]
-                    _new_recalled = await _memory_recall(user_id=str(current_user.id), query=last_user_text or "", k=5)
-                    _extended = await get_extended_signals(db, str(current_user.id), last_user_text or "")
+                    # Item 1.3 Session 1 (2026-07-31): profiling (first pass,
+                    # sequential + individually timed) found memory_recall as
+                    # the dominant cost (~2.25s of ~2.86s total) — context_
+                    # snapshot/intent_graph/extended_signals combined were
+                    # already cheap (~0.6s). context_snapshot, intent_graph,
+                    # and extended_signals all take the same sync `db:
+                    # Session` and stay sequential relative to each other
+                    # (concurrent use of one SQLAlchemy sync Session across
+                    # coroutines isn't safe); memory_recall opens its own
+                    # sessions and has no such constraint, so it now runs
+                    # concurrently with that sequential trio instead of after
+                    # it — real wall-clock win with no new correctness risk.
+                    import asyncio as _kctx_asyncio
+                    import time as _kctx_time
+
+                    async def _sync_db_trio():
+                        _t0 = _kctx_time.monotonic()
+                        ctx = await get_context_snapshot_cached(db, str(current_user.id))
+                        _t1 = _kctx_time.monotonic()
+                        intents = get_intent_graph(db, str(current_user.id))["total"]
+                        _t2 = _kctx_time.monotonic()
+                        ext = await get_extended_signals(db, str(current_user.id), last_user_text or "")
+                        _t3 = _kctx_time.monotonic()
+                        logger.info(
+                            f"⏱️ [kernel-context-timing] context_snapshot={_t1-_t0:.2f}s "
+                            f"intent_graph={_t2-_t1:.2f}s extended_signals={_t3-_t2:.2f}s "
+                            f"sync_trio_total={_t3-_t0:.2f}s"
+                        )
+                        return ctx, intents, ext
+
+                    # Item 1.3 Session 1 (2026-07-31): profiling _pkg() inside
+                    # get_extended_signals found it costing ~1.5-3.6s per
+                    # turn — traced to personal_kg.query_semantic()'s
+                    # embedding call (confirmed fast in isolation, ~20-100ms;
+                    # slow only during a real turn, i.e. genuine contention
+                    # on the shared embedding host from concurrent background
+                    # cognition). extended_signals' _pkg() and this call both
+                    # independently ran a "fact"-kind semantic search for the
+                    # SAME query — real, measured duplicate work, not just a
+                    # theoretical one. Excluding "fact" here (extended_signals'
+                    # _pkg() keeps its dedicated, guaranteed-visible fact
+                    # lookup — recall_traces' shared top-5 cap could otherwise
+                    # crowd facts out) cuts the redundant half of that cost
+                    # without touching the actual contention.
+                    from app.services.memory_recall import ALL_KINDS as _ALL_RECALL_KINDS
+                    _kctx_t0 = _kctx_time.monotonic()
+                    (_new_context, _new_open_intents, _extended), _new_recalled = await _kctx_asyncio.gather(
+                        _sync_db_trio(),
+                        _memory_recall(
+                            user_id=str(current_user.id), query=last_user_text or "", k=5,
+                            kinds=[k for k in _ALL_RECALL_KINDS if k != "fact"],
+                        ),
+                    )
+                    _kctx_t_end = _kctx_time.monotonic()
+                    logger.info(
+                        f"⏱️ [kernel-context-timing] sync_trio || memory_recall, "
+                        f"combined_wall_clock={_kctx_t_end-_kctx_t0:.2f}s"
+                    )
                     _new_rendered = render_engaged_context(
                         _new_context, _new_open_intents, _new_recalled.get("traces") or [], extended=_extended,
                     )

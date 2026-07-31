@@ -310,9 +310,16 @@ async def get_self_state(user_id: str = DEFAULT_USER_ID, db: Optional[Session] =
     from app.services.body_state_projection import get_body_state_projection
     from app.services.kernel import get_state as kernel_get_state
 
+    # Presence-latency follow-up (item 1.3 Session 1, 2026-07-31): unlike
+    # world/self/relationship above, these two take only `user_id` — neither
+    # touches the shared sync `db`, so gathering them has none of that risk.
+    import asyncio
+    import time as _t
     now = datetime.now(timezone.utc)
-    kernel_state = await kernel_get_state(user_id)
-    body_state = await get_body_state_projection(user_id)
+    _t0 = _t.monotonic()
+    kernel_state, body_state = await asyncio.gather(kernel_get_state(user_id), get_body_state_projection(user_id))
+    _t1 = _t.monotonic()
+    logger.info(f"⏱️ [self-state-timing] kernel_state+body_state_projection(parallel)={_t1-_t0:.2f}s")
 
     open_concerns = [c.impact for c in body_state.components if c.status.value == "degraded" and c.impact]
 
@@ -382,16 +389,82 @@ def get_relationship_state(db: Session, user_id: str = DEFAULT_USER_ID) -> Relat
 async def get_context_snapshot(db: Session, user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]:
     """One assembled snapshot — world + self + relationship — for inspection.
     Body state and the intent graph already have their own endpoints; this
-    ties the remaining three together the same way."""
+    ties the remaining three together the same way.
+
+    Presence-latency follow-up (item 1.3 Session 1, 2026-07-31): considered
+    gathering world_state/self_state/relationship_state in parallel, but all
+    three take the same sync `db: Session` — concurrent use of one
+    SQLAlchemy sync Session across coroutines is not something the library
+    supports safely, and measured (see below) the sequential cost here is
+    already small (~0.1-0.3s combined) next to memory_recall's ~2.25s.
+    Not worth the correctness risk for that little upside — parallelized
+    memory_recall against this sequence instead, at the call site in
+    main_simple.py, since memory_recall opens its own sessions."""
+    import time as _t
+    _t0 = _t.monotonic()
     world = await get_world_state(db, user_id)
+    _t1 = _t.monotonic()
     self_ = await get_self_state(user_id, db=db)
+    _t2 = _t.monotonic()
     relationship = get_relationship_state(db, user_id)
+    _t3 = _t.monotonic()
+    logger.info(
+        f"⏱️ [context-snapshot-timing] world_state={_t1-_t0:.2f}s "
+        f"self_state={_t2-_t1:.2f}s relationship_state={_t3-_t2:.2f}s"
+    )
 
     return {
         "world_state": world.model_dump(mode="json"),
         "self_state": self_.model_dump(mode="json"),
         "relationship_state": relationship.model_dump(mode="json"),
     }
+
+
+_SNAPSHOT_CACHE_TTL_SEC = 20
+
+
+def _snapshot_cache_key(user_id: str) -> str:
+    return f"sara:context_snapshot:{user_id}"
+
+
+async def get_context_snapshot_cached(db: Session, user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]:
+    """Presence-latency follow-up (item 1.3 Session 1, 2026-07-31): the
+    architectural direction (a chat turn's assembly cost should collapse to
+    recall + thread + a read, not a from-scratch build every turn) applied
+    to the one piece of get_context_snapshot's output that's genuinely
+    message-independent — world/self/relationship state changes on its own
+    clock (calendar, health, kernel mode, body health), never on what David
+    just typed. `memory_recall`/`extended_signals`' `pkg` sub-fetch stay
+    live per-turn on purpose; they're query-dependent.
+
+    Short TTL (20s), not event-driven invalidation — same pragmatic
+    precedent as world_brief.get_rendered_brief's 2-minute cache. A chat
+    reply reflecting world-state up to 20s stale is a fully reasonable
+    trade for skipping a rebuild on every single turn of a fast back-and-
+    forth conversation; a real kernel-maintained warm artifact updated on
+    genuine world-state-change events would be more precise but is a
+    larger, separate piece of work than this pass's scope."""
+    try:
+        from app.services.unified_context import _get_redis
+        r = await _get_redis()
+        cached = await r.get(_snapshot_cache_key(user_id))
+        if cached:
+            import json as _json
+            return _json.loads(cached if isinstance(cached, str) else cached.decode("utf-8"))
+    except Exception as e:
+        logger.debug(f"[context_snapshot] cache read skipped: {e}")
+
+    snapshot = await get_context_snapshot(db, user_id)
+
+    try:
+        from app.services.unified_context import _get_redis
+        import json as _json
+        r = await _get_redis()
+        await r.set(_snapshot_cache_key(user_id), _json.dumps(snapshot), ex=_SNAPSHOT_CACHE_TTL_SEC)
+    except Exception as e:
+        logger.debug(f"[context_snapshot] cache write skipped: {e}")
+
+    return snapshot
 
 
 async def get_extended_signals(db: Session, user_id: str = DEFAULT_USER_ID, message: str = "") -> Dict[str, Optional[str]]:
@@ -465,8 +538,23 @@ async def get_extended_signals(db: Session, user_id: str = DEFAULT_USER_ID, mess
             logger.debug(f"[extended_signals] emotional_tone failed: {e}")
         return None
 
+    # Presence-latency follow-up (item 1.3 Session 1, 2026-07-31): these 6
+    # already run in parallel, so total time = the slowest one, not the
+    # sum — timed individually to find which one that is (measured 0.45s-
+    # 8s total across real turns, wide enough variance to suspect a shared
+    # external dependency, not a fixed cost).
+    import time as _t
+
+    async def _timed(name, coro):
+        t0 = _t.monotonic()
+        result = await coro
+        logger.info(f"⏱️ [extended-signals-timing] {name}={_t.monotonic()-t0:.2f}s")
+        return result
+
     pkg, brief, journal, patterns, device, tone = await asyncio.gather(
-        _pkg(), _daily_brief(), _journal(), _patterns(), _device(), _emotional_tone(),
+        _timed("pkg", _pkg()), _timed("daily_brief", _daily_brief()),
+        _timed("journal", _journal()), _timed("patterns", _patterns()),
+        _timed("device", _device()), _timed("emotional_tone", _emotional_tone()),
     )
 
     def _s(v: Any) -> Optional[str]:
