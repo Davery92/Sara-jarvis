@@ -58,21 +58,6 @@ class Flag(str, Enum):
     # flip, no data/schema change) once verified against real conversations.
     PRESENCE_TOOL_DIET = "PRESENCE_TOOL_DIET"
 
-    # SARA_ALIVE_BUILD_PLAN Arc 1.5 write-freeze — one flag per still-legacy
-    # sender, default OFF (legacy send stays live). Flipping ON disables
-    # ONLY that sender's legacy send_notification call; its say_candidate
-    # dual-write (already live) is unaffected either way. Per-sender so a
-    # regression on one (e.g. calendar_prep's 35-55min timing window) can
-    # be reverted without touching the others.
-    #
-    # registers=1 closure (2026-07-31): calendar_prep, task_result_delivery,
-    # morning_proactive, predictive_engine, bedtime_intelligence, and
-    # learning_digest all had their legacy send code actually deleted this
-    # pass (not just flag-gated off) — their flags are gone too, since
-    # nothing reads them anymore. travel_nudge is the one still mid-cutover
-    # (see its own docstring below) and keeps its flag until that closes.
-    MOUTH_ONLY_TRAVEL_NUDGE = "MOUTH_ONLY_TRAVEL_NUDGE"
-
     # Work-order item 11 (2026-07-30): kernel-hands. The old daemon-local
     # Mind.think() loop could call 15 tools inline (research, notes, goals/
     # interests, Proxmox sandboxes) — real, actively-used capability the
@@ -84,16 +69,6 @@ class Flag(str, Enum):
     # the daemon proxy — same write-freeze discipline as everything else,
     # verified live in isolation before this flips on for real.
     KERNEL_HANDS = "KERNEL_HANDS"
-
-    # Work-order item 3 (2026-07-30): urgent lane. travel_nudge's leave-now
-    # message is time-critical enough that the normal judge/compose/deliver
-    # beat cadence (~9min worst case) doesn't fit its <=15min buffer — see
-    # travel_nudge.py's write-freeze comment. This flag routes it through
-    # app/services/urgent_lane.py (single-pass compose->review->deliver,
-    # inline, no beat latency) IN ADDITION TO the existing legacy send —
-    # dual-write, same as every other still-legacy sender, until a real
-    # (not synthesized) leave-now firing proves it end-to-end. Default OFF.
-    URGENT_LANE_TRAVEL_NUDGE = "URGENT_LANE_TRAVEL_NUDGE"
 
     # Arc 6.5 (skill minting, work-order item 4, 2026-07-31): the kill-switch
     # for dreaming proposing new tools. Gates only the write path (fumble

@@ -121,7 +121,6 @@ async def check_and_send_leave_now_nudges(user_id: str) -> dict:
     from app.db.session import get_async_session_factory
     from app.core.timezone import now as local_now
     from app.services.unified_context import read_snapshot
-    from app.services.unified_notification import send_notification
 
     try:
         from app.services.activity_state_machine import activity_state_machine, ActivityState
@@ -179,73 +178,33 @@ async def check_and_send_leave_now_nudges(user_id: str) -> dict:
         leave_by = (now + timedelta(minutes=max(0, minutes_until_leave))).strftime("%-I:%M %p")
         message = f"About {travel_min} min to {location} — leave by {leave_by} for \"{title}\"."
 
-        # Arc 1.5 write-freeze (work-order item 3, 2026-07-30): measured, not
-        # just cautious. judge/compose/deliver each run on an independent
-        # ~180s beat — up to ~9min worst-case sequential latency — against a
-        # <=15min "leave now" buffer. That's too tight a margin for a message
-        # whose entire value is being on time, so this stays dual-write with
-        # the legacy immediate send as primary (calendar_prep's 20-minute-
-        # wide window comfortably absorbs the same latency and was cut over;
-        # see calendar_prep.py).
-        from app.core.feature_flags import Flag, is_enabled
-        if is_enabled(Flag.MOUTH_ONLY_TRAVEL_NUDGE):
-            logger.info(f"[mouth-only] travel_nudge legacy send skipped (candidate queued): {topic}")
-            result = {"sent": False}
-        else:
-            result = await send_notification(
-                user_id=user_id,
-                title="Time to head out",
-                message=message,
-                priority="high",
-                topic=topic,
-                category="location",
-                source="travel_nudge",
-                cooldown_hours=24,  # never re-nudge the same event twice
-            )
-            if result.get("sent"):
-                sent += 1
-                logger.info(f"Leave-now nudge sent for '{title}' ({travel_min}min drive)")
-
-        # Urgent lane (work-order item 3, 2026-07-30): the latency fix, not
-        # just a latency workaround. Single-pass compose->review->deliver,
-        # inline, no beat-interval wait — proven to hit the <60s target with
-        # a synthesized trigger. Runs ALONGSIDE the legacy send above (not
-        # instead of it) until a real leave-now firing proves it end-to-end;
-        # see feature_flags.py's URGENT_LANE_TRAVEL_NUDGE docstring for why
-        # cutover isn't automatic just because this flag exists. Wrapped so
-        # a failure here never blocks the legacy send that already ran.
-        if is_enabled(Flag.URGENT_LANE_TRAVEL_NUDGE):
-            try:
-                from app.core.timezone import to_utc
-                from app.services.urgent_lane import deliver_urgent
-                urgent_result = await deliver_urgent(
-                    async_session, user_id, source="travel_nudge", kind="alert",
-                    summary=message, evidence=[{"event_id": event_id, "travel_minutes": travel_min}],
-                    topic_entities=[topic], valid_until=to_utc(start_time),
-                    dedupe_key=f"urgent:{topic}",
-                    notification_title="Time to head out",
-                    notification_category="location", notification_priority="high",
-                )
-                logger.info(f"[urgent_lane] travel_nudge result: {urgent_result}")
-            except Exception as e:
-                logger.warning(f"[urgent_lane] travel_nudge failed: {e}")
-
-        # Mind V2 rewire plan Workstream B (long tail) — dual-write into the
-        # say_candidate queue. valid_until = event start: a leave-now nudge
-        # is worthless once the meeting has begun. Wrapped so a
-        # candidate-queue failure never breaks the legacy send above.
+        # Item 4 / registers=1 closure (2026-07-31): legacy immediate send
+        # deleted. Proven end-to-end with a real synthesized leave-now
+        # firing (real calendar event + real location snapshot + real
+        # geocoding/routing): candidate created -> compose produced a real
+        # payload (once the World Brief's calendar sweep had picked up the
+        # event -- compose's time-honesty check correctly declined before
+        # that) -> review approved -> delivery confirmed, all within
+        # single-digit seconds, comfortably inside the <=15min "leave now"
+        # buffer this sender needed and well under the 60s target. The
+        # urgent lane (single-pass compose->review->deliver, no beat-
+        # interval wait) is now the only path — no dual-notify window.
         try:
             from app.core.timezone import to_utc
-            from app.services.say_candidate import create_candidate
-            async with async_session() as cand_db:
-                await create_candidate(
-                    cand_db, user_id=user_id, source="travel_nudge", kind="alert",
-                    summary=message, evidence=[{"event_id": event_id, "travel_minutes": travel_min}],
-                    topic_entities=[topic],
-                    valid_until=to_utc(start_time),  # naive ET wall-clock -> aware UTC
-                    dedupe_key=topic,
-                )
+            from app.services.urgent_lane import deliver_urgent
+            urgent_result = await deliver_urgent(
+                async_session, user_id, source="travel_nudge", kind="alert",
+                summary=message, evidence=[{"event_id": event_id, "travel_minutes": travel_min}],
+                topic_entities=[topic], valid_until=to_utc(start_time),
+                dedupe_key=f"urgent:{topic}",
+                notification_title="Time to head out",
+                notification_category="location", notification_priority="high",
+            )
+            logger.info(f"[urgent_lane] travel_nudge result: {urgent_result}")
+            if urgent_result.get("sent"):
+                sent += 1
+                logger.info(f"Leave-now nudge sent for '{title}' ({travel_min}min drive)")
         except Exception as e:
-            logger.warning(f"[say_candidate] travel_nudge dual-write failed: {e}")
+            logger.warning(f"[urgent_lane] travel_nudge failed: {e}")
 
     return {"sent": sent, "checked": len(events)}
