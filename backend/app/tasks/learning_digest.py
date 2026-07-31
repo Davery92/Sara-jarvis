@@ -216,18 +216,10 @@ async def _send_weekly_digest_async(user_id: str) -> dict:
         await db.commit()
 
         digest_topic = f"weekly_digest:{now.date().isoformat()}"
-        # Arc 1.5 write-freeze: legacy send disabled once
-        # MOUTH_ONLY_LEARNING_DIGEST is on — dual-write below is
-        # unconditional either way. Flag default OFF.
-        from app.core.feature_flags import Flag, is_enabled
-        if is_enabled(Flag.MOUTH_ONLY_LEARNING_DIGEST):
-            logger.info(f"[mouth-only] learning_digest legacy send skipped (candidate queued): {digest_topic}")
-        else:
-            from app.services.unified_notification import send_notification
-            await send_notification(
-                user_id=user_id, title="What I've learned this week", message=note,
-                topic=digest_topic, priority="normal", source="learning_digest",
-            )
+        # Item 4 (registers=1 closure, 2026-07-31): legacy immediate send
+        # deleted. MOUTH_ONLY_LEARNING_DIGEST ran flag-safe long enough
+        # to confirm the mouth pipeline handles delivery.
+        logger.info(f"[mouth-only] learning_digest candidate queued: {digest_topic}")
 
         # Mind V2 rewire plan Workstream B (long tail) — dual-write into the
         # say_candidate queue. Wrapped so a candidate-queue failure never

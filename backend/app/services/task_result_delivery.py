@@ -190,35 +190,18 @@ async def deliver_task_result(
         return
 
     # --- Path 5: Nobody's home — standard push ---
-    # Arc 1.5 write-freeze: this is the one path here that's actually
-    # equivalent to the other "legacy sender" push notifications — Paths
-    # 0-4 above (active desktop HUD, SSE, iOS push with rich routing) are a
-    # genuinely better UX than the mouth pipeline replicates today and are
-    # left untouched. Flag default OFF; dual-write (below) is unconditional
-    # either way.
-    from app.core.feature_flags import Flag, is_enabled
-    if is_enabled(Flag.MOUTH_ONLY_TASK_RESULT_DELIVERY):
-        logger.info(f"[mouth-only] task_result_delivery fallback push skipped (candidate queued): agent_task:{task_id}")
-        return
-    await send_notification(
-        user_id=user_id,
-        title=_task_subject(task_query),
-        message=_push_body(result_summary),
-        category="background_task",
-        topic=f"agent_task:{task_id}",
-        source="task_result_delivery",
-        priority="normal",
-        extra_push_data={
-            "type": note_push_type,
-            "task_id": task_id,
-            "status": "completed",
-            "note_id": result_note_id,
-            "result_note_id": result_note_id,
-        },
-        db=db,
-    )
+    # Item 4 (registers=1 closure, 2026-07-31): legacy fallback push
+    # deleted. MOUTH_ONLY_TASK_RESULT_DELIVERY ran flag-safe long enough
+    # to confirm the say_candidate dual-write (above, unconditional,
+    # called before any path branch) is the only path needed here.
+    # Paths 0-4 (active desktop HUD, SSE, iOS push with rich routing)
+    # are a genuinely better UX than the mouth pipeline replicates today
+    # and stay untouched — this deletion is Path 5 only.
+    logger.info(f"[mouth-only] task_result_delivery candidate queued: agent_task:{task_id}")
+    # _record_delivered above (tell-once ledger) still needs this commit —
+    # it wrote to `db` before any path branch, and nothing else on this
+    # path persists it now that Path 5 no longer sends its own push.
     await db.commit()
-    logger.info(f"Delivered task {task_id} via fallback push notification ({note_push_type})")
 
 
 async def _dual_write_candidate(user_id: str, task_id: str, task_query: str, result_summary: str) -> None:

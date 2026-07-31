@@ -285,52 +285,16 @@ class MorningProactiveService:
         try:
             topic = f"pattern_suggestion:{pattern['id']}:{datetime.now(timezone.utc).strftime('%Y%m%d')}"
 
-            # Arc 1.5 write-freeze (SARA_ALIVE_BUILD_PLAN): legacy send
-            # disabled once MOUTH_ONLY_MORNING_PROACTIVE is on — the
-            # say_candidate dual-write (caller, unconditional, right after
-            # this returns) is the only path.
-            #
-            # Work-order item 4 fix (2026-07-30): this used to `return
-            # False` here, which silently broke behavioral_pattern_
-            # service.record_suggestion() — the caller only calls it
-            # `if success:`, so with the flag on (it has been for a
-            # while), the accept/reject learning feedback loop had
-            # stopped recording suggestions entirely, with nothing
-            # surfacing the gap. The dual-write happens unconditionally
-            # right after this call regardless of what's returned here,
-            # so "success" should mean "the mouth pipeline will handle
-            # delivery," not "legacy push fired."
-            from app.core.feature_flags import Flag, is_enabled
-            if is_enabled(Flag.MOUTH_ONLY_MORNING_PROACTIVE):
-                logger.info(f"[mouth-only] morning_proactive legacy send skipped (candidate queued): {topic}")
-                return True
-
-            from app.services.unified_notification import send_notification as unified_send_notification
-
-            result = await unified_send_notification(
-                user_id=user_id,
-                title=message["title"],
-                message=message["body"],
-                priority="normal",
-                topic=topic,
-                category="general",
-                source="morning_proactive",
-                db=db
-            )
-
-            # A normal/low-priority suggestion routed to the attention inbox
-            # (result["sent"] is False but attention_item_id is set) is still a
-            # real delivery David will see — count it so record_suggestion actually
-            # feeds the accept/reject learner. Only a true non-delivery (banned,
-            # deduped, no push tokens, tuner-suppressed) should return False.
-            if result.get("sent") or result.get("attention_item_id"):
-                logger.info(
-                    f"Delivered proactive suggestion: {message['title']} "
-                    f"(push={result.get('sent')}, attention_item_id={result.get('attention_item_id')})"
-                )
-                return True
-            logger.info(f"Proactive notification not sent: reason={result.get('reason')} topic={topic}")
-            return False
+            # Item 4 (registers=1 closure, 2026-07-31): legacy immediate
+            # send deleted. MOUTH_ONLY_MORNING_PROACTIVE ran flag-safe long
+            # enough to confirm the say_candidate dual-write (caller,
+            # unconditional, right after this returns) is the only path
+            # needed — "success" here means "the mouth pipeline will
+            # handle delivery," matching what record_suggestion's
+            # accept/reject learning loop actually needs (work-order item
+            # 4's original fix, preserved).
+            logger.info(f"[mouth-only] morning_proactive candidate queued: {topic}")
+            return True
 
         except Exception as e:
             logger.error(f"Failed to send notification: {e}")

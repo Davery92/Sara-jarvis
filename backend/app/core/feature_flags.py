@@ -63,15 +63,15 @@ class Flag(str, Enum):
     # ONLY that sender's legacy send_notification call; its say_candidate
     # dual-write (already live) is unaffected either way. Per-sender so a
     # regression on one (e.g. calendar_prep's 35-55min timing window) can
-    # be reverted without touching the others. Deleted only after each is
-    # individually verified live, per the plan's write-freeze pattern.
-    MOUTH_ONLY_CALENDAR_PREP = "MOUTH_ONLY_CALENDAR_PREP"
-    MOUTH_ONLY_TASK_RESULT_DELIVERY = "MOUTH_ONLY_TASK_RESULT_DELIVERY"
-    MOUTH_ONLY_MORNING_PROACTIVE = "MOUTH_ONLY_MORNING_PROACTIVE"
-    MOUTH_ONLY_PREDICTIVE_ENGINE = "MOUTH_ONLY_PREDICTIVE_ENGINE"
-    MOUTH_ONLY_BEDTIME_INTELLIGENCE = "MOUTH_ONLY_BEDTIME_INTELLIGENCE"
+    # be reverted without touching the others.
+    #
+    # registers=1 closure (2026-07-31): calendar_prep, task_result_delivery,
+    # morning_proactive, predictive_engine, bedtime_intelligence, and
+    # learning_digest all had their legacy send code actually deleted this
+    # pass (not just flag-gated off) — their flags are gone too, since
+    # nothing reads them anymore. travel_nudge is the one still mid-cutover
+    # (see its own docstring below) and keeps its flag until that closes.
     MOUTH_ONLY_TRAVEL_NUDGE = "MOUTH_ONLY_TRAVEL_NUDGE"
-    MOUTH_ONLY_LEARNING_DIGEST = "MOUTH_ONLY_LEARNING_DIGEST"
 
     # Work-order item 11 (2026-07-30): kernel-hands. The old daemon-local
     # Mind.think() loop could call 15 tools inline (research, notes, goals/
