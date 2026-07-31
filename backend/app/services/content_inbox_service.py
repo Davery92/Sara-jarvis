@@ -133,6 +133,14 @@ class ContentInboxService:
         except Exception as e:
             logger.warning(f"Embedding generation failed for text share: {e}")
 
+        # item 5.2: text shares are already "extracted" at creation — no
+        # extraction step will ever fire the dispatch above, so file here.
+        try:
+            from app.tasks.content_inbox import classify_and_file_content
+            classify_and_file_content.delay(item.id)
+        except Exception as e:
+            logger.debug(f"Filing dispatch skipped for {item.id}: {e}")
+
         return item
 
     # ------------------------------------------------------------------
@@ -185,6 +193,14 @@ class ContentInboxService:
                 item.updated_at = datetime.now(timezone.utc)
                 db.commit()
                 logger.info(f"Extracted content for {content_id}: {item.word_count} words")
+
+                # item 5.2: smart kernel-filing — now that there's real
+                # extracted text to classify against.
+                try:
+                    from app.tasks.content_inbox import classify_and_file_content
+                    classify_and_file_content.delay(content_id)
+                except Exception as e:
+                    logger.debug(f"Filing dispatch skipped for {content_id}: {e}")
 
             except Exception as e:
                 item.extraction_status = "failed"

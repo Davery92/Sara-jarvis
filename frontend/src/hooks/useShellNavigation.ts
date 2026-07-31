@@ -15,6 +15,7 @@ export function useShellNavigation({
 }: UseShellNavigationOptions) {
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false)
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false)
+  const [captureModalOpen, setCaptureModalOpen] = useState(false)
   const view = viewForPath(locationPathname)
 
   useEffect(() => {
@@ -23,6 +24,12 @@ export function useShellNavigation({
         e.preventDefault()
         e.stopPropagation()
         setCommandPaletteOpen((prev) => !prev)
+      } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'c') {
+        // item 5.2: universal capture's web hotkey — same idea as the iOS
+        // share sheet, for whatever's already open in the browser.
+        e.preventDefault()
+        e.stopPropagation()
+        setCaptureModalOpen((prev) => !prev)
       }
     }
 
@@ -80,6 +87,8 @@ export function useShellNavigation({
     setIsMobileMenuOpen,
     commandPaletteOpen,
     setCommandPaletteOpen,
+    captureModalOpen,
+    setCaptureModalOpen,
     openWorkspaceCanvas,
     navigateToView,
   }

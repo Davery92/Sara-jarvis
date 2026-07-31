@@ -9,6 +9,7 @@ import { useShellNavigation } from './hooks/useShellNavigation'
 import { useShellAuth } from './hooks/useShellAuth'
 import { useTaskEventStream } from './hooks/useTaskEventStream'
 import { CommandPalette } from './components/CommandPalette'
+import { CaptureModal } from './components/CaptureModal'
 import NotificationBanner from './components/NotificationBanner'
 import MiniChatOverlay from './components/MiniChatOverlay'
 import SaraOverlayHost from './components/overlay/SaraOverlayHost'
@@ -68,6 +69,8 @@ function App() {
     setIsMobileMenuOpen,
     commandPaletteOpen,
     setCommandPaletteOpen,
+    captureModalOpen,
+    setCaptureModalOpen,
     openWorkspaceCanvas,
     navigateToView,
   } = useShellNavigation({
@@ -516,6 +519,10 @@ function App() {
         onClose={() => setCommandPaletteOpen(false)}
         onNavigate={navigateToView}
         currentView={view}
+      />
+      <CaptureModal
+        isOpen={captureModalOpen}
+        onClose={() => setCaptureModalOpen(false)}
       />
 
       <div className="flex flex-col md:flex-row md:space-x-6 flex-1 min-h-0">

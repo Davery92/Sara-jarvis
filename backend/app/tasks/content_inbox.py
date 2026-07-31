@@ -31,6 +31,43 @@ def extract_shared_content(self, content_id: str):
         raise self.retry(exc=e, countdown=30)
 
 
+@celery_app.task(name="app.tasks.content_inbox.classify_and_file_content", bind=True, max_retries=1)
+def classify_and_file_content(self, content_id: str):
+    """item 5.2 (2026-07-31): the smart-filing half of universal capture —
+    dispatched after extraction completes (or immediately for text shares,
+    which need no extraction). Best-effort: a classification failure just
+    leaves the item in the inbox, same as before this existed.
+
+    One retry specifically for the transient connection-pool errors this
+    surfaced under concurrent load in testing (psycopg OperationalError/
+    ProgrammingError — "server closed the connection unexpectedly" /
+    "can't change 'autocommit' now") — a genuine pre-existing celery-worker
+    connection-pool fork-safety issue this task's ~10s async HTTP call
+    happened to newly exercise, not something specific to this feature. A
+    real fix (disposing the engine's pool in a celery worker_process_init
+    hook) is separate, systemic backend work; the retry is the safe,
+    scoped mitigation, and classify_and_file's own idempotency guard makes
+    the retry safe even if the first attempt actually filed successfully
+    before the connection dropped."""
+    logger.info(f"Classifying/filing shared content: {content_id}")
+    try:
+        from app.services.inbox_filing_service import classify_and_file
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            result = loop.run_until_complete(classify_and_file(content_id))
+        finally:
+            loop.close()
+        logger.info(f"Filing result for {content_id}: {result}")
+    except Exception as e:
+        err_name = type(e).__name__
+        if "psycopg" in err_name.lower() or "OperationalError" in err_name or "ProgrammingError" in err_name:
+            logger.warning(f"Filing task hit a transient DB error for {content_id}, retrying once: {e}")
+            raise self.retry(exc=e, countdown=5)
+        logger.warning(f"Filing task failed for {content_id} (leaving in inbox): {e}")
+
+
 @celery_app.task(name="app.tasks.content_inbox.send_morning_inbox_digest")
 def send_morning_inbox_digest():
     """
