@@ -566,15 +566,16 @@ def _calculate_next_wake(schedule_definition: dict) -> Optional[datetime]:
             return now
 
     elif schedule_type == "cron":
-        # Simple cron parsing - for full cron support, use croniter
+        # croniter is a real dependency (requirements.txt) -- no ImportError
+        # fallback. That fallback used to silently turn a real cron
+        # expression ("9am every Monday") into "every hour" on a missing
+        # dependency -- a behavior lie, worse than a crash (2026-08-01). If
+        # the dependency ever regresses, this raises honestly instead.
+        from croniter import croniter
         cron_expr = schedule_definition.get("cron_expr", "0 * * * *")
         try:
-            from croniter import croniter
             cron = croniter(cron_expr, now)
             return cron.get_next(datetime)
-        except ImportError:
-            logger.warning("croniter not installed, using 1-hour fallback for cron schedule")
-            return now + timedelta(hours=1)
         except Exception as e:
             logger.error(f"Failed to parse cron expression '{cron_expr}': {e}")
             return now + timedelta(hours=1)
