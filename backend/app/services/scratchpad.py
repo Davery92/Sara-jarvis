@@ -14,10 +14,11 @@ from typing import List, Optional
 from sqlalchemy import text
 
 from app.core.timezone import now_utc
+from app.core.config import get_owner_id
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_USER_ID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
+DEFAULT_USER_ID = get_owner_id()
 _MAX_CHARS = 900  # ~300 tokens, budget-capped for injection
 _CATEGORIES = {"meals", "schedule", "errands", "other"}
 

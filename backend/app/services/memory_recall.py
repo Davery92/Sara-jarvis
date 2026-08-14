@@ -21,9 +21,11 @@ import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 
+from app.core.config import get_owner_id
+
 logger = logging.getLogger(__name__)
 
-DEFAULT_USER_ID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
+DEFAULT_USER_ID = get_owner_id()
 
 ALL_KINDS = ["episode", "note", "document", "summary", "fact", "person", "thread", "intent", "artifact"]
 

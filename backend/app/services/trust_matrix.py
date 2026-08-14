@@ -18,10 +18,11 @@ import logging
 from typing import Dict, Any, List
 
 from sqlalchemy import text
+from app.core.config import get_owner_id
 
 logger = logging.getLogger(__name__)
 
-_DAVID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
+_DAVID = get_owner_id()
 
 L0, L1, L2, L3 = 0, 1, 2, 3
 

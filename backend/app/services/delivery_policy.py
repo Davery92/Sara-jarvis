@@ -30,6 +30,7 @@ from typing import Optional, Dict, Any
 from sqlalchemy import text
 
 from app.core.timezone import now as local_now, to_naive_utc
+from app.core.config import get_owner_id
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +110,7 @@ async def _night_window(db, now_et: datetime) -> tuple[float, float]:
     return bed_h, wake_h
 
 
-_DAVID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
+_DAVID = get_owner_id()
 
 
 async def _latest_focus_on(db) -> Optional[bool]:

@@ -17,10 +17,11 @@ from zoneinfo import ZoneInfo
 
 from app.services.event_bus import Event, EventType, EventSubscriber
 from app.services.working_memory import update_memory
+from app.core.config import get_owner_id
 
 logger = logging.getLogger(__name__)
 
-DAVID_USER_ID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
+DAVID_USER_ID = get_owner_id()
 USER_TZ = ZoneInfo("America/New_York")
 
 

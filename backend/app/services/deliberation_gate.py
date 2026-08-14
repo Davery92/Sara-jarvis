@@ -19,6 +19,7 @@ from difflib import SequenceMatcher
 from datetime import datetime, timezone
 from typing import Optional
 from app.core.timezone import now as local_now
+from app.core.config import get_owner_id
 
 from app.services.deliberation import DeliberationResult, NotificationProposal, HomeActionProposal, TaskProposal
 from app.services.silent_failure_tracker import Tracker
@@ -29,7 +30,7 @@ logger = logging.getLogger(__name__)
 # side-effect paths that used to fail to DEBUG-only logs.
 _GATE_TRACKER = Tracker("deliberation_gate")
 
-DEFAULT_USER_ID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
+DEFAULT_USER_ID = get_owner_id()
 
 # Hard-banned notification topics (from HEARTBEAT.md)
 # Comprehensive list — covers health, fitness, biometrics, nutrition, and body-state topics.

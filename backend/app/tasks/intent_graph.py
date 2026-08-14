@@ -11,10 +11,11 @@ background_task/sara_interest); only ever upserts into `intent`.
 import logging
 
 from app.celery_app import celery_app
+from app.core.config import get_owner_id
 
 logger = logging.getLogger(__name__)
 
-DAVID_USER_ID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
+DAVID_USER_ID = get_owner_id()
 
 
 @celery_app.task(name="app.tasks.intent_graph.sync_intent_graph")

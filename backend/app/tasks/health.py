@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, Any
 
 from app.celery_app import celery_app
+from app.core.config import get_owner_id
 
 logger = logging.getLogger(__name__)
 
@@ -253,7 +254,7 @@ def _run_body_sense(health_report: dict):
     import os
     try:
         from app.services.body_sense import reflect
-        user_id = os.getenv("SOLO_USER_ID", "") or "64f37c56-85cb-4590-8de9-adfc17d343ed"
+        user_id = get_owner_id()
 
         async def _go():
             await reflect(health_report, user_id=user_id)

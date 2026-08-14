@@ -18,10 +18,11 @@ from uuid import UUID
 from sqlalchemy import text
 
 from app.core.timezone import now as local_now
+from app.core.config import get_owner_id
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_USER_ID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
+DEFAULT_USER_ID = get_owner_id()
 
 _DEFAULT_TTL = {
     "alert": timedelta(minutes=30),

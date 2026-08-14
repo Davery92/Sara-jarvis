@@ -20,9 +20,10 @@ from datetime import timedelta
 
 from app.celery_app import celery_app
 from app.core.timezone import now as local_now
+from app.core.config import get_owner_id
 
 logger = logging.getLogger(__name__)
-DEFAULT_USER_ID = os.getenv("SOLO_USER_ID", "64f37c56-85cb-4590-8de9-adfc17d343ed")
+DEFAULT_USER_ID = get_owner_id()
 MAX_RUNTIME_HOURS = 4
 REPEAT_FAILURE_WINDOW_HOURS = 24
 

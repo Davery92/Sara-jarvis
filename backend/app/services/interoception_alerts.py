@@ -11,10 +11,11 @@ from __future__ import annotations
 import logging
 import os
 from typing import Any, Dict
+from app.core.config import get_owner_id
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_USER_ID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
+DEFAULT_USER_ID = get_owner_id()
 _COOLDOWN_SECONDS = 24 * 3600  # 1/day/task
 
 

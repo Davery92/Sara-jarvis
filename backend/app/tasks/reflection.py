@@ -12,6 +12,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 
 from app.celery_app import celery_app
+from app.core.config import get_owner_id
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +68,7 @@ async def _run_reflection_async():
             async_session = get_async_session_factory()
             async with async_session() as db:
                 candidate_ids = await policy_candidate_service.generate_from_reflection(
-                    db=db, user_id="64f37c56-85cb-4590-8de9-adfc17d343ed",
+                    db=db, user_id=get_owner_id(),
                     reflection_data=result_dict,
                 )
                 await db.commit()

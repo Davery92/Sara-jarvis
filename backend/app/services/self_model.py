@@ -21,10 +21,11 @@ from typing import Dict, Any, List
 from sqlalchemy import text
 
 from app.core.timezone import now as local_now
+from app.core.config import get_owner_id
 
 logger = logging.getLogger(__name__)
 
-_DAVID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
+_DAVID = get_owner_id()
 
 # Daemon heartbeat older than this = the ACS locus of continuity is down.
 _DAEMON_STALE_MIN = 30

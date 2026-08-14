@@ -20,12 +20,13 @@ from .scratchpad import ReflectionScratchpad, ObservationType, get_reflection_sc
 from .consolidation_auditor import ConsolidationAuditor, ConsolidationAuditResult
 from .pattern_detector import PatternDetector, DetectedPattern
 from .proposal_generator import PromptProposalGenerator, PromptProposal
+from app.core.config import get_owner_id
 
 logger = logging.getLogger(__name__)
 
 # Single-user system — same default every other reflection-adjacent service
 # (prediction_engine._DAVID, kernel.DEFAULT_USER_ID) uses.
-_DAVID_USER_ID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
+_DAVID_USER_ID = get_owner_id()
 
 
 @dataclass

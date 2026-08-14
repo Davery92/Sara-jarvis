@@ -22,10 +22,11 @@ from datetime import datetime
 from typing import Any, Dict, List, Tuple
 
 from app.core.timezone import now as local_now
+from app.core.config import get_owner_id
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_USER_ID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
+DEFAULT_USER_ID = get_owner_id()
 
 # Cheap pre-check (§6 Phase 3 accept: "empty-LLM-run ratio < 20%", was 94%
 # for deliberation). A batch that's 100% ambient (ambient category AND below

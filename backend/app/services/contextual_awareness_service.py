@@ -16,6 +16,7 @@ from app.db.session import SessionLocal
 from app.models.episode import Episode
 # Import Timer and Reminder from main_simple where the actual database schema is defined
 import sys
+from app.core.config import get_owner_id
 sys.path.insert(0, '/home/david/jarvis/backend')
 from app.main_simple import Timer, Reminder
 from app.services.content_intelligence import content_intelligence, ContentType
@@ -25,7 +26,7 @@ from app.services.enhanced_neo4j_schema import enhanced_neo4j
 
 logger = logging.getLogger(__name__)
 
-SOLO_USER_ID = os.getenv("SOLO_USER_ID", "64f37c56-85cb-4590-8de9-adfc17d343ed")
+SOLO_USER_ID = get_owner_id()
 
 class ContextualAwarenessService:
     """Provides contextual awareness and proactive monitoring for Sara"""

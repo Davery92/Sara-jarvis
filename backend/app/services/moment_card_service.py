@@ -12,10 +12,11 @@ import logging
 from typing import Optional
 
 from sqlalchemy.orm import Session
+from app.core.config import get_owner_id
 
 logger = logging.getLogger(__name__)
 
-_DAVID_USER_ID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
+_DAVID_USER_ID = get_owner_id()
 
 # "Rare" per the plan's own word for this feature — at most one callback
 # card in this many days, so it reads as a genuine right-moment surprise

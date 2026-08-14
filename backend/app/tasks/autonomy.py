@@ -27,11 +27,12 @@ def _run_async(coro):
 from app.celery_app import celery_app
 from sqlalchemy import text
 from app.core.timezone import USER_TIMEZONE, now as local_now, to_naive_local, to_naive_utc
+from app.core.config import get_owner_id
 
 logger = logging.getLogger(__name__)
 
 # Default user ID for Sara
-DEFAULT_USER_ID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
+DEFAULT_USER_ID = get_owner_id()
 
 
 

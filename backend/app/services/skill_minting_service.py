@@ -16,10 +16,11 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
+from app.core.config import get_owner_id
 
 logger = logging.getLogger(__name__)
 
-_DAVID_USER_ID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
+_DAVID_USER_ID = get_owner_id()
 
 _AUTHOR_PROMPT = """Sara noticed a real, repeated fumble and may be able to fix it by minting herself a
 new tool. Evidence (not a hypothesis — this actually happened):

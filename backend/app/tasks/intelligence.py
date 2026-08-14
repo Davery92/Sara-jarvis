@@ -13,10 +13,11 @@ from datetime import datetime
 
 from app.celery_app import celery_app
 from app.core.timezone import now as local_now
+from app.core.config import get_owner_id
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_USER_ID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
+DEFAULT_USER_ID = get_owner_id()
 
 
 def _get_event_loop():

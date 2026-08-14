@@ -23,11 +23,12 @@ from typing import List, Dict, Optional, Tuple
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+from app.core.config import get_owner_id
 
 logger = logging.getLogger(__name__)
 
 # Default user ID
-DEFAULT_USER_ID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
+DEFAULT_USER_ID = get_owner_id()
 
 # ─── Source definitions ───────────────────────────────────────────────────────
 

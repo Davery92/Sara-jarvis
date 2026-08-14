@@ -14,6 +14,7 @@ from app.core.timezone import now as local_now, today as local_today, start_of_d
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.config import get_owner_id
 
 logger = logging.getLogger(__name__)
 
@@ -427,7 +428,7 @@ class AnticipationService:
                     """),
                     {
                         "id": str(uuid.uuid4()),
-                        "user_id": "64f37c56-85cb-4590-8de9-adfc17d343ed",
+                        "user_id": get_owner_id(),
                         "title": prep.title,
                         "description": prep.body,
                         "reminder_time": prep.scheduled_for,
@@ -442,7 +443,7 @@ class AnticipationService:
             try:
                 wm_service = get_working_memory_service()
                 await wm_service.add_context_segment(
-                    user_id="64f37c56-85cb-4590-8de9-adfc17d343ed",
+                    user_id=get_owner_id(),
                     content=f"[Daily Brief]\n{prep.body}",
                     source="anticipation",
                     relevance=prep.priority,
@@ -459,7 +460,7 @@ class AnticipationService:
                     VALUES (:user_id, 'anticipation_alert', :content, :context)
                 """),
                 {
-                    "user_id": "64f37c56-85cb-4590-8de9-adfc17d343ed",
+                    "user_id": get_owner_id(),
                     "content": f"{prep.title}: {prep.body}",
                     "context": prep.metadata or {},
                 }

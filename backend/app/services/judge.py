@@ -24,10 +24,11 @@ from typing import Any, Dict, List, Tuple
 from sqlalchemy import text
 
 from app.core.timezone import now as local_now
+from app.core.config import get_owner_id
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_USER_ID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
+DEFAULT_USER_ID = get_owner_id()
 
 # Same envelope deliberation_gate.py already trusts for auto-execute task
 # proposals — prep actions reuse it rather than opening a second unguarded

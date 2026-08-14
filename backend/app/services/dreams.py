@@ -20,10 +20,11 @@ import logging
 import uuid
 
 from sqlalchemy import text
+from app.core.config import get_owner_id
 
 logger = logging.getLogger(__name__)
 
-_DAVID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
+_DAVID = get_owner_id()
 
 
 async def _qwen(system: str, user: str, max_tokens: int = 300) -> str:

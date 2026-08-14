@@ -17,6 +17,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import List, Optional, Tuple
+from app.core.config import get_owner_id
 
 logger = logging.getLogger(__name__)
 
@@ -150,7 +151,7 @@ def decay_emotional_state(
     )
 
 
-DEFAULT_USER_ID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
+DEFAULT_USER_ID = get_owner_id()
 
 
 async def compute_appraisal(user_id: str = DEFAULT_USER_ID) -> Optional[Tuple[str, float, str]]:

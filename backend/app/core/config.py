@@ -235,3 +235,20 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def get_owner_id() -> str:
+    """The single user Sara is owned by — this is a solo-user deployment,
+    not a multi-tenant one, so this ID is hardcoded system-wide rather than
+    resolved per-request. B5 (HYGIENE_AND_STALE_CONTEXT_FIX_PLAN
+    2026-08-12): ~88 files independently hardcode this same UUID (many as a
+    local ``DEFAULT_USER_ID = "64f37c56-..."`` constant, some as
+    ``os.getenv("SOLO_USER_ID", "64f37c56-...")``) — this is meant to
+    become the one place that ID lives.
+
+    Reuses ``settings.acs_owner_user_id`` (env ``ACS_OWNER_USER_ID``) rather
+    than introducing a second env var for the identical value — the plan
+    named ``SARA_OWNER_USER_ID``, but that field already exists under the
+    ACS name and duplicating it would just be a second knob for one owner.
+    """
+    return settings.acs_owner_user_id

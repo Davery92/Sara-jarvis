@@ -13,10 +13,11 @@ import uuid
 from typing import Optional, Tuple, List
 
 from sqlalchemy import text
+from app.core.config import get_owner_id
 
 logger = logging.getLogger(__name__)
 
-_DAVID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
+_DAVID = get_owner_id()
 # Recovery signals sync daily-ish and can lag a day; 40h keeps yesterday's
 # morning HRV/RHR in play instead of throwing away the only reading we have.
 _FRESH_HOURS = 40

@@ -11,9 +11,10 @@ import os
 from datetime import date, timedelta
 
 from app.celery_app import celery_app
+from app.core.config import get_owner_id
 
 logger = logging.getLogger(__name__)
-SOLO_USER_ID = os.getenv("SOLO_USER_ID", "64f37c56-85cb-4590-8de9-adfc17d343ed")
+SOLO_USER_ID = get_owner_id()
 
 MODEL_FAMILIES = ["interruptibility_v2", "notification_value", "next_block", "rhythm_forecaster"]
 

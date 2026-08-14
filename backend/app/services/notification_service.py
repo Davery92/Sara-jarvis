@@ -8,11 +8,12 @@ import hashlib
 from datetime import datetime
 from typing import Dict, Any, Optional
 from enum import Enum
+from app.core.config import get_owner_id
 
 logger = logging.getLogger(__name__)
 
 # David's user ID for push token lookup
-DAVID_USER_ID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
+DAVID_USER_ID = get_owner_id()
 
 
 class NotificationPriority(Enum):

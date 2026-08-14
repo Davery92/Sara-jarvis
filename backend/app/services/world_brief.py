@@ -32,6 +32,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import text
 
 from app.core.timezone import now as local_now, render_relative
+from app.core.config import get_owner_id
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +54,7 @@ def _strip_clock_from_header(header: str) -> str:
     header function's contract for its other callers is untouched."""
     return _NOW_PREFIX_RE.sub("", header, count=1)
 
-DEFAULT_USER_ID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
+DEFAULT_USER_ID = get_owner_id()
 
 # List-shaped sections (patch-backed, item_key-addressed) + the one
 # dict-shaped section (sara_state — always a single blob, no item_key list).

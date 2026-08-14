@@ -21,10 +21,11 @@ from typing import Any, Dict, List, Optional
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+from app.core.config import get_owner_id
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_USER_ID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
+DEFAULT_USER_ID = get_owner_id()
 
 SOUL_LINE_CAP = 40           # identity stays small — a self, not a config file
 MAX_PROPOSALS_PER_RUN = 2

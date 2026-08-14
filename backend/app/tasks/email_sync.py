@@ -22,6 +22,7 @@ from html import unescape
 
 from app.celery_app import celery_app
 from app.core.timezone import now as local_now, to_naive_utc
+from app.core.config import get_owner_id
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +102,7 @@ async def _sync_emails_async():
         msgraph = get_msgraph_service()
 
         # Default user ID for solo user (configured in SOLO_USER_ID env var)
-        user_id = os.getenv("SOLO_USER_ID", "64f37c56-85cb-4590-8de9-adfc17d343ed")
+        user_id = get_owner_id()
 
         total_synced = 0
         total_errors = 0
@@ -408,7 +409,7 @@ async def _sync_sent_items_async():
     engine = create_async_engine(async_url, echo=False)
     async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
-    user_id = os.getenv("SOLO_USER_ID", "64f37c56-85cb-4590-8de9-adfc17d343ed")
+    user_id = get_owner_id()
     total_recipients = 0
     total_sent = 0
     total_errors = 0
@@ -1025,7 +1026,7 @@ async def _process_riskninja_attachments_async():
             secure=False
         )
 
-        user_id = os.getenv("SOLO_USER_ID", "64f37c56-85cb-4590-8de9-adfc17d343ed")
+        user_id = get_owner_id()
 
         async with async_session() as db:
             # Find RiskNinja project

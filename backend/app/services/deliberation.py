@@ -16,13 +16,14 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from app.core.config import get_owner_id
 from app.services.deliberation_prompt import build_deliberation_prompt
 from app.services.observation_log import Observation, get_pending_observations
 from app.services.working_memory import read_memory
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_USER_ID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
+DEFAULT_USER_ID = get_owner_id()
 
 
 @dataclass

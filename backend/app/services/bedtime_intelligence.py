@@ -12,10 +12,11 @@ from datetime import timedelta
 from sqlalchemy import text
 
 from app.core.timezone import now as local_now
+from app.core.config import get_owner_id
 
 logger = logging.getLogger(__name__)
 
-_DAVID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
+_DAVID = get_owner_id()
 _SLEEP_TARGET = 7.5
 _EARLY_START_HOUR = 8.0  # first event before this = "early start"
 

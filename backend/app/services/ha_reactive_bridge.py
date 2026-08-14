@@ -15,11 +15,12 @@ import logging
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional
 from zoneinfo import ZoneInfo
+from app.core.config import get_owner_id
 
 logger = logging.getLogger(__name__)
 
 USER_TZ = ZoneInfo("America/New_York")
-DAVID_USER_ID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
+DAVID_USER_ID = get_owner_id()
 
 # Anomaly: door/motion events during these hours are noteworthy.
 # Runtime-overridable via tunable_setting (`notification.quiet_hours.start`,
