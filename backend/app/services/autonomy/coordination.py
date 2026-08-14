@@ -17,6 +17,8 @@ from dataclasses import dataclass
 
 import redis.asyncio as redis
 
+from app.core.redis import get_redis_bytes
+
 logger = logging.getLogger(__name__)
 
 _RELEASE_IF_OWNER = """
@@ -103,23 +105,12 @@ class WorkerCoordinator:
 
     def __init__(self, redis_url: str = "redis://redis:6379/0"):
         self.redis_url = redis_url
-        self._redis: Optional[redis.Redis] = None
-        self._redis_loop_id: Optional[int] = None
         self._mode = SystemMode.NORMAL
 
     async def _get_redis(self) -> redis.Redis:
-        """Get Redis connection, recreated when event loop changes."""
-        import asyncio
-        cur_loop = id(asyncio.get_running_loop())
-        if self._redis is None or cur_loop != self._redis_loop_id:
-            if self._redis is not None:
-                try:
-                    await self._redis.close()
-                except Exception:
-                    pass
-            self._redis = redis.from_url(self.redis_url)
-            self._redis_loop_id = cur_loop
-        return self._redis
+        """Get the shared bytes-mode Redis pool (owner-tokens are compared
+        as raw bytes throughout this module via .decode())."""
+        return await get_redis_bytes()
 
     async def acquire_exclusive(self, worker_name: str, group: str) -> bool:
         """

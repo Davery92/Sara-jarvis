@@ -26,10 +26,11 @@ import json
 import logging
 import os
 from typing import Dict, Any, Optional, Tuple
+from app.core.config import get_owner_id
 
 logger = logging.getLogger(__name__)
 
-DAVID_USER_ID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
+DAVID_USER_ID = get_owner_id()
 
 # Redis key holding the last-known set of degraded subsystems, so we can diff
 # tick-over-tick and only surface transitions.
@@ -74,9 +75,8 @@ def _label(subsystem: str) -> Tuple[str, str]:
 
 
 async def _get_redis():
-    import redis.asyncio as aioredis
-    redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
-    return aioredis.from_url(redis_url, decode_responses=True)
+    from app.core.redis import get_redis
+    return await get_redis()
 
 
 async def _load_state(r) -> Dict[str, str]:
@@ -276,11 +276,6 @@ async def reflect(report: Dict[str, Any], user_id: str = DAVID_USER_ID) -> Dict[
     if stale:
         await _clear_announced(r, stale)
 
-    try:
-        await r.close()
-    except Exception:
-        pass
-
     if newly_failed or recovered:
         logger.info(
             f"[body_sense] degraded={sorted(newly_failed)} recovered={sorted(recovered)} "
@@ -378,10 +373,6 @@ async def current_self_status(user_id: str = DAVID_USER_ID) -> Dict[str, Any]:
     try:
         r = await _get_redis()
         state = await _load_state(r)
-        try:
-            await r.close()
-        except Exception:
-            pass
         degraded = [
             {
                 "subsystem": s,
@@ -428,27 +419,21 @@ async def record_chat_provider_failure(provider: str, error_class: str, detail: 
     key = f"llm_chat:{provider}"
     try:
         r = await _get_redis()
-        try:
-            state = await r.hgetall(_CHAT_STATE_KEY)
-            was_down = key in (state or {})
-            await r.hset(_CHAT_STATE_KEY, key, json.dumps({
-                "severity": "error", "error_class": error_class, "detail": detail[:300],
-            }))
-            if not was_down:
-                result: Dict[str, Any] = {"events": [], "alerts": []}
-                delivered = await _emit_and_alert(
-                    user_id=DAVID_USER_ID, kind="degraded",
-                    subsystems={key: "error"}, severity="error", result=result,
-                )
-                if delivered:
-                    await _mark_announced(r, [key])
-                logger.info(f"[body_sense] chat provider degraded: {key} ({error_class})")
-            return not was_down
-        finally:
-            try:
-                await r.close()
-            except Exception:
-                pass
+        state = await r.hgetall(_CHAT_STATE_KEY)
+        was_down = key in (state or {})
+        await r.hset(_CHAT_STATE_KEY, key, json.dumps({
+            "severity": "error", "error_class": error_class, "detail": detail[:300],
+        }))
+        if not was_down:
+            result: Dict[str, Any] = {"events": [], "alerts": []}
+            delivered = await _emit_and_alert(
+                user_id=DAVID_USER_ID, kind="degraded",
+                subsystems={key: "error"}, severity="error", result=result,
+            )
+            if delivered:
+                await _mark_announced(r, [key])
+            logger.info(f"[body_sense] chat provider degraded: {key} ({error_class})")
+        return not was_down
     except Exception as e:
         logger.debug(f"[body_sense] record_chat_provider_failure failed: {e}")
         return False
@@ -462,28 +447,22 @@ async def record_chat_provider_recovery(provider: str) -> bool:
     key = f"llm_chat:{provider}"
     try:
         r = await _get_redis()
-        try:
-            state = await r.hgetall(_CHAT_STATE_KEY)
-            if key not in (state or {}):
-                return False
-            await r.hdel(_CHAT_STATE_KEY, key)
-            announced = await _load_announced(r)
-            to_close = key in announced
-            result: Dict[str, Any] = {"events": [], "alerts": []}
-            await _emit_and_alert(
-                user_id=DAVID_USER_ID, kind="recovered",
-                subsystems={key: "error"}, severity="normal", result=result,
-                notify=to_close,
-            )
-            if to_close:
-                await _clear_announced(r, [key])
-            logger.info(f"[body_sense] chat provider recovered: {key}")
-            return True
-        finally:
-            try:
-                await r.close()
-            except Exception:
-                pass
+        state = await r.hgetall(_CHAT_STATE_KEY)
+        if key not in (state or {}):
+            return False
+        await r.hdel(_CHAT_STATE_KEY, key)
+        announced = await _load_announced(r)
+        to_close = key in announced
+        result: Dict[str, Any] = {"events": [], "alerts": []}
+        await _emit_and_alert(
+            user_id=DAVID_USER_ID, kind="recovered",
+            subsystems={key: "error"}, severity="normal", result=result,
+            notify=to_close,
+        )
+        if to_close:
+            await _clear_announced(r, [key])
+        logger.info(f"[body_sense] chat provider recovered: {key}")
+        return True
     except Exception as e:
         logger.debug(f"[body_sense] record_chat_provider_recovery failed: {e}")
         return False
@@ -495,13 +474,7 @@ async def current_chat_provider_status() -> Dict[str, Any]:
     alongside the heartbeat-driven degradations."""
     try:
         r = await _get_redis()
-        try:
-            raw = await r.hgetall(_CHAT_STATE_KEY)
-        finally:
-            try:
-                await r.close()
-            except Exception:
-                pass
+        raw = await r.hgetall(_CHAT_STATE_KEY)
         degraded = []
         for key, payload in (raw or {}).items():
             try:

@@ -86,28 +86,22 @@ def build_envelope(event) -> EventEnvelopeV1:
 
 
 async def _get_redis():
-    import redis.asyncio as aioredis
-    return aioredis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"), decode_responses=True)
+    from app.core.redis import get_redis
+    return await get_redis()
 
 
 async def record_envelope(envelope: EventEnvelopeV1) -> None:
     """Persist the canonical envelope and index it under its user for
     recent-event lookups (diagnostics, future replay)."""
     r = await _get_redis()
-    try:
-        key = f"sara:event_envelope:{envelope.event_id}"
-        await r.setex(key, _ENVELOPE_TTL_SECONDS, envelope.model_dump_json())
+    key = f"sara:event_envelope:{envelope.event_id}"
+    await r.setex(key, _ENVELOPE_TTL_SECONDS, envelope.model_dump_json())
 
-        index_key = f"sara:event_envelope:index:{envelope.user_id}"
-        score = envelope.occurred_at.timestamp()
-        await r.zadd(index_key, {envelope.event_id: score})
-        await r.zremrangebyrank(index_key, 0, -(_INDEX_MAX_SIZE + 1))
-        await r.expire(index_key, _ENVELOPE_TTL_SECONDS)
-    finally:
-        try:
-            await r.close()
-        except Exception:
-            pass
+    index_key = f"sara:event_envelope:index:{envelope.user_id}"
+    score = envelope.occurred_at.timestamp()
+    await r.zadd(index_key, {envelope.event_id: score})
+    await r.zremrangebyrank(index_key, 0, -(_INDEX_MAX_SIZE + 1))
+    await r.expire(index_key, _ENVELOPE_TTL_SECONDS)
 
 
 async def record_from_event(event) -> EventEnvelopeV1:
@@ -119,14 +113,8 @@ async def record_from_event(event) -> EventEnvelopeV1:
 
 async def get_envelope(event_id: str) -> Optional[EventEnvelopeV1]:
     r = await _get_redis()
-    try:
-        raw = await r.get(f"sara:event_envelope:{event_id}")
-        return EventEnvelopeV1.model_validate_json(raw) if raw else None
-    finally:
-        try:
-            await r.close()
-        except Exception:
-            pass
+    raw = await r.get(f"sara:event_envelope:{event_id}")
+    return EventEnvelopeV1.model_validate_json(raw) if raw else None
 
 
 async def get_recent_envelopes(user_id: str, limit: int = 20) -> List[EventEnvelopeV1]:
@@ -135,17 +123,11 @@ async def get_recent_envelopes(user_id: str, limit: int = 20) -> List[EventEnvel
     the index and the envelope keys can legitimately fall out of step near
     the retention boundary."""
     r = await _get_redis()
-    try:
-        index_key = f"sara:event_envelope:index:{user_id}"
-        event_ids = await r.zrevrange(index_key, 0, max(limit, 1) - 1)
-        envelopes: List[EventEnvelopeV1] = []
-        for event_id in event_ids:
-            raw = await r.get(f"sara:event_envelope:{event_id}")
-            if raw:
-                envelopes.append(EventEnvelopeV1.model_validate_json(raw))
-        return envelopes
-    finally:
-        try:
-            await r.close()
-        except Exception:
-            pass
+    index_key = f"sara:event_envelope:index:{user_id}"
+    event_ids = await r.zrevrange(index_key, 0, max(limit, 1) - 1)
+    envelopes: List[EventEnvelopeV1] = []
+    for event_id in event_ids:
+        raw = await r.get(f"sara:event_envelope:{event_id}")
+        if raw:
+            envelopes.append(EventEnvelopeV1.model_validate_json(raw))
+    return envelopes

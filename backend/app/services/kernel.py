@@ -27,14 +27,15 @@ tick to `ambient_turn(wake_reason=DAEMON_PROXY)` instead of running its own
 
 import json
 import logging
-import os
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, Optional
 
+from app.core.config import get_owner_id
+
 logger = logging.getLogger(__name__)
 
-DEFAULT_USER_ID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
+DEFAULT_USER_ID = get_owner_id()
 
 _STATE_KEY = "kernel:state:{user_id}"
 _STATE_TTL = 3600  # a live-state readout; refreshed on every turn
@@ -70,13 +71,6 @@ class WakeReason(str, Enum):
 _WAKE_REASON_DEFAULT_DEEP = {WakeReason.SCHEDULED_ANCHOR}
 
 
-async def _redis():
-    import redis.asyncio as aioredis
-    return aioredis.from_url(
-        os.getenv("REDIS_URL", "redis://redis:6379/0"), decode_responses=True
-    )
-
-
 async def set_state(
     user_id: str,
     state: KernelState,
@@ -87,7 +81,8 @@ async def set_state(
     """Publish the live kernel state so surfaces can read the one mind's real
     condition (honest orb / greeting / Interior). Best-effort."""
     try:
-        r = await _redis()
+        from app.core.redis import get_redis
+        r = await get_redis()
         payload = {
             "state": state.value,
             "wake_reason": wake_reason.value if wake_reason else None,
@@ -96,10 +91,6 @@ async def set_state(
             "correlation_id": correlation_id,
         }
         await r.set(_STATE_KEY.format(user_id=user_id), json.dumps(payload), ex=_STATE_TTL)
-        try:
-            await r.close()
-        except Exception:
-            pass
     except Exception as e:
         logger.debug(f"[kernel] set_state failed: {e}")
 
@@ -107,12 +98,9 @@ async def set_state(
 async def get_state(user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]:
     """Return the live kernel state, or a resting default."""
     try:
-        r = await _redis()
+        from app.core.redis import get_redis
+        r = await get_redis()
         raw = await r.get(_STATE_KEY.format(user_id=user_id))
-        try:
-            await r.close()
-        except Exception:
-            pass
         if raw:
             return json.loads(raw)
     except Exception as e:

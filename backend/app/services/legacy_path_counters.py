@@ -21,7 +21,6 @@ measurable instead of anecdotal.
 """
 
 import logging
-import os
 from datetime import datetime, timedelta, timezone
 from typing import Dict
 
@@ -38,8 +37,8 @@ def _day_bucket(when: datetime) -> str:
 
 
 async def _get_redis():
-    import redis.asyncio as aioredis
-    return aioredis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"), decode_responses=True)
+    from app.core.redis import get_redis
+    return await get_redis()
 
 
 async def _record(path_name: str, lane: str) -> None:
@@ -50,10 +49,6 @@ async def _record(path_name: str, lane: str) -> None:
         r = await _get_redis()
         await r.incr(key)
         await r.expire(key, _TTL_SECONDS)
-        try:
-            await r.close()
-        except Exception:
-            pass
     except Exception as e:
         # Never let telemetry break the path it's measuring.
         logger.debug(f"[legacy_path_counters] record failed for {key}: {e}")
@@ -73,17 +68,11 @@ async def get_counts(path_name: str, days: int = 7) -> Dict[str, int]:
     r = await _get_redis()
     legacy_total = 0
     target_total = 0
-    try:
-        today = datetime.now(timezone.utc)
-        for i in range(days):
-            day = _day_bucket(today - timedelta(days=i))
-            legacy_val = await r.get(f"{_KEY_PREFIX}:{path_name}:legacy:{day}")
-            target_val = await r.get(f"{_KEY_PREFIX}:{path_name}:target:{day}")
-            legacy_total += int(legacy_val or 0)
-            target_total += int(target_val or 0)
-    finally:
-        try:
-            await r.close()
-        except Exception:
-            pass
+    today = datetime.now(timezone.utc)
+    for i in range(days):
+        day = _day_bucket(today - timedelta(days=i))
+        legacy_val = await r.get(f"{_KEY_PREFIX}:{path_name}:legacy:{day}")
+        target_val = await r.get(f"{_KEY_PREFIX}:{path_name}:target:{day}")
+        legacy_total += int(legacy_val or 0)
+        target_total += int(target_val or 0)
     return {"path_name": path_name, "days": days, "legacy": legacy_total, "target": target_total}

@@ -18,11 +18,12 @@ from typing import Dict, Any, Optional, List
 import httpx
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.config import get_owner_id
 
 logger = logging.getLogger(__name__)
 
 # Default user ID
-DAVID_USER_ID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
+DAVID_USER_ID = get_owner_id()
 
 # Hardcoded fallbacks for category cooldowns (hours). The values for `checkin`,
 # `general`, `calendar`, `email`, and `health` are overridden at runtime by
@@ -891,15 +892,14 @@ async def _maybe_speak_via_jetson(user_id: str, title: str, message: str) -> Non
         if presence.active_device_id != "jetson":
             return
 
-        import redis.asyncio as aioredis
+        from app.core.redis import get_redis
         from app.core.timezone import now as local_now
 
-        redis_client = aioredis.from_url(os.environ.get("REDIS_URL", "redis://localhost:6379/0"), decode_responses=True)
+        redis_client = await get_redis()
         key = JETSON_SPEAK_COUNT_KEY.format(user_id=user_id, date=local_now().date().isoformat())
         count = await redis_client.incr(key)
         if count == 1:
             await redis_client.expire(key, 90000)  # a little over 24h, clock-skew safe
-        await redis_client.close()
 
         if count > JETSON_SPEAK_DAILY_CAP:
             logger.info(f"Jetson speak skipped — daily cap ({JETSON_SPEAK_DAILY_CAP}) reached")

@@ -151,26 +151,20 @@ async def reply_to_attention_item(
         raise HTTPException(status_code=400, detail="Missing request_id in payload")
 
     # Push reply to Redis so the waiting session unblocks
-    import redis.asyncio as aioredis
+    from app.core.redis import get_redis
     from datetime import datetime, timezone
     response_key = f"sara:acs:hitl_response:{request_id}"
-    r = await aioredis.from_url(REDIS_URL, decode_responses=True)
-    try:
-        push_result = await r.lpush(response_key, json.dumps({
-            "message": body.message,
-            "replied_at": datetime.now(timezone.utc).isoformat(),
-        }))
-        # Set TTL so the key doesn't linger forever if session already timed out
-        await r.expire(response_key, 3600)
-        logger.info(
-            f"HITL reply pushed: request={request_id[:8]} key={response_key} "
-            f"list_len_after_push={push_result} msg={body.message[:100]}"
-        )
-    finally:
-        if hasattr(r, "aclose"):
-            await r.close()
-        else:
-            await r.close()
+    r = await get_redis()
+    push_result = await r.lpush(response_key, json.dumps({
+        "message": body.message,
+        "replied_at": datetime.now(timezone.utc).isoformat(),
+    }))
+    # Set TTL so the key doesn't linger forever if session already timed out
+    await r.expire(response_key, 3600)
+    logger.info(
+        f"HITL reply pushed: request={request_id[:8]} key={response_key} "
+        f"list_len_after_push={push_result} msg={body.message[:100]}"
+    )
 
     # Mark item completed + append action history. Use direct SQL so any failure
     # is loud (previously this went through a helper that swallowed exceptions,

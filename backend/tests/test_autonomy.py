@@ -263,12 +263,25 @@ class TestWorkerCoordinator:
     """Tests for the worker coordinator."""
 
     @pytest.fixture
-    def coordinator(self):
-        """Create a WorkerCoordinator instance with async fake Redis."""
+    def coordinator(self, monkeypatch):
+        """Create a WorkerCoordinator instance with async fake Redis.
+
+        coordination.py now gets its client from the shared
+        app.core.redis.get_redis_bytes() pool (bytes mode — the module
+        compares owner tokens via .decode()), so the fake is injected by
+        patching that function rather than setting an instance attribute.
+        """
+        from app.services.autonomy import coordination
         from app.services.autonomy.coordination import WorkerCoordinator
         import fakeredis.aioredis
+        fake = fakeredis.aioredis.FakeRedis(decode_responses=False)
+
+        async def _fake_get_redis_bytes():
+            return fake
+
+        monkeypatch.setattr(coordination, "get_redis_bytes", _fake_get_redis_bytes)
         coord = WorkerCoordinator()
-        coord._redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+        coord._test_fake_redis = fake
         return coord
 
     @pytest.mark.asyncio
@@ -303,8 +316,8 @@ class TestWorkerCoordinator:
     async def test_adaptive_scheduling(self, coordinator):
         """Test adaptive scheduling based on load."""
         # Record some load using async methods
-        await coordinator._redis.set("resource_usage:llm_calls_per_minute", "50")
-        await coordinator._redis.set("resource_usage:concurrent_heavy_tasks", "3")
+        await coordinator._test_fake_redis.set("resource_usage:llm_calls_per_minute", "50")
+        await coordinator._test_fake_redis.set("resource_usage:concurrent_heavy_tasks", "3")
 
         # High load should affect scheduling - test with high-priority worker
         should_run = await coordinator.should_run_worker("proactive_check")

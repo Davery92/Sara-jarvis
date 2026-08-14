@@ -332,17 +332,12 @@ async def diagnostics_overview() -> Dict[str, Any]:
 
 
 async def _queue_depths() -> Dict[str, int]:
-    import redis.asyncio as aredis
-    import os
-    url = os.getenv("REDIS_URL", "redis://redis:6379/0")
-    r = aredis.Redis.from_url(url, decode_responses=True)
-    try:
-        depths = {}
-        for q in ["cognitive", "health", "input", "maintenance", "low_priority", "reflection"]:
-            depths[q] = int(await r.llen(q))
-        return depths
-    finally:
-        await r.close()
+    from app.core.redis import get_redis
+    r = await get_redis()
+    depths = {}
+    for q in ["cognitive", "health", "input", "maintenance", "low_priority", "reflection"]:
+        depths[q] = int(await r.llen(q))
+    return depths
 
 
 async def _daemon_heartbeat_status() -> Dict[str, Any]:

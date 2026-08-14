@@ -13,12 +13,13 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.core.deps import get_current_user
 from app.models.user import User
+from app.core.config import get_owner_id
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-DEFAULT_USER_ID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
+DEFAULT_USER_ID = get_owner_id()
 
 
 @router.get("/debug/voice-register")
@@ -78,42 +79,37 @@ async def notification_funnel(
 
     # 1. Observations from Redis
     try:
-        import redis.asyncio as aioredis
-        import os
-        redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
-        r = await aioredis.from_url(redis_url, decode_responses=True)
-        try:
-            obs_key = f"sara:observations:{user_id}"
-            detail_key = f"sara:observation_details:{user_id}"
-            pending_count = await r.zcard(obs_key)
-            accumulated_salience = 0.0
-            top_obs = await r.zrevrange(obs_key, 0, 9, withscores=True)
-            if top_obs:
-                accumulated_salience = sum(s for _, s in top_obs)
+        from app.core.redis import get_redis
+        r = await get_redis()
+        obs_key = f"sara:observations:{user_id}"
+        detail_key = f"sara:observation_details:{user_id}"
+        pending_count = await r.zcard(obs_key)
+        accumulated_salience = 0.0
+        top_obs = await r.zrevrange(obs_key, 0, 9, withscores=True)
+        if top_obs:
+            accumulated_salience = sum(s for _, s in top_obs)
 
-            # Count observations by category from details
-            all_details = await r.hgetall(detail_key)
-            category_counts = {}
-            import json
-            for _, detail_json in all_details.items():
-                try:
-                    d = json.loads(detail_json)
-                    cat = d.get("category", "unknown")
-                    category_counts[cat] = category_counts.get(cat, 0) + 1
-                except Exception:
-                    pass
+        # Count observations by category from details
+        all_details = await r.hgetall(detail_key)
+        category_counts = {}
+        import json
+        for _, detail_json in all_details.items():
+            try:
+                d = json.loads(detail_json)
+                cat = d.get("category", "unknown")
+                category_counts[cat] = category_counts.get(cat, 0) + 1
+            except Exception:
+                pass
 
-            funnel["observations"] = {
-                "pending_count": pending_count,
-                "accumulated_salience": round(accumulated_salience, 2),
-                "by_category": category_counts,
-                "top_pending": [
-                    {"id": obs_id, "salience": round(score, 2)}
-                    for obs_id, score in (top_obs or [])[:5]
-                ],
-            }
-        finally:
-            await r.close()
+        funnel["observations"] = {
+            "pending_count": pending_count,
+            "accumulated_salience": round(accumulated_salience, 2),
+            "by_category": category_counts,
+            "top_pending": [
+                {"id": obs_id, "salience": round(score, 2)}
+                for obs_id, score in (top_obs or [])[:5]
+            ],
+        }
     except Exception as e:
         funnel["observations"] = {"error": str(e)}
 

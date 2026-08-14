@@ -9,17 +9,13 @@ and can be fully rebuilt from DB on cold start.
 
 import json
 import logging
-import os
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from typing import Dict, List, Optional, get_args, get_origin, Union
 from app.core.timezone import now as local_now
 
-import redis.asyncio as aioredis
-
 logger = logging.getLogger(__name__)
 
-REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 SNAPSHOT_KEY = "sara:unified_context:{user_id}"
 CHANGES_KEY = "sara:context_changes:{user_id}"
 
@@ -211,28 +207,10 @@ class UnifiedContextSnapshot:
 
 
 # ── Redis Connection Pool (per-event-loop singleton) ──
+# app-wide shared pool (app.core.redis) — was a private per-module pool here,
+# now aliased so existing call sites (`await _get_redis()`) are unchanged.
 
-_redis_pool: Optional[aioredis.Redis] = None
-_redis_loop_id: Optional[int] = None  # track which event loop owns the pool
-
-
-async def _get_redis() -> aioredis.Redis:
-    """Lazy-init shared Redis connection, recreated when event loop changes."""
-    global _redis_pool, _redis_loop_id
-    import asyncio
-    cur_loop = id(asyncio.get_running_loop())
-    if _redis_pool is None or cur_loop != _redis_loop_id:
-        # Close stale pool (best-effort)
-        if _redis_pool is not None:
-            try:
-                await _redis_pool.close()
-            except Exception:
-                pass
-        _redis_pool = await aioredis.from_url(
-            REDIS_URL, decode_responses=True, max_connections=10
-        )
-        _redis_loop_id = cur_loop
-    return _redis_pool
+from app.core.redis import get_redis as _get_redis
 
 
 async def read_snapshot(user_id: str) -> UnifiedContextSnapshot:

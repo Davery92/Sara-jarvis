@@ -230,24 +230,39 @@ def test_run_task_consumes_clarification_once():
 
 
 def test_release_wrong_owner_preserves_lock():
+    # coordination.py sources its client from the shared
+    # app.core.redis.get_redis_bytes() pool (bytes mode) — patch that
+    # function rather than setting coordinator._redis directly, which no
+    # longer exists as an instance attribute. FakeRedis binds its internal
+    # queue to whichever event loop first touches it, so every operation
+    # must run inside a single asyncio.run() — not one per call, which
+    # would hand it a fresh loop each time and blow up on the second use.
     coordinator = WorkerCoordinator()
-    coordinator._redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
 
-    acquired = asyncio.run(coordinator.acquire_exclusive("worker-A", "lock-group"))
-    assert acquired is True
+    async def _run():
+        fake = fakeredis.aioredis.FakeRedis(decode_responses=False)
+        with patch("app.services.autonomy.coordination.get_redis_bytes", AsyncMock(return_value=fake)):
+            acquired = await coordinator.acquire_exclusive("worker-A", "lock-group")
+            assert acquired is True
 
-    asyncio.run(coordinator.release_exclusive("lock-group", "worker-B"))
-    holder = asyncio.run(coordinator.get_lock_holder("lock-group"))
-    assert holder == "worker-A"
+            await coordinator.release_exclusive("lock-group", "worker-B")
+            holder = await coordinator.get_lock_holder("lock-group")
+            assert holder == "worker-A"
+
+    asyncio.run(_run())
 
 
 def test_release_correct_owner_deletes_lock():
     coordinator = WorkerCoordinator()
-    coordinator._redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
 
-    acquired = asyncio.run(coordinator.acquire_exclusive("worker-A", "lock-group"))
-    assert acquired is True
+    async def _run():
+        fake = fakeredis.aioredis.FakeRedis(decode_responses=False)
+        with patch("app.services.autonomy.coordination.get_redis_bytes", AsyncMock(return_value=fake)):
+            acquired = await coordinator.acquire_exclusive("worker-A", "lock-group")
+            assert acquired is True
 
-    asyncio.run(coordinator.release_exclusive("lock-group", "worker-A"))
-    holder = asyncio.run(coordinator.get_lock_holder("lock-group"))
-    assert holder is None
+            await coordinator.release_exclusive("lock-group", "worker-A")
+            holder = await coordinator.get_lock_holder("lock-group")
+            assert holder is None
+
+    asyncio.run(_run())

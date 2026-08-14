@@ -21,7 +21,7 @@ from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from typing import Optional
 
-import redis.asyncio as aioredis
+from app.core.redis import get_redis
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ class DevicePresence:
 
 
 async def _get_redis():
-    return aioredis.from_url(REDIS_URL, decode_responses=True)
+    return await get_redis()
 
 
 async def _resolve_uncached(db, user_id: str) -> DevicePresence:
@@ -151,18 +151,15 @@ async def resolve(db, user_id: str, force: bool = False) -> DevicePresence:
     this within the same turn)."""
     r = await _get_redis()
     key = CACHE_KEY.format(user_id=user_id)
-    try:
-        if not force:
-            cached = await r.get(key)
-            if cached:
-                return DevicePresence(**json.loads(cached))
+    if not force:
+        cached = await r.get(key)
+        if cached:
+            return DevicePresence(**json.loads(cached))
 
-        result = await _resolve_uncached(db, user_id)
-        await _publish_if_changed(r, user_id, result)
-        await r.setex(key, CACHE_TTL_SECONDS, json.dumps(asdict(result)))
-        return result
-    finally:
-        await r.close()
+    result = await _resolve_uncached(db, user_id)
+    await _publish_if_changed(r, user_id, result)
+    await r.setex(key, CACHE_TTL_SECONDS, json.dumps(asdict(result)))
+    return result
 
 
 async def _publish_if_changed(r, user_id: str, result: DevicePresence) -> None:

@@ -34,10 +34,11 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from app.schemas.contracts import BodyComponentV1, BodyStateV1, ComponentStatus
+from app.core.config import get_owner_id
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_USER_ID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
+DEFAULT_USER_ID = get_owner_id()
 
 _HEARTBEAT_KEY = "system:health_status"
 # The heartbeat runs every 5 minutes; a report much older than that means the
@@ -50,18 +51,14 @@ _DEGRADED_STATUSES = {"warning", "error", "critical"}
 
 
 async def _get_redis():
-    import redis.asyncio as aioredis
-    return aioredis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"), decode_responses=True)
+    from app.core.redis import get_redis
+    return await get_redis()
 
 
 async def _load_raw_report() -> Optional[Dict[str, Any]]:
     try:
         r = await _get_redis()
         raw = await r.get(_HEARTBEAT_KEY)
-        try:
-            await r.close()
-        except Exception:
-            pass
         return json.loads(raw) if raw else None
     except Exception as e:
         logger.debug(f"[body_state_projection] could not load heartbeat report: {e}")

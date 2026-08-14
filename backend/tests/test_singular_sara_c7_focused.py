@@ -23,7 +23,8 @@ def fake_redis_everywhere(monkeypatch):
     async def _fake_redis():
         return fake
 
-    monkeypatch.setattr(kernel, "_redis", _fake_redis)
+    import app.core.redis as core_redis
+    monkeypatch.setattr(core_redis, "get_redis", _fake_redis)
     monkeypatch.setattr(counters, "_get_redis", _fake_redis)
     return fake
 

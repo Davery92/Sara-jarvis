@@ -65,14 +65,12 @@ class MLPersistenceSubscriber(EventSubscriber):
             return  # not a "just sat down this morning" moment anymore
 
         try:
-            import redis.asyncio as aioredis
-            import os
+            from app.core.redis import get_redis
 
-            redis_client = aioredis.from_url(os.environ.get("REDIS_URL", "redis://localhost:6379/0"), decode_responses=True)
+            redis_client = await get_redis()
             prompt_key = f"sara:morning_brief_prompted:{event.user_id}:{now.date().isoformat()}"
             already_prompted = await redis_client.get(prompt_key)
             if already_prompted:
-                await redis_client.close()
                 return
 
             from app.db.base import SessionLocal
@@ -87,11 +85,9 @@ class MLPersistenceSubscriber(EventSubscriber):
 
             import asyncio
             if not await asyncio.to_thread(_brief_exists):
-                await redis_client.close()
                 return
 
             await redis_client.set(prompt_key, "1", ex=86400)
-            await redis_client.close()
 
             from app.services.unified_notification import send_notification
             await send_notification(

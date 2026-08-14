@@ -19,10 +19,11 @@ import logging
 import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+from app.core.config import get_owner_id
 
 logger = logging.getLogger(__name__)
 
-DAVID_USER_ID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
+DAVID_USER_ID = get_owner_id()
 
 # A fact is "unverified" below this confidence with no real confirmations.
 _UNVERIFIED_BELOW = 0.55
@@ -44,8 +45,8 @@ _EPHEMERAL = (
 
 
 async def _redis():
-    import redis.asyncio as aioredis
-    return aioredis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"), decode_responses=True)
+    from app.core.redis import get_redis
+    return await get_redis()
 
 
 def _is_ephemeral(subject: str, predicate: str) -> bool:
@@ -110,55 +111,49 @@ async def pick_question(user_id: str = DAVID_USER_ID, mark_asked: bool = True) -
     """Return the ripest unverified fact as a question, or None if there's
     nothing to ask, the daily cap is hit, or everything is on cooldown."""
     r = await _redis()
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    count_key = _COUNT_KEY.format(user_id=user_id, day=day)
+    asked_key = _ASKED_KEY.format(user_id=user_id)
+
     try:
-        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        count_key = _COUNT_KEY.format(user_id=user_id, day=day)
-        asked_key = _ASKED_KEY.format(user_id=user_id)
-
-        try:
-            sent_today = int(await r.get(count_key) or 0)
-        except Exception:
-            sent_today = 0
-        if sent_today >= _DAILY_CAP:
-            return None
-
-        asked = await r.hgetall(asked_key) or {}
-        now = datetime.now(timezone.utc)
-
-        for fact in _list_unverified():
-            pkg_id = fact.get("pkg_id")
-            if not pkg_id:
-                continue
-            if _is_ephemeral(fact.get("subject", ""), fact.get("predicate", "")):
-                continue
-            # cooldown check
-            last = asked.get(pkg_id)
-            if last:
-                try:
-                    age = (now - datetime.fromisoformat(last)).total_seconds()
-                    if age < _ASK_COOLDOWN_SECONDS:
-                        continue
-                except Exception:
-                    pass
-
-            question = _phrase(fact.get("subject", ""), fact.get("predicate", ""), fact.get("object", ""))
-            if mark_asked:
-                await r.hset(asked_key, pkg_id, now.isoformat())
-                await r.expire(asked_key, _ASK_COOLDOWN_SECONDS * 2)
-                await r.incr(count_key)
-                await r.expire(count_key, 2 * 24 * 3600)
-            return {
-                "pkg_id": pkg_id,
-                "question": question,
-                "fact": _fact_text(fact.get("subject", ""), fact.get("predicate", ""), fact.get("object", "")),
-                "confidence": fact.get("confidence"),
-            }
+        sent_today = int(await r.get(count_key) or 0)
+    except Exception:
+        sent_today = 0
+    if sent_today >= _DAILY_CAP:
         return None
-    finally:
-        try:
-            await r.close()
-        except Exception:
-            pass
+
+    asked = await r.hgetall(asked_key) or {}
+    now = datetime.now(timezone.utc)
+
+    for fact in _list_unverified():
+        pkg_id = fact.get("pkg_id")
+        if not pkg_id:
+            continue
+        if _is_ephemeral(fact.get("subject", ""), fact.get("predicate", "")):
+            continue
+        # cooldown check
+        last = asked.get(pkg_id)
+        if last:
+            try:
+                age = (now - datetime.fromisoformat(last)).total_seconds()
+                if age < _ASK_COOLDOWN_SECONDS:
+                    continue
+            except Exception:
+                pass
+
+        question = _phrase(fact.get("subject", ""), fact.get("predicate", ""), fact.get("object", ""))
+        if mark_asked:
+            await r.hset(asked_key, pkg_id, now.isoformat())
+            await r.expire(asked_key, _ASK_COOLDOWN_SECONDS * 2)
+            await r.incr(count_key)
+            await r.expire(count_key, 2 * 24 * 3600)
+        return {
+            "pkg_id": pkg_id,
+            "question": question,
+            "fact": _fact_text(fact.get("subject", ""), fact.get("predicate", ""), fact.get("object", "")),
+            "confidence": fact.get("confidence"),
+        }
+    return None
 
 
 async def record_answer(user_id: str, pkg_id: str, confirmed: bool) -> Dict[str, Any]:

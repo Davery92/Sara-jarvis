@@ -794,21 +794,15 @@ class AttentionQueueService:
             # User chose to skip — push a skip message to Redis and complete the item
             request_id = payload.get("request_id", "") if isinstance(payload, dict) else ""
             if request_id:
-                import os
-                import redis.asyncio as aioredis
-                redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+                from app.core.redis import get_redis
                 try:
-                    r = await aioredis.from_url(redis_url, decode_responses=True)
+                    r = await get_redis()
                     response_key = f"sara:acs:hitl_response:{request_id}"
                     await r.lpush(response_key, json.dumps({
                         "message": "[David chose to skip this request]",
                         "skipped": True,
                     }))
                     await r.expire(response_key, 3600)
-                    if hasattr(r, "aclose"):
-                        await r.close()
-                    else:
-                        await r.close()
                 except Exception as e:
                     logger.warning(f"acs_skip: failed to push skip to Redis: {e}")
 

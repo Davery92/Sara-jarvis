@@ -59,3 +59,48 @@ async def retrieval_funnel(
         snap["memory_health"] = {"error": f"health_check_failed:{exc.__class__.__name__}"}
 
     return snap
+
+
+@router.get("/debug/swallow-counts")
+async def swallow_counts(
+    days: int = 7,
+    current_user: User = Depends(get_current_user),
+):
+    """Silent-failure counts by call site (app.core.swallow.swallow()),
+    last `days` days.
+
+    Redis-backed and daily-bucketed, so counts survive a container restart
+    and aggregate across the backend + Celery workers — the early-warning
+    this system otherwise only gets from manual audits, months late.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from app.core.redis import get_redis
+    from app.core.swallow import _KEY_PREFIX
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+    sites: dict = {}
+    try:
+        r = await get_redis()
+        cursor = 0
+        pattern = f"{_KEY_PREFIX}:*"
+        while True:
+            cursor, keys = await r.scan(cursor=cursor, match=pattern, count=200)
+            for key in keys:
+                try:
+                    _, site, date = key.rsplit(":", 2)
+                except ValueError:
+                    continue
+                if date < cutoff:
+                    continue
+                count = int(await r.get(key) or 0)
+                entry = sites.setdefault(site, {"total": 0, "by_day": {}})
+                entry["total"] += count
+                entry["by_day"][date] = count
+            if cursor == 0:
+                break
+    except Exception as exc:
+        return {"error": f"redis_unavailable:{exc.__class__.__name__}", "sites": {}}
+
+    ranked = dict(sorted(sites.items(), key=lambda kv: -kv[1]["total"]))
+    return {"window_days": days, "sites": ranked}

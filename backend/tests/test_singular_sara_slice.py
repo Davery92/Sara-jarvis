@@ -136,7 +136,8 @@ class TestKernelCorrelationWiring:
         async def _fake_redis():
             return fake
 
-        monkeypatch.setattr(kernel, "_redis", _fake_redis)
+        import app.core.redis as core_redis
+        monkeypatch.setattr(core_redis, "get_redis", _fake_redis)
 
         await kernel.set_state(
             "user-1", kernel.KernelState.AMBIENT, kernel.WakeReason.MANUAL,
@@ -155,7 +156,8 @@ class TestKernelCorrelationWiring:
         async def _broken_redis():
             raise ConnectionError("no redis in test")
 
-        monkeypatch.setattr(kernel, "_redis", _broken_redis)
+        import app.core.redis as core_redis
+        monkeypatch.setattr(core_redis, "get_redis", _broken_redis)
 
         state = await kernel.get_state("user-1")
         assert state["correlation_id"] is None

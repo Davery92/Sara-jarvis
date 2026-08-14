@@ -10,10 +10,11 @@ import json
 import logging
 
 from app.celery_app import celery_app
+from app.core.config import get_owner_id
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_USER_ID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
+DEFAULT_USER_ID = get_owner_id()
 _REDIS_KEY = "sara:system_events"
 
 
@@ -28,52 +29,47 @@ def drain_system_events(batch: int = 500):
 
 
 async def _drain_async(batch: int):
-    import os
-    import redis.asyncio as aredis
     from sqlalchemy import text
+    from app.core.redis import get_redis
     from app.db.session import get_async_session_factory
     from app.services.diagnostics_service import _stable_event_id
 
-    url = os.getenv("REDIS_URL", "redis://redis:6379/0")
-    r = aredis.Redis.from_url(url, decode_responses=True)
+    r = await get_redis()
     inserted = 0
-    try:
-        items = []
-        for _ in range(batch):
-            raw = await r.rpop(_REDIS_KEY)
-            if raw is None:
-                break
-            try:
-                items.append(json.loads(raw))
-            except Exception:
-                continue
-        if not items:
-            return {"drained": 0}
+    items = []
+    for _ in range(batch):
+        raw = await r.rpop(_REDIS_KEY)
+        if raw is None:
+            break
+        try:
+            items.append(json.loads(raw))
+        except Exception:
+            continue
+    if not items:
+        return {"drained": 0}
 
-        from datetime import datetime, timezone
-        factory = get_async_session_factory()
-        async with factory() as db:
-            for it in items:
-                ts = it.get("ts")
-                try:
-                    created = datetime.fromtimestamp(ts, tz=timezone.utc) if ts else datetime.now(timezone.utc)
-                except Exception:
-                    created = datetime.now(timezone.utc)
-                svc = it.get("service", "")
-                msg = it.get("message", "")
-                eid = _stable_event_id("log", svc, msg[:120])
-                await db.execute(text("""
-                    INSERT INTO system_event
-                        (event_id, category, service, level, logger, message, traceback, meta, created_at)
-                    VALUES (:eid, 'log', :svc, :lvl, :lg, :msg, :tb, NULL, :created)
-                """), {"eid": eid, "svc": svc[:128], "lvl": (it.get("level") or "")[:16],
-                       "lg": (it.get("logger") or svc)[:255], "msg": msg[:4000],
-                       "tb": it.get("traceback"), "created": created})
-                inserted += 1
-            await db.commit()
-        return {"drained": inserted}
-    finally:
-        await r.close()
+    from datetime import datetime, timezone
+    factory = get_async_session_factory()
+    async with factory() as db:
+        for it in items:
+            ts = it.get("ts")
+            try:
+                created = datetime.fromtimestamp(ts, tz=timezone.utc) if ts else datetime.now(timezone.utc)
+            except Exception:
+                created = datetime.now(timezone.utc)
+            svc = it.get("service", "")
+            msg = it.get("message", "")
+            eid = _stable_event_id("log", svc, msg[:120])
+            await db.execute(text("""
+                INSERT INTO system_event
+                    (event_id, category, service, level, logger, message, traceback, meta, created_at)
+                VALUES (:eid, 'log', :svc, :lvl, :lg, :msg, :tb, NULL, :created)
+            """), {"eid": eid, "svc": svc[:128], "lvl": (it.get("level") or "")[:16],
+                   "lg": (it.get("logger") or svc)[:255], "msg": msg[:4000],
+                   "tb": it.get("traceback"), "created": created})
+            inserted += 1
+        await db.commit()
+    return {"drained": inserted}
 
 
 @celery_app.task(name="app.tasks.interoception.self_check", queue="health")

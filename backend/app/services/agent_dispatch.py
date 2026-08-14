@@ -19,7 +19,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 import httpx
-import redis.asyncio as aioredis
+from app.core.redis import get_redis
 from sqlalchemy.orm import Session
 
 import shlex
@@ -37,13 +37,10 @@ DISPATCH_LIVE_CHANNEL = "sara:dispatch:live:{task_id}"
 async def _publish_dispatch_event(task_id: str, entry: dict):
     """Publish a live execution event to the dispatch SSE channel."""
     try:
-        r = await aioredis.from_url(REDIS_URL, decode_responses=True)
-        try:
-            channel = DISPATCH_LIVE_CHANNEL.format(task_id=task_id)
-            payload = json.dumps(entry, default=str)
-            await r.publish(channel, payload)
-        finally:
-            await r.close()
+        r = await get_redis()
+        channel = DISPATCH_LIVE_CHANNEL.format(task_id=task_id)
+        payload = json.dumps(entry, default=str)
+        await r.publish(channel, payload)
     except Exception as e:
         logger.warning(f"[dispatch] Redis publish failed: {e}")
 

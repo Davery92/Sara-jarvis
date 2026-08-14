@@ -18,14 +18,13 @@ Usage:
 
 import json
 import logging
-import os
 import time
 import uuid
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from typing import List, Optional
 
-import redis.asyncio as aioredis
+from app.core.redis import get_redis as _get_redis
 
 from app.services.silent_failure_tracker import Tracker
 
@@ -35,30 +34,9 @@ logger = logging.getLogger(__name__)
 # log/get/consume/prune failure modes.
 _OBS_LOG_TRACKER = Tracker("observation_log")
 
-REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 OBS_ZSET_KEY = "sara:observations:{user_id}"
 OBS_DETAIL_KEY = "sara:observation_details:{user_id}"
 OBS_TTL_SECONDS = 24 * 60 * 60  # 24 hours
-
-_redis_pool: Optional[aioredis.Redis] = None
-_redis_loop_id: Optional[int] = None
-
-
-async def _get_redis() -> aioredis.Redis:
-    global _redis_pool, _redis_loop_id
-    import asyncio
-    cur_loop = id(asyncio.get_running_loop())
-    if _redis_pool is None or cur_loop != _redis_loop_id:
-        if _redis_pool is not None:
-            try:
-                await _redis_pool.close()
-            except Exception:
-                pass
-        _redis_pool = await aioredis.from_url(
-            REDIS_URL, decode_responses=True, max_connections=10
-        )
-        _redis_loop_id = cur_loop
-    return _redis_pool
 
 
 @dataclass

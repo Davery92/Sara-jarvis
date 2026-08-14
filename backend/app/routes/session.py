@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 from app.core.timezone import now as local_now
 
-import redis.asyncio as aioredis
+from app.core.redis import get_redis
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
@@ -42,9 +42,7 @@ class SessionResponse(BaseModel):
 
 
 async def _get_redis():
-    import os
-    url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
-    return await aioredis.from_url(url, decode_responses=True)
+    return await get_redis()
 
 
 @router.get("/active", response_model=SessionResponse)
