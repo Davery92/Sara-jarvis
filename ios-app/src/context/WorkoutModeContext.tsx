@@ -112,6 +112,8 @@ export function WorkoutModeProvider({ children }: { children: React.ReactNode })
   const [restTimer, setRestTimer] = useState<RestTimerStatus | null>(null);
   const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const restTimerIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const coordinatorSessionRef = useRef<string | null>(null);
+  const emptySessionPollsRef = useRef(0);
   // Local timer tracking (independent of session refresh)
   const localTimerRef = useRef<{ startTime: number; duration: number } | null>(null);
 
@@ -143,6 +145,23 @@ export function WorkoutModeProvider({ children }: { children: React.ReactNode })
     const unsubCoordinator = workoutCoordinator.subscribe((state) => {
       setWatch(prev => ({ ...prev, pending: state.pendingCount }));
       setPendingProposal(state.projection?.pending_proposal ?? null);
+      const activeSessionId = state.projection?.status === 'active'
+        ? state.projection.session_id
+        : null;
+      const previousSessionId = coordinatorSessionRef.current;
+      if (activeSessionId && activeSessionId !== previousSessionId) {
+        coordinatorSessionRef.current = activeSessionId;
+        void checkActiveSession();
+      } else if (!activeSessionId) {
+        coordinatorSessionRef.current = null;
+        if (previousSessionId) {
+          emptySessionPollsRef.current = 0;
+          localTimerRef.current = null;
+          setRestTimer(null);
+          setSession(null);
+          void AsyncStorage.removeItem(STORAGE_KEY);
+        }
+      }
       // The canonical set list. Sourced from the projection rather than kept
       // locally so a set added on the Watch shows up here without the phone
       // having to reconstruct it (§7.3).
@@ -282,12 +301,19 @@ export function WorkoutModeProvider({ children }: { children: React.ReactNode })
       // Only update if we get a valid session back, or if we explicitly have no session
       // This prevents race conditions where polling returns null before state is synced
       if (result.session) {
+        emptySessionPollsRef.current = 0;
         setSession(result.session);
       } else if (session && session.status === 'active') {
-        // Don't overwrite an active local session with null from API
-        // This can happen due to timing issues - wait for next poll
-        console.log('[WorkoutMode] Ignoring null from API - local session still active');
+        emptySessionPollsRef.current += 1;
+        if (emptySessionPollsRef.current >= 2) {
+          setSession(null);
+          setRestTimer(null);
+          localTimerRef.current = null;
+          workoutCoordinator.applyProjection(null);
+          void AsyncStorage.removeItem(STORAGE_KEY);
+        }
       } else {
+        emptySessionPollsRef.current = 0;
         setSession(null);
       }
     } catch (err) {
@@ -483,12 +509,17 @@ export function WorkoutModeProvider({ children }: { children: React.ReactNode })
       // Both devices end together: leaving the Watch's HealthKit session
       // running would keep burning battery and recording a workout that Sara
       // has already closed (§4.5 step 7).
-      await watchWorkout.endWatchWorkout('completed on phone');
+      await watchWorkout.endWatchWorkout('completed on phone', { summary: result.summary });
       workoutCoordinator.reset();
       return { summary: result.summary };
     } catch (err: any) {
       console.error('Failed to complete workout:', err);
       setError(err.message);
+      // Ending HealthKit is a local safety action and must not depend on the
+      // backend being reachable. The canonical completion remains queued for
+      // reconciliation, but the Watch must stop recording now.
+      void workoutCoordinator.complete().catch(() => undefined);
+      await watchWorkout.endWatchWorkout('completion requested on phone');
       // David tried to end the workout — even though the server call failed,
       // the Live Activity must not keep ticking as if it's still in progress
       // (the session-effect's endEvent only fires when `session` clears,
@@ -512,11 +543,13 @@ export function WorkoutModeProvider({ children }: { children: React.ReactNode })
       await AsyncStorage.removeItem(STORAGE_KEY);
       // Abandonment is broadcast, not inferred — the Watch must stop tracking
       // a workout whose sets have just been deleted (§4.6).
-      await watchWorkout.endWatchWorkout('abandoned on phone');
+      await watchWorkout.endWatchWorkout('abandoned on phone', { discarded: true });
       workoutCoordinator.reset();
     } catch (err: any) {
       console.error('Failed to abandon workout:', err);
       setError(err.message);
+      void workoutCoordinator.abandon().catch(() => undefined);
+      await watchWorkout.endWatchWorkout('abandon requested on phone', { discarded: true });
       if (workoutActivityRef.current) {
         endEvent(workoutActivityRef.current);
         workoutActivityRef.current = null;

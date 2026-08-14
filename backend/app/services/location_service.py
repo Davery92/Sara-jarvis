@@ -13,7 +13,7 @@ if the OS-level region monitor hasn't caught up yet.
 import logging
 import math
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
@@ -28,6 +28,23 @@ logger = logging.getLogger(__name__)
 _LAST_PLACE_KEY = "sara:location:last_place:{user_id}"
 _ADHOC_INSIDE_KEY = "sara:location:trigger_inside:{trigger_id}"
 _STATE_TTL_SECONDS = 60 * 60 * 24 * 7  # a week — cheap to recompute if it expires
+_MAX_REPORT_AGE = timedelta(minutes=10)
+_MAX_FUTURE_SKEW = timedelta(minutes=1)
+
+
+def _normalize_observed_at(value: Optional[datetime]) -> Optional[datetime]:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _location_sample_is_fresh(observed_at: Optional[datetime]) -> bool:
+    if observed_at is None:
+        return False
+    delta = datetime.now(timezone.utc) - observed_at
+    return -_MAX_FUTURE_SKEW <= delta <= _MAX_REPORT_AGE
 
 
 async def _get_redis():
@@ -118,8 +135,14 @@ def classify(db: Session, user_id: str, lat: float, lon: float) -> Optional[Dict
 
 
 async def process_report(db: Session, user_id: str, lat: float, lon: float,
-                          accuracy: Optional[float], source: str) -> Dict[str, Any]:
+                          accuracy: Optional[float], source: str,
+                          observed_at: Optional[datetime] = None) -> Dict[str, Any]:
     """Handle a periodic location report from the phone."""
+    report_time = _normalize_observed_at(observed_at)
+    if not _location_sample_is_fresh(report_time):
+        logger.info("Ignoring stale location report for %s observed at %s", user_id, report_time)
+        return {"classified_place": None, "ignored": "stale_sample"}
+
     place = classify(db, user_id, lat, lon)
 
     event = LocationEvent(
@@ -130,6 +153,7 @@ async def process_report(db: Session, user_id: str, lat: float, lon: float,
         place_id=place["id"] if place else None,
         event_type="report",
         source=source,
+        created_at=report_time or local_now(),
     )
     db.add(event)
 
@@ -159,7 +183,7 @@ async def process_report(db: Session, user_id: str, lat: float, lon: float,
     db.commit()
 
     await _check_adhoc_geofences(db, user_id, lat, lon)
-    await _update_context(user_id, place, lat, lon)
+    await _update_context(user_id, place, lat, lon, observed_at=report_time)
 
     return {"classified_place": place["name"] if place else None}
 
@@ -396,14 +420,15 @@ async def _fire_trigger(db: Session, trigger_row) -> None:
     logger.info(f"Location trigger #{trigger_row.id} fired: '{trigger_row.reminder_title}' ({trigger_row.trigger_on} {trigger_row.label})")
 
 
-async def _update_context(user_id: str, place: Optional[Dict[str, Any]], lat: float, lon: float) -> None:
+async def _update_context(user_id: str, place: Optional[Dict[str, Any]], lat: float, lon: float,
+                          observed_at: Optional[datetime] = None) -> None:
     from app.services.context_writer import update_fields
     from app.services.unified_context import read_snapshot
 
     fields = {
         "location_latitude": lat,
         "location_longitude": lon,
-        "last_location_at": local_now().isoformat(),
+        "last_location_at": (observed_at or local_now()).isoformat(),
     }
     if place:
         try:

@@ -85,6 +85,21 @@ class FoodItem(BaseModel):
 VALID_MEAL_TYPES = {"breakfast", "lunch", "dinner", "snack"}
 
 
+# Canonical shape for each entry in FoodLogCreate.detailed_items (and
+# IngredientItem, which mirrors it for recipes). All clients (web, iOS, Sara's
+# chat tools) should write this shape going forward so any client can rehydrate
+# an entry logged by any other client. Old rows may lack these fields - every
+# consumer must read defensively (`.get()`), not assume presence.
+#   {
+#     "food_id": "fs-123 | <uuid> | recipe-<uuid> | null",
+#     "name": "...",
+#     "source": "fatsecret | user | recipe | manual",
+#     "serving_id": "FatSecret serving_id or null",
+#     "serving_description": "1 cup, cooked",
+#     "quantity": 1.5,
+#     "unit": "serving-desc | g | oz | ml",
+#     "calories": 320, "protein": 24, "carbs": 12, "fats": 18  # scaled totals for this line
+#   }
 class FoodLogCreate(BaseModel):
     meal_type: str  # breakfast, lunch, dinner, snack
     food_items: List[FoodItem]
@@ -191,6 +206,7 @@ class IngredientItem(BaseModel):
     food_id: Optional[str] = None  # FatSecret food id, for re-resolve/audit
     source: Optional[str] = None  # "fatsecret" | "user" | "manual"
     serving_description: Optional[str] = None  # e.g. "1 cup, cooked"
+    serving_id: Optional[str] = None  # FatSecret serving_id, for re-selecting the exact serving on edit
 
 
 
@@ -4798,7 +4814,7 @@ async def update_recipe(
         import json
 
         # Check recipe exists
-        check_query = text("SELECT id FROM recipe WHERE id = :recipe_id AND user_id = :user_id")
+        check_query = text("SELECT id, servings FROM recipe WHERE id = :recipe_id AND user_id = :user_id")
         exists = db.execute(check_query, {"recipe_id": recipe_id, "user_id": user_id}).fetchone()
 
         if not exists:
@@ -4834,7 +4850,7 @@ async def update_recipe(
 
         if updates.ingredients is not None:
             # Recalculate nutrition (accurate FatSecret estimator)
-            servings = updates.servings if updates.servings else 1
+            servings = updates.servings if updates.servings else (exists._mapping['servings'] or 1)
             nutrition = await estimate_recipe_nutrition(updates.ingredients, servings)
 
             ingredients_json = json.dumps([ing.dict() for ing in updates.ingredients])

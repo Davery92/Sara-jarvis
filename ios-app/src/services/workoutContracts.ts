@@ -263,6 +263,8 @@ export const PHONE_TO_WATCH_KINDS = [
   'coaching_event',
   'proposal_created',
   'proposal_resolved',
+  /** Durable terminal directive for a workout ended from the iPhone. */
+  'workout_ended',
   'finish_confirmed',
   'catalog_updated',
 ] as const;

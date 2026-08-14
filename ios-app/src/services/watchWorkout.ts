@@ -14,6 +14,7 @@ import {
   type WorkoutMessageEvent,
 } from '../../modules/sara-workout-native';
 import { fitnessService } from './fitness';
+import { navigate } from './navigation';
 import { workoutCoordinator } from './workoutCoordinator';
 import {
   buildEnvelope,
@@ -197,8 +198,13 @@ class WatchWorkoutBridge {
       return;
     }
 
-    this.note('start_accepted', result.projection.session_id);
-    await this.reply('start_accepted', result.projection);
+    this.note("start_accepted", result.projection.session_id);
+    await this.reply("start_accepted", result.projection);
+    // Application context has one replaceable slot. Publish a fresh catalog
+    // containing the active projection so a foreground catalog refresh cannot
+    // overwrite the start acknowledgement with pre-workout state.
+    await this.syncCatalog();
+    navigate("WorkoutMode");
   }
 
   /**
@@ -216,7 +222,7 @@ class WatchWorkoutBridge {
 
     try {
       const result = await fitnessService.v2Command(command);
-      if (result.projection) workoutCoordinator.applyProjection(result.projection);
+      workoutCoordinator.applyProjection(result.projection ?? null);
       await this.reply('command_accepted', result.projection ?? null, {
         command_id: command.command_id,
         status: result.status,
@@ -228,6 +234,10 @@ class WatchWorkoutBridge {
         // rather than waiting for the HealthKit round trip.
         summary: (result as { summary?: unknown }).summary ?? null,
       });
+      if (command.kind === "complete" || command.kind === "abandon") {
+        await endMirroredWorkout(`${command.kind} on Watch`).catch(() => undefined);
+        await this.syncCatalog();
+      }
     } catch (e: any) {
       const detail = e?.response?.data?.detail;
       const code = detail?.code ?? 'send_failed';
@@ -340,7 +350,6 @@ class WatchWorkoutBridge {
    * native transport is a no-op when there is genuinely no Watch.
    */
   async broadcast(projection: WorkoutProjection | null): Promise<void> {
-    if (!this.hasWatch) return;
     await this.reply('projection_updated', projection);
   }
 
@@ -425,7 +434,37 @@ class WatchWorkoutBridge {
     }
   }
 
-  async endWatchWorkout(reason: string): Promise<void> {
+  async endWatchWorkout(
+    reason: string,
+    options: { discarded?: boolean; summary?: unknown } = {}
+  ): Promise<void> {
+    const sessionId = workoutCoordinator.sessionId;
+    // Build 8 Watch apps predate `workout_ended`. They already treat an
+    // explicit `finish_confirmed` as the signal to finalize HealthKit, so send
+    // that first for backwards compatibility. Newer Watches intentionally use
+    // it only to enrich their summary and wait for `workout_ended` below.
+    // Ordering is important: application context keeps only the latest value,
+    // which must remain the authoritative modern terminal instruction.
+    if (!options.discarded) {
+      const legacyEnvelope = buildEnvelope('finish_confirmed', sessionId, {
+        summary: options.summary ?? null,
+        reason,
+      });
+      await sendWorkoutMessage(legacyEnvelope, true).catch((e: any) => {
+        this.note('legacy_watch_end_send_failed', e?.message);
+      });
+    }
+    const envelope = buildEnvelope('workout_ended', sessionId, {
+      reason,
+      discarded: options.discarded ?? false,
+      summary: options.summary ?? null,
+    });
+    // `session.end()` on the iPhone mirror is not a remote command. Tell the
+    // Watch explicitly, over the durable channel, before tearing the mirror
+    // down so an unreachable wrist still stops when it reconnects.
+    await sendWorkoutMessage(envelope, true).catch((e: any) => {
+      this.note('watch_end_send_failed', e?.message);
+    });
     await endMirroredWorkout(reason).catch(() => undefined);
   }
 

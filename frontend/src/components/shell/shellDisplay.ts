@@ -26,6 +26,12 @@ export const EMOTION_EMOJI: Record<string, string> = {
   energetic: '\u26a1',
 }
 
+// Day-boundary logic must use ET, not UTC — toISOString().split('T')[0] is
+// wrong for ~4-5h every evening (still "today" in ET, already tomorrow UTC).
+export function etDateString(d: Date = new Date()): string {
+  return d.toLocaleDateString('en-CA', { timeZone: 'America/New_York' })
+}
+
 export function getGreeting() {
   const hour = new Date().getHours()
   if (hour < 12) return 'Good morning'
@@ -41,4 +47,16 @@ export function formatRelativeTime(ts: string) {
   const hrs = Math.floor(mins / 60)
   if (hrs < 24) return `${hrs}h ago`
   return `${Math.floor(hrs / 24)}d ago`
+}
+
+// For "ongoing" fires_at timestamps in the future — "in 4h" reads faster
+// than a bare clock time when scanning a short list of upcoming triggers.
+export function formatFutureRelativeTime(ts: string) {
+  const diff = new Date(ts).getTime() - Date.now()
+  const mins = Math.round(diff / 60000)
+  if (mins <= 0) return 'now'
+  if (mins < 60) return `in ${mins}m`
+  const hrs = Math.round(mins / 60)
+  if (hrs < 24) return `in ${hrs}h`
+  return `in ${Math.round(hrs / 24)}d`
 }

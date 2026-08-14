@@ -2,7 +2,6 @@ import React, { useState, useEffect } from 'react'
 import { Plus, Calendar, Trash2, ChevronDown, ChevronRight } from 'lucide-react'
 import { APP_CONFIG } from '../../config'
 import AddMealForm from './AddMealForm'
-import type { SelectedFoodItem } from './FoodItemSelector'
 
 interface FoodItem {
   name: string
@@ -14,7 +13,9 @@ interface FoodLogEntry {
   log_id: string
   meal_type: string
   food_items: FoodItem[] | string
-  detailed_items?: SelectedFoodItem[]
+  // Raw canonical items as stored by the backend (see FoodLogCreate in
+  // fitness.py) - rehydrated into SelectedFoodItem[] inside AddMealForm.
+  detailed_items?: any[]
   calories?: number
   protein?: number
   carbs?: number

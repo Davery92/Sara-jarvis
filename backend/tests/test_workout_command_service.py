@@ -493,6 +493,28 @@ async def test_abandon_removes_sets_and_confirms_once(pg, svc, user_id):
     ), {"s": sid}).scalar() == "abandoned"
 
 
+@requires_pg
+@pytest.mark.asyncio
+async def test_abandon_accepts_stale_version_for_the_same_session(pg, svc, user_id):
+    tid = _template(pg, user_id)
+    start = await svc.start(pg, user_id, tid)
+    sid = start["projection"]["session_id"]
+
+    # A HealthKit-state update can race the wrist tap and advance the version.
+    await svc.execute(pg, user_id, _envelope(
+        "healthkit_state", sid, start["projection"]["version"],
+        {"state": "running"}, "watch"
+    ))
+    result = await svc.execute(pg, user_id, _envelope(
+        "abandon", sid, start["projection"]["version"], {}, "watch"
+    ))
+
+    assert result["status"] == "accepted"
+    assert pg.execute(text(
+        "SELECT status FROM active_workout_session WHERE id = :s"
+    ), {"s": sid}).scalar() == "abandoned"
+
+
 # ────────────────────────────────────────────────────────────────────────
 # Approval boundary (§11)
 # ────────────────────────────────────────────────────────────────────────

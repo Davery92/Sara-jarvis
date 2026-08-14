@@ -14,7 +14,7 @@ import FloatingAssistant from './sara/FloatingAssistant';
 import { pushNotificationService } from '../services/pushNotifications';
 import { healthSyncService } from '../services/healthSync';
 import { registerBackgroundHealthSync, triggerManualSync } from '../services/backgroundHealthSync';
-import { isLocationTrackingEnabled, startTracking as startLocationTracking, resyncGeofences } from '../services/locationTracking';
+import { isLocationTrackingEnabled, startTracking as startLocationTracking, refreshCurrentLocation, resyncGeofences } from '../services/locationTracking';
 import { iosCalendarSyncService } from '../services/iosCalendarSync';
 import { navigateToChat, navigationRef, getCurrentViewName } from '../services/navigation';
 import apiClient from '../services/api';
@@ -270,7 +270,8 @@ export const AuthenticatedOverlays: React.FC = () => {
         void flushPendingCaptures();
         // Sync badge to real unread count when app comes to foreground
         syncBadge();
-        // Keep native geofence regions current with armed triggers/places
+        // Refresh physical presence before syncing the set of monitored regions.
+        void refreshCurrentLocation();
         resyncGeofences();
         // Reconcile the workout after time away — mirrored messages are the
         // primary transport, this is the fallback that catches what was

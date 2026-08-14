@@ -495,6 +495,7 @@ public enum WireMessageKind: RawRepresentable, Codable, Equatable {
     case coachingEvent
     case proposalCreated
     case proposalResolved
+    case workoutEnded
     case finishConfirmed
     case catalogUpdated
     /// Anything this build has never heard of. Kept rather than thrown so a
@@ -520,6 +521,7 @@ public enum WireMessageKind: RawRepresentable, Codable, Equatable {
         case "coaching_event": self = .coachingEvent
         case "proposal_created": self = .proposalCreated
         case "proposal_resolved": self = .proposalResolved
+        case "workout_ended": self = .workoutEnded
         case "finish_confirmed": self = .finishConfirmed
         case "catalog_updated": self = .catalogUpdated
         default: self = .unknown(rawValue)
@@ -545,6 +547,7 @@ public enum WireMessageKind: RawRepresentable, Codable, Equatable {
         case .coachingEvent: return "coaching_event"
         case .proposalCreated: return "proposal_created"
         case .proposalResolved: return "proposal_resolved"
+        case .workoutEnded: return "workout_ended"
         case .finishConfirmed: return "finish_confirmed"
         case .catalogUpdated: return "catalog_updated"
         case .unknown(let raw): return raw

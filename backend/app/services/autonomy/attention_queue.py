@@ -13,9 +13,16 @@ import logging
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
 logger = logging.getLogger(__name__)
+
+# Categories that are Sara's own self-maintenance (wiring checks, brief-
+# generation failures) rather than something David needs to act on. The
+# dashboard's "Needs you" slot excludes these via list_items'/count_by_status'
+# exclude_categories param; items still exist and stay reachable in the
+# unified inbox at FYI tier — this only demotes them from the amber slot.
+SELF_MAINTENANCE_CATEGORIES = {"system"}
 
 
 async def _exec(db, stmt, params=None):
@@ -235,6 +242,7 @@ class AttentionQueueService:
         status: Optional[str] = None,
         limit: int = 50,
         offset: int = 0,
+        exclude_categories: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """List attention items, newest first."""
         conditions = ["user_id = :user_id"]
@@ -249,26 +257,34 @@ class AttentionQueueService:
             # actually leaves the inbox, defeating the point of snoozing it.
             conditions.append("status NOT IN ('archived', 'dropped', 'completed', 'snoozed')")
 
+        if exclude_categories:
+            conditions.append("(category IS NULL OR category NOT IN :exclude_categories)")
+            params["exclude_categories"] = tuple(exclude_categories)
+
         where = " AND ".join(conditions)
 
+        stmt = text(f"""
+            SELECT id::text, title, body, category, priority, source, status,
+                   dedupe_key, payload, created_at, updated_at, read_at, archived_at,
+                   completed_at
+            FROM outbox_item
+            WHERE {where}
+            ORDER BY
+                CASE priority
+                    WHEN 'critical' THEN 0
+                    WHEN 'urgent' THEN 1
+                    WHEN 'high' THEN 2
+                    WHEN 'normal' THEN 3
+                    WHEN 'low' THEN 4
+                END,
+                created_at DESC
+            LIMIT :limit OFFSET :offset
+        """)
+        if exclude_categories:
+            stmt = stmt.bindparams(bindparam("exclude_categories", expanding=True))
+
         try:
-            result = await _exec(db, text(f"""
-                SELECT id::text, title, body, category, priority, source, status,
-                       dedupe_key, payload, created_at, updated_at, read_at, archived_at,
-                       completed_at
-                FROM outbox_item
-                WHERE {where}
-                ORDER BY
-                    CASE priority
-                        WHEN 'critical' THEN 0
-                        WHEN 'urgent' THEN 1
-                        WHEN 'high' THEN 2
-                        WHEN 'normal' THEN 3
-                        WHEN 'low' THEN 4
-                    END,
-                    created_at DESC
-                LIMIT :limit OFFSET :offset
-            """), params)
+            result = await _exec(db, stmt, params)
             return [
                 {
                     "id": r[0], "title": r[1], "body": r[2], "category": r[3],
@@ -290,15 +306,27 @@ class AttentionQueueService:
         self,
         db,
         user_id: str,
+        exclude_categories: Optional[List[str]] = None,
     ) -> Dict[str, int]:
         """Count items by status."""
+        conditions = ["user_id = :user_id"]
+        params: Dict[str, Any] = {"user_id": user_id}
+        if exclude_categories:
+            conditions.append("(category IS NULL OR category NOT IN :exclude_categories)")
+            params["exclude_categories"] = tuple(exclude_categories)
+        where = " AND ".join(conditions)
+
+        stmt = text(f"""
+            SELECT status, COUNT(*) as count
+            FROM outbox_item
+            WHERE {where}
+            GROUP BY status
+        """)
+        if exclude_categories:
+            stmt = stmt.bindparams(bindparam("exclude_categories", expanding=True))
+
         try:
-            result = await _exec(db, text("""
-                SELECT status, COUNT(*) as count
-                FROM outbox_item
-                WHERE user_id = :user_id
-                GROUP BY status
-            """), {"user_id": user_id})
+            result = await _exec(db, stmt, params)
             return {r[0]: r[1] for r in result.fetchall()}
         except Exception as e:
             logger.error(f"Failed to count attention items: {e}")

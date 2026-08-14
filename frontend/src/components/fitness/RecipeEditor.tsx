@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react'
 import { X, Plus, Save } from 'lucide-react'
 import { APP_CONFIG } from '../../config'
 import type { Recipe } from './RecipesSection'
-import IngredientSearchInput, { IngredientRowValue } from './IngredientSearchInput'
+import IngredientSearchInput, { IngredientRowValue, rehydrateIngredientRow } from './IngredientSearchInput'
 
 interface RecipeEditorProps {
   recipe: Recipe | null
@@ -29,27 +29,39 @@ export default function RecipeEditor({ recipe, onClose, onSave }: RecipeEditorPr
   const units = ['g', 'oz', 'lb', 'cup', 'tbsp', 'tsp', 'piece', 'whole']
 
   useEffect(() => {
-    if (recipe) {
-      setName(recipe.name)
-      setDescription(recipe.description || '')
-      setCategory(recipe.category || '')
-      setIngredients(recipe.ingredients.map((ing: any) => ({
-        name: ing.name,
-        quantity: ing.quantity?.toString() ?? '',
-        unit: ing.unit || 'g',
-        calories: ing.calories?.toString() || '',
-        protein: ing.protein?.toString() || '',
-        carbs: ing.carbs?.toString() || '',
-        fats: ing.fats?.toString() || '',
-        food_id: ing.food_id || undefined,
-        source: ing.source || undefined,
-        serving_description: ing.serving_description || undefined,
-        showNutrition: false
-      })))
-      setInstructions(recipe.instructions)
-      setPrepTime(recipe.prep_time_minutes?.toString() || '')
-      setServings(recipe.servings.toString())
-    }
+    if (!recipe) return
+    let cancelled = false
+
+    setName(recipe.name)
+    setDescription(recipe.description || '')
+    setCategory(recipe.category || '')
+    const baseRows: IngredientRow[] = recipe.ingredients.map((ing: any) => ({
+      name: ing.name,
+      quantity: ing.quantity?.toString() ?? '',
+      unit: ing.unit || 'g',
+      calories: ing.calories?.toString() || '',
+      protein: ing.protein?.toString() || '',
+      carbs: ing.carbs?.toString() || '',
+      fats: ing.fats?.toString() || '',
+      food_id: ing.food_id || undefined,
+      source: ing.source || undefined,
+      serving_description: ing.serving_description || undefined,
+      selected_serving_id: ing.serving_id || undefined,
+      showNutrition: false
+    }))
+    setIngredients(baseRows)
+    setInstructions(recipe.instructions)
+    setPrepTime(recipe.prep_time_minutes?.toString() || '')
+    setServings(recipe.servings.toString())
+
+    // Restore each resolved ingredient's serving list (real + synthetic g/oz/ml)
+    // so the serving dropdown reappears and quantity/serving edits rescale
+    // macros again instead of going stale (the recipes remove-and-re-add bug).
+    Promise.all(baseRows.map(rehydrateIngredientRow)).then((rehydrated) => {
+      if (!cancelled) setIngredients(rehydrated)
+    })
+
+    return () => { cancelled = true }
   }, [recipe])
 
   const handleAddIngredient = () => {
@@ -133,6 +145,7 @@ export default function RecipeEditor({ recipe, onClose, onSave }: RecipeEditorPr
           food_id: ing.food_id,
           source: ing.source,
           serving_description: ing.serving_description,
+          serving_id: ing.selected_serving_id,
         })),
         instructions: instructions.trim(),
         prep_time_minutes: prepTime ? parseInt(prepTime) : undefined,

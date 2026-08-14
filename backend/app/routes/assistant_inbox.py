@@ -115,6 +115,7 @@ def build_unified_inbox(
             "ref_id": r.id,
             "title": r.title,
             "body": r.body,
+            "category": r.category,
             "priority": r.priority or "normal",
             "source": r.source or "Sara",
             "status": r.status,

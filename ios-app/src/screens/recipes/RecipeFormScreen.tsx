@@ -33,6 +33,7 @@ export default function RecipeFormScreen({ route, navigation }: Props) {
   const [servings, setServings] = useState('');
   const [ingredients, setIngredients] = useState<IngredientItem[]>([]);
   const [showIngredientModal, setShowIngredientModal] = useState(false);
+  const [editingIngredientIndex, setEditingIngredientIndex] = useState<number | null>(null);
 
   useEffect(() => {
     if (existingRecipe) {
@@ -47,7 +48,17 @@ export default function RecipeFormScreen({ route, navigation }: Props) {
   }, [existingRecipe]);
 
   const handleAddIngredient = (ingredient: IngredientItem) => {
-    setIngredients([...ingredients, ingredient]);
+    if (editingIngredientIndex !== null) {
+      setIngredients(ingredients.map((ing, i) => (i === editingIngredientIndex ? ingredient : ing)));
+      setEditingIngredientIndex(null);
+    } else {
+      setIngredients([...ingredients, ingredient]);
+    }
+  };
+
+  const handleEditIngredient = (index: number) => {
+    setEditingIngredientIndex(index);
+    setShowIngredientModal(true);
   };
 
   const handleRemoveIngredient = (index: number) => {
@@ -196,7 +207,10 @@ export default function RecipeFormScreen({ route, navigation }: Props) {
                 <Text style={styles.label}>Ingredients</Text>
                 <TouchableOpacity
                   style={styles.addButton}
-                  onPress={() => setShowIngredientModal(true)}
+                  onPress={() => {
+                    setEditingIngredientIndex(null);
+                    setShowIngredientModal(true);
+                  }}
                 >
                   <Text style={styles.addButtonText}>+ Add</Text>
                 </TouchableOpacity>
@@ -208,7 +222,11 @@ export default function RecipeFormScreen({ route, navigation }: Props) {
                 </Text>
               ) : (
                 ingredients.map((ingredient, index) => (
-                  <View key={index} style={styles.ingredientRow}>
+                  <TouchableOpacity
+                    key={index}
+                    style={styles.ingredientRow}
+                    onPress={() => handleEditIngredient(index)}
+                  >
                     <View style={styles.ingredientInfo}>
                       <Text style={styles.ingredientText}>
                         {ingredient.quantity} {ingredient.unit} {ingredient.name}
@@ -227,7 +245,7 @@ export default function RecipeFormScreen({ route, navigation }: Props) {
                     >
                       <Text style={styles.removeText}>Remove</Text>
                     </TouchableOpacity>
-                  </View>
+                  </TouchableOpacity>
                 ))
               )}
 
@@ -322,8 +340,12 @@ export default function RecipeFormScreen({ route, navigation }: Props) {
       {/* Ingredient Search Modal */}
       <IngredientSearchModal
         visible={showIngredientModal}
-        onClose={() => setShowIngredientModal(false)}
+        onClose={() => {
+          setShowIngredientModal(false);
+          setEditingIngredientIndex(null);
+        }}
         onAddIngredient={handleAddIngredient}
+        editIngredient={editingIngredientIndex !== null ? ingredients[editingIngredientIndex] : null}
       />
     </SafeAreaView>
   );

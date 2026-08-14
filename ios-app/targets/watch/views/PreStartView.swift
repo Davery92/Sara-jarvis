@@ -77,6 +77,9 @@ struct PreStartView: View {
                 dismiss()
             }
         }
+        .onChange(of: manager.isStarting) { _, isStarting in
+            if !isStarting { starting = false }
+        }
     }
 
     /// What is actually happening, and what David can do about it (§5.1, §5.2).

@@ -8,6 +8,7 @@ Also provides the /api/sara/brief endpoint for the unified Sara screen
 with time-adaptive contextual data.
 """
 
+import json
 import logging
 import os
 import re
@@ -15,13 +16,15 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict, Any
 from zoneinfo import ZoneInfo
 
-from app.core.timezone import now as local_now
+from app.core.timezone import now as local_now, to_local
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
 from app.db.session import get_db
+from app.services.phase_resolution import get_effective_phase
+from app.services.training_day import is_training_day
 from app.core.deps import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -96,6 +99,42 @@ def _local_day_bounds_naive(now_utc: datetime) -> tuple[datetime, datetime]:
     local_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
     local_end = local_start + timedelta(days=1)
     return local_start.replace(tzinfo=None), local_end.replace(tzinfo=None)
+
+
+def _hours_since_naive_local(timestamp: datetime, now_utc: datetime) -> float:
+    """Calculate age for timestamps stored as timezone-naive local wall time."""
+    local_tz = ZoneInfo(os.environ.get("TIMEZONE", "America/New_York"))
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=local_tz)
+    timestamp_utc = timestamp.astimezone(timezone.utc)
+    elapsed_hours = (now_utc.astimezone(timezone.utc) - timestamp_utc).total_seconds() / 3600
+    return round(max(0.0, elapsed_hours), 1)
+
+
+def _resolve_daily_calorie_goal(db: Session, user_id: str, on_date) -> int:
+    """Resolve the calorie target shown by the dashboard for a local date.
+
+    Keep the brief aligned with the Fitness screen: an effective program phase
+    wins, including its training/rest-day cycling, then the user's manually set
+    nutrition goal, then the same 2,000 kcal default used by /fitness/goals.
+    """
+    goals_row = db.execute(text("""
+        SELECT calories
+        FROM fitness_goals
+        WHERE user_id = :uid
+        ORDER BY updated_at DESC
+        LIMIT 1
+    """), {"uid": user_id}).fetchone()
+    fallback = goals_row.calories if goals_row and goals_row.calories is not None else 2000
+
+    phase = get_effective_phase(db, user_id, on_date)
+    if not phase:
+        return int(fallback)
+
+    training = is_training_day(db, user_id, on_date)["is_training_day"]
+    cycled = phase.get("calories_training_day") if training else phase.get("calories_rest_day")
+    target = cycled if cycled is not None else phase.get("calories_target")
+    return int(target if target is not None else fallback)
 
 
 def _calendar_source_label(source: Optional[str], ios_calendar_name: Optional[str]) -> str:
@@ -359,6 +398,7 @@ async def get_sara_brief(
                     "data": {"degraded": degraded},
                 })
         except Exception as e:
+            db.rollback()
             logger.debug(f"Brief self_status section failed: {e}")
 
         # --- Activity state + interruptibility ---
@@ -414,27 +454,34 @@ async def get_sara_brief(
                     },
                 })
         except Exception as e:
+            db.rollback()
             logger.debug(f"Brief calendar section failed: {e}")
 
         # --- Fitness/nutrition section ---
         try:
-            today_start_local = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            today_start_local, today_end_local = _local_day_bounds_naive(now)
+            calorie_goal = _resolve_daily_calorie_goal(
+                db, user_id, today_start_local.date()
+            )
             food_stats = db.execute(text("""
                 SELECT COALESCE(SUM(calories), 0) as cal,
                        COALESCE(SUM(protein), 0) as pro,
                        MAX(logged_at) as last_meal
-                FROM food_logs
-                WHERE user_id = :uid AND logged_at >= :start
-            """), {"uid": user_id, "start": today_start_local}).fetchone()
+                FROM food_log
+                WHERE user_id = :uid
+                  AND logged_at >= :start
+                  AND logged_at < :end
+            """), {
+                "uid": user_id,
+                "start": today_start_local,
+                "end": today_end_local,
+            }).fetchone()
 
             if food_stats:
                 last_meal_ago = None
                 if food_stats.last_meal:
                     try:
-                        last_meal_time = food_stats.last_meal
-                        if hasattr(last_meal_time, 'replace'):
-                            delta = (now - last_meal_time.replace(tzinfo=timezone.utc)).total_seconds() / 3600
-                            last_meal_ago = round(delta, 1)
+                        last_meal_ago = _hours_since_naive_local(food_stats.last_meal, now)
                     except Exception:
                         pass
 
@@ -443,11 +490,12 @@ async def get_sara_brief(
                     "data": {
                         "calories_today": int(food_stats.cal or 0),
                         "protein_today": int(food_stats.pro or 0),
-                        "goal": 2200,
+                        "goal": calorie_goal,
                         "last_meal_ago_hours": last_meal_ago,
                     },
                 })
         except Exception as e:
+            db.rollback()
             logger.debug(f"Brief fitness section failed: {e}")
 
         # --- Open threads section ---
@@ -467,6 +515,7 @@ async def get_sara_brief(
                     },
                 })
         except Exception as e:
+            db.rollback()
             logger.debug(f"Brief threads section failed: {e}")
 
         # --- Learning section ---
@@ -484,6 +533,7 @@ async def get_sara_brief(
                     },
                 })
         except Exception as e:
+            db.rollback()
             logger.debug(f"Brief learning section failed: {e}")
 
         # --- Fact verification (ONE_MIND §3.4): one gentle memory-check in the
@@ -503,7 +553,188 @@ async def get_sara_brief(
                         "data": {"pkg_id": vq["pkg_id"], "fact": vq["fact"]},
                     })
             except Exception as e:
+                db.rollback()
                 logger.debug(f"Brief verification section failed: {e}")
+
+        # --- needs_you: reuse the unified inbox formula (single source of
+        # truth, do not reimplement), minus Sara's own self-maintenance
+        # categories — those stay reachable in the inbox at FYI tier but
+        # don't occupy the dashboard's amber "needs you" slot. ---
+        try:
+            from app.routes.assistant_inbox import build_unified_inbox, compute_badge
+            from app.services.autonomy.attention_queue import SELF_MAINTENANCE_CATEGORIES
+
+            inbox = build_unified_inbox(db, user_id)
+            filtered_needs_you = [
+                item for item in (inbox.get("needs_you") or [])
+                if (item.get("category") or "") not in SELF_MAINTENANCE_CATEGORIES
+            ]
+            result["needs_you"] = {
+                "items": filtered_needs_you[:3],
+                "total": len(filtered_needs_you),
+                "badge": compute_badge(db, user_id),
+            }
+        except Exception as e:
+            db.rollback()
+            logger.debug(f"Brief needs_you section failed: {e}")
+
+        # --- ongoing: active timers + standing orders firing in the next
+        # 12h (ET). Shares compute_order_fires_at with /api/standing-orders
+        # so the two surfaces never disagree about when something fires. ---
+        try:
+            from app.routes.standing_orders import compute_order_fires_at
+
+            now_et = local_now()
+            horizon = now_et + timedelta(hours=12)
+            ongoing_items: List[Dict[str, Any]] = []
+
+            timer_rows = db.execute(text("""
+                SELECT id, title, end_time FROM timer
+                WHERE user_id = :uid AND is_active = true AND is_completed = false
+                ORDER BY end_time
+            """), {"uid": user_id}).fetchall()
+            for t in timer_rows:
+                fires_at = to_local(t.end_time) if t.end_time else None
+                ongoing_items.append({
+                    "kind": "timer",
+                    "id": str(t.id),
+                    "title": t.title,
+                    "fires_at": fires_at.isoformat() if fires_at else None,
+                })
+
+            order_rows = db.execute(text("""
+                SELECT id, description, trigger_type, trigger_config
+                FROM standing_order
+                WHERE user_id = :uid AND status = 'active'
+            """), {"uid": user_id}).fetchall()
+            for r in order_rows:
+                tc = r.trigger_config if isinstance(r.trigger_config, dict) else json.loads(r.trigger_config or "{}")
+                fires_at = compute_order_fires_at(db, user_id, r.trigger_type, tc)
+                if fires_at and now_et <= fires_at <= horizon:
+                    ongoing_items.append({
+                        "kind": "standing_order",
+                        "id": str(r.id),
+                        "title": r.description,
+                        "fires_at": fires_at.isoformat(),
+                    })
+
+            ongoing_items.sort(key=lambda x: x["fires_at"] or "9999")
+            result["ongoing"] = ongoing_items
+        except Exception as e:
+            db.rollback()
+            logger.debug(f"Brief ongoing section failed: {e}")
+
+        # --- journal: up to 3 deduped first-person entries, same rule as
+        # /api/sara/activity's journal branch (0D). ---
+        try:
+            from app.routes.sara_activity import get_deduped_journal_entries
+
+            entries = get_deduped_journal_entries(db, user_id, hours=24, raw_limit=20, max_results=3)
+            result["journal"] = [
+                {
+                    "id": e["id"],
+                    "content": e["content"],
+                    "timestamp": e["timestamp"],
+                    "emotional_state": e["emotional_state"],
+                }
+                for e in entries
+            ]
+        except Exception as e:
+            db.rollback()
+            logger.debug(f"Brief journal section failed: {e}")
+
+        # --- digest ("while you were away"): Mind V2's judge->compose->review
+        # pipeline (composed_utterance) is the primary source — David's shadow
+        # -week reading surface for what Sara would have said. Falls back to
+        # the raw sara_activity_log audience=user_facing rule (0A/Phase 1) on
+        # cold days with no composed rows in the window. Payload shape is
+        # unchanged either way: {items: [{text, at, delivered}], machinery}. ---
+        try:
+            digest_since = now - timedelta(hours=24)
+
+            composed_rows = db.execute(text("""
+                SELECT text, final_text, slot, created_at, delivered_at
+                FROM composed_utterance
+                WHERE user_id = :uid AND created_at >= :since
+                  AND review_verdict IN ('approve', 'edit')
+                ORDER BY (slot IS NOT NULL) DESC, created_at DESC
+                LIMIT 6
+            """), {"uid": user_id, "since": digest_since}).fetchall()
+
+            if composed_rows:
+                digest_items = [
+                    {
+                        "text": row.final_text or row.text,
+                        "at": row.created_at.isoformat() if row.created_at else None,
+                        "delivered": row.delivered_at is not None,
+                    }
+                    for row in composed_rows
+                ]
+            else:
+                HUMAN_KINDS = {"thought", "reflection", "focus_set", "notify_david", "inbox_pickup", "inbox_complete"}
+                human_rows = db.execute(text("""
+                    SELECT kind, summary, created_at FROM sara_activity_log
+                    WHERE audience = 'user_facing' AND created_at >= :since
+                    ORDER BY created_at DESC LIMIT 60
+                """), {"since": digest_since}).fetchall()
+
+                digest_items = []
+                last_summary = None
+                for row in human_rows:
+                    if row.kind not in HUMAN_KINDS or row.summary == last_summary:
+                        continue
+                    digest_items.append({
+                        "text": row.summary,
+                        "at": row.created_at.isoformat() if row.created_at else None,
+                        "delivered": True,
+                    })
+                    last_summary = row.summary
+                    if len(digest_items) >= 6:
+                        break
+
+            MACHINE_KINDS = {"tool_call", "tool_result", "error"}
+            machine_rows = db.execute(text("""
+                SELECT kind FROM sara_activity_log
+                WHERE (audience = 'internal' OR audience IS NULL) AND created_at >= :since
+                ORDER BY created_at DESC LIMIT 30
+            """), {"since": digest_since}).fetchall()
+            machine_kinds_seen = [r.kind for r in machine_rows if r.kind in MACHINE_KINDS]
+
+            result["digest"] = {
+                "items": digest_items,
+                "machinery": {
+                    "tool_calls": sum(1 for k in machine_kinds_seen if k in ("tool_call", "tool_result")),
+                    "errors": sum(1 for k in machine_kinds_seen if k == "error"),
+                },
+            }
+        except Exception as e:
+            db.rollback()
+            logger.debug(f"Brief digest section failed: {e}")
+
+        # --- weather: server-side so iOS gets it too (web currently fetches
+        # it separately via /api/morning-brief/weather). ---
+        try:
+            from app.services.weather_service import weather_service
+
+            weather = await weather_service.get_weather()
+            if weather:
+                result["weather"] = weather.to_dict()
+        except Exception as e:
+            logger.debug(f"Brief weather section failed: {e}")
+
+        # --- quiet_line: on an empty day (no calendar events, no digest
+        # items) the renderer collapses to one line instead of stacking five
+        # "No X today" placeholders — the most recent journal entry's first
+        # sentence, since that's already Sara's own read on the day. ---
+        try:
+            calendar_empty = not any(s.get("type") == "calendar" for s in result["brief_sections"])
+            digest_empty = not (result.get("digest") or {}).get("items")
+            if calendar_empty and digest_empty and result.get("journal"):
+                first_content = result["journal"][0]["content"] or ""
+                sentence_end = re.search(r"[.!?](\s|$)", first_content)
+                result["quiet_line"] = first_content[:sentence_end.end()].strip() if sentence_end else first_content.strip()
+        except Exception as e:
+            logger.debug(f"Brief quiet_line failed: {e}")
 
         # --- Suggested actions based on time of day ---
         if time_period == "morning":
@@ -530,6 +761,7 @@ async def get_sara_brief(
             ]
 
     except Exception as e:
+        db.rollback()
         logger.error(f"Sara brief endpoint error: {e}")
 
     return result

@@ -83,7 +83,8 @@ export function getCurrentViewName(): string {
 // Queue for pending navigations when navigator isn't ready
 type PendingNavigation =
   | { kind: 'tab'; name: string; params?: object }
-  | { kind: 'stack'; name: string; params?: object };
+  | { kind: 'stack'; name: string; params?: object }
+  | { kind: 'root'; name: string; params?: object };
 
 let pendingNavigation: PendingNavigation | null = null;
 
@@ -99,8 +100,10 @@ export function onNavigatorReady() {
     pendingNavigation = null;
     if (kind === 'tab') {
       navigateToTab(name, params);
-    } else {
+    } else if (kind === 'stack') {
       navigateToStackScreen(name, params);
+    } else {
+      navigate(name, params);
     }
   }
 }
@@ -118,7 +121,7 @@ export function navigate(name: string, params?: object) {
     );
   } else {
     console.log('[Navigation] Navigator not ready, queueing navigation to:', name);
-    // Could queue navigation for later, but usually the ref is ready quickly
+    pendingNavigation = { kind: 'root', name, params };
   }
 }
 

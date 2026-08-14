@@ -68,6 +68,7 @@ export default function FitnessScreen({ navigation }: Props) {
   const [showViewModal, setShowViewModal] = useState(false);
   const [showFoodModal, setShowFoodModal] = useState(false);
   const [selectedMealType, setSelectedMealType] = useState('snack');
+  const [editingFoodLog, setEditingFoodLog] = useState<FoodLog | null>(null);
   const [showTemplatePicker, setShowTemplatePicker] = useState(false);
   const [selectedDate, setSelectedDate] = useState(() => {
     const now = new Date();
@@ -272,6 +273,15 @@ export default function FitnessScreen({ navigation }: Props) {
   };
 
   const handleEditFood = (log: FoodLog) => {
+    // Full edit (quantity/serving/macros) only works for single-item entries
+    // that carry a rehydratable detailed_item snapshot. Multi-item and recipe
+    // entries fall back to the meal-type-only alert (acceptable v1 - see
+    // FOOD_AND_RECIPES_EDITING_FIX_PLAN_2026_08_03.md Phase 4.3).
+    if (log.detailed_item) {
+      setEditingFoodLog(log);
+      return;
+    }
+
     const mealTypes = ['breakfast', 'lunch', 'dinner', 'snack'];
     Alert.alert(
       'Change Meal Type',
@@ -1786,13 +1796,24 @@ export default function FitnessScreen({ navigation }: Props) {
         }}
       />
       <FoodLogModal
-        visible={showFoodModal}
-        onClose={() => setShowFoodModal(false)}
+        visible={showFoodModal || !!editingFoodLog}
+        onClose={() => {
+          setShowFoodModal(false);
+          setEditingFoodLog(null);
+        }}
         onComplete={() => {
           setShowFoodModal(false);
+          setEditingFoodLog(null);
           loadData();
         }}
         initialMealType={selectedMealType}
+        editEntry={editingFoodLog ? {
+          id: editingFoodLog.meal_log_id,
+          meal_type: editingFoodLog.meal_type,
+          logged_at: editingFoodLog.logged_at,
+          notes: editingFoodLog.notes,
+          item: editingFoodLog.detailed_item,
+        } : null}
       />
 
       {/* Template Picker Modal */}

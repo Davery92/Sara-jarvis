@@ -37,6 +37,7 @@ public struct WatchCatalog: Codable, Equatable {
     public let todayTemplateId: String?
     public let templates: [TemplateSummary]
     public let policy: WatchWorkoutPolicy?
+    public let activeProjection: WorkoutProjection?
 
     enum CodingKeys: String, CodingKey {
         case templates, policy
@@ -44,6 +45,7 @@ public struct WatchCatalog: Codable, Equatable {
         case generatedAt = "generated_at"
         case generatedForDate = "generated_for_date"
         case todayTemplateId = "today_template_id"
+        case activeProjection = "active_projection"
     }
 
     /// Only label a template "Today" when the backend selected it for the

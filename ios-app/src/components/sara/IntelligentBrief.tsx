@@ -152,8 +152,8 @@ function BriefSectionRow({ section, onAction }: { section: BriefSection; onActio
 
   switch (section.type) {
     case 'fitness': {
-      const cal = section.data?.calories_today || 0;
-      const goal = section.data?.goal || 2200;
+      const cal = section.data?.calories_today ?? 0;
+      const goal = section.data?.goal ?? 0;
       const lastMeal = section.data?.last_meal_ago_hours;
       label = `${cal} / ${goal} cal`;
       detail = lastMeal ? `Last meal ${lastMeal}h ago` : 'No meals logged yet';

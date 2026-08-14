@@ -1,6 +1,6 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import { X } from 'lucide-react'
-import FoodItemSelector from './FoodItemSelector'
+import FoodItemSelector, { rehydrateDetailedItems } from './FoodItemSelector'
 import type { SelectedFoodItem } from './FoodItemSelector'
 import apiClient from '../../api/client'
 
@@ -12,7 +12,30 @@ interface AddMealFormProps {
     meal_type: string
     logged_at: string
     notes?: string
-    detailed_items?: SelectedFoodItem[]
+    // Raw canonical items as stored by the backend (see FoodLogCreate in
+    // fitness.py) - NOT SelectedFoodItem. Rehydrated into SelectedFoodItem[]
+    // on mount via rehydrateDetailedItems().
+    detailed_items?: any[]
+  }
+}
+
+// Canonical detailed_items shape (see FoodLogCreate in backend/app/routes/fitness.py) -
+// every client writes this so any client can rehydrate an entry logged by another.
+function toCanonicalItem(food: SelectedFoodItem) {
+  const rawId = food.id || ''
+  const isPlaceholderId = rawId.startsWith('recent-') || rawId.startsWith('quick-')
+  return {
+    food_id: !isPlaceholderId && rawId ? rawId : null,
+    name: food.name,
+    source: food.source || 'manual',
+    serving_id: food.selected_serving?.serving_id || null,
+    serving_description: food.selected_serving?.serving_description || food.selected_unit || food.serving_unit || null,
+    quantity: food.quantity,
+    unit: food.selected_unit || food.serving_unit || 'serving',
+    calories: food.calculated_calories ?? food.calories ?? 0,
+    protein: food.calculated_protein ?? food.protein ?? 0,
+    carbs: food.calculated_carbs ?? food.carbs ?? 0,
+    fats: food.calculated_fats ?? food.fats ?? 0,
   }
 }
 
@@ -34,8 +57,27 @@ export default function AddMealForm({ onClose, onSuccess, editEntry }: AddMealFo
       : formatLocalDateTime(new Date())
   )
   const [notes, setNotes] = useState(editEntry?.notes || '')
-  const [selectedFoods, setSelectedFoods] = useState<SelectedFoodItem[]>(editEntry?.detailed_items || [])
+  const [selectedFoods, setSelectedFoods] = useState<SelectedFoodItem[]>([])
   const [isSubmitting, setIsSubmitting] = useState(false)
+  // Never let an edit save zeros: block submit until stored detailed_items
+  // (which may be another client's minimal snapshot) are rehydrated into full
+  // SelectedFoodItems with real calculated_* totals.
+  const [isRehydrating, setIsRehydrating] = useState(!!editEntry?.detailed_items?.length)
+
+  useEffect(() => {
+    if (!editEntry?.detailed_items?.length) return
+    let cancelled = false
+    setIsRehydrating(true)
+    rehydrateDetailedItems(editEntry.detailed_items)
+      .then((foods) => {
+        if (!cancelled) setSelectedFoods(foods)
+      })
+      .finally(() => {
+        if (!cancelled) setIsRehydrating(false)
+      })
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // Calculate totals from selected foods
   const totals = selectedFoods.reduce(
@@ -71,7 +113,7 @@ export default function AddMealForm({ onClose, onSuccess, editEntry }: AddMealFo
           quantity: food.quantity,
           unit: food.serving_unit,
         })),
-        detailed_items: selectedFoods,
+        detailed_items: selectedFoods.map(toCanonicalItem),
       }
 
       if (editEntry) {
@@ -144,10 +186,16 @@ export default function AddMealForm({ onClose, onSuccess, editEntry }: AddMealFo
             <label className="block text-sm font-medium text-gray-300 mb-2">
               Food Items
             </label>
-            <FoodItemSelector
-              onFoodsSelected={setSelectedFoods}
-              initialFoods={selectedFoods}
-            />
+            {isRehydrating ? (
+              <div className="text-sm text-gray-400 py-4 text-center border border-gray-700 rounded-lg">
+                Loading food details…
+              </div>
+            ) : (
+              <FoodItemSelector
+                onFoodsSelected={setSelectedFoods}
+                initialFoods={selectedFoods}
+              />
+            )}
           </div>
 
           {/* Notes */}
@@ -208,10 +256,10 @@ export default function AddMealForm({ onClose, onSuccess, editEntry }: AddMealFo
           <div className="flex gap-3 pt-4">
             <button
               type="submit"
-              disabled={isSubmitting || selectedFoods.length === 0}
+              disabled={isSubmitting || isRehydrating || selectedFoods.length === 0}
               className="flex-1 px-6 py-3 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors font-medium disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {isSubmitting ? 'Saving...' : editEntry ? 'Update Meal' : 'Add Meal'}
+              {isSubmitting ? 'Saving...' : isRehydrating ? 'Loading...' : editEntry ? 'Update Meal' : 'Add Meal'}
             </button>
             <button
               type="button"

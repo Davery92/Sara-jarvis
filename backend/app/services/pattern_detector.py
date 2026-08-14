@@ -433,6 +433,18 @@ class PatternDetector:
         "cover": {"open": "cover.open_cover", "closed": "cover.close_cover"},
     }
 
+    # HA emits transient in-flight states (locking, unlocking, opening,
+    # closing) alongside the settled state they resolve to. Without this,
+    # each becomes its own (entity_id, to_state) pattern key — "Side Door
+    # Lock locks around 00:00" AND "Side Door Lock goes to locking around
+    # 00:00" as two independently promotable duplicates.
+    _TRANSIENT_STATE_ALIASES = {
+        "locking": "locked",
+        "unlocking": "unlocked",
+        "opening": "open",
+        "closing": "closed",
+    }
+
     async def _detect_home_routine_patterns(
         self,
         db: Session,
@@ -466,6 +478,10 @@ class PatternDetector:
                 to_state = event.details.get("to_state")
                 if not eid or not to_state:
                     continue
+                # Collapse HA's transient in-flight states onto their settled
+                # counterpart so "locking" and "locked" key the same pattern
+                # instead of each becoming its own promotable duplicate.
+                to_state = self._TRANSIENT_STATE_ALIASES.get(to_state, to_state)
                 key = (eid, to_state)
                 entity_days[key][replay.replay_date] = set(event.details.get("active_hours") or [])
                 names[eid] = event.details.get("friendly_name") or eid

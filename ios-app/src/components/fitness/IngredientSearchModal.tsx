@@ -23,12 +23,14 @@ interface Props {
   visible: boolean;
   onClose: () => void;
   onAddIngredient: (ingredient: IngredientItem) => void;
+  editIngredient?: IngredientItem | null;
 }
 
 export default function IngredientSearchModal({
   visible,
   onClose,
   onAddIngredient,
+  editIngredient = null,
 }: Props) {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<FoodItem[]>([]);
@@ -39,6 +41,9 @@ export default function IngredientSearchModal({
   const [showManualEntry, setShowManualEntry] = useState(false);
   const [showBarcodeScanner, setShowBarcodeScanner] = useState(false);
   const [barcodeError, setBarcodeError] = useState<string | null>(null);
+  // Never let an edit save stale/zero macros: block Add/Update until a
+  // resolvable ingredient's fresh per-unit macros are fetched.
+  const [isRehydrating, setIsRehydrating] = useState(false);
 
   // Manual entry fields
   const [manualName, setManualName] = useState('');
@@ -81,6 +86,76 @@ export default function IngredientSearchModal({
     setSearchResults([]);
     setBarcodeError(null);
   };
+
+  // Rehydrate an ingredient row for editing. FatSecret-backed ingredients
+  // re-fetch details to re-select the matching serving (falling back to the
+  // stored line macros divided by quantity if that fails); manual/unresolved
+  // ingredients reopen directly in the manual entry form.
+  const prefillForEdit = async (ingredient: IngredientItem) => {
+    const rawQty = ingredient.quantity;
+    const qty = rawQty && rawQty > 0 ? rawQty : 1;
+
+    if (ingredient.food_id && ingredient.source === 'fatsecret') {
+      setIsRehydrating(true);
+      setShowManualEntry(false);
+      setQuantity(String(qty));
+      setSearchQuery(ingredient.name || '');
+      setSearchResults([]);
+
+      let perUnitFood: FoodItem = {
+        id: ingredient.food_id,
+        name: ingredient.name || '',
+        serving_size: 1,
+        serving_unit: ingredient.serving_description || ingredient.unit || 'serving',
+        calories: (ingredient.calories || 0) / qty,
+        protein: (ingredient.protein || 0) / qty,
+        carbs: (ingredient.carbs || 0) / qty,
+        fats: (ingredient.fats || 0) / qty,
+        is_custom: false,
+        source: 'fatsecret',
+      };
+      setUnit(perUnitFood.serving_unit);
+
+      try {
+        const detail = await fitnessService.getFoodDetails(ingredient.food_id);
+        const servings = (detail?.servings || []).filter(s => s && s.serving_description);
+        const matched = servings.find(s => s.serving_description === ingredient.serving_description) || servings[0];
+        if (matched) {
+          perUnitFood = {
+            ...perUnitFood,
+            calories: matched.calories ?? perUnitFood.calories,
+            protein: matched.protein ?? perUnitFood.protein,
+            carbs: matched.carbs ?? perUnitFood.carbs,
+            fats: matched.fat ?? perUnitFood.fats,
+            serving_unit: matched.serving_description || perUnitFood.serving_unit,
+          };
+          setUnit(matched.serving_description || perUnitFood.serving_unit);
+        }
+      } catch (error) {
+        console.error('Failed to rehydrate ingredient for edit, using stored macros:', error);
+      }
+
+      setSelectedFood(perUnitFood);
+      setIsRehydrating(false);
+    } else {
+      // Manual/unresolved ingredient - reopen directly in the manual entry form.
+      setShowManualEntry(true);
+      setManualName(ingredient.name || '');
+      setManualQuantity(String(qty));
+      setManualUnit(ingredient.unit || 'serving');
+      setManualCalories(ingredient.calories != null ? String(ingredient.calories) : '');
+      setManualProtein(ingredient.protein != null ? String(ingredient.protein) : '');
+      setManualCarbs(ingredient.carbs != null ? String(ingredient.carbs) : '');
+      setManualFats(ingredient.fats != null ? String(ingredient.fats) : '');
+    }
+  };
+
+  useEffect(() => {
+    if (visible && editIngredient) {
+      prefillForEdit(editIngredient);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, editIngredient]);
 
   const handleBarcodeScanned = async (barcode: string) => {
     setShowBarcodeScanner(false);
@@ -220,7 +295,7 @@ export default function IngredientSearchModal({
       >
         <SafeAreaView edges={['top']} style={styles.safeArea}>
           <View style={styles.header}>
-            <Text style={styles.title}>Add Ingredient</Text>
+            <Text style={styles.title}>{editIngredient ? 'Edit Ingredient' : 'Add Ingredient'}</Text>
             <TouchableOpacity onPress={handleClose} style={styles.closeButtonContainer}>
               <Ionicons name="close" size={fontSizes.xxl} color={colors.textSecondary} />
             </TouchableOpacity>
@@ -289,6 +364,7 @@ export default function IngredientSearchModal({
                             <Text style={styles.resultBrand}>{food.brand}</Text>
                           )}
                           <Text style={styles.resultDetails}>
+                            {food.serving_unit ? `Per ${food.serving_unit} • ` : ''}
                             {food.calories || '?'} cal • {food.protein || '?'}g protein •{' '}
                             {food.source === 'user'
                               ? '⭐ Custom'
@@ -355,11 +431,18 @@ export default function IngredientSearchModal({
 
                   {/* Add Button */}
                   <TouchableOpacity
-                    style={styles.addButton}
+                    style={[styles.addButton, isRehydrating && styles.addButtonDisabled]}
                     onPress={handleAddFromSearch}
+                    disabled={isRehydrating}
                   >
-                    <Ionicons name="add" size={20} color={colors.background} />
-                    <Text style={styles.addButtonText}>Add Ingredient</Text>
+                    {isRehydrating ? (
+                      <ActivityIndicator size="small" color={colors.background} />
+                    ) : (
+                      <>
+                        <Ionicons name="add" size={20} color={colors.background} />
+                        <Text style={styles.addButtonText}>{editIngredient ? 'Update Ingredient' : 'Add Ingredient'}</Text>
+                      </>
+                    )}
                   </TouchableOpacity>
                 </View>
               )}
@@ -471,7 +554,7 @@ export default function IngredientSearchModal({
                 onPress={handleAddManual}
               >
                 <Ionicons name="add" size={20} color={colors.background} />
-                <Text style={styles.addButtonText}>Add Ingredient</Text>
+                <Text style={styles.addButtonText}>{editIngredient ? 'Update Ingredient' : 'Add Ingredient'}</Text>
               </TouchableOpacity>
 
               <TouchableOpacity
@@ -697,6 +780,9 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: spacing.xs,
     minHeight: 48,
+  },
+  addButtonDisabled: {
+    opacity: 0.6,
   },
   addButtonText: {
     fontSize: fontSizes.md,

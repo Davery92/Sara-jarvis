@@ -116,14 +116,15 @@ class FoodSearchAndLogTool(BaseTool):
                 detailed_items.append({
                     "food_id": fatsecret_result.get("id"),
                     "name": fatsecret_result.get("name"),
+                    "source": "fatsecret",
+                    "serving_id": None,
+                    "serving_description": serving_label,
                     "quantity": quantity,
                     "unit": unit or "serving",
-                    "serving_description": serving_label,
                     "calories": round(item_calories, 1),
                     "protein": round(item_protein, 1),
                     "carbs": round(item_carbs, 1),
                     "fats": round(item_fats, 1),
-                    "source": "fatsecret"
                 })
 
                 # Simple item for food_items field

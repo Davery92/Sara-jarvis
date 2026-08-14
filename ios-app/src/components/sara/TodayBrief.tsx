@@ -20,8 +20,8 @@ import { colors } from '../../styles/theme'
  *
  * A centered presence hero (orb + greeting + Sara's first-person thought) sits
  * above a prioritized stack: what's next (with countdown), an at-a-glance row,
- * and a "needs you" group (open threads, reviews due) that the old flat
- * card-stack buried. All from /api/sara/brief. Depth lives behind Chat / tabs.
+ * and a "needs you" group backed by the same actionable inbox contract as its
+ * destination. All from /api/sara/brief. Depth lives behind Chat / tabs.
  */
 
 interface BriefSection {
@@ -101,12 +101,12 @@ export default function TodayBrief({ navigation }: { navigation?: any }) {
   const nextEvent = events[0]
   const moreEvents = Math.max(0, (calendar?.count || events.length) - 1)
   const fitness = sections.find((s) => s.type === 'fitness')?.data
-  const threads = sections.find((s) => s.type === 'threads')?.data
-  const learning = sections.find((s) => s.type === 'learning')?.data
   const status = brief?.sara_status
   const actions = brief?.suggested_actions || []
   const stateLabel = humanizeState(brief?.activity_state)
-  const needsYou = Boolean(threads?.open || learning?.reviews_due)
+  const needsYouItems: any[] = brief?.needs_you?.items || []
+  const needsYou = needsYouItems.length > 0
+  const digestItems: { text: string; at: string }[] = brief?.digest?.items || []
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
@@ -199,29 +199,35 @@ export default function TodayBrief({ navigation }: { navigation?: any }) {
         {needsYou ? (
           <View style={styles.group}>
             <Text style={styles.groupLabel}>NEEDS YOU</Text>
-            {threads?.open ? (
-              <TouchableOpacity style={styles.needRow} onPress={() => navigation?.navigate('AssistantInboxTab')} activeOpacity={0.8}>
-                <Ionicons name="chatbox-ellipses-outline" size={18} color={colors.primary} />
-                <Text style={styles.needText} numberOfLines={1}>
-                  {threads.open} open thread{threads.open === 1 ? '' : 's'}
-                  {threads.topics?.length ? ` · ${threads.topics.slice(0, 2).join(', ')}` : ''}
-                </Text>
-                <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
-              </TouchableOpacity>
-            ) : null}
-            {learning?.reviews_due ? (
+            {needsYouItems.slice(0, 3).map((item) => (
               <TouchableOpacity
+                key={item.id}
                 style={styles.needRow}
-                onPress={() => navigateToChat({ quickReply: { message: 'Quiz me on what I have due', title: 'Reviews' } })}
+                onPress={() => navigation?.navigate('AssistantInboxTab')}
                 activeOpacity={0.8}
               >
-                <Ionicons name="school-outline" size={18} color={colors.primary} />
+                <Ionicons name="alert-circle-outline" size={18} color={colors.primary} />
                 <Text style={styles.needText} numberOfLines={1}>
-                  {learning.reviews_due} review{learning.reviews_due === 1 ? '' : 's'} due
+                  {item.title || 'Needs your input'}
                 </Text>
                 <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
               </TouchableOpacity>
-            ) : null}
+            ))}
+          </View>
+        ) : null}
+
+        {/* While you were away — Sara's own account of the gap, not launcher
+            chrome (SARA_MIND_V2 dashboard fix Phase 3). Same digest section
+            the web dashboard renders. */}
+        {digestItems.length > 0 ? (
+          <View style={styles.group}>
+            <Text style={styles.groupLabel}>WHILE YOU WERE AWAY</Text>
+            {digestItems.slice(0, 3).map((item, i) => (
+              <View key={`${item.at}-${i}`} style={styles.awayRow}>
+                <Text style={styles.awayText} numberOfLines={2}>{item.text}</Text>
+                <Text style={styles.awayTime}>{formatTime(item.at)}</Text>
+              </View>
+            ))}
           </View>
         ) : null}
 
@@ -342,6 +348,18 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
   },
   needText: { flex: 1, color: colors.text, fontSize: 15 },
+
+  // While you were away
+  awayRow: {
+    backgroundColor: colors.surface,
+    borderRadius: 14,
+    padding: 14,
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  awayText: { color: colors.text, fontSize: 15, lineHeight: 20 },
+  awayTime: { color: colors.textMuted, fontSize: 12, marginTop: 4 },
 
   // Shared
   kicker: { color: colors.textMuted, fontSize: 11, fontWeight: '700', letterSpacing: 0.8 },

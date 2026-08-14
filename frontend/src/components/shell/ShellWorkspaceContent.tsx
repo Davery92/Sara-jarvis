@@ -79,8 +79,9 @@ interface ShellWorkspaceContentProps {
   greeting: string
   attentionItems: any[]
   attentionUnreadCount: number
+  needsYouTotal: number
   missions: any[]
-  reminders: any[]
+  todayReminders: any[]
   timers: any[]
   calendarEvents: any[]
   weather: any
@@ -101,10 +102,23 @@ interface ShellWorkspaceContentProps {
   expandedJournalEntries: Set<string>
   onToggleJournalEntry: (entryKey: string) => void
   emotionEmoji: Record<string, string>
-  saraStatus: any
-  connectedDevices: any[]
   standingOrders: any[]
+  digest: { items: { text: string; at: string; delivered?: boolean }[]; machinery: { tool_calls: number; errors: number } } | null
+  briefLoaded: boolean
+  quietLine: string | null
   formatRelativeTime: (value: any) => string
+  briefSections: any[]
+  saraStatusLine: any
+  activityState: string | null
+  interruptibility: number | null
+  suggestedActions: { label: string; message: string; icon?: string }[]
+  selfStatus: { healthy: boolean; degraded: { subsystem: string; name: string; impact: string; severity: string }[] } | null
+  timePeriod: string | null
+  recovery: any
+  todayTemplate: any
+  activeWorkout: any
+  weightTrend: any[]
+  onVerificationAnswer: (pkgId: string, confirmed: boolean) => void
   chatMessages: any[]
   setChatMessages: React.Dispatch<React.SetStateAction<any[]>>
   loading: boolean
@@ -151,8 +165,9 @@ export default function ShellWorkspaceContent({
   greeting,
   attentionItems,
   attentionUnreadCount,
+  needsYouTotal,
   missions,
-  reminders,
+  todayReminders,
   timers,
   calendarEvents,
   weather,
@@ -173,10 +188,23 @@ export default function ShellWorkspaceContent({
   expandedJournalEntries,
   onToggleJournalEntry,
   emotionEmoji,
-  saraStatus,
-  connectedDevices,
   standingOrders,
+  digest,
+  briefLoaded,
+  quietLine,
   formatRelativeTime,
+  briefSections,
+  saraStatusLine,
+  activityState,
+  interruptibility,
+  suggestedActions,
+  selfStatus,
+  timePeriod,
+  recovery,
+  todayTemplate,
+  activeWorkout,
+  weightTrend,
+  onVerificationAnswer,
   chatMessages,
   setChatMessages,
   loading,
@@ -221,17 +249,18 @@ export default function ShellWorkspaceContent({
     return (
       <DashboardHomeView
         attentionItems={attentionItems}
-        attentionUnreadCount={attentionUnreadCount}
+        needsYouTotal={needsYouTotal}
         missions={missions}
-        reminders={reminders}
+        missionAwaitingCount={missionAwaitingCount}
+        runningMissionCount={runningMissionCount}
+        todayReminders={todayReminders}
         timers={timers}
         calendarEvents={calendarEvents}
+        standingOrders={standingOrders}
         onNavigate={onNavigate}
         greeting={greeting}
         weather={weather}
         weatherEmoji={weatherEmoji}
-        missionAwaitingCount={missionAwaitingCount}
-        runningMissionCount={runningMissionCount}
         morningBrief={morningBrief}
         morningBriefLoading={morningBriefLoading}
         briefAudioPlaying={briefAudioPlaying}
@@ -246,11 +275,23 @@ export default function ShellWorkspaceContent({
         expandedJournalEntries={expandedJournalEntries}
         onToggleJournalEntry={onToggleJournalEntry}
         emotionEmoji={emotionEmoji}
-        saraStatus={saraStatus}
-        connectedDevices={connectedDevices}
-        standingOrders={standingOrders}
+        digest={digest}
+        briefLoaded={briefLoaded}
+        quietLine={quietLine}
         formatRelativeTime={formatRelativeTime}
         onAskSara={onAskSara}
+        briefSections={briefSections}
+        saraStatusLine={saraStatusLine}
+        activityState={activityState}
+        interruptibility={interruptibility}
+        suggestedActions={suggestedActions}
+        selfStatus={selfStatus}
+        timePeriod={timePeriod}
+        recovery={recovery}
+        todayTemplate={todayTemplate}
+        activeWorkout={activeWorkout}
+        weightTrend={weightTrend}
+        onVerificationAnswer={onVerificationAnswer}
       />
     )
   }

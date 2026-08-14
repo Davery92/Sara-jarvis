@@ -24,6 +24,10 @@ export interface FoodLog {
   carbs?: number;
   fat?: number;
   notes?: string;
+  // Raw canonical detailed_item for this row (see FoodLogCreate in
+  // backend/app/routes/fitness.py), present only for single-item, non-recipe
+  // entries where full-fidelity editing is possible.
+  detailed_item?: any;
 }
 
 export interface WorkoutLog {
@@ -71,19 +75,21 @@ export interface CreateFoodLogParams {
   meal_type: string;
   food_items: Array<{ name: string; quantity: number; unit: string }>;
   // Rich per-item snapshot (food_id, per-item macros, serving) so the Recent
-  // tab can one-tap re-log with correct macros. Optional for backward compat.
+  // tab can one-tap re-log with correct macros, and so any client can rehydrate
+  // an entry logged by another. Canonical shape - see FoodLogCreate in
+  // backend/app/routes/fitness.py.
   detailed_items?: Array<{
-    food_id?: string;
+    food_id?: string | null;
     name: string;
-    quantity: number;
-    serving_unit: string;
+    source?: string;
+    serving_id?: string | null;
     serving_description?: string;
+    quantity: number;
+    unit: string;
     calories?: number;
     protein?: number;
     carbs?: number;
     fats?: number;
-    source?: string;
-    is_custom?: boolean;
   }>;
   calories?: number;
   protein?: number;
@@ -552,6 +558,11 @@ class FitnessService {
                 ? Math.round((meal.fats || 0) * 100) / 100
                 : Math.round(((meal.fats || 0) / meal.food_items.length) * 100) / 100,
               notes: meal.notes,
+              // Full-fidelity editing only supported for single-item entries -
+              // multi-item entries fall back to the meal-type-only edit alert.
+              detailed_item: meal.food_items.length === 1 && Array.isArray(meal.detailed_items)
+                ? meal.detailed_items[index]
+                : undefined,
             });
           });
         }
@@ -567,6 +578,10 @@ class FitnessService {
 
   async updateFoodLogMealType(id: string, mealType: string): Promise<void> {
     await apiClient.patch(`/api/fitness/food-log/${id}`, { meal_type: mealType });
+  }
+
+  async updateFoodLog(id: string, params: CreateFoodLogParams): Promise<FoodLog> {
+    return await apiClient.put<FoodLog>(`/api/fitness/food-log/${id}`, params);
   }
 
   async deleteFoodLog(id: string): Promise<void> {

@@ -24,6 +24,7 @@ const GEOFENCE_TASK = 'SARA_GEOFENCE_TASK';
 
 const MIN_DISTANCE_M = 200; // Minimum distance before reporting (meters)
 const MIN_INTERVAL_MS = 5 * 60 * 1000; // Minimum 5 minutes between reports
+const MAX_SAMPLE_AGE_MS = 10 * 60 * 1000;
 
 let lastReportedAt = 0;
 let lastLat = 0;
@@ -136,15 +137,20 @@ TaskManager.defineTask(LOCATION_TASK, async ({ data, error }) => {
   await onLocationUpdate(location);
 });
 
-async function onLocationUpdate(location: Location.LocationObject): Promise<void> {
+async function onLocationUpdate(location: Location.LocationObject, force = false): Promise<boolean> {
   const now = Date.now();
-  if (now - lastReportedAt < MIN_INTERVAL_MS) return;
+  const sampleAge = now - location.timestamp;
+  if (sampleAge > MAX_SAMPLE_AGE_MS || sampleAge < -MIN_INTERVAL_MS) {
+    console.warn(`[Location] Ignoring stale/invalid sample (${Math.round(sampleAge / 1000)}s old)`);
+    return false;
+  }
+  if (!force && now - lastReportedAt < MIN_INTERVAL_MS) return false;
 
   const { latitude, longitude, accuracy } = location.coords;
 
   if (lastLat !== 0 && lastLon !== 0) {
     const dist = haversineDistance(lastLat, lastLon, latitude, longitude);
-    if (dist < MIN_DISTANCE_M) return;
+    if (!force && dist < MIN_DISTANCE_M) return false;
   }
 
   lastReportedAt = now;
@@ -156,6 +162,7 @@ async function onLocationUpdate(location: Location.LocationObject): Promise<void
     longitude,
     accuracy: accuracy ?? undefined,
     source: 'ios_significant',
+    observed_at: new Date(location.timestamp).toISOString(),
   });
   if (ok) {
     console.log(`[Location] Reported: ${latitude.toFixed(4)}, ${longitude.toFixed(4)}`);
@@ -163,6 +170,21 @@ async function onLocationUpdate(location: Location.LocationObject): Promise<void
     flushQueuedLocationEvents().catch(() => {});
   } else {
     console.warn('[Location] Report failed (WAN + LAN); queued events will retry later');
+  }
+  return ok;
+}
+
+/** Request a new foreground fix instead of relying on iOS's cached background sample. */
+export async function refreshCurrentLocation(): Promise<boolean> {
+  if (!(await isLocationTrackingEnabled())) return false;
+  try {
+    const permission = await Location.getForegroundPermissionsAsync();
+    if (permission.status !== 'granted') return false;
+    const location = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+    return await onLocationUpdate(location, true);
+  } catch (error) {
+    console.warn('[Location] Current location refresh failed:', error);
+    return false;
   }
 }
 
@@ -264,6 +286,7 @@ export async function startTracking(): Promise<boolean> {
       showsBackgroundLocationIndicator: false,
     });
 
+    await refreshCurrentLocation();
     await resyncGeofences();
 
     console.log('[Location] Tracking started');

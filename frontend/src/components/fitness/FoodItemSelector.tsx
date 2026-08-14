@@ -91,6 +91,68 @@ interface FoodServing {
   sodium?: number
 }
 
+// Brand foods often list only "1 serving" with no gram/oz option. When any real
+// serving carries metric_serving_amount/unit, derive synthetic "g"/"oz" (and "ml"
+// for liquids) options so gram-based logging stays possible without guessing at
+// cross-unit math. Each synthetic option's macros are per-1-unit, so it slots into
+// the same calculateNutrition() quantity-multiplier path as a real serving.
+function buildSyntheticWeightServings(servings: FoodServing[]): FoodServing[] {
+  const metricServing = servings.find(s => s.metric_serving_amount && s.metric_serving_unit)
+  if (!metricServing) return []
+
+  const unit = metricServing.metric_serving_unit!.toLowerCase().trim()
+  const amount = metricServing.metric_serving_amount!
+  const { calories: cal, protein, carbs, fat } = metricServing
+
+  const synthetic: FoodServing[] = []
+
+  if (WEIGHT_UNITS.includes(unit)) {
+    const amountInGrams = amount * (UNIT_CONVERSIONS[unit] || 1)
+    if (amountInGrams > 0) {
+      const perGram = {
+        calories: cal / amountInGrams,
+        protein: protein / amountInGrams,
+        carbs: carbs / amountInGrams,
+        fat: fat / amountInGrams,
+      }
+      synthetic.push({
+        serving_id: 'synthetic-g',
+        serving_description: 'g',
+        metric_serving_amount: 1,
+        metric_serving_unit: 'g',
+        ...perGram,
+      })
+      const gramsPerOz = UNIT_CONVERSIONS['oz']
+      synthetic.push({
+        serving_id: 'synthetic-oz',
+        serving_description: 'oz',
+        metric_serving_amount: 1,
+        metric_serving_unit: 'oz',
+        calories: perGram.calories * gramsPerOz,
+        protein: perGram.protein * gramsPerOz,
+        carbs: perGram.carbs * gramsPerOz,
+        fat: perGram.fat * gramsPerOz,
+      })
+    }
+  } else if (VOLUME_UNITS.includes(unit)) {
+    const amountInMl = amount * (UNIT_CONVERSIONS[unit] || 1)
+    if (amountInMl > 0) {
+      synthetic.push({
+        serving_id: 'synthetic-ml',
+        serving_description: 'ml',
+        metric_serving_amount: 1,
+        metric_serving_unit: 'ml',
+        calories: cal / amountInMl,
+        protein: protein / amountInMl,
+        carbs: carbs / amountInMl,
+        fat: fat / amountInMl,
+      })
+    }
+  }
+
+  return synthetic
+}
+
 interface Food {
   id: string
   fatsecret_id?: string
@@ -127,6 +189,204 @@ export interface SelectedFoodItem extends Food {
   calculated_protein?: number
   calculated_carbs?: number
   calculated_fats?: number
+}
+
+function calculateNutrition(food: Food, quantity: number, serving?: FoodServing, selectedUnit?: string): SelectedFoodItem {
+  if (serving) {
+    // Parse the serving description to get the actual amount and unit
+    // E.g., "292g" -> { amount: 292, unit: 'g' }
+    const parsed = parseServingDescription(serving.serving_description)
+
+    if (parsed && selectedUnit) {
+      // User changed the unit - do unit conversion
+      const targetUnit = selectedUnit.toLowerCase().trim()
+      const sourceUnit = parsed.unit.toLowerCase().trim()
+
+      const sourceIsWeight = WEIGHT_UNITS.includes(sourceUnit)
+      const targetIsWeight = WEIGHT_UNITS.includes(targetUnit)
+      const sourceIsVolume = VOLUME_UNITS.includes(sourceUnit)
+      const targetIsVolume = VOLUME_UNITS.includes(targetUnit)
+
+      let multiplier = quantity
+
+      if (sourceIsWeight && targetIsWeight) {
+        const targetInGrams = quantity * (UNIT_CONVERSIONS[targetUnit] || 1)
+        const sourceInGrams = parsed.amount * (UNIT_CONVERSIONS[sourceUnit] || 1)
+        multiplier = targetInGrams / sourceInGrams
+      } else if (sourceIsVolume && targetIsVolume) {
+        const targetInMl = quantity * (UNIT_CONVERSIONS[targetUnit] || 1)
+        const sourceInMl = parsed.amount * (UNIT_CONVERSIONS[sourceUnit] || 1)
+        multiplier = targetInMl / sourceInMl
+      }
+
+      return {
+        ...food,
+        quantity,
+        selected_serving: serving,
+        selected_unit: selectedUnit,
+        base_nutrition: {
+          calories: serving.calories,
+          protein: serving.protein,
+          carbs: serving.carbs,
+          fats: serving.fat,
+          per_amount: parsed.amount,
+          per_unit: parsed.unit,
+        },
+        calculated_calories: Math.round(serving.calories * multiplier),
+        calculated_protein: parseFloat((serving.protein * multiplier).toFixed(1)),
+        calculated_carbs: parseFloat((serving.carbs * multiplier).toFixed(1)),
+        calculated_fats: parseFloat((serving.fat * multiplier).toFixed(1)),
+      }
+    }
+
+    // No unit conversion needed - just multiply by quantity
+    return {
+      ...food,
+      quantity,
+      selected_serving: serving,
+      selected_unit: selectedUnit || (parsed ? parsed.unit : serving.serving_description),
+      base_nutrition: {
+        calories: serving.calories,
+        protein: serving.protein,
+        carbs: serving.carbs,
+        fats: serving.fat,
+        per_amount: parsed ? parsed.amount : 1,
+        per_unit: parsed ? parsed.unit : serving.serving_description,
+      },
+      calculated_calories: serving.calories * quantity,
+      calculated_protein: serving.protein * quantity,
+      calculated_carbs: serving.carbs * quantity,
+      calculated_fats: serving.fat * quantity,
+    }
+  }
+
+  // For custom foods or foods without FatSecret serving data - support unit conversion
+  // Try to parse the serving unit in case it's like "292g"
+  const parsed = parseServingDescription(food.serving_unit || '')
+  const baseUnit = parsed ? parsed.unit.toLowerCase().trim() : (food.serving_unit?.toLowerCase().trim() || 'serving')
+  const baseAmount = parsed ? parsed.amount : (food.serving_size || 1)
+  const targetUnit = (selectedUnit || baseUnit).toLowerCase().trim()
+
+  // Store base nutrition for future recalculations
+  const baseNutrition = {
+    calories: food.calories || 0,
+    protein: food.protein || 0,
+    carbs: food.carbs || 0,
+    fats: food.fats || 0,
+    per_amount: baseAmount,
+    per_unit: baseUnit,
+  }
+
+  // Calculate multiplier with unit conversion
+  let multiplier = quantity
+
+  const sourceIsWeight = WEIGHT_UNITS.includes(baseUnit)
+  const targetIsWeight = WEIGHT_UNITS.includes(targetUnit)
+  const sourceIsVolume = VOLUME_UNITS.includes(baseUnit)
+  const targetIsVolume = VOLUME_UNITS.includes(targetUnit)
+
+  if (sourceIsWeight && targetIsWeight) {
+    // Both are weight units - convert
+    const targetInGrams = quantity * (UNIT_CONVERSIONS[targetUnit] || 1)
+    const sourceInGrams = baseAmount * (UNIT_CONVERSIONS[baseUnit] || 1)
+    multiplier = targetInGrams / sourceInGrams
+  } else if (sourceIsVolume && targetIsVolume) {
+    // Both are volume units - convert
+    const targetInMl = quantity * (UNIT_CONVERSIONS[targetUnit] || 1)
+    const sourceInMl = baseAmount * (UNIT_CONVERSIONS[baseUnit] || 1)
+    multiplier = targetInMl / sourceInMl
+  }
+  // If units are incompatible (e.g., serving, piece), just use quantity as multiplier
+
+  return {
+    ...food,
+    quantity,
+    selected_unit: selectedUnit || baseUnit,
+    base_nutrition: baseNutrition,
+    calculated_calories: food.calories ? Math.round(food.calories * multiplier) : undefined,
+    calculated_protein: food.protein ? parseFloat((food.protein * multiplier).toFixed(1)) : undefined,
+    calculated_carbs: food.carbs ? parseFloat((food.carbs * multiplier).toFixed(1)) : undefined,
+    calculated_fats: food.fats ? parseFloat((food.fats * multiplier).toFixed(1)) : undefined,
+  }
+}
+
+// Rehydrate canonical detailed_items (as stored by the backend - see FoodLogCreate
+// in fitness.py) into SelectedFoodItem[] for the edit form. Each client's write
+// format can differ in what it omits, so every field is read defensively.
+//
+// - If food_id resolves, fetch /foods/{id}/details (cheap - servings come from
+//   cache), re-derive the same synthetic g/oz/ml options addFood() would have
+//   offered, and re-select the serving the entry was originally logged with.
+// - If it doesn't resolve (deleted custom food, chat-logged item with no id,
+//   fetch failure), fall back to a manual item whose base_nutrition is the
+//   stored line macros divided by the stored quantity, so a quantity edit
+//   scales proportionally and an untouched save round-trips identically.
+export async function rehydrateDetailedItems(items: any[]): Promise<SelectedFoodItem[]> {
+  return Promise.all(items.map(rehydrateOneItem))
+}
+
+async function rehydrateOneItem(raw: any): Promise<SelectedFoodItem> {
+  const foodId: string | null | undefined = raw.food_id
+  const rawQty = typeof raw.quantity === 'number' ? raw.quantity : parseFloat(raw.quantity)
+  const quantity = rawQty && rawQty > 0 ? rawQty : 1
+
+  if (foodId) {
+    try {
+      const details = await apiClient.getFoodDetails(foodId)
+      const realServings: FoodServing[] = details.servings || []
+      const synthetic = buildSyntheticWeightServings(realServings)
+      const allServings = [...realServings, ...synthetic]
+
+      let matched: FoodServing | undefined
+      if (raw.serving_id) matched = allServings.find(s => s.serving_id === raw.serving_id)
+      if (!matched && raw.serving_description) matched = allServings.find(s => s.serving_description === raw.serving_description)
+      if (!matched && raw.unit) matched = allServings.find(s => s.serving_description === raw.unit)
+      if (!matched) matched = allServings[0]
+
+      const baseFood: Food = {
+        id: foodId,
+        name: raw.name,
+        serving_size: 1,
+        serving_unit: matched?.serving_description || raw.unit || 'serving',
+        is_custom: details.is_custom || false,
+        source: raw.source || details.source || 'fatsecret',
+        servings: allServings,
+      }
+
+      if (matched) {
+        return calculateNutrition(baseFood, quantity, matched, raw.unit)
+      }
+    } catch (error) {
+      console.error('Failed to rehydrate food item, falling back to manual:', error)
+    }
+  }
+
+  // Not resolvable - build a manual item scaled from the stored line macros.
+  return {
+    id: foodId || `manual-${raw.name}-${quantity}`,
+    name: raw.name,
+    serving_size: quantity,
+    serving_unit: raw.unit || 'serving',
+    calories: raw.calories,
+    protein: raw.protein,
+    carbs: raw.carbs,
+    fats: raw.fats,
+    is_custom: true,
+    source: raw.source || 'manual',
+    quantity,
+    base_nutrition: {
+      calories: (raw.calories || 0) / quantity,
+      protein: (raw.protein || 0) / quantity,
+      carbs: (raw.carbs || 0) / quantity,
+      fats: (raw.fats || 0) / quantity,
+      per_amount: 1,
+      per_unit: raw.unit || 'serving',
+    },
+    calculated_calories: raw.calories || 0,
+    calculated_protein: raw.protein || 0,
+    calculated_carbs: raw.carbs || 0,
+    calculated_fats: raw.fats || 0,
+  }
 }
 
 interface FoodItemSelectorProps {
@@ -255,125 +515,6 @@ export default function FoodItemSelector({ onFoodsSelected, initialFoods = [] }:
     setSelectedFoods([...selectedFoods, selectedFood])
   }
 
-  function calculateNutrition(food: Food, quantity: number, serving?: FoodServing, selectedUnit?: string): SelectedFoodItem {
-    if (serving) {
-      // Parse the serving description to get the actual amount and unit
-      // E.g., "292g" -> { amount: 292, unit: 'g' }
-      const parsed = parseServingDescription(serving.serving_description)
-
-      if (parsed && selectedUnit) {
-        // User changed the unit - do unit conversion
-        const targetUnit = selectedUnit.toLowerCase().trim()
-        const sourceUnit = parsed.unit.toLowerCase().trim()
-
-        const sourceIsWeight = WEIGHT_UNITS.includes(sourceUnit)
-        const targetIsWeight = WEIGHT_UNITS.includes(targetUnit)
-        const sourceIsVolume = VOLUME_UNITS.includes(sourceUnit)
-        const targetIsVolume = VOLUME_UNITS.includes(targetUnit)
-
-        let multiplier = quantity
-
-        if (sourceIsWeight && targetIsWeight) {
-          const targetInGrams = quantity * (UNIT_CONVERSIONS[targetUnit] || 1)
-          const sourceInGrams = parsed.amount * (UNIT_CONVERSIONS[sourceUnit] || 1)
-          multiplier = targetInGrams / sourceInGrams
-        } else if (sourceIsVolume && targetIsVolume) {
-          const targetInMl = quantity * (UNIT_CONVERSIONS[targetUnit] || 1)
-          const sourceInMl = parsed.amount * (UNIT_CONVERSIONS[sourceUnit] || 1)
-          multiplier = targetInMl / sourceInMl
-        }
-
-        return {
-          ...food,
-          quantity,
-          selected_serving: serving,
-          selected_unit: selectedUnit,
-          base_nutrition: {
-            calories: serving.calories,
-            protein: serving.protein,
-            carbs: serving.carbs,
-            fats: serving.fat,
-            per_amount: parsed.amount,
-            per_unit: parsed.unit,
-          },
-          calculated_calories: Math.round(serving.calories * multiplier),
-          calculated_protein: parseFloat((serving.protein * multiplier).toFixed(1)),
-          calculated_carbs: parseFloat((serving.carbs * multiplier).toFixed(1)),
-          calculated_fats: parseFloat((serving.fat * multiplier).toFixed(1)),
-        }
-      }
-
-      // No unit conversion needed - just multiply by quantity
-      return {
-        ...food,
-        quantity,
-        selected_serving: serving,
-        selected_unit: selectedUnit || (parsed ? parsed.unit : serving.serving_description),
-        base_nutrition: {
-          calories: serving.calories,
-          protein: serving.protein,
-          carbs: serving.carbs,
-          fats: serving.fat,
-          per_amount: parsed ? parsed.amount : 1,
-          per_unit: parsed ? parsed.unit : serving.serving_description,
-        },
-        calculated_calories: serving.calories * quantity,
-        calculated_protein: serving.protein * quantity,
-        calculated_carbs: serving.carbs * quantity,
-        calculated_fats: serving.fat * quantity,
-      }
-    }
-
-    // For custom foods or foods without FatSecret serving data - support unit conversion
-    // Try to parse the serving unit in case it's like "292g"
-    const parsed = parseServingDescription(food.serving_unit || '')
-    const baseUnit = parsed ? parsed.unit.toLowerCase().trim() : (food.serving_unit?.toLowerCase().trim() || 'serving')
-    const baseAmount = parsed ? parsed.amount : (food.serving_size || 1)
-    const targetUnit = (selectedUnit || baseUnit).toLowerCase().trim()
-
-    // Store base nutrition for future recalculations
-    const baseNutrition = {
-      calories: food.calories || 0,
-      protein: food.protein || 0,
-      carbs: food.carbs || 0,
-      fats: food.fats || 0,
-      per_amount: baseAmount,
-      per_unit: baseUnit,
-    }
-
-    // Calculate multiplier with unit conversion
-    let multiplier = quantity
-
-    const sourceIsWeight = WEIGHT_UNITS.includes(baseUnit)
-    const targetIsWeight = WEIGHT_UNITS.includes(targetUnit)
-    const sourceIsVolume = VOLUME_UNITS.includes(baseUnit)
-    const targetIsVolume = VOLUME_UNITS.includes(targetUnit)
-
-    if (sourceIsWeight && targetIsWeight) {
-      // Both are weight units - convert
-      const targetInGrams = quantity * (UNIT_CONVERSIONS[targetUnit] || 1)
-      const sourceInGrams = baseAmount * (UNIT_CONVERSIONS[baseUnit] || 1)
-      multiplier = targetInGrams / sourceInGrams
-    } else if (sourceIsVolume && targetIsVolume) {
-      // Both are volume units - convert
-      const targetInMl = quantity * (UNIT_CONVERSIONS[targetUnit] || 1)
-      const sourceInMl = baseAmount * (UNIT_CONVERSIONS[baseUnit] || 1)
-      multiplier = targetInMl / sourceInMl
-    }
-    // If units are incompatible (e.g., serving, piece), just use quantity as multiplier
-
-    return {
-      ...food,
-      quantity,
-      selected_unit: selectedUnit || baseUnit,
-      base_nutrition: baseNutrition,
-      calculated_calories: food.calories ? Math.round(food.calories * multiplier) : undefined,
-      calculated_protein: food.protein ? parseFloat((food.protein * multiplier).toFixed(1)) : undefined,
-      calculated_carbs: food.carbs ? parseFloat((food.carbs * multiplier).toFixed(1)) : undefined,
-      calculated_fats: food.fats ? parseFloat((food.fats * multiplier).toFixed(1)) : undefined,
-    }
-  }
-
   async function addFood(food: Food) {
     setLoadingDetails(food.id)
 
@@ -381,10 +522,12 @@ export default function FoodItemSelector({ onFoodsSelected, initialFoods = [] }:
       // For FatSecret foods, fetch detailed serving info
       if (food.source === 'fatsecret' && food.id.startsWith('fs-')) {
         const details = await apiClient.getFoodDetails(food.id)
-        const defaultServing = details.servings?.[0]
+        const synthetic = buildSyntheticWeightServings(details.servings || [])
+        const allServings = [...(details.servings || []), ...synthetic]
+        const defaultServing = allServings?.[0]
 
         const selectedFood = calculateNutrition(
-          { ...food, servings: details.servings },
+          { ...food, servings: allServings },
           1,
           defaultServing
         )
@@ -407,34 +550,28 @@ export default function FoodItemSelector({ onFoodsSelected, initialFoods = [] }:
   }
 
   function addRecipe(recipe: any) {
-    const servings = recipe.servings || 1
-    const ingredientFoods: SelectedFoodItem[] = recipe.ingredients.map((ingredient: any) => {
-      const perServingQuantity = Math.round((ingredient.quantity / servings) * 100) / 100
-      const perServingCalories = Math.round(((ingredient.calories || 0) / servings) * 100) / 100
-      const perServingProtein = Math.round(((ingredient.protein || 0) / servings) * 100) / 100
-      const perServingCarbs = Math.round(((ingredient.carbs || 0) / servings) * 100) / 100
-      const perServingFats = Math.round(((ingredient.fats || 0) / servings) * 100) / 100
-
-      return {
-        id: `recipe-${recipe.id}-${ingredient.name}`,
-        name: ingredient.name,
-        brand: '',
-        serving_size: perServingQuantity,
-        serving_unit: ingredient.unit,
-        calories: perServingCalories,
-        protein: perServingProtein,
-        carbs: perServingCarbs,
-        fats: perServingFats,
-        is_custom: false,
-        source: 'recipe',
-        quantity: perServingQuantity,
-        calculated_calories: perServingCalories,
-        calculated_protein: perServingProtein,
-        calculated_carbs: perServingCarbs,
-        calculated_fats: perServingFats,
-      }
-    })
-    setSelectedFoods([...selectedFoods, ...ingredientFoods])
+    // recipe.calories/protein/carbs/fats are already per-serving (see
+    // estimate_recipe_nutrition) - add as one line rather than expanding
+    // ingredients, which undercounts anything without explicit per-ingredient macros.
+    const recipeFood: SelectedFoodItem = {
+      id: `recipe-${recipe.id}`,
+      name: `${recipe.name} (Recipe)`,
+      brand: '',
+      serving_size: 1,
+      serving_unit: 'serving',
+      calories: recipe.calories || 0,
+      protein: recipe.protein || 0,
+      carbs: recipe.carbs || 0,
+      fats: recipe.fats || 0,
+      is_custom: false,
+      source: 'recipe',
+      quantity: 1,
+      calculated_calories: recipe.calories || 0,
+      calculated_protein: recipe.protein || 0,
+      calculated_carbs: recipe.carbs || 0,
+      calculated_fats: recipe.fats || 0,
+    }
+    setSelectedFoods([...selectedFoods, recipeFood])
   }
 
   function removeFood(index: number) {
@@ -451,7 +588,9 @@ export default function FoodItemSelector({ onFoodsSelected, initialFoods = [] }:
   function updateServing(index: number, serving: FoodServing) {
     const updatedFoods = [...selectedFoods]
     const food = updatedFoods[index]
-    updatedFoods[index] = calculateNutrition(food, food.quantity, serving, food.selected_unit)
+    // Picking a discrete serving (real or synthetic g/oz/ml) is authoritative -
+    // don't carry over a stale unit override from a previously selected serving.
+    updatedFoods[index] = calculateNutrition(food, food.quantity, serving, undefined)
     setSelectedFoods(updatedFoods)
   }
 
@@ -716,7 +855,7 @@ export default function FoodItemSelector({ onFoodsSelected, initialFoods = [] }:
                           <div className="font-medium text-purple-300 truncate">{recipe.name}</div>
                           <div className="text-xs text-gray-400">
                             {recipe.ingredients?.length || 0} ingredients
-                            {recipe.total_calories && ` • ${Math.round(recipe.total_calories)} cal`}
+                            {recipe.calories && ` • ≈${Math.round(recipe.calories)} cal/serving`}
                           </div>
                         </div>
                         <Plus className="w-5 h-5 text-purple-400/50 group-hover:text-purple-400 flex-shrink-0 ml-2" />
@@ -797,7 +936,9 @@ export default function FoodItemSelector({ onFoodsSelected, initialFoods = [] }:
                   >
                     {food.servings.map(serving => (
                       <option key={serving.serving_id} value={serving.serving_id}>
-                        {serving.serving_description} ({Math.round(serving.calories)} cal)
+                        {serving.serving_id.startsWith('synthetic-')
+                          ? serving.serving_description
+                          : `${serving.serving_description} (${Math.round(serving.calories)} cal)`}
                       </option>
                     ))}
                   </select>

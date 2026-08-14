@@ -486,6 +486,7 @@ class LocationUpdate(BaseModel):
     longitude: float
     accuracy: Optional[float] = None
     label: Optional[str] = None  # iOS may provide a label
+    observed_at: Optional[datetime] = None
 
 
 @router.post("/location")
@@ -499,5 +500,8 @@ async def report_location(
     POST /api/location/report instead — kept here so old app builds keep working.
     """
     from app.services.location_service import process_report
-    result = await process_report(db, current_user.id, data.latitude, data.longitude, data.accuracy, "ios_significant")
+    result = await process_report(
+        db, current_user.id, data.latitude, data.longitude, data.accuracy,
+        "ios_significant", observed_at=data.observed_at,
+    )
     return {"ok": True, "classified_place": result.get("classified_place") or data.label or "unknown"}

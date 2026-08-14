@@ -72,7 +72,9 @@ public final class WorkoutManager: NSObject, ObservableObject {
     /// The start currently in flight, kept so it can be replayed on its own
     /// `startAttemptId` rather than re-issued as a second workout (§5.2 step 2).
     private var pendingStart: WatchPendingStart?
+    private var startResponseTimeoutTask: Task<Void, Never>?
     private var mirrorRetryTask: Task<Void, Never>?
+    private var isFinalizingHealthKit = false
 
     /// Rest countdown state, so the rest screen and its haptics don't depend on
     /// a message arriving at exactly the right second.
@@ -340,6 +342,7 @@ public final class WorkoutManager: NSObject, ObservableObject {
     /// Reuses `attemptId`, so a request that crossed a dying link is replayed
     /// by the backend into the same session rather than creating a second one.
     private func submitStartRequest(_ attempt: WatchPendingStart) {
+        startResponseTimeoutTask?.cancel()
         startState.saraSession = .requesting
         let channel = send(.startRequested, payload: [
             "template_id": .string(attempt.templateId),
@@ -362,6 +365,23 @@ public final class WorkoutManager: NSObject, ObservableObject {
             startState.phoneLink = .offline
             startState.detail = "Your iPhone isn't reachable."
             lastError = "Apple workout running — couldn't reach Sara yet"
+        }
+
+        startResponseTimeoutTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 12_000_000_000)
+            guard let self, !Task.isCancelled,
+                  self.pendingStart?.attemptId == attempt.attemptId,
+                  self.startState.saraSession == .requesting
+            else { return }
+            self.isStarting = false
+            self.startState.saraSession = .failed
+            self.startState.detail = "Sara hasn't answered yet. Keep the iPhone unlocked and tap Retry."
+            self.lastError = self.startState.detail
+            self.recordDiagnostic(
+                stage: "start_response_timeout",
+                startAttemptId: attempt.attemptId,
+                backendAccepted: false
+            )
         }
     }
 
@@ -408,8 +428,12 @@ public final class WorkoutManager: NSObject, ObservableObject {
                     self.mirrorAttached = true
                     self.startState.phoneLink = .mirroring
                     self.recordDiagnostic(stage: "mirror_attached", transport: "mirror")
-                    if self.pendingStart == nil, self.projection == nil,
-                       self.startState.saraSession == .requesting {
+                    if let pending = self.pendingStart,
+                       self.startState.saraSession == .requesting
+                        || self.startState.saraSession == .failed {
+                        self.submitStartRequest(pending)
+                    } else if self.pendingStart == nil, self.projection == nil,
+                              self.startState.saraSession == .requesting {
                         self.send(.watchRecoveredSession, payload: [:], sessionId: nil)
                     }
                     return
@@ -661,16 +685,31 @@ public final class WorkoutManager: NSObject, ObservableObject {
               payload: ["proposal_id": .string(proposal.proposalId)])
     }
 
-    /// Finish: end the Sara workout first, then finalize HealthKit and hand the
-    /// phone the exact workout UUID so the two records bind (§4.5).
+    /// Finish immediately on the wrist, even if the phone or backend is away.
+    /// The durable command can reconcile later; keeping HealthKit and the
+    /// active screen alive while waiting for an acknowledgement cannot.
     public func finishWorkout() async {
+        let endingProjection = projection
+        let sessionId = endingProjection?.sessionId
         issue(.complete)
-        await finalizeHealthKit(discard: false)
+        completion = localSummary(from: endingProjection)
+        projection = nil
+        startState.saraSession = .none
+        await finalizeHealthKit(discard: false, sessionId: sessionId)
     }
 
     public func abandonWorkout() async {
+        let sessionId = projection?.sessionId
         issue(.abandon)
-        await finalizeHealthKit(discard: true)
+        // The tap is explicit. Clear the active screen before the slower
+        // HealthKit finalization and durable command delivery finish.
+        projection = nil
+        startState.saraSession = .none
+        await finalizeHealthKit(
+            discard: true,
+            preserveTerminalCommand: true,
+            sessionId: sessionId
+        )
     }
 
     private func transmit(_ command: WorkoutCommand) {
@@ -765,6 +804,19 @@ public final class WorkoutManager: NSObject, ObservableObject {
                 let incoming = try WorkoutWire.decoder.decode(WatchCatalog.self, from: data)
                 catalog = incoming
                 catalogStore.save(incoming)
+                if let active = incoming.activeProjection {
+                    projection = active
+                    persistRecovery(projection: active)
+                    syncRestTimer(with: active.rest)
+                    isStarting = false
+                    startState.saraSession = .active
+                    startState.detail = nil
+                    if pendingStart != nil {
+                        recordDiagnostic(stage: "catalog_recovered_start", backendAccepted: true)
+                        setPendingStart(nil)
+                    }
+                    lastError = nil
+                }
             } catch {
                 log.error("Catalog decode failed: \(error.localizedDescription, privacy: .public)")
             }
@@ -804,6 +856,33 @@ public final class WorkoutManager: NSObject, ObservableObject {
             if envelope.kind == .proposalCreated { WatchHaptics.approvalRequested() }
             applyProjection(from: envelope)
 
+        case .workoutEnded:
+            // This is the iPhone's explicit terminal instruction. Ending the
+            // mirrored session on the phone does not end the primary Watch
+            // HealthKit session, so this message is durable and authoritative.
+            let discarded = envelope.payload["discarded"] == .bool(true)
+            let endingProjection = projection
+            let sessionId = envelope.sessionId ?? endingProjection?.sessionId
+            if discarded {
+                completion = nil
+            } else if let summary = envelope.payload["summary"], summary != .null {
+                completion = try? decode(WatchWorkoutSummary.self, from: summary)
+            } else {
+                completion = localSummary(from: endingProjection)
+            }
+            if let sessionId {
+                queue.clear(sessionId: sessionId)
+                refreshPendingCount()
+            }
+            projection = nil
+            startState.saraSession = .none
+            Task {
+                await finalizeHealthKit(
+                    discard: discarded,
+                    sessionId: sessionId
+                )
+            }
+
         case .finishConfirmed:
             // Deliberately does NOT decode the whole payload as a summary:
             // every field of WatchWorkoutSummary is optional, so decoding an
@@ -813,7 +892,8 @@ public final class WorkoutManager: NSObject, ObservableObject {
             if let summary = envelope.payload["summary"], summary != .null {
                 completion = try? decode(WatchWorkoutSummary.self, from: summary)
             }
-            Task { await finalizeHealthKit(discard: false) }
+            // HealthKit has already been finalized when this acknowledgement
+            // arrives; it confirms the UUID was linked and may enrich summary.
 
         case .unknown(let raw):
             // A newer phone build. Not an error worth interrupting a set for.
@@ -855,7 +935,13 @@ public final class WorkoutManager: NSObject, ObservableObject {
                 return
             }
             projection = incoming
-            persistRecovery(projection: incoming)
+            if incoming.status == "active" {
+                persistRecovery(projection: incoming)
+            } else {
+                // A late completion acknowledgement must not recreate the
+                // recovery record after HealthKit has already been torn down.
+                recoveryStore.clear()
+            }
             syncRestTimer(with: incoming.rest)
         } catch {
             log.error("Projection decode failed: \(error.localizedDescription, privacy: .public)")
@@ -932,18 +1018,50 @@ public final class WorkoutManager: NSObject, ObservableObject {
 
     // MARK: - HealthKit lifecycle
 
-    private func finalizeHealthKit(discard: Bool) async {
-        guard let session, let builder else { return }
+    private func finalizeHealthKit(
+        discard: Bool,
+        preserveTerminalCommand: Bool = false,
+        sessionId explicitSessionId: String? = nil
+    ) async {
+        // State-bearing phone replies are deliberately fanned out over the
+        // mirror and WatchConnectivity. The same terminal message can arrive
+        // twice, but HealthKit collection may only be finalized once.
+        guard !isFinalizingHealthKit else { return }
+        isFinalizingHealthKit = true
+        defer { isFinalizingHealthKit = false }
+
+        let sessionId = explicitSessionId ?? projection?.sessionId
+        guard let session else {
+            await teardown(
+                discardingHealthKit: discard,
+                preserveTerminalCommand: preserveTerminalCommand,
+                sessionId: sessionId
+            )
+            return
+        }
         let endDate = Date()
         session.stopActivity(with: endDate)
         session.end()
         stopElapsedTimer()
 
+        guard let builder else {
+            await teardown(
+                discardingHealthKit: discard,
+                preserveTerminalCommand: preserveTerminalCommand,
+                sessionId: sessionId
+            )
+            return
+        }
+
         if discard {
             try? await builder.endCollection(at: endDate)
             builder.discardWorkout()
-            send(.healthkitFinished, payload: ["discarded": .bool(true)], sessionId: projection?.sessionId)
-            await teardown(discardingHealthKit: true)
+            send(.healthkitFinished, payload: ["discarded": .bool(true)], sessionId: sessionId)
+            await teardown(
+                discardingHealthKit: true,
+                preserveTerminalCommand: preserveTerminalCommand,
+                sessionId: sessionId
+            )
             return
         }
 
@@ -951,7 +1069,7 @@ public final class WorkoutManager: NSObject, ObservableObject {
             try await builder.endCollection(at: endDate)
             // Stamp the Sara session onto the workout's metadata so ingestion
             // can bind the two without guessing (§6.4).
-            if let sessionId = projection?.sessionId {
+            if let sessionId {
                 try? await builder.addMetadata(["com.avery.sara.session_id": sessionId])
             }
             let workout = try await builder.finishWorkout()
@@ -962,17 +1080,21 @@ public final class WorkoutManager: NSObject, ObservableObject {
                     workout?.statistics(for: HKQuantityType(.activeEnergyBurned))?
                         .sumQuantity()?.doubleValue(for: .kilocalorie()) ?? 0
                 ),
-            ], sessionId: projection?.sessionId)
+            ], sessionId: sessionId)
         } catch {
             // The strength record is already safe on the backend; losing the
             // HealthKit finalize costs HR/calories, not the workout.
             lastError = "Couldn't save Health data"
             log.error("finishWorkout failed: \(error.localizedDescription, privacy: .public)")
         }
-        await teardown(discardingHealthKit: false)
+        await teardown(discardingHealthKit: false, sessionId: sessionId)
     }
 
-    private func teardown(discardingHealthKit: Bool) async {
+    private func teardown(
+        discardingHealthKit: Bool,
+        preserveTerminalCommand: Bool = false,
+        sessionId explicitSessionId: String? = nil
+    ) async {
         mirrorRetryTask?.cancel()
         mirrorRetryTask = nil
         mirrorAttached = false
@@ -989,11 +1111,27 @@ public final class WorkoutManager: NSObject, ObservableObject {
         activeEnergy = 0
         stopElapsedTimer()
         stopRestTimer()
-        if discardingHealthKit, let sessionId = projection?.sessionId {
-            queue.clear(sessionId: sessionId)
+        if discardingHealthKit, let sessionId = explicitSessionId ?? projection?.sessionId {
+            queue.clear(
+                sessionId: sessionId,
+                preservingTerminalCommands: preserveTerminalCommand
+            )
         }
         recoveryStore.clear()
         refreshPendingCount()
+    }
+
+    /// A local summary makes Finish visibly terminal without waiting for the
+    /// phone. A later command acknowledgement replaces it with backend totals.
+    private func localSummary(from projection: WorkoutProjection?) -> WatchWorkoutSummary {
+        WatchWorkoutSummary(
+            workoutName: projection?.template.name,
+            durationMinutes: max(0, Int(elapsed / 60)),
+            totalSets: projection?.progress.completedSets,
+            totalVolume: projection?.progress.totalVolume,
+            heartRate: nil,
+            pendingProposalCount: projection?.pendingProposal == nil ? 0 : 1
+        )
     }
 
     // MARK: - Elapsed / metrics
@@ -1051,6 +1189,10 @@ public final class WorkoutManager: NSObject, ObservableObject {
     /// retried with a fresh id after a relaunch, which is exactly how you get
     /// two Sara sessions for one Apple workout.
     private func setPendingStart(_ value: WatchPendingStart?) {
+        if value == nil {
+            startResponseTimeoutTask?.cancel()
+            startResponseTimeoutTask = nil
+        }
         pendingStart = value
         var state = recoveryStore.load() ?? WatchWorkoutRecoveryState()
         state.pendingStart = value
@@ -1117,8 +1259,15 @@ extension WorkoutManager: WCSessionDelegate {
         Task { @MainActor in
             self.isReachable = session.isReachable
             self.startState.phoneLink = self.transport.linkPhase
-            // Coming back into range is the moment queued sets should land.
-            if session.isReachable { await self.flushQueue() }
+            guard session.isReachable else { return }
+            // The start is not a queued set command. It has its own durable
+            // idempotency key and must be replayed when the phone returns.
+            if let pending = self.pendingStart,
+               self.startState.saraSession == .requesting
+                || self.startState.saraSession == .failed {
+                self.submitStartRequest(pending)
+            }
+            await self.flushQueue()
         }
     }
 }

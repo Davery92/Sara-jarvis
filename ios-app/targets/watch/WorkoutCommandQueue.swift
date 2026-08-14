@@ -108,15 +108,21 @@ public final class WorkoutCommandQueue {
         persist()
     }
 
-    /// Clear everything for a session that has ended. Commands for a finished
-    /// workout can never usefully apply.
-    public func clear(sessionId: String? = nil) {
+    /// Clear obsolete work for an ended session. A terminal command can be
+    /// preserved until the phone acknowledges the explicit Finish/Abandon tap.
+    public func clear(
+        sessionId: String? = nil,
+        preservingTerminalCommands: Bool = false
+    ) {
         lock.lock(); defer { lock.unlock() }
-        if let sessionId {
-            entries.removeAll { $0.command.sessionId == sessionId }
-        } else {
-            entries.removeAll()
+        let shouldRemove: (Entry) -> Bool = { entry in
+            guard sessionId == nil || entry.command.sessionId == sessionId else { return false }
+            if preservingTerminalCommands {
+                return entry.command.kind != .complete && entry.command.kind != .abandon
+            }
+            return true
         }
+        entries.removeAll(where: shouldRemove)
         persist()
     }
 

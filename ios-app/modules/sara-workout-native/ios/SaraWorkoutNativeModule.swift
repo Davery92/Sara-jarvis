@@ -36,6 +36,11 @@ public class SaraWorkoutNativeModule: Module {
 
         Events("workoutMessage", "liveMetrics", "mirrorStateChanged", "coachingPlaybackChanged")
 
+        OnCreate {
+            guard #available(iOS 17.0, *) else { return }
+            self.typedCoordinator.bootstrap()
+        }
+
         /// Install the mirror handler.
         ///
         /// Must be called once, as early after authentication as possible: a

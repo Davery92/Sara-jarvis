@@ -376,10 +376,10 @@ async def get_recipe_food_details(recipe_id: str, db: Session) -> FoodDetailResp
     if not result:
         raise HTTPException(status_code=404, detail="Recipe not found")
 
-    servings = result.servings or 1
-
-    def per_serving(total):
-        return float(total) / servings if total is not None else 0.0
+    # result.calories/protein/carbs/fats are already stored PER SERVING
+    # (see estimate_recipe_nutrition) — do not divide by servings again here.
+    def as_float(total):
+        return float(total) if total is not None else 0.0
 
     return FoodDetailResponse(
         id=f"recipe-{result.id}",
@@ -392,10 +392,10 @@ async def get_recipe_food_details(recipe_id: str, db: Session) -> FoodDetailResp
                 serving_description="1 serving",
                 metric_serving_amount=1,
                 metric_serving_unit="serving",
-                calories=per_serving(result.calories),
-                protein=per_serving(result.protein),
-                carbs=per_serving(result.carbs),
-                fat=per_serving(result.fats),
+                calories=as_float(result.calories),
+                protein=as_float(result.protein),
+                carbs=as_float(result.carbs),
+                fat=as_float(result.fats),
             )
         ],
         is_custom=True,

@@ -101,11 +101,22 @@ function parseServingDescription(description: string): { amount: number; unit: s
   return null;
 }
 
+interface EditEntry {
+  id: string; // food_log row id (meal_log_id) for PUT
+  meal_type: string;
+  logged_at: string;
+  notes?: string;
+  // Raw canonical detailed_item for the single item being edited (see
+  // FoodLogCreate in backend/app/routes/fitness.py).
+  item: any;
+}
+
 interface Props {
   visible: boolean;
   onClose: () => void;
   onComplete: () => void;
   initialMealType?: string;
+  editEntry?: EditEntry | null;
 }
 
 export default function FoodLogModal({
@@ -113,6 +124,7 @@ export default function FoodLogModal({
   onClose,
   onComplete,
   initialMealType = 'snack',
+  editEntry = null,
 }: Props) {
   const [mealType, setMealType] = useState(initialMealType);
   const [searchQuery, setSearchQuery] = useState('');
@@ -164,6 +176,10 @@ export default function FoodLogModal({
   const [yesterdayFoods, setYesterdayFoods] = useState<any[]>([]);
   const [activeQuickTab, setActiveQuickTab] = useState<'recent' | 'yesterday'>('recent');
   const [loadingQuickFoods, setLoadingQuickFoods] = useState(true);
+
+  // Never let an edit save zeros: block submit until the stored detailed_item
+  // (which may be another client's minimal snapshot) is rehydrated with real macros.
+  const [isRehydrating, setIsRehydrating] = useState(false);
 
   useEffect(() => {
     if (initialMealType) {
@@ -272,6 +288,72 @@ export default function FoodLogModal({
     }
   };
 
+  // Brand foods often list only "1 serving" with no gram/oz option. When any
+  // real serving carries metric_serving_amount/unit, derive synthetic "g"/"oz"
+  // (and "ml" for liquids) options so gram-based logging stays possible without
+  // guessing at cross-unit math. Each synthetic option's macros are per-1-unit,
+  // so it slots into the same applyServing()/quantity-multiplier path as a real
+  // serving — quantity then just means "how many grams/oz".
+  const buildSyntheticWeightServings = (servings: FoodServing[]): FoodServing[] => {
+    const metricServing = servings.find((s) => s.metric_serving_amount && s.metric_serving_unit);
+    if (!metricServing) return [];
+
+    const unit = metricServing.metric_serving_unit!.toLowerCase().trim();
+    const amount = metricServing.metric_serving_amount!;
+    const cal = metricServing.calories || 0;
+    const protein = metricServing.protein || 0;
+    const carbs = metricServing.carbs || 0;
+    const fat = metricServing.fat || 0;
+
+    const synthetic: FoodServing[] = [];
+
+    if (WEIGHT_UNITS.includes(unit)) {
+      const amountInGrams = amount * (UNIT_CONVERSIONS[unit] || 1);
+      if (amountInGrams > 0) {
+        const perGram = {
+          calories: cal / amountInGrams,
+          protein: protein / amountInGrams,
+          carbs: carbs / amountInGrams,
+          fat: fat / amountInGrams,
+        };
+        synthetic.push({
+          serving_id: 'synthetic-g',
+          serving_description: 'g',
+          metric_serving_amount: 1,
+          metric_serving_unit: 'g',
+          ...perGram,
+        });
+        const gramsPerOz = UNIT_CONVERSIONS['oz'];
+        synthetic.push({
+          serving_id: 'synthetic-oz',
+          serving_description: 'oz',
+          metric_serving_amount: 1,
+          metric_serving_unit: 'oz',
+          calories: perGram.calories * gramsPerOz,
+          protein: perGram.protein * gramsPerOz,
+          carbs: perGram.carbs * gramsPerOz,
+          fat: perGram.fat * gramsPerOz,
+        });
+      }
+    } else if (VOLUME_UNITS.includes(unit)) {
+      const amountInMl = amount * (UNIT_CONVERSIONS[unit] || 1);
+      if (amountInMl > 0) {
+        synthetic.push({
+          serving_id: 'synthetic-ml',
+          serving_description: 'ml',
+          metric_serving_amount: 1,
+          metric_serving_unit: 'ml',
+          calories: cal / amountInMl,
+          protein: protein / amountInMl,
+          carbs: carbs / amountInMl,
+          fat: fat / amountInMl,
+        });
+      }
+    }
+
+    return synthetic;
+  };
+
   // Apply one of the food's real serving options. qty then means "number of
   // these servings", so the conversion machinery's qty-multiplier path yields
   // exactly serving.macros * qty — no cross-unit math, no silent failure.
@@ -288,6 +370,77 @@ export default function FoodLogModal({
     });
   };
 
+  // Rehydrate an edit target: fetch the food's servings (rebuilding the same
+  // synthetic g/oz/ml options handleSelectFood would offer), re-select the
+  // serving the entry was originally logged with, and recompute macros from it.
+  // If the food_id doesn't resolve, fall back to a manual per-unit base derived
+  // from the stored line macros so quantity edits still scale correctly.
+  const prefillForEdit = async (entry: EditEntry) => {
+    setIsRehydrating(true);
+    const item = entry.item || {};
+    const rawQty = typeof item.quantity === 'number' ? item.quantity : parseFloat(item.quantity);
+    const qty = rawQty && rawQty > 0 ? rawQty : 1;
+
+    setMealType(entry.meal_type || 'snack');
+    setLoggedDate(entry.logged_at ? new Date(entry.logged_at) : new Date());
+    setQuantity(String(qty));
+    setSearchQuery(item.name || '');
+    setSearchResults([]);
+    setSelectedFood({
+      id: item.food_id || '',
+      name: item.name || '',
+      serving_size: 1,
+      serving_unit: item.unit || 'serving',
+      is_custom: item.source !== 'fatsecret',
+      source: item.source || 'user',
+    });
+
+    if (item.food_id) {
+      try {
+        const detail = await fitnessService.getFoodDetails(item.food_id);
+        const realServings = (detail?.servings || []).filter(s => s && s.serving_description);
+        const synthetic = buildSyntheticWeightServings(realServings);
+        const allServings = [...realServings, ...synthetic];
+
+        let matchIdx = -1;
+        if (item.serving_id) matchIdx = allServings.findIndex(s => s.serving_id === item.serving_id);
+        if (matchIdx < 0 && item.serving_description) matchIdx = allServings.findIndex(s => s.serving_description === item.serving_description);
+        if (matchIdx < 0 && item.unit) matchIdx = allServings.findIndex(s => s.serving_description === item.unit);
+        if (matchIdx < 0 && allServings.length > 0) matchIdx = 0;
+
+        if (matchIdx >= 0) {
+          setAvailableServings(allServings);
+          applyServing(allServings[matchIdx], matchIdx);
+          setIsRehydrating(false);
+          return;
+        }
+      } catch (error) {
+        console.error('Failed to rehydrate food item for edit, falling back to manual:', error);
+      }
+    }
+
+    // Not resolvable - build a manual per-unit base from the stored line macros.
+    setAvailableServings([]);
+    setSelectedServingIdx(0);
+    setUnit(item.unit || 'serving');
+    setBaseNutrition({
+      calories: (item.calories || 0) / qty,
+      protein: (item.protein || 0) / qty,
+      carbs: (item.carbs || 0) / qty,
+      fats: (item.fats || 0) / qty,
+      perAmount: 1,
+      perUnit: item.unit || 'serving',
+    });
+    setIsRehydrating(false);
+  };
+
+  useEffect(() => {
+    if (visible && editEntry) {
+      prefillForEdit(editEntry);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, editEntry]);
+
   const handleSelectFood = async (food: FoodItem) => {
     setSelectedFood(food);
     setSearchQuery(food.name);
@@ -302,7 +455,8 @@ export default function FoodLogModal({
       const detail = await fitnessService.getFoodDetails(food.id);
       const servings = (detail?.servings || []).filter(s => s && s.serving_description);
       if (servings.length > 0) {
-        setAvailableServings(servings);
+        const synthetic = buildSyntheticWeightServings(servings);
+        setAvailableServings([...servings, ...synthetic]);
         applyServing(servings[0], 0);
         return;
       }
@@ -450,6 +604,10 @@ export default function FoodLogModal({
       return;
     }
 
+    if (isRehydrating) {
+      return;
+    }
+
     const qty = parseFloat(quantity);
     if (isNaN(qty) || qty <= 0) {
       Alert.alert('Error', 'Please enter a valid quantity');
@@ -482,14 +640,15 @@ export default function FoodLogModal({
           detailed_items: [{
             food_id: customFood.id,
             name: String(customFood.name || ''),
+            source: 'user',
+            serving_id: null,
+            serving_description: String(customFood.serving_unit || 'serving'),
             quantity: qty,
-            serving_unit: String(customFood.serving_unit || 'serving'),
+            unit: String(customFood.serving_unit || 'serving'),
             calories: customFood.calories,
             protein: customFood.protein,
             carbs: customFood.carbs,
             fats: customFood.fats,
-            source: 'custom',
-            is_custom: true,
           }],
           calories: customFood.calories,
           protein: customFood.protein,
@@ -511,15 +670,15 @@ export default function FoodLogModal({
           detailed_items: [{
             food_id: selectedFood.id,
             name: foodName,
+            source: selectedFood.source,
+            serving_id: availableServings[selectedServingIdx]?.serving_id ?? null,
+            serving_description: String(unit || selectedFood.serving_unit || ''),
             quantity: qty,
-            serving_unit: String(unit || 'serving'),
-            serving_description: String(selectedFood.serving_unit || ''),
+            unit: String(unit || 'serving'),
             calories: displayNutrition.calories || undefined,
             protein: displayNutrition.protein || undefined,
             carbs: displayNutrition.carbs || undefined,
             fats: displayNutrition.fats || undefined,
-            source: selectedFood.source,
-            is_custom: selectedFood.is_custom,
           }],
           calories: displayNutrition.calories || undefined,
           protein: displayNutrition.protein || undefined,
@@ -529,7 +688,11 @@ export default function FoodLogModal({
         };
 
         console.log('📤 Sending food log:', logData.meal_type, foodName, displayNutrition.calories, 'cal');
-        await fitnessService.createFoodLog(logData);
+        if (editEntry) {
+          await fitnessService.updateFoodLog(editEntry.id, logData);
+        } else {
+          await fitnessService.createFoodLog(logData);
+        }
       }
 
       onComplete();
@@ -574,7 +737,7 @@ export default function FoodLogModal({
       >
         <SafeAreaView edges={['top']} style={styles.safeArea}>
           <View style={styles.header}>
-            <Text style={styles.title}>Log Food</Text>
+            <Text style={styles.title}>{editEntry ? 'Edit Food' : 'Log Food'}</Text>
             <TouchableOpacity onPress={handleClose} style={styles.closeButtonContainer}>
               <Ionicons name="close" size={fontSizes.xxl} color={colors.textSecondary} />
             </TouchableOpacity>
@@ -860,6 +1023,7 @@ export default function FoodLogModal({
                             <Text style={styles.resultBrand}>{food.brand}</Text>
                           )}
                           <Text style={styles.resultDetails}>
+                            {food.serving_unit ? `Per ${food.serving_unit} • ` : ''}
                             {food.calories || '?'} cal • {food.protein || '?'}g protein •{' '}
                             {food.source === 'recipe'
                               ? '🍽️ Recipe'
@@ -1058,16 +1222,16 @@ export default function FoodLogModal({
           {/* Submit Button */}
           <View style={styles.buttonContainer}>
             <TouchableOpacity
-              style={[styles.submitButton, loading && styles.submitButtonDisabled]}
+              style={[styles.submitButton, (loading || isRehydrating) && styles.submitButtonDisabled]}
               onPress={handleSubmit}
-              disabled={loading}
+              disabled={loading || isRehydrating}
             >
-              {loading ? (
+              {loading || isRehydrating ? (
                 <ActivityIndicator color={colors.background} />
               ) : (
                 <>
                   <Ionicons name="checkmark-circle" size={20} color={colors.background} />
-                  <Text style={styles.submitButtonText}>Log Food</Text>
+                  <Text style={styles.submitButtonText}>{editEntry ? 'Update Food' : 'Log Food'}</Text>
                 </>
               )}
             </TouchableOpacity>
@@ -1124,7 +1288,11 @@ export default function FoodLogModal({
                 ? availableServings.map((s, index) => (
                     <Picker.Item
                       key={`serving-${index}`}
-                      label={`${s.serving_description}${s.calories != null ? ` — ${Math.round(s.calories)} cal` : ''}`}
+                      label={
+                        s.serving_id?.startsWith('synthetic-')
+                          ? s.serving_description
+                          : `${s.serving_description}${s.calories != null ? ` — ${Math.round(s.calories)} cal` : ''}`
+                      }
                       value={String(index)}
                     />
                   ))

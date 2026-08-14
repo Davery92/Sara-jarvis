@@ -69,6 +69,14 @@ class StandingOrderService:
         """
         from sqlalchemy import text
 
+        duplicate = self._find_duplicate_order(db, user_id, trigger_type, trigger_config, action_config)
+        if duplicate:
+            logger.info(
+                f"Standing order create skipped as duplicate of #{duplicate['id']} "
+                f"'{duplicate['description']}' (new description was '{description}')"
+            )
+            return duplicate
+
         result = db.execute(text("""
             INSERT INTO standing_order
             (user_id, description, trigger_type, trigger_config, action_type, action_config,
@@ -95,6 +103,55 @@ class StandingOrderService:
 
         logger.info(f"Standing order created: #{order_id} '{description}' (trigger={trigger_type}, action={action_type})")
         return {"id": order_id, "description": description, "status": "active"}
+
+    def _find_duplicate_order(
+        self, db, user_id: str, trigger_type: str, trigger_config: Dict, action_config: Dict,
+    ) -> Optional[Dict]:
+        """Look for an active order with the same entity_id + action service,
+        firing within 20 minutes of this one. Covers promote_pattern and the
+        attention-queue action path, since both funnel through create_order."""
+        from sqlalchemy import text
+
+        entity_id = (action_config or {}).get("entity_id")
+        service = (action_config or {}).get("service")
+        new_minutes = self._trigger_minutes(trigger_type, trigger_config)
+        if not entity_id or new_minutes is None:
+            return None
+
+        rows = db.execute(text("""
+            SELECT id, description, trigger_type, trigger_config, action_config
+            FROM standing_order
+            WHERE user_id = :user_id AND status = 'active'
+        """), {"user_id": user_id}).fetchall()
+
+        for row in rows:
+            existing_action = row.action_config if isinstance(row.action_config, dict) else json.loads(row.action_config or "{}")
+            if existing_action.get("entity_id") != entity_id or existing_action.get("service") != service:
+                continue
+            existing_trigger = row.trigger_config if isinstance(row.trigger_config, dict) else json.loads(row.trigger_config or "{}")
+            existing_minutes = self._trigger_minutes(row.trigger_type, existing_trigger)
+            if existing_minutes is None:
+                continue
+            if abs(existing_minutes - new_minutes) <= 20:
+                return {"id": row.id, "description": row.description, "status": "active"}
+        return None
+
+    @staticmethod
+    def _trigger_minutes(trigger_type: str, trigger_config: Dict) -> Optional[int]:
+        """Minutes-since-midnight for a time trigger, or None if not a time
+        trigger. Handles both trigger_config shapes in use: {"hour","minute"}
+        (chat-created orders) and {"time": "HH:MM"} (pattern-promoted orders)."""
+        if trigger_type != "time" or not trigger_config:
+            return None
+        try:
+            if "time" in trigger_config and isinstance(trigger_config["time"], str):
+                hh, mm = trigger_config["time"].split(":")[:2]
+                return int(hh) * 60 + int(mm)
+            if "hour" in trigger_config:
+                return int(trigger_config["hour"]) * 60 + int(trigger_config.get("minute", 0))
+        except (ValueError, TypeError, AttributeError):
+            return None
+        return None
 
     async def list_orders(self, db, user_id: str, status: str = "active") -> List[Dict]:
         """List standing orders for a user."""

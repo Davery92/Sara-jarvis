@@ -557,7 +557,11 @@ class WorkoutCommandService:
                     "That action was for a different workout.",
                     self.projection(db, session),
                 )
-            if expected_version is not None and int(expected_version) != session["version"]:
+            if (
+                kind not in ("complete", "abandon")
+                and expected_version is not None
+                and int(expected_version) != session["version"]
+            ):
                 raise WorkoutConflict(
                     "version_conflict",
                     "The workout changed on another device.",

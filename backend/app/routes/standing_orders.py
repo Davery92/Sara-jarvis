@@ -5,16 +5,55 @@ Exposes active standing orders for the dashboard.
 """
 
 import logging
+from datetime import timedelta
+from typing import Any, Dict, Optional
+
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
 from app.db.session import get_db
 from app.core.deps import get_current_user
+from app.core.timezone import now as local_now, to_local
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["standing-orders"])
+
+
+def compute_order_fires_at(db: Session, user_id: str, trigger_type: str, trigger_config: Optional[Dict[str, Any]]):
+    """Best-effort next-fire datetime (ET-aware) for a standing order's
+    trigger. Returns None for triggers without a deterministic schedule
+    (climate/presence/calendar/state/compound) — those aren't a "next fires
+    at" moment, they're conditional.
+
+    Shared by /api/standing-orders and /api/sara/brief's `ongoing` section so
+    the two never disagree about when something fires.
+    """
+    if not trigger_config:
+        return None
+    if trigger_type == "timer":
+        timer_title = trigger_config.get("timer_title")
+        if not timer_title:
+            return None
+        timer_row = db.execute(text("""
+            SELECT end_time FROM timer
+            WHERE user_id = :uid AND title = :title
+              AND is_active = true AND is_completed = false
+            ORDER BY created_at DESC LIMIT 1
+        """), {"uid": user_id, "title": timer_title}).fetchone()
+        return to_local(timer_row.end_time) if timer_row and timer_row.end_time else None
+    if trigger_type == "time":
+        hour = trigger_config.get("hour")
+        if hour is None:
+            return None
+        minute = trigger_config.get("minute", 0)
+        now_et = local_now()
+        candidate = now_et.replace(hour=int(hour), minute=int(minute), second=0, microsecond=0)
+        if candidate <= now_et:
+            candidate += timedelta(days=1)
+        return candidate
+    return None
 
 
 @router.get("/api/standing-orders")
@@ -62,20 +101,11 @@ async def list_standing_orders(
                 "created_at": r.created_at.isoformat() if r.created_at else None,
             }
 
-            # For timer-triggered orders, look up the associated timer's end time
-            if r.trigger_type == "timer" and tc:
-                timer_title = tc.get("timer_title")
-                if timer_title:
-                    timer_row = db.execute(text("""
-                        SELECT end_time FROM timer
-                        WHERE user_id = :uid AND title = :title
-                          AND is_active = true AND is_completed = false
-                        ORDER BY created_at DESC LIMIT 1
-                    """), {"uid": user_id, "title": timer_title}).fetchone()
-                    if timer_row and timer_row.end_time:
-                        order["fires_at"] = timer_row.end_time.isoformat()
+            fires_at = compute_order_fires_at(db, user_id, r.trigger_type, tc)
+            if fires_at:
+                order["fires_at"] = fires_at.isoformat()
 
-            # For time-triggered orders, show the scheduled time
+            # For time-triggered orders, also show the scheduled time
             if r.trigger_type == "time" and tc:
                 hour = tc.get("hour")
                 minute = tc.get("minute", 0)

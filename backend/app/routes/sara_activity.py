@@ -36,6 +36,60 @@ def _similarity(a: str, b: str) -> float:
     return SequenceMatcher(None, _normalize_journal_text(a), _normalize_journal_text(b)).ratio()
 
 
+def get_deduped_journal_entries(
+    db: Session, user_id: str, hours: int = 24, raw_limit: int = 20, max_results: int = None,
+):
+    """Recent first-person journal entries, deduped and stripped of internal
+    working documents. Shared by /api/sara/activity's journal branch and
+    /api/sara/brief's `journal` section so both read the exact same rule for
+    "what counts as a journal entry" instead of drifting apart.
+
+    theory_of_david and self_story are fold-forward internal substrate
+    documents, not chronological diary entries — excluded at the source.
+    """
+    since = datetime.now(timezone.utc) - timedelta(hours=hours)
+    entries = db.execute(text("""
+        SELECT id, content, emotional_state, entry_type,
+               observations, watching_for, created_at
+        FROM sara_journal
+        WHERE user_id = :uid AND created_at >= :since
+          AND entry_type NOT IN ('theory_of_david', 'self_story')
+        ORDER BY created_at DESC
+        LIMIT :lim
+    """), {"uid": user_id, "since": since, "lim": raw_limit}).fetchall()
+
+    deduped = []
+    last_kept_content = None
+    last_kept_ts = None
+    for entry in entries:
+        content = entry.content or ""
+        # Skip parse/LLM failure stubs — these are error messages persisted
+        # as journal content when the deliberation or consolidation LLM call
+        # failed to produce valid JSON.
+        if content.startswith(("Parse failed:", "Deliberation failed:", "Consolidation failed:")):
+            continue
+        entry_ts = entry.created_at
+        if last_kept_content and last_kept_ts and entry_ts:
+            within_window = (last_kept_ts - entry_ts) <= timedelta(hours=3)
+            if within_window and _similarity(content, last_kept_content) >= 0.8:
+                continue
+
+        deduped.append({
+            "id": str(entry.id),
+            "timestamp": entry.created_at.isoformat() if entry.created_at else None,
+            "entry_type": entry.entry_type,
+            "content": content,
+            "emotional_state": entry.emotional_state,
+            "observations": entry.observations,
+            "watching_for": entry.watching_for,
+        })
+        last_kept_content = content
+        last_kept_ts = entry_ts
+        if max_results and len(deduped) >= max_results:
+            break
+    return deduped
+
+
 @router.get("/api/sara/activity")
 async def get_activity(
     db: Session = Depends(get_db),
@@ -111,45 +165,20 @@ async def get_activity(
 
         # 3. Journal entries (inner monologue)
         if not activity_type or activity_type == "journal":
-            entries = db.execute(text("""
-                SELECT id, content, emotional_state, entry_type,
-                       observations, watching_for, created_at
-                FROM sara_journal
-                WHERE user_id = :uid AND created_at >= :since
-                ORDER BY created_at DESC
-                LIMIT :lim
-            """), {"uid": user_id, "since": since, "lim": limit}).fetchall()
-
-            last_kept_content = None
-            last_kept_ts = None
-            for entry in entries:
-                content = entry.content or ""
-                # Skip parse/LLM failure stubs — these are error messages
-                # persisted as journal content when the deliberation or
-                # consolidation LLM call failed to produce valid JSON.
-                if content.startswith(("Parse failed:", "Deliberation failed:", "Consolidation failed:")):
-                    continue
-                entry_ts = entry.created_at
-                if last_kept_content and last_kept_ts and entry_ts:
-                    within_window = (last_kept_ts - entry_ts) <= timedelta(hours=12)
-                    if within_window and _similarity(content, last_kept_content) >= 0.9:
-                        continue
-
+            for entry in get_deduped_journal_entries(db, user_id, hours=hours, raw_limit=limit):
                 activities.append({
-                    "id": str(entry.id),
-                    "timestamp": entry.created_at.isoformat() if entry.created_at else None,
+                    "id": entry["id"],
+                    "timestamp": entry["timestamp"],
                     "type": "journal",
-                    "summary": content[:200],
+                    "summary": (entry["content"] or "")[:200],
                     "details": {
-                        "emotional_state": entry.emotional_state,
-                        "entry_type": entry.entry_type,
-                        "observations": entry.observations,
-                        "watching_for": entry.watching_for,
-                        "full_content": content,
+                        "emotional_state": entry["emotional_state"],
+                        "entry_type": entry["entry_type"],
+                        "observations": entry["observations"],
+                        "watching_for": entry["watching_for"],
+                        "full_content": entry["content"],
                     }
                 })
-                last_kept_content = content
-                last_kept_ts = entry_ts
 
         # Sort by timestamp descending
         activities.sort(key=lambda x: x.get("timestamp", ""), reverse=True)

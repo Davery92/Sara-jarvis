@@ -102,17 +102,32 @@ def system_heartbeat(self) -> Dict[str, Any]:
             "message": f"Buffer check warning: {str(e)}"
         }
 
-    # Check consolidation status
+    # Check consolidation status.
+    #
+    # `consolidation:last_deep_run` is stamped by app.tasks.autonomy.run_consolidation
+    # (app.services.consolidation.consolidation_engine) — the job that actually
+    # turns episodes into knowledge, scheduled 2x/day (2PM/9PM) plus a nightly
+    # pass (~3:40AM). The longest gap between those is ~10.5h, so 16h gives
+    # headroom for the single retry (countdown=120s) before flagging real
+    # trouble.
+    #
+    # This is deliberately NOT `consolidation:last_run` (app.tasks.consolidation
+    # .run_consolidation) — that's a separate, event-driven raw-sensory-buffer
+    # compaction path fed by raw_buffer:* Redis streams with no current
+    # producer in this deployment, so it legitimately sits idle. A 5-minute
+    # staleness threshold on that key was flagging an idle-but-fine subsystem
+    # as "degraded" and describing it to David as "episodes aren't being
+    # turned into knowledge" — which was never true; that's this check's job.
     try:
         redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
         r = redis.from_url(redis_url)
 
-        last_run = r.get("consolidation:last_run")
+        last_run = r.get("consolidation:last_deep_run")
         if last_run:
             last_run_time = datetime.fromisoformat(last_run.decode())
             age = datetime.now(timezone.utc) - last_run_time
 
-            if age > timedelta(minutes=5):
+            if age > timedelta(hours=16):
                 health_report["checks"]["consolidation"] = {
                     "status": HealthStatus.WARNING,
                     "message": f"Consolidation last ran {age} ago"

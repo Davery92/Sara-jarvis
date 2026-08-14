@@ -25,24 +25,31 @@ async def get_attention_items(
     status: Optional[str] = Query(None),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    exclude_categories: Optional[str] = Query(None, description="Comma-separated categories to exclude, e.g. 'system'"),
     current_user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Get attention queue items."""
+    exclude_list = [c.strip() for c in exclude_categories.split(",") if c.strip()] if exclude_categories else None
     items = await attention_queue.list_items(
         db=db, user_id=str(current_user.id),
         status=status, limit=limit, offset=offset,
+        exclude_categories=exclude_list,
     )
     return {"items": items, "count": len(items)}
 
 
 @router.get("/attention/count")
 async def get_attention_count(
+    exclude_categories: Optional[str] = Query(None, description="Comma-separated categories to exclude, e.g. 'system'"),
     current_user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Get attention queue item counts by status."""
-    counts = await attention_queue.count_by_status(db=db, user_id=str(current_user.id))
+    exclude_list = [c.strip() for c in exclude_categories.split(",") if c.strip()] if exclude_categories else None
+    counts = await attention_queue.count_by_status(
+        db=db, user_id=str(current_user.id), exclude_categories=exclude_list,
+    )
     unread = counts.get("new", 0) + counts.get("sent", 0)
     return {"counts": counts, "unread": unread}
 

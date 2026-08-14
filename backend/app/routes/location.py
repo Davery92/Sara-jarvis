@@ -2,7 +2,7 @@
 
 import logging
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Optional, List
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -27,6 +27,7 @@ class LocationReport(BaseModel):
     longitude: float
     accuracy: Optional[float] = None
     source: str = "ios_significant"
+    observed_at: Optional[datetime] = None
 
 
 @router.post("/report")
@@ -37,7 +38,10 @@ async def report_location(
 ):
     """Periodic location report from the phone (significant-location-change tier)."""
     from app.services.location_service import process_report
-    result = await process_report(db, current_user.id, data.latitude, data.longitude, data.accuracy, data.source)
+    result = await process_report(
+        db, current_user.id, data.latitude, data.longitude, data.accuracy, data.source,
+        observed_at=data.observed_at,
+    )
     return {"ok": True, **result}
 
 

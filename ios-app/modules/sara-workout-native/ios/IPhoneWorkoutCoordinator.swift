@@ -47,6 +47,8 @@ final class IPhoneWorkoutCoordinator: NSObject {
     /// stretch cannot grow without limit.
     private var pendingMessages: [[String: Any]] = []
     private var pendingApplicationContext: [String: Any]?
+    private var pendingConnectivityPayloads: [[String: Any]] = []
+    private var isBootstrapped = false
     private static let maxPendingMessages = 64
 
     /// Key both sides wrap a workout envelope in, whichever WatchConnectivity
@@ -62,10 +64,10 @@ final class IPhoneWorkoutCoordinator: NSObject {
 
     // MARK: - Lifecycle
 
-    /// Install the mirror handler. Called once, as early as the app can manage.
-    func activate(emitter: @escaping Emitter) {
-        self.emit = emitter
-        flushPending()
+    /// Install native receivers before JavaScript and authentication are ready.
+    func bootstrap() {
+        guard !isBootstrapped else { return }
+        isBootstrapped = true
 
         connectivitySession?.delegate = self
         connectivitySession?.activate()
@@ -75,6 +77,13 @@ final class IPhoneWorkoutCoordinator: NSObject {
             self.log.notice("Received mirrored workout session from Watch")
             self.attach(session)
         }
+    }
+
+    /// Attach JavaScript to the already-running native receiver.
+    func activate(emitter: @escaping Emitter) {
+        self.emit = emitter
+        bootstrap()
+        flushPending()
     }
 
     private func attach(_ session: HKWorkoutSession) {
@@ -139,30 +148,56 @@ final class IPhoneWorkoutCoordinator: NSObject {
             return
         }
 
+        let payload: [String: Any] = [Self.envelopeKey: envelopeJSON]
         let session: HKWorkoutSession? = stateQueue.sync { mirroredSession }
         if let session, session.state == .running || session.state == .paused {
-            session.sendToRemoteWorkoutSession(data: data) { _, error in
-                if let error { completion(.failure(error)) } else { completion(.success(())) }
+            if requiresDelivery {
+                // A successful mirror handoff is not proof the Watch rendered
+                // the message. Fan durable state out through WatchConnectivity
+                // as well; duplicate projections and acknowledgements are safe.
+                session.sendToRemoteWorkoutSession(data: data) { [weak self] _, error in
+                    guard let error else { return }
+                    self?.log.error("Mirror reply failed: \(error.localizedDescription, privacy: .public)")
+                }
+                guard enqueueDurableConnectivityPayload(payload) else {
+                    completion(.failure(WorkoutMirrorError.watchConnectivityUnavailable))
+                    return
+                }
+                completion(.success(()))
+            } else {
+                session.sendToRemoteWorkoutSession(data: data) { _, error in
+                    if let error { completion(.failure(error)) } else { completion(.success(())) }
+                }
             }
             return
         }
 
-        guard let connectivitySession, connectivitySession.activationState == .activated else {
-            completion(.failure(WorkoutMirrorError.noMirroredSession))
+        guard let connectivitySession else {
+            completion(.failure(WorkoutMirrorError.watchConnectivityUnavailable))
             return
         }
-        let payload: [String: Any] = [Self.envelopeKey: envelopeJSON]
+
+        guard connectivitySession.activationState == .activated else {
+            guard requiresDelivery else {
+                completion(.failure(WorkoutMirrorError.watchUnreachable))
+                return
+            }
+            _ = enqueueDurableConnectivityPayload(payload)
+            completion(.success(()))
+            return
+        }
 
         if connectivitySession.isReachable {
             connectivitySession.sendMessage(payload, replyHandler: nil) { [weak self] error in
-                // Reachability can lapse between the check and the send. A
-                // projection must not be lost to that race, so it falls through
-                // to the durable queue — the completion has already resolved,
-                // because the caller's job (hand it to the transport) is done.
                 self?.log.error("Interactive reply failed: \(error.localizedDescription, privacy: .public)")
-                if requiresDelivery {
-                    connectivitySession.transferUserInfo(payload)
-                }
+            }
+            if requiresDelivery {
+                // State-bearing replies are cheap and idempotent. The durable
+                // copies close the reachability race even when sendMessage does
+                // not report a failure until after this function returns. Use
+                // application context here too: a Watch-originated request makes
+                // the session reachable, but transferUserInfo may still wait.
+                _ = enqueueDurableConnectivityPayload(payload)
             }
             completion(.success(()))
             return
@@ -172,8 +207,37 @@ final class IPhoneWorkoutCoordinator: NSObject {
             completion(.failure(WorkoutMirrorError.watchUnreachable))
             return
         }
-        connectivitySession.transferUserInfo(payload)
+        _ = enqueueDurableConnectivityPayload(payload)
         completion(.success(()))
+    }
+
+    @discardableResult
+    private func enqueueDurableConnectivityPayload(_ payload: [String: Any]) -> Bool {
+        guard let connectivitySession else { return false }
+        var context = payload
+        context["sentAt"] = Date().timeIntervalSince1970
+
+        guard connectivitySession.activationState == .activated else {
+            stateQueue.sync {
+                if pendingConnectivityPayloads.count >= Self.maxPendingMessages {
+                    pendingConnectivityPayloads.removeFirst()
+                }
+                pendingConnectivityPayloads.append(payload)
+                // Latest state wins. This is the same proven delivery channel
+                // the Watch catalog uses while transferUserInfo may be deferred.
+                pendingApplicationContext = context
+            }
+            connectivitySession.activate()
+            return true
+        }
+
+        do {
+            try connectivitySession.updateApplicationContext(context)
+        } catch {
+            log.error("Projection context failed: \(error.localizedDescription, privacy: .public)")
+        }
+        connectivitySession.transferUserInfo(payload)
+        return true
     }
 
     /// Persist the latest pre-workout state for delivery through WatchConnectivity.
@@ -217,6 +281,17 @@ final class IPhoneWorkoutCoordinator: NSObject {
         }
     }
 
+    private func flushPendingConnectivityPayloads(to session: WCSession) {
+        let payloads: [[String: Any]] = stateQueue.sync {
+            let copy = pendingConnectivityPayloads
+            pendingConnectivityPayloads.removeAll()
+            return copy
+        }
+        for payload in payloads {
+            session.transferUserInfo(payload)
+        }
+    }
+
     /// Current mirror state, for a JS layer that just woke up.
     func snapshot() -> [String: Any] {
         let session: HKWorkoutSession? = stateQueue.sync { mirroredSession }
@@ -226,6 +301,9 @@ final class IPhoneWorkoutCoordinator: NSObject {
             "activityType": session?.workoutConfiguration.activityType.rawValue as Any,
             "startDate": session?.startDate?.timeIntervalSince1970 as Any,
             "pendingMessages": stateQueue.sync { pendingMessages.count },
+            "pendingConnectivityPayloads": stateQueue.sync { pendingConnectivityPayloads.count },
+            "connectivityActivation": connectivitySession?.activationState.rawValue as Any,
+            "connectivityReachable": connectivitySession?.isReachable as Any,
         ]
     }
 
@@ -294,6 +372,7 @@ extension IPhoneWorkoutCoordinator: WCSessionDelegate {
             log.notice("WatchConnectivity activated: \(activationState.rawValue)")
             if activationState == .activated {
                 flushPendingApplicationContext(to: session)
+                flushPendingConnectivityPayloads(to: session)
             }
         }
     }

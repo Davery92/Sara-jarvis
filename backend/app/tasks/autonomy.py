@@ -12,7 +12,7 @@ Handles:
 
 import logging
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 
 def _run_async(coro):
@@ -341,6 +341,7 @@ def nightly_memory_consolidation(self):
             _memory_consolidation_async()
         )
         logger.info(f"Memory consolidation complete: {result}")
+        _mark_deep_consolidation_run()
         return result
     except Exception as e:
         is_deadlock = "deadlock" in str(e).lower()
@@ -1384,6 +1385,27 @@ async def _autonomy_retention_async():
     except Exception as e:
         results["episode_embeddings_error"] = str(e)
 
+    # followup_thread: app.services.thread_manager.expire_stale_threads()
+    # existed but was never called from anywhere, so threads past their
+    # follow_up_before sat at status='open' forever — surfacing weeks-old
+    # "Open threads" chips on the dashboard (e.g. a workout-day reminder
+    # thread from 3 weeks ago) since the brief's threads section only
+    # filters on status, not follow_up_before. Runs per-user since the
+    # function is scoped that way; cheap even with many users.
+    try:
+        from app.services.thread_manager import expire_stale_threads
+        async with async_session() as db:
+            user_ids = (await db.execute(text(
+                "SELECT DISTINCT user_id FROM followup_thread WHERE status = 'open'"
+            ))).scalars().all()
+            expired_total = 0
+            for uid in user_ids:
+                expired_total += await expire_stale_threads(uid, db)
+            await db.commit()
+            results["followup_threads_expired"] = expired_total
+    except Exception as e:
+        results["followup_threads_error"] = str(e)
+
     return results
 
 
@@ -1667,6 +1689,20 @@ def scan_ended_meetings(self):
 
 # ─── Consolidation Task (Phase 4: Deep Reflection) ──────────────
 
+def _mark_deep_consolidation_run():
+    """Stamp the heartbeat the `consolidation` health check reads (app.tasks
+    .health.system_heartbeat) — best-effort, a Redis hiccup here must never
+    fail an otherwise-successful consolidation run."""
+    try:
+        import os
+        import redis
+
+        r = redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"))
+        r.set("consolidation:last_deep_run", datetime.now(timezone.utc).isoformat())
+    except Exception as e:
+        logger.warning(f"Failed to stamp consolidation:last_deep_run: {e}")
+
+
 @celery_app.task(
     name="app.tasks.autonomy.run_consolidation",
     bind=True,
@@ -1682,6 +1718,7 @@ def run_consolidation(self):
         result = _run_async(
             _consolidation_async()
         )
+        _mark_deep_consolidation_run()
         return result
     except Exception as e:
         logger.error(f"Consolidation failed: {e}")

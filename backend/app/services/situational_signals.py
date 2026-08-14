@@ -12,20 +12,35 @@ import logging
 from typing import Optional
 
 from sqlalchemy import text
+from app.core.config import get_owner_id
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_USER_ID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
+DEFAULT_USER_ID = get_owner_id()
 
-_GUIDANCE = (
+_BASE_GUIDANCE = (
     "When schedule facts and current location/logging disagree, ask ONE specific "
     "question with a proposed action, not a generic check-in. E.g. office day + no "
     "breakfast logged by ~11 -> 'You usually eat before the gym — nothing logged, grab "
     "your bowl?' (SILENT if food is logged OR the scratchpad already covers it — the "
-    "scratchpad wins). Weekday ~11:30 + not at the office + no office arrival -> "
+    "scratchpad wins)."
+)
+
+_OFFICE_GUIDANCE = (
+    " Weekday ~11:30 + not at the office + no office arrival -> "
     "'You're not at the office — skip the 1:10 workout and switch to rest-day nutrition?' "
     "(one tap -> set_day_type(today,'rest')). One ask per topic per day; drop on ignore."
 )
+
+
+def _guidance_for_office_state(has_office: bool) -> str:
+    if has_office:
+        return _BASE_GUIDANCE + _OFFICE_GUIDANCE
+    return (
+        _BASE_GUIDANCE
+        + " No office location is configured. Treat office attendance as unknown and never infer "
+        "that David skipped, left, or failed to arrive at the office from location data."
+    )
 
 
 async def build_situational_block(user_id: str = DEFAULT_USER_ID) -> Optional[str]:
@@ -33,6 +48,21 @@ async def build_situational_block(user_id: str = DEFAULT_USER_ID) -> Optional[st
     from app.core.timezone import today as _today, now as _now
 
     lines = []
+    has_office = False
+    try:
+        db = SessionLocal()
+        try:
+            has_office = bool(db.execute(text("""
+                SELECT 1 FROM known_place
+                WHERE user_id = :uid AND is_active = TRUE
+                  AND lower(place_type) IN ('office', 'work')
+                LIMIT 1
+            """), {"uid": user_id}).scalar())
+        finally:
+            db.close()
+    except Exception as e:
+        logger.debug(f"office-place lookup failed: {e}")
+
     # Training-day status (sync helper).
     try:
         from app.services.training_day import is_training_day
@@ -68,4 +98,9 @@ async def build_situational_block(user_id: str = DEFAULT_USER_ID) -> Optional[st
 
     if not lines:
         return None
-    return "## Today's body & fuel (Phase 10D)\n" + " ".join(lines) + "\n" + _GUIDANCE
+    return (
+        "## Today's body & fuel (Phase 10D)\n"
+        + " ".join(lines)
+        + "\n"
+        + _guidance_for_office_state(has_office)
+    )
