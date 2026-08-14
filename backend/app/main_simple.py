@@ -60,43 +60,27 @@ from app.core.auth import (
     get_password_hash
 )
 
-# Import Daily Brief system
-try:
-    from app.services.daily_brief import daily_brief_service
-    DAILY_BRIEF_AVAILABLE = True
-except ImportError as e:
-    logging.warning(f"Daily Brief service not available: {e}")
-    DAILY_BRIEF_AVAILABLE = False
+# First-party modules — a broken/typo'd import here must crash startup, not
+# silently amputate the subsystem (B4, HYGIENE_AND_STALE_CONTEXT_FIX_PLAN
+# 2026-08-12). The try/except ImportError pattern is reserved for genuinely
+# optional third-party deps (pgvector, chromadb, sentence_transformers,
+# above) where the package may not be installed in every environment.
+from app.services.daily_brief import daily_brief_service
+DAILY_BRIEF_AVAILABLE = True
 
+from app.services.gtky_service import GTKYService
+GTKY_SERVICE_AVAILABLE = True
 
-# Import GTKY service
-try:
-    from app.services.gtky_service import GTKYService
-    GTKY_SERVICE_AVAILABLE = True
-except ImportError as e:
-    logging.warning(f"GTKY service not available: {e}")
-    GTKY_SERVICE_AVAILABLE = False
+from app.services.reflection_service import ReflectionService
+REFLECTION_SERVICE_AVAILABLE = True
 
-# Import reflection service
-try:
-    from app.services.reflection_service import ReflectionService
-    REFLECTION_SERVICE_AVAILABLE = True
-except ImportError as e:
-    logging.warning(f"Reflection service not available: {e}")
-    REFLECTION_SERVICE_AVAILABLE = False
-
-# Import chess command handler
-try:
-    from app.services.chess_command_handler import (
-        handle_chess_command,
-        get_chess_mode,
-        is_in_chess_game,
-        get_chess_context_prompt
-    )
-    CHESS_COMMANDS_AVAILABLE = True
-except ImportError as e:
-    logging.warning(f"Chess command handler not available: {e}")
-    CHESS_COMMANDS_AVAILABLE = False
+from app.services.chess_command_handler import (
+    handle_chess_command,
+    get_chess_mode,
+    is_in_chess_game,
+    get_chess_context_prompt
+)
+CHESS_COMMANDS_AVAILABLE = True
 
 # Configure structured logging
 import os as _os
@@ -2408,8 +2392,8 @@ Keep it brief and factual."""
     async def store_session_summary(self, user_id: str, summary: str, timestamp: datetime):
         """Store session summary in Redis with 24hr TTL"""
         try:
-            from redis.asyncio import Redis
-            redis = Redis.from_url(config.settings.redis_url, encoding="utf-8", decode_responses=True)
+            from app.core.redis import get_redis
+            redis = await get_redis()
 
             date_key = timestamp.strftime("%Y-%m-%d")
             session_time = timestamp.strftime("%H:%M")
@@ -2428,7 +2412,6 @@ Keep it brief and factual."""
             })
 
             await redis.set(redis_key, json.dumps(summaries), ex=86400)  # 24 hour TTL
-            await redis.close()
 
             logger.info(f"✅ Stored session summary in Redis for {date_key} at {session_time}")
 
@@ -2438,14 +2421,13 @@ Keep it brief and factual."""
     async def get_todays_context(self, user_id: str) -> str:
         """Retrieve today's session summaries from Redis"""
         try:
-            from redis.asyncio import Redis
-            redis = Redis.from_url(config.settings.redis_url, encoding="utf-8", decode_responses=True)
+            from app.core.redis import get_redis
+            redis = await get_redis()
 
             today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             redis_key = f"session_summary:{user_id}:{today}"
 
             summaries_json = await redis.get(redis_key)
-            await redis.close()
 
             if not summaries_json:
                 return ""
@@ -5922,24 +5904,20 @@ You are now in workspace mode. The user is working on their Windows PC with the 
                 async def _v_fetch_autonomous_notes():
                     """Fetch Sara's latest autonomous journal + session summary + show_david items."""
                     try:
-                        import redis.asyncio as _aioredis
-                        _redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+                        from app.core.redis import get_redis
                         parts = []
 
                         # 1. Recent autonomous session summary from Redis
-                        _r = await _aioredis.from_url(_redis_url, decode_responses=True)
-                        try:
-                            summary = await _r.get("sara:subconscious:autonomous_summary")
-                            if summary:
-                                import json as _json
-                                s = _json.loads(summary)
-                                parts.append(
-                                    f"Your last autonomous session: {s.get('turns', 0)} turns, "
-                                    f"{s.get('notes_created', 0)} notes created, "
-                                    f"ended: {s.get('end_reason', 'unknown')}"
-                                )
-                        finally:
-                            await _r.close()
+                        _r = await get_redis()
+                        summary = await _r.get("sara:subconscious:autonomous_summary")
+                        if summary:
+                            import json as _json
+                            s = _json.loads(summary)
+                            parts.append(
+                                f"Your last autonomous session: {s.get('turns', 0)} turns, "
+                                f"{s.get('notes_created', 0)} notes created, "
+                                f"ended: {s.get('end_reason', 'unknown')}"
+                            )
 
                         from app.db.session import get_async_session_factory
                         _async_session = get_async_session_factory()
@@ -7548,132 +7526,13 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
     except Exception as _doc_err:
         logger.warning(f"Document attachment extraction failed (non-critical): {_doc_err}")
 
-    # Signal activity state machine: David is actively chatting
-    try:
-        from app.services.activity_state_machine import activity_state_machine, ActivitySignal
-        activity_state_machine.process_signal(ActivitySignal(
-            signal_type="interaction",
-            source="chat_stream",
-            value="message",
-        ))
-    except Exception:
-        pass  # Non-critical
-
-    # Post an external_event to the ACS daemon's activity log so her next
-    # think turn sees that David is talking to chat-Sara right now. This is
-    # how the in-VM daemon stays aware of conversations she isn't part of.
-    try:
-        last_user_text = ""
-        for _m in reversed(request.messages):
-            if (_m.role if hasattr(_m, "role") else _m.get("role")) == "user":
-                _content = _m.content if hasattr(_m, "content") else _m.get("content")
-                last_user_text = _extract_text_content(_content) if _content else ""
-                break
-
-        if last_user_text and getattr(settings, "acs_daemon_token", ""):
-            import asyncio as _aio_acs
-            import httpx as _httpx_acs
-
-            async def _post_acs_event(text_excerpt: str) -> None:
-                try:
-                    async with _httpx_acs.AsyncClient(timeout=4.0) as _c:
-                        await _c.post(
-                            "http://127.0.0.1:8000/api/acs/v2/activity",
-                            json={
-                                "kind": "external_event",
-                                "summary": f"David in chat: {text_excerpt[:160]}",
-                                "body": text_excerpt[:2000],
-                                "tags": ["chat", "david"],
-                                "metadata": {"source": "chat_stream"},
-                            },
-                            headers={"X-Daemon-Token": settings.acs_daemon_token},
-                        )
-                except Exception:
-                    pass  # never let an event-post block chat
-
-            _aio_acs.ensure_future(_post_acs_event(last_user_text))
-    except Exception:
-        pass  # Non-critical
-
-    # SINGULAR_SARA_MASTER_PLAN §C4 — shadow-only kernel.engaged_turn() call.
-    # Fire-and-forget: never awaited inline, never touches the response
-    # David gets. Existed purely to prove the engaged-state context assembly
-    # is correct against real conversations before anything is asked to
-    # depend on it.
-    #
-    # Presence-latency follow-up (item 1.3 Session 1, 2026-07-31): that
-    # proof is done — SINGULAR_CONTEXT has been live for a while, and the
-    # inline kernel-context assembly a few hundred lines below IS the real
-    # path chat responses depend on now, not a hypothesis being validated.
-    # This shadow call built the exact same context_snapshot + intent_graph
-    # + memory_recall (default k=5, ALL_KINDS, including "fact") a second
-    # time, fully redundant, on every single real turn — confirmed via
-    # direct instrumentation: two independent embedding calls per turn
-    # (one from this shadow path's fact-kind recall, one from the real
-    # extended_signals' pkg lookup) racing for the same embedding host,
-    # each taking 1.5-5s instead of its ~20-100ms isolated baseline. Now
-    # gated to only run the comparison BEFORE a real cutover exists to
-    # compare against — once SINGULAR_CONTEXT is live, running this
-    # shadow path is pure waste, not validation.
-    try:
-        from app.core.feature_flags import Flag, is_enabled as _singular_flag_enabled
-        if _singular_flag_enabled(Flag.SINGULAR_KERNEL) and not _singular_flag_enabled(Flag.SINGULAR_CONTEXT):
-            import asyncio as _aio_kernel
-            from app.services.kernel import engaged_turn as _kernel_engaged_turn
-
-            async def _shadow_engaged_turn(preview: str, conv_id) -> None:
-                try:
-                    await _kernel_engaged_turn(
-                        str(current_user.id), conversation_id=conv_id, message_preview=preview,
-                    )
-                except Exception as _kernel_err:
-                    logger.debug(f"[kernel] shadow engaged_turn failed: {_kernel_err}")
-
-            _aio_kernel.ensure_future(_shadow_engaged_turn(last_user_text, request.conversation_id))
-    except Exception:
-        pass  # Non-critical — the shadow path must never affect real chat
-
-    # Update unified context snapshot: David is chatting now
-    try:
-        from app.services.context_writer import update_fields as _ctx_update, clear_changes as _ctx_clear
-        from app.services.unified_context import read_changes as _ctx_read_changes
-        import asyncio as _aio
-        _device = getattr(request, 'source', None) or 'unknown'
-        _aio.ensure_future(_ctx_update(
-            str(current_user.id), source="chat_stream",
-            last_chat_at=datetime.now(timezone.utc).isoformat(),
-            hours_since_last_chat=0.0,
-            has_chatted_today=True,
-            turn_count=len(request.messages),
-            active_conversation_id=request.conversation_id,
-            active_conversation_device=_device,
-        ))
-        # Update cross-device active session. A brand-new conversation has no id
-        # yet — skip it here; the post-stream update below stamps the real id.
-        if request.conversation_id:
-            from app.routes.session import update_active_session
-            _aio.ensure_future(update_active_session(
-                user_id=str(current_user.id),
-                conversation_id=request.conversation_id,
-                device=_device,
-                turn_count=len(request.messages),
-            ))
-    except Exception:
-        pass  # Non-critical
-
-    # Emit CHAT_MESSAGE_RECEIVED for working memory + salience subscribers
-    try:
-        from app.services.event_bus import emit_event, EventType as _EvtType
-        import asyncio as _aio2
-        _last_msg = _extract_text_content(next((m.content for m in reversed(request.messages) if m.role == "user"), ""))
-        _aio2.ensure_future(emit_event(
-            event_type=_EvtType.CHAT_MESSAGE_RECEIVED,
-            user_id=str(current_user.id),
-            payload={"topic": _last_msg[:100] if _last_msg else "", "turn_count": len(request.messages)},
-            source="chat_stream",
-        ))
-    except Exception:
-        pass  # Non-critical
+    # Fire every "a chat turn started" side effect (activity signal, ACS
+    # daemon activity post, shadow kernel engaged_turn, unified context
+    # snapshot, CHAT_MESSAGE_RECEIVED event) — all best-effort, none may
+    # add latency to the real response. B3: extracted from ~140 lines
+    # inline here into app/services/chat_turn_notify.py.
+    from app.services.chat_turn_notify import notify_turn_started
+    await notify_turn_started(current_user, request)
 
     # Presence-latency investigation (SARA_ALIVE §6 follow-up, 2026-07-31):
     # per-turn stage timestamps so a slow turn's *shape* is visible (which
@@ -7691,169 +7550,19 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
 
     async def generate_events():
         try:
-            # CHESS COMMAND INTERCEPTION
-            # Check if this is a /chess command or we're in chess mode
-            if CHESS_COMMANDS_AVAILABLE and request.messages:
-                _chess_raw = next((m.content for m in reversed(request.messages) if m.role == "user"), None)
-                last_user_message = _extract_text_content(_chess_raw) if _chess_raw else None
-                if last_user_message:
-                    chess_result = await handle_chess_command(current_user.id, last_user_message, db)
-                    if chess_result is not None:
-                        # Chess command was handled - return direct response
-                        response_content, is_streaming = chess_result
-                        logger.info(f"♟️ Chess command handled: {last_user_message[:50]}...")
-                        # Use text_chunk format for iOS compatibility
-                        yield f"data: {json.dumps({'type': 'text_chunk', 'data': {'content': response_content}})}\n\n"
-                        yield f"data: {json.dumps({'type': 'final_response', 'data': {'content': response_content, 'citations': [], 'timestamp': datetime.now(timezone.utc).isoformat(), 'conversation_id': request.conversation_id}})}\n\n"
-                        yield f"data: {json.dumps({'type': 'done'})}\n\n"
-                        return
-
-            # CODE MODE INTERCEPTION
-            # If the conversation has an active code session, or the user typed a
-            # /code command, route the whole turn to the coding harness on the VM.
-            try:
-                from app.services import code_mode
-                _code_raw = next((m.content for m in reversed(request.messages) if m.role == "user"), None)
-                _code_msg = _extract_text_content(_code_raw) if _code_raw else None
-                if _code_msg:
-                    _is_code_cmd = _code_msg.strip().lower().startswith("/code")
-                    # Plain (non-/code) messages only route to code mode when an
-                    # active session is bound to THIS conversation. Without a
-                    # conversation_id we must NOT fall back to the user's most
-                    # recent session — a session created with a NULL/absent
-                    # conversation_id would otherwise become a global catch-all
-                    # that hijacks every normal chat turn. Explicit `/code`
-                    # commands still follow the user across conversations (their
-                    # fallback lives in code_mode.run_code_message).
-                    _code_session = (
-                        code_mode.get_active_session(db, current_user.id, request.conversation_id)
-                        if request.conversation_id else None
-                    )
-                    if _code_session or _is_code_cmd:
-                        logger.info(f"💻 Code mode handling: {_code_msg[:60]}...")
-                        _code_queue = asyncio.Queue()
-                        _code_task = asyncio.create_task(
-                            code_mode.run_code_message(
-                                db, current_user.id, request.conversation_id, _code_msg, _code_queue
-                            )
-                        )
-                        while True:
-                            _ev = await _code_queue.get()
-                            if _ev is None:
-                                break
-                            yield f"data: {json.dumps(_ev)}\n\n"
-                        await _code_task  # surface any late exception / ensure cleanup
-                        return
-            except Exception as _code_e:
-                logger.error(f"Code mode interception error: {_code_e}", exc_info=True)
-
-            # HOST INSPECTION INTERCEPTION
-            # "/host ..." commands, or natural "check out <server>" when the named
-            # target resolves to a registered machine. Lets David say
-            # "Sara, check out gpu-box" and get specs back.
-            try:
-                from app.services import host_command_handler
-                _host_raw = next((m.content for m in reversed(request.messages) if m.role == "user"), None)
-                _host_msg = _extract_text_content(_host_raw) if _host_raw else None
-                if _host_msg:
-                    _host_cmd = host_command_handler.parse_host_command(_host_msg, db, current_user.id)
-                    if _host_cmd:
-                        logger.info(f"🖥️ Host command handling: {_host_cmd.get('action')} {_host_cmd.get('name','')}")
-                        async for _hev in host_command_handler.run_host_command(db, current_user.id, _host_cmd):
-                            yield f"data: {json.dumps(_hev)}\n\n"
-                        return
-            except Exception as _host_e:
-                logger.error(f"Host interception error: {_host_e}", exc_info=True)
-
-            # WEB INVESTIGATION INTERCEPTION
-            # "go check out getcara.ai and tell me about it" → drop it into the
-            # autonomous background agent, which opens the site in a real browser
-            # (Playwright), explores it, and reports back with a detailed writeup
-            # + screenshots. NOT an inline web_search answer.
-            try:
-                from app.services import web_investigation
-                _wi_raw = next((m.content for m in reversed(request.messages) if m.role == "user"), None)
-                _wi_msg = _extract_text_content(_wi_raw) if _wi_raw else None
-                if _wi_msg:
-                    _wi_urls = web_investigation.detect(_wi_msg, db, current_user.id)
-                    if _wi_urls:
-                        logger.info(f"🌐 Web investigation dispatch: {_wi_urls}")
-                        _wi_res = await web_investigation.dispatch_investigation(db, current_user.id, _wi_urls)
-                        if _wi_res.get("status") == "error":
-                            _wi_ack = f"I couldn't start that investigation: {_wi_res.get('error')}"
-                        elif len(_wi_urls) == 1:
-                            _wi_ack = (
-                                f"🔍 On it — I'll open **{_wi_urls[0]}** in a real browser, dig through "
-                                f"the site, and send you a detailed report (with screenshots where "
-                                f"useful) when I'm done. You can keep chatting meanwhile; watch the "
-                                f"tasks panel for live progress."
-                            )
-                        else:
-                            _wi_list = "\n".join(f"- **{u}**" for u in _wi_urls)
-                            _wi_ack = (
-                                f"🔍 On it — I'm opening each of these in a real browser and will "
-                                f"send you a single combined report comparing them all (with "
-                                f"screenshots where useful):\n"
-                                f"{_wi_list}\n\n"
-                                f"You can keep chatting meanwhile; watch the tasks panel for live progress."
-                            )
-                        yield f"data: {json.dumps({'type': 'text_chunk', 'data': {'content': _wi_ack, 'full_content': _wi_ack}})}\n\n"
-                        yield f"data: {json.dumps({'type': 'final_response', 'data': {'content': _wi_ack, 'citations': [], 'timestamp': datetime.now(timezone.utc).isoformat(), 'conversation_id': request.conversation_id}})}\n\n"
-                        yield f"data: {json.dumps({'type': 'done'})}\n\n"
-                        return
-            except Exception as _wi_e:
-                logger.error(f"Web investigation interception error: {_wi_e}", exc_info=True)
-
-            # UI COMMAND INTERCEPTION
-            # Jarvis-style: "bring up my morning brief" / "show me my nutrition" /
-            # "open my note about the server build" → ui_command SSE event that
-            # the webapp renders as an overlay, plus a one-line ack. No LLM call.
-            try:
-                from app.services import ui_intent
-                _ui_raw = next((m.content for m in reversed(request.messages) if m.role == "user"), None)
-                _ui_msg = _extract_text_content(_ui_raw) if _ui_raw else None
-                if _ui_msg:
-                    # iOS clients can navigate to any app screen; the webapp only
-                    # handles overlay surfaces, so screen intents fall through to
-                    # the LLM there instead of acking with no visible effect.
-                    _ui_is_ios = str(request.source or "").startswith("ios")
-                    _ui = ui_intent.parse_ui_intent(_ui_msg, allow_screens=_ui_is_ios)
-                    if _ui:
-                        _ui_res = ui_intent.resolve_ui_intent(db, current_user.id, _ui)
-                        logger.info(f"🪟 UI command: {_ui.get('overlay') or _ui.get('screen')} (query={_ui.get('query')})")
-                        if _ui_res.get("command"):
-                            yield f"data: {json.dumps({'type': 'ui_command', 'data': _ui_res['command']})}\n\n"
-                        _ui_ack = _ui_res["ack"]
-                        yield f"data: {json.dumps({'type': 'text_chunk', 'data': {'content': _ui_ack, 'full_content': _ui_ack}})}\n\n"
-                        yield f"data: {json.dumps({'type': 'final_response', 'data': {'content': _ui_ack, 'citations': [], 'timestamp': datetime.now(timezone.utc).isoformat(), 'conversation_id': request.conversation_id}})}\n\n"
-                        yield f"data: {json.dumps({'type': 'done'})}\n\n"
-                        return
-            except Exception as _ui_e:
-                logger.error(f"UI command interception error: {_ui_e}", exc_info=True)
-
-            # INTEREST MODEL CHAT VERBS (SARA_MIND_V2 §3.2)
-            # "stop pinging me about X" / "I care about Y now" → immediate
-            # edit + confirmation, no LLM round trip. Same interception
-            # shape as ui_intent/web_investigation above.
-            try:
-                from app.core.feature_flags import Flag as _IMFlag, is_enabled as _im_enabled
-                if _im_enabled(_IMFlag.MINDV2_BRIEF):
-                    from app.services import interest_model as _im
-                    _im_raw = next((m.content for m in reversed(request.messages) if m.role == "user"), None)
-                    _im_msg = _extract_text_content(_im_raw) if _im_raw else None
-                    if _im_msg:
-                        from app.db.session import get_async_session_factory as _get_imf
-                        _imf = _get_imf()
-                        async with _imf() as _imdb:
-                            _im_ack = await _im.apply_chat_verb(_imdb, str(current_user.id), _im_msg)
-                        if _im_ack:
-                            logger.info(f"🎯 Interest model chat verb applied: {_im_msg[:60]}")
-                            yield f"data: {json.dumps({'type': 'text_chunk', 'data': {'content': _im_ack, 'full_content': _im_ack}})}\n\n"
-                            yield f"data: {json.dumps({'type': 'final_response', 'data': {'content': _im_ack, 'citations': [], 'timestamp': datetime.now(timezone.utc).isoformat(), 'conversation_id': request.conversation_id}})}\n\n"
-                            yield f"data: {json.dumps({'type': 'done'})}\n\n"
-                            return
-            except Exception as _im_e:
-                logger.error(f"Interest model chat verb interception error: {_im_e}", exc_info=True)
+            # EARLY INTERCEPT CHAIN — chess, code mode, host inspection, web
+            # investigation, UI commands, interest-model chat verbs. Each
+            # skips the normal LLM turn entirely on a match. B3: extracted
+            # from ~260 lines inline here into app/services/chat_intercepts.py
+            # (multi-step task detection stays inline below — it depends on
+            # state intent classification computes, further down).
+            from app.services.chat_intercepts import build_context, dispatch_intercepts
+            _intercept_ctx = build_context(request, current_user, db)
+            _intercepted = await dispatch_intercepts(_intercept_ctx)
+            if _intercepted is not None:
+                async for _chunk in _intercepted:
+                    yield _chunk
+                return
 
             # Create an async queue for events
             event_queue = asyncio.Queue()
