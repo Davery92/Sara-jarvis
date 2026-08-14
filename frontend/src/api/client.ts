@@ -328,7 +328,7 @@ class ApiClient {
         // Handle authentication errors
         if (error.response?.status === 401) {
           // Don't automatically redirect - let components handle auth state
-          // The main App-interactive.tsx handles its own authentication flow
+          // The main App.tsx handles its own authentication flow
           console.warn('API request failed with 401 - authentication may be required')
         }
         return Promise.reject(error)

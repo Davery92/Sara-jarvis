@@ -70,7 +70,7 @@ python3 backend/add_note_connections.py # Add knowledge garden connections table
 ### System Design
 Sara is a personal AI hub with human-like memory built as a full-stack application:
 
-- **Frontend**: React SPA using App-interactive.tsx (not App.tsx) as main entry point
+- **Frontend**: React SPA using App.tsx as main entry point
 - **Backend**: FastAPI server with main_simple.py as primary implementation
 - **Database**: PostgreSQL 16 with pgvector extension for semantic search
 - **Storage**: MinIO for document uploads
@@ -138,7 +138,7 @@ docker compose ps
 ### Key Components
 
 #### Frontend Architecture
-- **Main App**: `App-interactive.tsx` is the actual app entry point (not App.tsx)
+- **Main App**: `App.tsx` is the app entry point
 - **Routing**: View-based state management, not React Router
 - **State**: Local React state with some TanStack Query for server state
 - **Styling**: Tailwind CSS with dark theme
@@ -187,7 +187,7 @@ docker compose ps
 - Frontend dev server: http://<dev-host>:3000
 - Backend API: http://<dev-host>:8000
 - Database: <dev-host>:5432
-- The frontend uses App-interactive.tsx for local development
+- The frontend uses App.tsx for local development
 
 #### Production Configuration
 - Domain: sara.avery.cloud
@@ -216,12 +216,11 @@ Tools are registered in `app/tools/registry.py`:
 - **Calendar**: List events, create events
 
 ### Important Gotchas
-1. **App Entry Point**: main.tsx imports App-interactive.tsx, not App.tsx
-2. **API Base URL**: Uses dynamic configuration based on environment
-3. **Database**: Requires PostgreSQL with pgvector extension enabled
-4. **CORS**: Must include both development and production origins
-5. **Embeddings**: Uses bge-m3 model via OpenAI-compatible endpoint
-6. **Authentication**: Uses HTTP-only cookies, not localStorage tokens
+1. **API Base URL**: Uses dynamic configuration based on environment
+2. **Database**: Requires PostgreSQL with pgvector extension enabled
+3. **CORS**: Must include both development and production origins
+4. **Embeddings**: Uses bge-m3 model via OpenAI-compatible endpoint
+5. **Authentication**: Uses HTTP-only cookies, not localStorage tokens
 
 ### Knowledge Garden Components
 
@@ -253,7 +252,7 @@ Tools are registered in `app/tools/registry.py`:
 10. **Settings Panel**: Knowledge garden management and statistics
 
 ### File Structure Highlights
-- `frontend/src/App-interactive.tsx`: Main application component
+- `frontend/src/App.tsx`: Main application component
 - `backend/app/main_simple.py`: Primary FastAPI server implementation
 - `backend/app/tools/`: AI tool implementations
 - `docker-compose.yml`: Complete service orchestration
