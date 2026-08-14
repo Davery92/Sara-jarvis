@@ -11,9 +11,10 @@ from datetime import datetime, timedelta, time
 from typing import Dict, List, Any, Optional
 from sqlalchemy.orm import Session
 import pytz
-import redis.asyncio as aioredis
+from app.core.redis import get_redis
 
 from app.core.timezone import now as local_now
+from app.core.config import get_owner_id
 
 from app.db.session import SessionLocal
 from app.models.episode import Episode
@@ -27,7 +28,7 @@ logger = logging.getLogger(__name__)
 DREAM_LOCK_KEY = "sara:dream_scheduler_lock"
 DREAM_LOCK_TTL = 120  # seconds
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
-SOLO_USER_ID = os.getenv("SOLO_USER_ID", "64f37c56-85cb-4590-8de9-adfc17d343ed")
+SOLO_USER_ID = get_owner_id()
 
 RELEASE_SCRIPT = """
 if redis.call("get", KEYS[1]) == ARGV[1] then
@@ -52,13 +53,12 @@ class NightlyDreamService:
     async def start_dream_scheduler(self):
         """Start the nightly dream scheduler with Redis distributed lock."""
         self._owner_token = str(_uuid.uuid4())
-        r = await aioredis.from_url(REDIS_URL, decode_responses=True)
+        r = await get_redis()
 
         # Acquire lock
         acquired = await r.set(DREAM_LOCK_KEY, self._owner_token, nx=True, ex=DREAM_LOCK_TTL)
         if not acquired:
             logger.warning("Dream scheduler already running (lock held by another instance)")
-            await r.close()
             return
 
         logger.info("Starting nightly dream scheduler (lock acquired)...")
@@ -94,7 +94,6 @@ class NightlyDreamService:
                 await r.eval(RELEASE_SCRIPT, 1, DREAM_LOCK_KEY, self._owner_token)
             except Exception:
                 pass
-            await r.close()
     
     def _should_dream(self, eastern_now: datetime) -> bool:
         """Check if we should run the dream sequence (Eastern time)"""
@@ -736,8 +735,14 @@ class NightlyDreamService:
             contradictions = result.get("contradictions", [])
             stats = result.get("stats", {})
 
-            # Run stale knowledge decay as maintenance
+            # Run stale knowledge decay as maintenance, then propagate the
+            # new Neo4j confidence values to the pgvector shadow — decay
+            # only ever touches Neo4j, and query_semantic()'s merge fallback
+            # reads the shadow, so without this the shadow keeps serving
+            # pre-decay confidence indefinitely.
             personal_kg.decay_stale_knowledge(days_threshold=90)
+            reconcile_stats = personal_kg.reconcile_embedding_confidence()
+            logger.info(f"   PKG: shadow reconcile — {reconcile_stats}")
 
             logger.info(f"   🧠 PKG: Extracted {stats.get('total', 0)} facts "
                        f"(types: {stats.get('by_type', {})}), "

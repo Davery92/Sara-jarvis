@@ -34,7 +34,10 @@ For each fact, classify as one of these types:
 - **Routine**: A recurring activity (activity, typical_time, day_of_week, frequency: daily/weekly/monthly/occasional)
 - **Goal**: Something David is working toward (description, status: active/completed/abandoned, target_date, progress_notes)
 - **Interest**: A topic David cares about (topic, depth: surface/moderate/deep, related_topics)
-- **Health**: A health/wellness metric (metric, current_value, trend: improving/stable/declining, notes)
+- **Health**: A health/wellness metric (metric, current_value, trend: improving/stable/declining, notes).
+  Distinguish a *state* (currently sick, tired, sore, in pain — true today, not true in general) from an
+  *attribute* (resting heart rate baseline, chronically underdeveloped chest — true indefinitely). Only
+  extract a state if David describes it as current; don't infer it's still true days later.
 - **Place**: A significant location (name, type: home/work/gym/restaurant/other, address, significance)
 - **Fact**: Anything else important (subject, predicate, object, category)
 
@@ -347,9 +350,8 @@ class PKGExtractor:
         # Rate-limit check: only run weekly
         redis_conn = None
         try:
-            import redis.asyncio as aioredis
-            redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
-            redis_conn = await aioredis.from_url(redis_url, decode_responses=True)
+            from app.core.redis import get_redis
+            redis_conn = await get_redis()
             last_run = await redis_conn.get(BEHAVIORAL_EXTRACTION_KEY)
             if last_run:
                 last_dt = datetime.fromisoformat(last_run)

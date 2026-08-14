@@ -43,6 +43,27 @@ BASE_PROPERTIES = [
 # showing up in chat prompts.
 PKG_CLOSED_STATUSES = ["completed", "abandoned", "archived", "stale"]
 
+# Health metric/value text that describes a *current state* rather than a
+# stable attribute (resting HR baseline, "chest historically underdeveloped").
+# States are transient by nature — worth surfacing for two weeks, not
+# forever — while attributes stay true indefinitely. Shared between the
+# extractor (mints these with an expires_at) and the context provider (falls
+# back to this heuristic for older nodes minted before that existed).
+TRANSIENT_HEALTH_KEYWORDS = (
+    "sick", "ill", "flu", "cold", "fever", "cough", "sore throat",
+    "tired", "fatigue", "fatigued", "exhausted", "dizzy", "dizziness",
+    "sore", "ache", "aching", "pain", "nausea", "nauseous", "nauseated",
+    "recovering", "recovery from", "symptom", "injury", "injured",
+    "migraine", "headache", "under the weather",
+)
+
+
+def is_transient_health_text(metric: str, value: str) -> bool:
+    """True when a Health metric/value pair reads as a temporary state
+    (mints with a 14-day TTL) rather than a durable attribute."""
+    text = f"{metric or ''} {value or ''}".lower()
+    return any(kw in text for kw in TRANSIENT_HEALTH_KEYWORDS)
+
 # Cypher snippet — exclude closed facts and past-target_date goals.
 # Use as: ... AND (n.superseded_by IS NULL) AND ({PKG_FRESH_FILTER})
 # `target_date` is a stored ISO-8601 string, so a lex comparison against
@@ -238,6 +259,31 @@ class PersonalKnowledgeGraph:
         """
         if not self._ensure_driver():
             return None
+
+        if fact_type == "Health":
+            metric = (properties.get("metric") or "").strip()
+            value = (properties.get("current_value") or "").strip()
+            # health_consolidation/runner.py mints a different Health
+            # sub-schema (kind="weekly_summary" + headline, no
+            # metric/current_value) — only reject nodes with NEITHER the
+            # metric/value pair NOR a recognized alternate schema marker.
+            has_alt_schema = bool(properties.get("kind"))
+            if not has_alt_schema and (not metric or not value):
+                logger.debug(
+                    f"PKG: rejecting Health upsert with missing metric/value "
+                    f"(metric={metric!r}, value={value!r}) — extractor garbage"
+                )
+                return None
+            # Transient states (sick/tired/sore/...) mint with a 14-day TTL
+            # instead of as durable facts; re-set on every confirmation so
+            # a still-ongoing state keeps its rolling window. Durable
+            # attributes (resting HR baseline, "chest historically
+            # underdeveloped") are untouched.
+            if metric and value and "expires_at" not in properties and is_transient_health_text(metric, value):
+                properties = {
+                    **properties,
+                    "expires_at": (datetime.now(timezone.utc) + timedelta(days=14)).isoformat(),
+                }
 
         label = f"PKG_{fact_type}"
         if label not in PKG_LABELS:
@@ -537,6 +583,83 @@ class PersonalKnowledgeGraph:
                               f"(not confirmed in {days_threshold} days)")
         except Exception as e:
             logger.error(f"PKG: decay_stale_knowledge failed: {e}")
+
+    def reconcile_embedding_confidence(self, dry_run: bool = False) -> Dict[str, int]:
+        """Sync pkg_embedding.confidence from Neo4j (source of truth) and
+        delete shadow rows whose Neo4j node is gone or superseded.
+
+        decay_stale_knowledge() and promote_corroborated_facts() only ever
+        touch Neo4j — nothing propagates confidence to the pgvector shadow
+        the merge fallback in query_semantic() reads. Left alone, shadow
+        confidence only ever drifts upward (each embed write sets whatever
+        confidence was current at write time and never revisits it), which
+        is how a Feb 23 fact decayed to 0.18 in Neo4j while still sitting at
+        0.99 in the shadow six months later. Call this after any nightly
+        decay/promotion pass; a full reconcile is cheap (low hundreds of
+        rows) so there's no need to track only the changed pkg_ids.
+
+        `dry_run=True` computes counts without writing — used by the
+        one-off cleanup script to preview before `--apply`.
+        """
+        if not self._ensure_driver():
+            return {"updated": 0, "deleted": 0}
+
+        from sqlalchemy import text as sa_text
+        from app.db.base import engine as sync_engine
+
+        with sync_engine.connect() as conn:
+            shadow_confidence = {
+                r[0]: r[1] for r in conn.execute(
+                    sa_text("SELECT pkg_id, confidence FROM pkg_embedding WHERE pkg_id IS NOT NULL")
+                ).fetchall()
+            }
+        shadow_ids = list(shadow_confidence.keys())
+        if not shadow_ids:
+            return {"updated": 0, "deleted": 0}
+
+        live: Dict[str, float] = {}
+        try:
+            with self.driver.session() as neo_session:
+                result = neo_session.run(f"""
+                    MATCH (n)
+                    WHERE ({" OR ".join(f"n:{label}" for label in PKG_LABELS)})
+                    AND n.pkg_id IN $pkg_ids
+                    AND n.superseded_by IS NULL
+                    RETURN n.pkg_id as pkg_id, n.confidence as confidence
+                """, {"pkg_ids": shadow_ids})
+                for record in result:
+                    if record["confidence"] is not None:
+                        live[record["pkg_id"]] = float(record["confidence"])
+        except Exception as e:
+            logger.warning(f"PKG: reconcile_embedding_confidence Neo4j fetch failed: {e}")
+            return {"updated": 0, "deleted": 0}
+
+        gone = [pid for pid in shadow_ids if pid not in live]
+        to_update = {
+            pid: conf for pid, conf in live.items()
+            if shadow_confidence.get(pid) != conf
+        }
+
+        if dry_run:
+            return {"updated": len(to_update), "deleted": len(gone)}
+
+        updated = 0
+        with sync_engine.begin() as conn:
+            for pkg_id, confidence in to_update.items():
+                conn.execute(sa_text("""
+                    UPDATE pkg_embedding SET confidence = :confidence WHERE pkg_id = :pkg_id
+                """), {"pkg_id": pkg_id, "confidence": confidence})
+                updated += 1
+            deleted = 0
+            if gone:
+                result = conn.execute(sa_text(
+                    "DELETE FROM pkg_embedding WHERE pkg_id = ANY(:pkg_ids)"
+                ), {"pkg_ids": gone})
+                deleted = result.rowcount or 0
+
+        if updated or deleted:
+            logger.info(f"PKG: reconciled shadow confidence ({updated} updated, {deleted} deleted)")
+        return {"updated": updated, "deleted": deleted}
 
     def promote_corroborated_facts(
         self, min_confirmations_for_inferred: int = 3, min_confirmations_for_confirmed: int = 8
@@ -977,17 +1100,10 @@ class PersonalKnowledgeGraph:
                 logger.error(f"PKG: _fetch_recent_episodes (sync) failed: {e}")
                 return []
 
-        # Otherwise create our own sync session
+        # Otherwise create our own sync session, off the app-wide pooled engine
         try:
-            # Keep psycopg3 driver — bare postgresql:// defaults to psycopg2,
-            # which isn't installed. Use project-wide psycopg3 suffix.
-            database_url = _to_psycopg3_url(os.getenv("DATABASE_URL", ""))
-
-            from sqlalchemy import create_engine
-            engine = create_engine(database_url, echo=False)
-            from sqlalchemy.orm import sessionmaker as sync_sessionmaker
-            Session = sync_sessionmaker(bind=engine)
-            session = Session()
+            from app.db.base import SessionLocal
+            session = SessionLocal()
             try:
                 rows = session.execute(sa_text("""
                     SELECT content FROM episode
@@ -999,7 +1115,6 @@ class PersonalKnowledgeGraph:
                 return [row.content for row in rows if row.content]
             finally:
                 session.close()
-                engine.dispose()
         except Exception as e:
             logger.error(f"PKG: _fetch_recent_episodes (own session) failed: {e}")
             return []
@@ -1204,19 +1319,15 @@ class PersonalKnowledgeGraph:
             except Exception as e:
                 logger.warning(f"PKG: retire_node Neo4j delete failed for {pkg_id}: {e}")
         try:
-            from sqlalchemy import text as sa_text, create_engine
-            from sqlalchemy.orm import sessionmaker as sync_sm
-            database_url = _to_psycopg3_url(os.getenv("DATABASE_URL", ""))
-            engine = create_engine(database_url, echo=False)
-            Session = sync_sm(bind=engine)
-            session = Session()
+            from sqlalchemy import text as sa_text
+            from app.db.base import SessionLocal
+            session = SessionLocal()
             try:
                 session.execute(sa_text("DELETE FROM pkg_embedding WHERE pkg_id = :pid"),
                                 {"pid": pkg_id})
                 session.commit()
             finally:
                 session.close()
-                engine.dispose()
         except Exception as e:
             logger.warning(f"PKG: retire_node embedding delete failed for {pkg_id}: {e}")
         if ok_graph:
@@ -1505,13 +1616,8 @@ class PersonalKnowledgeGraph:
                 return []
         else:
             try:
-                database_url = _to_psycopg3_url(os.getenv("DATABASE_URL", ""))
-
-                from sqlalchemy import create_engine
-                from sqlalchemy.orm import sessionmaker as sync_sessionmaker
-                engine = create_engine(database_url, echo=False)
-                Session = sync_sessionmaker(bind=engine)
-                session = Session()
+                from app.db.base import SessionLocal
+                session = SessionLocal()
                 try:
                     rows = session.execute(sa_text("""
                         SELECT content FROM episode
@@ -1524,7 +1630,6 @@ class PersonalKnowledgeGraph:
                     user_texts = [row.content for row in rows if row.content]
                 finally:
                     session.close()
-                    engine.dispose()
             except Exception as e:
                 logger.error(f"PKG: identify_knowledge_gaps — own session failed: {e}")
                 return []
@@ -1721,11 +1826,9 @@ class PersonalKnowledgeGraph:
                 embedding = await svc.generate_embedding(content_text, capability="embedding_cognition")  # fire-and-forget write, never blocks presence
                 if not embedding:
                     return
-                from sqlalchemy import text as sa_text, create_engine
-                from sqlalchemy.orm import sessionmaker as sync_sm
-                engine = create_engine(_to_psycopg3_url(os.getenv("DATABASE_URL", "")), echo=False)
-                Session = sync_sm(bind=engine)
-                session = Session()
+                from sqlalchemy import text as sa_text
+                from app.db.base import SessionLocal
+                session = SessionLocal()
                 try:
                     session.execute(sa_text("""
                         INSERT INTO pkg_embedding (pkg_id, node_type, content_text, embedding, confidence, updated_at)
@@ -1740,7 +1843,6 @@ class PersonalKnowledgeGraph:
                     session.commit()
                 finally:
                     session.close()
-                    engine.dispose()
             except Exception as e:
                 _PKG_EMBEDDING_TRACKER.note(f"life_fact:{type(e).__name__}")
                 logger.debug(f"PKG: life_fact embedding write failed: {e}")
@@ -1883,13 +1985,8 @@ class PersonalKnowledgeGraph:
                 return False
 
             from sqlalchemy import text as sa_text
-            database_url = _to_psycopg3_url(os.getenv("DATABASE_URL", ""))
-
-            from sqlalchemy import create_engine
-            from sqlalchemy.orm import sessionmaker as sync_sm
-            engine = create_engine(database_url, echo=False)
-            Session = sync_sm(bind=engine)
-            session = Session()
+            from app.db.base import SessionLocal
+            session = SessionLocal()
             try:
                 # Upsert: insert or update
                 session.execute(sa_text("""
@@ -1913,7 +2010,6 @@ class PersonalKnowledgeGraph:
                 return True
             finally:
                 session.close()
-                engine.dispose()
         except Exception as e:
             _PKG_EMBEDDING_TRACKER.note(f"exception:{type(e).__name__}")
             logger.warning(f"PKG: store_embedding_async failed for {pkg_id}: {e}")
@@ -1947,23 +2043,16 @@ class PersonalKnowledgeGraph:
                 return []
 
             from sqlalchemy import text as sa_text
-            database_url = os.getenv("DATABASE_URL", "")
-            if "asyncpg" in database_url:
-                database_url = database_url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
-            elif not database_url.startswith("postgresql+psycopg://"):
-                # Ensure we use psycopg (v3) driver, not psycopg2
-                database_url = database_url.replace("postgresql://", "postgresql+psycopg://", 1)
+            from app.db.base import SessionLocal
 
-            # Presence-latency follow-up (item 1.3 Session 1, 2026-07-31):
-            # timed separately below to confirm/refute the suspicion that
-            # create_engine() fresh on every single call (no pooling reuse)
-            # is the real cost here, before touching it.
-            from sqlalchemy import create_engine
-            from sqlalchemy.orm import sessionmaker as sync_sm
+            # Presence-latency follow-up (item 1.3 Session 1, 2026-07-31)
+            # found create_engine() fresh on every call was a real cost;
+            # B1 (2026-08-12) fixed it by reusing the app-wide pooled
+            # engine (app.db.base.engine) instead of one-off engines —
+            # session acquisition below is now a pool checkout, not a
+            # fresh TCP+auth handshake.
             _t_pre_engine = _t.monotonic()
-            engine = create_engine(database_url, echo=False)
-            Session = sync_sm(bind=engine)
-            session = Session()
+            session = SessionLocal()
             _t_engine_ready = _t.monotonic()
             try:
                 rows = session.execute(sa_text("""
@@ -1986,7 +2075,6 @@ class PersonalKnowledgeGraph:
                 ]
             finally:
                 session.close()
-                engine.dispose()
             _t_query_done = _t.monotonic()
             logger.info(
                 f"⏱️ [pkg-query-semantic-timing] embedding={_t_embed-_t0:.2f}s "
@@ -2009,6 +2097,16 @@ class PersonalKnowledgeGraph:
 
             _t_neo4j_start = _t.monotonic()
             pkg_ids = [m["pkg_id"] for m in matches]
+            # Tracks whether the Neo4j fetch itself succeeded, as opposed to
+            # succeeding but excluding a given pkg_id on purpose (closed
+            # status, past target_date, low confidence). Only the former
+            # justifies falling back to the shadow's raw content_text below —
+            # a node Neo4j deliberately filtered out must stay filtered out,
+            # not leak back in through the pgvector shadow (the root cause of
+            # the "still recovering" bug: decayed Neo4j confidence correctly
+            # excluded a node, but the merge fallback re-injected it from the
+            # shadow, which never received the decay).
+            neo4j_fetch_ok = False
             try:
                 with self.driver.session() as neo_session:
                     params = {"pkg_ids": pkg_ids, **_pkg_fresh_params()}
@@ -2028,25 +2126,40 @@ class PersonalKnowledgeGraph:
                             **{k: v for k, v in record["props"].items()
                                if k not in ("dedup_key",)}
                         }
+                neo4j_fetch_ok = True
             except Exception as e:
                 logger.warning(f"PKG: Neo4j fetch for semantic results failed: {e}")
                 neo4j_data = {}
             logger.info(f"⏱️ [pkg-query-semantic-timing] neo4j_fetch={_t.monotonic()-_t_neo4j_start:.2f}s")
 
-            # Merge: prefer Neo4j data, fall back to content_text
+            # Merge: prefer Neo4j data, fall back to content_text only when
+            # Neo4j itself was unreachable.
+            recent_cutoff = datetime.now(timezone.utc) - timedelta(days=14)
             results = []
             for m in matches:
                 if m["pkg_id"] in neo4j_data:
                     entry = neo4j_data[m["pkg_id"]]
+                    confidence = entry.get("confidence")
+                    last_confirmed = entry.get("last_confirmed")
+                    if confidence is not None and confidence < 0.4:
+                        is_recent = False
+                        if last_confirmed:
+                            try:
+                                is_recent = datetime.fromisoformat(last_confirmed) >= recent_cutoff
+                            except (ValueError, TypeError):
+                                is_recent = False
+                        if not is_recent:
+                            continue  # decayed and stale — drop, no shadow fallback
                     entry["similarity"] = m["similarity"]
                     results.append(entry)
-                else:
-                    # Node may have been superseded since embedding was stored
+                elif not neo4j_fetch_ok:
+                    # Neo4j unreachable — shadow content is the best we have.
                     results.append({
                         "type": m["node_type"],
                         "content_text": m["content_text"],
                         "similarity": m["similarity"],
                     })
+                # else: Neo4j answered and excluded this node on purpose — skip it.
 
             return results
         except Exception as e:
@@ -2115,28 +2228,15 @@ class PersonalKnowledgeGraph:
             return 0
 
         # Check which pkg_ids already have embeddings.
-        # Keep the psycopg3 driver in the URL — bare ``postgresql://`` defaults
-        # to psycopg2, which isn't installed. Previously this silently broke
-        # every backfill attempt with ModuleNotFoundError.
         from sqlalchemy import text as sa_text
-        database_url = os.getenv("DATABASE_URL", "")
-        if "asyncpg" in database_url:
-            database_url = database_url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
-        elif not database_url.startswith("postgresql+psycopg://"):
-            database_url = database_url.replace("postgresql://", "postgresql+psycopg://", 1)
-
-        from sqlalchemy import create_engine
-        from sqlalchemy.orm import sessionmaker as sync_sm
-        engine = create_engine(database_url, echo=False)
-        Session = sync_sm(bind=engine)
-        session = Session()
+        from app.db.base import SessionLocal
+        session = SessionLocal()
         try:
             existing = set()
             rows = session.execute(sa_text("SELECT pkg_id FROM pkg_embedding")).fetchall()
             existing = {r.pkg_id for r in rows}
         finally:
             session.close()
-            engine.dispose()
 
         count = 0
         for node in nodes:
@@ -2169,8 +2269,8 @@ def get_memory_health() -> Dict[str, Any]:
     Used by /debug/retrieval-funnel so a stuck embedding pipeline shows up
     at a glance instead of silently eroding retrieval quality.
     """
-    from sqlalchemy import create_engine, text as sa_text
-    from sqlalchemy.orm import sessionmaker as _sm
+    from sqlalchemy import text as sa_text
+    from app.db.base import SessionLocal
 
     health: Dict[str, Any] = {
         "episode_embedding_gaps": None,
@@ -2179,16 +2279,8 @@ def get_memory_health() -> Dict[str, Any]:
         "pkg_active_total": None,
     }
 
-    database_url = os.getenv("DATABASE_URL", "")
-    if "asyncpg" in database_url:
-        database_url = database_url.replace("postgresql+asyncpg://", "postgresql+psycopg://")
-    elif not database_url.startswith("postgresql+psycopg://"):
-        database_url = database_url.replace("postgresql://", "postgresql+psycopg://", 1)
-
     try:
-        engine = create_engine(database_url, echo=False)
-        Session = _sm(bind=engine)
-        session = Session()
+        session = SessionLocal()
         try:
             row = session.execute(sa_text(
                 "SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE embedding IS NULL) AS gaps FROM episode"
@@ -2203,7 +2295,6 @@ def get_memory_health() -> Dict[str, Any]:
             pkg_embedding_count = int(row.total or 0) if row else 0
         finally:
             session.close()
-            engine.dispose()
     except Exception as exc:
         health["error"] = f"pg_query_failed:{type(exc).__name__}"
         return health

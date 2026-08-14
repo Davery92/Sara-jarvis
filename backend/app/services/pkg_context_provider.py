@@ -7,11 +7,52 @@ Produces natural language summaries rather than database dumps.
 
 import logging
 import re
+from datetime import datetime, timezone
 from typing import List, Optional
 
-from app.services.personal_knowledge_graph import personal_kg
+from app.services.personal_knowledge_graph import personal_kg, is_transient_health_text
 
 logger = logging.getLogger(__name__)
+
+# Facts older than this get an explicit age suffix so the model can discount
+# them ("noted 6 months ago") instead of reading a stale snapshot as current.
+_STALE_AGE_THRESHOLD_DAYS = 21
+# Transient Health states (sick/tired/sore/...) drop out of context entirely
+# once they're this old without being reconfirmed.
+_TRANSIENT_HEALTH_TTL_DAYS = 14
+
+
+def _parse_iso(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _age_days(iso_value: Optional[str]) -> Optional[int]:
+    dt = _parse_iso(iso_value)
+    if dt is None:
+        return None
+    return (datetime.now(timezone.utc) - dt).days
+
+
+def _age_suffix(last_confirmed: Optional[str]) -> str:
+    """' (noted 2026-02-23 — ~6 months ago, may be stale)' past the
+    threshold; '' otherwise. Lets the model discount what it can see."""
+    dt = _parse_iso(last_confirmed)
+    if dt is None:
+        return ""
+    age_days = (datetime.now(timezone.utc) - dt).days
+    if age_days < _STALE_AGE_THRESHOLD_DAYS:
+        return ""
+    months = age_days // 30
+    age_str = f"~{months} month{'s' if months != 1 else ''} ago" if months >= 1 else f"~{age_days} days ago"
+    return f" (noted {dt.date().isoformat()} — {age_str}, may be stale)"
 
 
 class PKGContextProvider:
@@ -35,7 +76,8 @@ class PKGContextProvider:
             try:
                 facts = await personal_kg.query_semantic(message, limit=8, min_similarity=0.35)
             except Exception as e:
-                logger.debug(f"PKG semantic search failed, falling back to text: {e}")
+                from app.core.swallow import swallow
+                await swallow(logger, "pkg_context_provider.query_semantic", e)
 
             # Fall back to text-based search if semantic returned nothing
             if not facts:
@@ -184,7 +226,7 @@ class PKGContextProvider:
         elif fact_type == "Goal":
             desc = props.get("description", "")
             status = props.get("status", "active")
-            return f"David's goal: {desc} (status: {status})"
+            return f"David's goal: {desc} (status: {status})" + _age_suffix(props.get("last_confirmed"))
         elif fact_type == "Interest":
             topic = props.get("topic", "")
             depth = props.get("depth", "")
@@ -193,7 +235,20 @@ class PKGContextProvider:
             metric = props.get("metric", "")
             value = props.get("current_value", "")
             trend = props.get("trend", "")
-            return f"David's {metric}: {value}" + (f" (trending {trend})" if trend else "")
+            last_confirmed = props.get("last_confirmed")
+            expires_at = props.get("expires_at")
+            transient = bool(expires_at) or is_transient_health_text(metric, value)
+            if transient:
+                if expires_at:
+                    expiry_dt = _parse_iso(expires_at)
+                    stale = expiry_dt is not None and datetime.now(timezone.utc) > expiry_dt
+                else:
+                    age = _age_days(last_confirmed)
+                    stale = age is not None and age > _TRANSIENT_HEALTH_TTL_DAYS
+                if stale:
+                    return ""  # transient state, unconfirmed past its TTL — drop entirely
+            sentence = f"David's {metric}: {value}" + (f" (trending {trend})" if trend else "")
+            return sentence + _age_suffix(last_confirmed)
         elif fact_type == "Place":
             name = props.get("name", "")
             ptype = props.get("type", "")
@@ -202,7 +257,7 @@ class PKGContextProvider:
             subj = props.get("subject", "David")
             pred = props.get("predicate", "")
             obj = props.get("object", "")
-            return f"{subj} {pred} {obj}"
+            return f"{subj} {pred} {obj}" + _age_suffix(props.get("last_confirmed"))
         return ""
 
 

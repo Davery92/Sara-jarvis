@@ -89,3 +89,73 @@ class TestUpsertFactConfirmation:
         create_calls = [c for c in mock_session.run.call_args_list if "CREATE" in c.args[0]]
         assert len(create_calls) == 1
         assert create_calls[0].args[1]["confidence"] == 0.6
+
+
+class TestUpsertFactHealthGuard:
+    """A5: refuse Health upserts that are neither a metric/value observation
+    nor the health_consolidation weekly_summary sub-schema (kind + headline,
+    no metric/current_value) — verified live 2026-08-12 that the naive
+    'metric IS NULL AND current_value IS NULL' garbage filter would have
+    caught 15 real weekly summaries and zero actual garbage."""
+
+    def test_missing_metric_and_value_rejected(self, pkg):
+        with patch.object(pkg, "_ensure_driver", return_value=True):
+            result = pkg.upsert_fact("Health", {"notes": "something"}, confidence=0.9)
+        assert result is None
+
+    def test_metric_without_value_rejected(self, pkg):
+        with patch.object(pkg, "_ensure_driver", return_value=True):
+            result = pkg.upsert_fact("Health", {"metric": "resting heart rate"}, confidence=0.9)
+        assert result is None
+
+    def test_weekly_summary_kind_bypasses_metric_value_requirement(self, pkg):
+        mock_session = _mock_session_with_match(None)
+        mock_driver = MagicMock()
+        mock_driver.session.return_value = mock_session
+
+        with patch.object(pkg, "_ensure_driver", return_value=True), \
+             patch.object(pkg, "driver", mock_driver), \
+             patch.object(pkg, "_schedule_embedding"):
+            result = pkg.upsert_fact(
+                "Health",
+                {"kind": "weekly_summary", "headline": "Recovery dipped hard Saturday"},
+                confidence=0.95,
+            )
+
+        assert result is not None
+
+    def test_transient_health_state_gets_expires_at(self, pkg):
+        mock_session = _mock_session_with_match(None)
+        mock_driver = MagicMock()
+        mock_driver.session.return_value = mock_session
+
+        with patch.object(pkg, "_ensure_driver", return_value=True), \
+             patch.object(pkg, "driver", mock_driver), \
+             patch.object(pkg, "_schedule_embedding"):
+            pkg.upsert_fact(
+                "Health",
+                {"metric": "flu-like symptoms", "current_value": "present"},
+                confidence=0.8,
+            )
+
+        create_calls = [c for c in mock_session.run.call_args_list if "CREATE" in c.args[0]]
+        assert len(create_calls) == 1
+        assert "expires_at" in create_calls[0].args[1]
+
+    def test_durable_health_attribute_gets_no_expires_at(self, pkg):
+        mock_session = _mock_session_with_match(None)
+        mock_driver = MagicMock()
+        mock_driver.session.return_value = mock_session
+
+        with patch.object(pkg, "_ensure_driver", return_value=True), \
+             patch.object(pkg, "driver", mock_driver), \
+             patch.object(pkg, "_schedule_embedding"):
+            pkg.upsert_fact(
+                "Health",
+                {"metric": "resting heart rate", "current_value": "58 bpm"},
+                confidence=0.8,
+            )
+
+        create_calls = [c for c in mock_session.run.call_args_list if "CREATE" in c.args[0]]
+        assert len(create_calls) == 1
+        assert "expires_at" not in create_calls[0].args[1]
