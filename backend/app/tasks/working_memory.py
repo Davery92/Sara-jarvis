@@ -102,10 +102,9 @@ def refresh_context(self) -> Dict[str, Any]:
     Refresh working memory with latest consolidated context.
     Runs every 60 seconds.
     """
-    import redis
+    from app.core.redis import get_redis_sync_bytes
 
-    redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
-    r = redis.from_url(redis_url)
+    r = get_redis_sync_bytes()
     solo_user_id = os.getenv("SOLO_USER_ID", "")
 
     result = {
@@ -155,10 +154,9 @@ def cleanup_expired(self) -> Dict[str, Any]:
     Clean up expired entries from raw buffer and working memory.
     Enforces TTL on all ephemeral data.
     """
-    import redis
+    from app.core.redis import get_redis_sync_bytes
 
-    redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
-    r = redis.from_url(redis_url)
+    r = get_redis_sync_bytes()
 
     result = {
         "timestamp": local_now().isoformat(),

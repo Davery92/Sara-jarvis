@@ -9,7 +9,6 @@ the alert (or asking "what's that about?") resolves to diagnostics_explain.
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any, Dict
 from app.core.config import get_owner_id
 
@@ -20,9 +19,8 @@ _COOLDOWN_SECONDS = 24 * 3600  # 1/day/task
 
 
 def _sync_redis():
-    import redis as _redis
-    return _redis.Redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"),
-                                 decode_responses=True)
+    from app.core.redis import get_redis_sync
+    return get_redis_sync()
 
 
 def _cooldown_ok(task_name: str) -> bool:

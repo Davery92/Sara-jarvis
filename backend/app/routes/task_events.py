@@ -9,12 +9,10 @@ Two event types:
 import asyncio
 import json
 import logging
-import os
 from typing import AsyncGenerator, Dict, Set
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
-import redis
 
 from app.core.deps import get_current_user
 from app.db.session import get_db
@@ -23,8 +21,6 @@ from sqlalchemy.orm import Session
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/task-events", tags=["Task Events"])
-
-REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
 
 # Track which users have active SSE connections
 # Maps user_id -> set of client connection IDs
@@ -46,10 +42,10 @@ def publish_task_event(user_id: str, event_dict: dict) -> bool:
     Returns True if published successfully.
     """
     try:
-        r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+        from app.core.redis import get_redis_sync
+        r = get_redis_sync()
         channel = _channel_for(user_id)
         r.publish(channel, json.dumps(event_dict))
-        r.close()
         logger.info(f"Published task event to {channel}: type={event_dict.get('type')}")
         return True
     except Exception as e:
@@ -87,7 +83,8 @@ async def stream_task_events(
         r = None
         pubsub = None
         try:
-            r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+            from app.core.redis import get_redis_sync
+            r = get_redis_sync()
             pubsub = r.pubsub()
             pubsub.subscribe(_channel_for(user_id))
         except Exception as e:
@@ -121,8 +118,6 @@ async def stream_task_events(
                     del _sse_connections[user_id]
             if pubsub:
                 pubsub.close()
-            if r:
-                r.close()
             logger.info(f"SSE task-events client disconnected: user={user_id} conn={conn_id}")
 
     return StreamingResponse(

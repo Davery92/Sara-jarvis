@@ -28,6 +28,7 @@ def system_heartbeat(self) -> Dict[str, Any]:
     Verifies all critical services are responsive.
     """
     import redis
+    from app.core.redis import get_redis_sync_bytes
     import os
     from sqlalchemy import create_engine, text
 
@@ -39,8 +40,7 @@ def system_heartbeat(self) -> Dict[str, Any]:
 
     # Check Redis
     try:
-        redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
-        r = redis.from_url(redis_url)
+        r = get_redis_sync_bytes()
         r.ping()
         health_report["checks"]["redis"] = {
             "status": HealthStatus.HEALTHY,
@@ -73,8 +73,7 @@ def system_heartbeat(self) -> Dict[str, Any]:
 
     # Check raw buffer status (once implemented)
     try:
-        redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
-        r = redis.from_url(redis_url)
+        r = get_redis_sync_bytes()
 
         # Check if raw buffer streams exist and have recent data
         streams = ["raw_buffer:text", "raw_buffer:screen", "raw_buffer:notification"]
@@ -119,8 +118,7 @@ def system_heartbeat(self) -> Dict[str, Any]:
     # as "degraded" and describing it to David as "episodes aren't being
     # turned into knowledge" — which was never true; that's this check's job.
     try:
-        redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
-        r = redis.from_url(redis_url)
+        r = get_redis_sync_bytes()
 
         last_run = r.get("consolidation:last_deep_run")
         if last_run:
@@ -150,8 +148,7 @@ def system_heartbeat(self) -> Dict[str, Any]:
 
     # Check working memory
     try:
-        redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
-        r = redis.from_url(redis_url)
+        r = get_redis_sync_bytes()
         solo_user_id = os.getenv("SOLO_USER_ID", "")
 
         if solo_user_id:
@@ -211,8 +208,7 @@ def system_heartbeat(self) -> Dict[str, Any]:
 
     # Check Celery queue depths
     try:
-        redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
-        r = redis.from_url(redis_url)
+        r = get_redis_sync_bytes()
         queues = ["critical", "cognitive", "health", "input", "maintenance", "low_priority", "reflection", "acs"]
         queue_depths = {}
         for q in queues:
@@ -243,8 +239,7 @@ def system_heartbeat(self) -> Dict[str, Any]:
 
     # Store health status in Redis for quick access
     try:
-        redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
-        r = redis.from_url(redis_url)
+        r = get_redis_sync_bytes()
         import json
         r.setex("system:health_status", 600, json.dumps(health_report, default=str))
     except Exception as e:

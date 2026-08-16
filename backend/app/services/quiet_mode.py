@@ -11,7 +11,6 @@ Redis-backed so backend + celery share one truth; auto-expires by TTL.
 from __future__ import annotations
 
 import logging
-import os
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -21,8 +20,8 @@ _GUEST_KEY = "sara:guest_mode"
 
 
 def _redis():
-    import redis as _redis
-    return _redis.Redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"), decode_responses=True)
+    from app.core.redis import get_redis_sync
+    return get_redis_sync()
 
 
 def set_quiet(hours: Optional[float] = None, guest: bool = False) -> dict:

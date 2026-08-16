@@ -99,11 +99,8 @@ class DailyBriefService:
             # Guard: skip if recently attempted (check Redis flag with 1h TTL)
             should_bootstrap = True
             try:
-                import redis as _redis
-                r = _redis.from_url(
-                    os.environ.get("REDIS_URL", "redis://redis:6379/0"),
-                    decode_responses=True,
-                )
+                from app.core.redis import get_redis_sync
+                r = get_redis_sync()
                 flag_key = f"brief:bootstrap_attempted:{user_id}"
                 if r.get(flag_key):
                     should_bootstrap = False

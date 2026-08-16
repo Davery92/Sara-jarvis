@@ -32,24 +32,16 @@ class RatingEventPublisher:
             redis_url: Redis connection URL
         """
         self.redis_url = redis_url
-        self._client: Optional[redis.Redis] = None
 
-    @property
-    def client(self) -> redis.Redis:
-        """Get Redis client (lazy initialization)."""
-        if not self._client:
-            self._client = redis.from_url(
-                self.redis_url,
-                encoding="utf-8",
-                decode_responses=True
-            )
-        return self._client
+    async def _client(self) -> redis.Redis:
+        """Get the shared Redis client."""
+        from app.core.redis import get_redis
+        return await get_redis()
 
     async def close(self):
-        """Close Redis connection."""
-        if self._client:
-            await self._client.close()
-            self._client = None
+        """No-op kept for backwards compatibility — the shared pool is
+        long-lived and must not be closed per-instance."""
+        pass
 
     async def publish_episode_rated(
         self,
@@ -91,7 +83,7 @@ class RatingEventPublisher:
             event["session_id"] = session_id
 
         try:
-            subscribers = await self.client.publish(
+            subscribers = await (await self._client()).publish(
                 CHANNEL_EPISODE_RATED,
                 json.dumps(event)
             )
@@ -133,7 +125,7 @@ class RatingEventPublisher:
         }
 
         try:
-            subscribers = await self.client.publish(
+            subscribers = await (await self._client()).publish(
                 CHANNEL_RATING_UPDATED,
                 json.dumps(event)
             )
@@ -169,7 +161,7 @@ class RatingEventPublisher:
         }
 
         try:
-            subscribers = await self.client.publish(
+            subscribers = await (await self._client()).publish(
                 CHANNEL_RATING_SYNCED,
                 json.dumps(event)
             )
@@ -191,32 +183,23 @@ class RatingEventSubscriber:
             redis_url: Redis connection URL
         """
         self.redis_url = redis_url
-        self._client: Optional[redis.Redis] = None
         self._pubsub: Optional[redis.client.PubSub] = None
         self._handlers: Dict[str, Callable[[Dict[str, Any]], Awaitable[None]]] = {}
         self._running = False
         self._task: Optional[asyncio.Task] = None
 
-    @property
-    def client(self) -> redis.Redis:
-        """Get Redis client (lazy initialization)."""
-        if not self._client:
-            self._client = redis.from_url(
-                self.redis_url,
-                encoding="utf-8",
-                decode_responses=True
-            )
-        return self._client
+    async def _client(self) -> redis.Redis:
+        """Get the shared Redis client."""
+        from app.core.redis import get_redis
+        return await get_redis()
 
     async def close(self):
-        """Close Redis connection and stop subscriber."""
+        """Stop the subscriber and release the pubsub connection — the
+        shared client itself is long-lived and must not be closed."""
         await self.stop()
         if self._pubsub:
             await self._pubsub.close()
             self._pubsub = None
-        if self._client:
-            await self._client.close()
-            self._client = None
 
     def register_handler(
         self,
@@ -241,7 +224,7 @@ class RatingEventSubscriber:
             channels: List of channel names to subscribe to
         """
         if not self._pubsub:
-            self._pubsub = self.client.pubsub()
+            self._pubsub = (await self._client()).pubsub()
 
         await self._pubsub.subscribe(*channels)
         logger.info(f"Subscribed to channels: {channels}")

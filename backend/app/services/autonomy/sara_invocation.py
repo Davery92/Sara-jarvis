@@ -468,9 +468,8 @@ Respond with JSON:
     ):
         """Log an invocation for auditing and reflection."""
         try:
-            import redis
-            redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
-            r = redis.from_url(redis_url)
+            from app.core.redis import get_redis_sync_bytes
+            r = get_redis_sync_bytes()
 
             log_entry = {
                 "type": invocation_type,

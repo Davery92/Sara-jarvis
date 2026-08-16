@@ -42,11 +42,6 @@ def _hash_key(parts: List[str]) -> str:
 class SearchService:
     def __init__(self):
         self.http = httpx.AsyncClient(timeout=10.0)  # Increased timeout for Tavily
-        self.redis: Optional[Redis] = None
-        try:
-            self.redis = Redis.from_url(settings.redis_url, encoding="utf-8", decode_responses=True)
-        except Exception as e:
-            logger.warning(f"Redis not available ({e}); falling back to no-cache mode")
 
         # Search provider config
         self.search_provider = settings.search_provider
@@ -72,13 +67,19 @@ class SearchService:
 
         logger.info(f"🔍 Search service initialized with provider: {self.search_provider}")
 
+    async def _get_redis(self) -> Optional[Redis]:
+        try:
+            from app.core.redis import get_redis
+            return await get_redis()
+        except Exception as e:
+            logger.warning(f"Redis not available ({e}); falling back to no-cache mode")
+            return None
+
     async def close(self):
         try:
             await self.http.aclose()
         except Exception:
             pass
-        if self.redis:
-            await self.redis.close()
 
     def _map_recency(self, recency: str | None) -> Optional[str]:
         if not recency:
@@ -416,8 +417,9 @@ class SearchService:
         # Returns: title, final_url, readable_html, plain_text
         can_url = _strip_tracking_params(url)
         cache_key = f"page:{PAGE_CACHE_VERSION}:{_hash_key([can_url])}"
-        if self.redis:
-            cached = await self.redis.get(cache_key)
+        r = await self._get_redis()
+        if r:
+            cached = await r.get(cache_key)
             if cached:
                 try:
                     data = json.loads(cached)
@@ -443,8 +445,8 @@ class SearchService:
                     "readable_html": "",
                     "plain_text": plain_text,
                 }
-                if self.redis:
-                    await self.redis.set(cache_key, json.dumps(bundle), ex=self.page_ttl)
+                if r:
+                    await r.set(cache_key, json.dumps(bundle), ex=self.page_ttl)
                 return title, final_url, "", plain_text
 
             html = resp.text
@@ -465,8 +467,8 @@ class SearchService:
                 "readable_html": readable_html,
                 "plain_text": plain_text,
             }
-            if self.redis:
-                await self.redis.set(cache_key, json.dumps(bundle), ex=self.page_ttl)
+            if r:
+                await r.set(cache_key, json.dumps(bundle), ex=self.page_ttl)
             return title, final_url, readable_html, plain_text
         except Exception as e:
             logger.debug(f"Extract failed for {url}: {e}")
@@ -571,8 +573,9 @@ class SearchService:
         # Cache check
         key_parts = [query, recency or "", ",".join(sites or []), str(max_results)]
         cache_key = f"search:{_hash_key(key_parts)}"
-        if self.redis:
-            cached = await self.redis.get(cache_key)
+        r = await self._get_redis()
+        if r:
+            cached = await r.get(cache_key)
             if cached:
                 try:
                     return json.loads(cached)
@@ -636,8 +639,8 @@ class SearchService:
             "recency": recency,
             "results": final,
         }
-        if self.redis:
-            await self.redis.set(cache_key, json.dumps(payload), ex=self.query_ttl)
+        if r:
+            await r.set(cache_key, json.dumps(payload), ex=self.query_ttl)
         return payload
 
     async def open_page(self, url: str) -> Dict[str, Any]:

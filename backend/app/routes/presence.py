@@ -3,7 +3,6 @@
 import asyncio
 import json
 import logging
-import os
 import uuid
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
@@ -11,7 +10,6 @@ from typing import Dict, List, Optional, Tuple
 from fastapi import APIRouter, Depends
 from sqlalchemy import text
 from sqlalchemy.orm import Session
-import redis
 
 from app.db.session import get_db
 from app.core.deps import get_current_user
@@ -21,8 +19,6 @@ from pydantic import BaseModel
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Presence"])
-
-REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
 
 # --- Redis-backed client state helpers ---
 
@@ -42,14 +38,14 @@ def _client_key(user_id: str, client_id: str) -> str:
 def get_active_clients(user_id: str) -> List[dict]:
     """Return all active client states for a user (keys with unexpired TTL)."""
     try:
-        r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+        from app.core.redis import get_redis_sync
+        r = get_redis_sync()
         pattern = f"{_CLIENT_STATE_PREFIX}:{user_id}:*"
         clients = []
         for key in r.scan_iter(match=pattern, count=50):
             raw = r.get(key)
             if raw:
                 clients.append(json.loads(raw))
-        r.close()
         return clients
     except Exception as e:
         logger.error(f"Failed to get active clients: {e}")
@@ -162,7 +158,8 @@ async def presence_heartbeat(
     emit_view_changed = False
 
     try:
-        r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+        from app.core.redis import get_redis_sync
+        r = get_redis_sync()
         key = _client_key(current_user.id, client_id)
 
         raw_prev = r.get(key)
@@ -206,8 +203,6 @@ async def presence_heartbeat(
         # Dwell rollup — only count foreground time in a real view
         if visible and current_view not in ("", "unknown"):
             _increment_view_dwell(r, current_user.id, current_view, _HEARTBEAT_SECONDS)
-
-        r.close()
     except Exception as e:
         logger.error(f"Failed to store heartbeat: {e}")
 
@@ -336,10 +331,10 @@ async def _apply_app_presence(
 def render_app_views_today(user_id: str) -> Optional[str]:
     """Render the per-view dwell hash into 'fitness 41m, recipes 12m'."""
     try:
-        r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+        from app.core.redis import get_redis_sync
+        r = get_redis_sync()
         key = f"{_VIEWS_TODAY_PREFIX}:{user_id}:{local_today().isoformat()}"
         raw = r.hgetall(key)
-        r.close()
         if not raw:
             return None
         pairs = []

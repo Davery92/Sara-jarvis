@@ -71,7 +71,8 @@ class RawBufferService:
     def redis(self) -> redis.Redis:
         """Lazy initialization of Redis client."""
         if self._redis is None:
-            self._redis = redis.from_url(self.redis_url)
+            from app.core.redis import get_redis_sync_bytes
+            self._redis = get_redis_sync_bytes()
         return self._redis
 
     def _stream_key(self, stream_type: StreamType) -> str:

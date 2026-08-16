@@ -60,9 +60,8 @@ class MemoryService:
 
         # Lazy initialization
         try:
-            import redis
-            url = os.getenv("REDIS_URL", "redis://redis:6379/0")
-            self.redis = redis.from_url(url, decode_responses=True)
+            from app.core.redis import get_redis_sync
+            self.redis = get_redis_sync()
             logger.info("✅ Redis client initialized for memory service")
             return self.redis
         except Exception as e:

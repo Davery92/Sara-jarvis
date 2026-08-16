@@ -75,7 +75,8 @@ def _now_iso() -> str:
 
 
 def _redis() -> redis.Redis:
-    return redis.from_url(VOICE_REDIS_URL, decode_responses=True)
+    from app.core.redis import get_redis_sync
+    return get_redis_sync()
 
 
 def _load_json(key: str) -> Optional[Dict[str, Any]]:

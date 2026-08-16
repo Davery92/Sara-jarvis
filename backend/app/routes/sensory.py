@@ -23,20 +23,18 @@ from fastapi import APIRouter, Depends, Request, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import httpx
-import redis
 
 from app.main_simple import get_current_user
 from app.db.session import get_db
 from sqlalchemy.orm import Session
 from app.services.voice.control_plane import update_service_heartbeat
+from app.core.redis import get_redis_sync
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/sensory", tags=["sensory"])
 
-# Redis for event pub/sub
 import os
-REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
 
 # Service endpoints
 JETSON_IP = os.getenv("JETSON_IP", "10.185.1.84")
@@ -134,7 +132,7 @@ async def stream_sensory_events(
 
         # Connect to Redis for events
         try:
-            r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+            r = get_redis_sync()
             pubsub = r.pubsub()
             pubsub.subscribe("sensory:events")
         except Exception as e:
@@ -240,7 +238,7 @@ async def publish_sensory_event(
     3. Stores transcriptions in raw buffer for cognitive processing
     """
     try:
-        r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+        r = get_redis_sync()
 
         # Check if PC is playing audio - if so, this might be speaker output
         playback_state = r.get("sensory:audio_playback")
@@ -311,7 +309,7 @@ async def update_audio_playback(
     filter out speaker audio from transcriptions.
     """
     try:
-        r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+        r = get_redis_sync()
 
         playback_state = {
             "is_playing": is_playing,
@@ -335,7 +333,7 @@ async def update_audio_playback(
 async def get_audio_playback():
     """Get current audio playback state."""
     try:
-        r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+        r = get_redis_sync()
         state = r.get("sensory:audio_playback")
 
         if state:
@@ -398,7 +396,7 @@ async def get_recent_audio_events(
 ):
     """Get recent audio processing events from Redis."""
     try:
-        r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+        r = get_redis_sync()
 
         # Get from raw buffer stream
         events = r.xrevrange("raw_buffer:audio", count=limit)
@@ -728,7 +726,7 @@ async def _record_dataset_clip_on_jetson(
 async def get_enrollment_status(current_user=Depends(get_current_user)):
     """Get current enrollment recording status."""
     try:
-        r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+        r = get_redis_sync()
         state = r.get(ENROLLMENT_STATE_KEY)
 
         if state:
@@ -746,7 +744,7 @@ async def get_enrollment_status(current_user=Depends(get_current_user)):
 async def get_dataset_recording_status(current_user=Depends(get_current_user)):
     """Get current dataset recording task status."""
     try:
-        r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+        r = get_redis_sync()
         state = _parse_json_state(r.get(DATASET_RECORDING_STATE_KEY))
         if state:
             return state
@@ -765,7 +763,7 @@ async def start_wake_dataset_recording(
     try:
         normalized_dataset_id = _normalize_identifier(dataset_id, "dataset_id")
         duration = max(2, min(int(request.duration_seconds), 60))
-        r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+        r = get_redis_sync()
 
         active_dataset_state = _parse_json_state(r.get(DATASET_RECORDING_STATE_KEY))
         active_enrollment_state = _parse_json_state(r.get(ENROLLMENT_STATE_KEY))
@@ -809,7 +807,7 @@ async def start_speaker_dataset_recording(
         normalized_dataset_id = _normalize_identifier(dataset_id, "dataset_id")
         normalized_speaker_id = _normalize_identifier(speaker_id, "speaker_id")
         duration = max(2, min(int(request.duration_seconds), 60))
-        r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+        r = get_redis_sync()
 
         active_dataset_state = _parse_json_state(r.get(DATASET_RECORDING_STATE_KEY))
         active_enrollment_state = _parse_json_state(r.get(ENROLLMENT_STATE_KEY))
@@ -982,7 +980,7 @@ async def start_speaker_recording(
     Poll /speakers/enrollment-status for progress.
     """
     try:
-        r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+        r = get_redis_sync()
 
         # Check if already recording
         current_state = r.get(ENROLLMENT_STATE_KEY)
@@ -1162,7 +1160,7 @@ async def enroll_speaker(
                 logger.info(f"Speaker {speaker_id} enrolled successfully")
 
                 # Clear enrollment state
-                r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+                r = get_redis_sync()
                 r.delete(ENROLLMENT_STATE_KEY)
 
                 return {
@@ -1225,7 +1223,7 @@ async def clear_speaker_samples(
             os.makedirs(sample_dir)
 
         # Reset enrollment state
-        r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+        r = get_redis_sync()
         state = {
             "status": "idle",
             "speaker_id": speaker_id,
@@ -1450,7 +1448,7 @@ async def report_jetson_health(
 ):
     """Receive Jetson health report — store in Redis with 60s TTL."""
     try:
-        r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+        r = get_redis_sync()
         r.setex("sara:jetson:health", 60, json.dumps(report.dict()))
         r.setex("sara:jetson:online", 90, "1")
 
@@ -1503,7 +1501,7 @@ async def report_jetson_health(
 async def get_jetson_health(current_user=Depends(get_current_user)):
     """Get latest Jetson health report from Redis."""
     try:
-        r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+        r = get_redis_sync()
         data = r.get("sara:jetson:health")
         online = r.get("sara:jetson:online")
         if data:

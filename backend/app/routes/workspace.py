@@ -112,7 +112,8 @@ def _partner_context_key(user_id: str) -> str:
 
 def _get_redis() -> Optional[Redis]:
     try:
-        return Redis.from_url(settings.redis_url, decode_responses=True)
+        from app.core.redis import get_redis_sync
+        return get_redis_sync()
     except Exception as e:
         logger.warning(f"Workspace partner Redis unavailable: {e}")
         return None

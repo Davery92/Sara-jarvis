@@ -6,7 +6,6 @@ then adjusts cooldowns for categories that are consistently ignored.
 """
 
 import logging
-import os
 from datetime import datetime
 from typing import Dict, Any
 
@@ -75,15 +74,14 @@ async def compute_and_apply_tuning(user_id: str) -> Dict[str, Any]:
     # Store adjustments in Redis for fast lookup by unified_notification
     if adjustments:
         try:
-            import redis
-            r = redis.from_url(os.environ.get("REDIS_URL", "redis://redis:6379/0"), decode_responses=True)
+            from app.core.redis import get_redis_sync
+            r = get_redis_sync()
             import json
             r.setex(
                 f"notification_tuning:{user_id}",
                 86400,  # 24h TTL
                 json.dumps(adjustments),
             )
-            r.close()
         except Exception as e:
             logger.warning(f"Failed to store notification tuning: {e}")
 
@@ -97,11 +95,10 @@ def get_tuning_for_category(user_id: str, category: str) -> str:
     Returns: "normal", "suppress", "double_cooldown", or "boost"
     """
     try:
-        import redis
+        from app.core.redis import get_redis_sync
         import json
-        r = redis.from_url(os.environ.get("REDIS_URL", "redis://redis:6379/0"), decode_responses=True)
+        r = get_redis_sync()
         raw = r.get(f"notification_tuning:{user_id}")
-        r.close()
         if raw:
             tuning = json.loads(raw)
             entry = tuning.get(category)

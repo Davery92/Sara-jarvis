@@ -13,7 +13,6 @@ import hmac
 import os
 from typing import Any, Dict, List, Optional
 
-import redis
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -22,7 +21,6 @@ from app.main_simple import get_current_user
 from app.services.ml.control_plane import (
     ML_EVENT_TYPES,
     ML_MODEL_FAMILIES,
-    ML_REDIS_URL,
     ML_EVENT_PUBSUB_CHANNEL,
     claim_next_job,
     create_training_job,
@@ -251,7 +249,8 @@ async def stream_ml_events(request: Request, current_user=Depends(get_current_us
     async def event_generator():
         pubsub = None
         try:
-            client = redis.Redis.from_url(ML_REDIS_URL, decode_responses=True)
+            from app.core.redis import get_redis_sync
+            client = get_redis_sync()
             pubsub = client.pubsub()
             pubsub.subscribe(ML_EVENT_PUBSUB_CHANNEL)
             while True:

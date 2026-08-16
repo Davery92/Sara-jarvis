@@ -38,10 +38,9 @@ def check_consolidation_trigger(self) -> Dict[str, Any]:
        - AND it's been quiet for QUIET_THRESHOLD_SECONDS
        - AND there's enough new content to consolidate
     """
-    import redis
+    from app.core.redis import get_redis_sync_bytes
 
-    redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
-    r = redis.from_url(redis_url)
+    r = get_redis_sync_bytes()
 
     try:
         # Get Redis server time for consistency
@@ -134,10 +133,9 @@ def run_consolidation(self) -> Dict[str, Any]:
     4. Update working memory with consolidated context
     5. Log discards for reflection auditing
     """
-    import redis
+    from app.core.redis import get_redis_sync_bytes
 
-    redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
-    r = redis.from_url(redis_url)
+    r = get_redis_sync_bytes()
     solo_user_id = os.getenv("SOLO_USER_ID", "")
 
     run_id = str(uuid4())

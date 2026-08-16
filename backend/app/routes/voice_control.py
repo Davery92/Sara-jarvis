@@ -18,13 +18,11 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-import redis
 
 from app.main_simple import get_current_user
 from app.services.voice.control_plane import (
     VOICE_EVENT_TYPES,
     VOICE_EVENT_PUBSUB_CHANNEL,
-    VOICE_REDIS_URL,
     claim_next_job,
     create_training_job,
     get_job,
@@ -555,7 +553,8 @@ async def stream_voice_events(
     async def event_generator():
         pubsub = None
         try:
-            client = redis.Redis.from_url(VOICE_REDIS_URL, decode_responses=True)
+            from app.core.redis import get_redis_sync
+            client = get_redis_sync()
             pubsub = client.pubsub()
             pubsub.subscribe(VOICE_EVENT_PUBSUB_CHANNEL)
 

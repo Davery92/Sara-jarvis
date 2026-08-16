@@ -19,34 +19,21 @@ class RatingCache:
     def __init__(self, redis_url: str = "redis://localhost:6379/0"):
         """Initialize Redis connection."""
         self.redis_url = redis_url
-        self._client: Optional[redis.Redis] = None
 
     async def connect(self):
-        """Establish Redis connection."""
-        if not self._client:
-            self.redis = redis.from_url(
-                self.redis_url,
-                encoding="utf-8",
-                decode_responses=True
-            )
-        return self._client
+        """No-op kept for backwards compatibility — the shared pool
+        connects lazily on first use via _client()."""
+        return await self._client()
 
     async def close(self):
-        """Close Redis connection."""
-        if self._client:
-            await self._client.close()
-            self._client = None
+        """No-op kept for backwards compatibility — the shared pool is
+        long-lived and must not be closed per-instance."""
+        pass
 
-    @property
-    def client(self) -> redis.Redis:
-        """Get Redis client (lazy initialization)."""
-        if not self._client:
-            self._client = redis.from_url(
-                self.redis_url,
-                encoding="utf-8",
-                decode_responses=True
-            )
-        return self._client
+    async def _client(self) -> redis.Redis:
+        """Get the shared Redis client."""
+        from app.core.redis import get_redis
+        return await get_redis()
 
     # Episode Rating Cache Methods
 
@@ -59,7 +46,8 @@ class RatingCache:
             None if not cached
         """
         key = f"episode_rating:{episode_id}"
-        data = await self.client.hgetall(key)
+        client = await self._client()
+        data = await client.hgetall(key)
 
         if not data:
             return None
@@ -109,8 +97,9 @@ class RatingCache:
             data["user_rating"] = user_rating
 
         try:
-            await self.client.hset(key, mapping=data)
-            await self.client.expire(key, timedelta(days=ttl_days))
+            client = await self._client()
+            await client.hset(key, mapping=data)
+            await client.expire(key, timedelta(days=ttl_days))
             return True
         except Exception as e:
             logger.error(f"Failed to cache episode rating {episode_id}: {e}")
@@ -199,7 +188,7 @@ class RatingCache:
             Rating value (1-5) or None if not rated
         """
         key = f"user_rating:{user_id}:{episode_id}"
-        rating = await self.client.get(key)
+        rating = await (await self._client()).get(key)
         return int(rating) if rating else None
 
     async def set_user_rating(
@@ -223,7 +212,7 @@ class RatingCache:
         """
         key = f"user_rating:{user_id}:{episode_id}"
         try:
-            await self.client.set(key, rating, ex=timedelta(days=ttl_days))
+            await (await self._client()).set(key, rating, ex=timedelta(days=ttl_days))
             return True
         except Exception as e:
             logger.error(f"Failed to cache user rating {user_id}:{episode_id}: {e}")
@@ -233,7 +222,7 @@ class RatingCache:
         """Delete a user's rating for an episode."""
         key = f"user_rating:{user_id}:{episode_id}"
         try:
-            await self.client.delete(key)
+            await (await self._client()).delete(key)
             return True
         except Exception as e:
             logger.error(f"Failed to delete user rating {user_id}:{episode_id}: {e}")
@@ -249,7 +238,7 @@ class RatingCache:
         episodes have rating changes that need to be synced.
         """
         try:
-            await self.client.sadd("rating_dirty_set", episode_id)
+            await (await self._client()).sadd("rating_dirty_set", episode_id)
             return True
         except Exception as e:
             logger.error(f"Failed to mark episode {episode_id} as dirty: {e}")
@@ -267,9 +256,10 @@ class RatingCache:
         """
         try:
             # Use SPOP to atomically get and remove items
+            client = await self._client()
             episode_ids = []
             for _ in range(batch_size):
-                episode_id = await self.client.spop("rating_dirty_set")
+                episode_id = await client.spop("rating_dirty_set")
                 if not episode_id:
                     break
                 episode_ids.append(episode_id)
@@ -281,7 +271,7 @@ class RatingCache:
     async def get_dirty_count(self) -> int:
         """Get count of episodes needing sync."""
         try:
-            return await self.client.scard("rating_dirty_set")
+            return await (await self._client()).scard("rating_dirty_set")
         except Exception as e:
             logger.error(f"Failed to get dirty count: {e}")
             return 0
@@ -289,7 +279,7 @@ class RatingCache:
     async def clear_dirty_set(self) -> bool:
         """Clear the entire dirty set (use after successful batch sync)."""
         try:
-            await self.client.delete("rating_dirty_set")
+            await (await self._client()).delete("rating_dirty_set")
             return True
         except Exception as e:
             logger.error(f"Failed to clear dirty set: {e}")
@@ -307,7 +297,7 @@ class RatingCache:
         Returns:
             Dict mapping episode_id -> rating data dict
         """
-        pipeline = self.client.pipeline()
+        pipeline = (await self._client()).pipeline()
         for episode_id in episode_ids:
             key = f"episode_rating:{episode_id}"
             pipeline.hgetall(key)
@@ -339,7 +329,8 @@ class RatingCache:
             # Count all episode rating keys
             cursor = 0
             total_rated = 0
-            async for key in self.client.scan_iter(match="episode_rating:*"):
+            client = await self._client()
+            async for key in client.scan_iter(match="episode_rating:*"):
                 total_rated += 1
 
             pending_sync = await self.get_dirty_count()

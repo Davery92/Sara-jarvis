@@ -286,10 +286,8 @@ _TRANSIENT_STREAK_TO_ESCALATE = 5
 
 
 def _sync_redis():
-    import os
-    import redis as _redis
-    return _redis.Redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"),
-                                 decode_responses=True)
+    from app.core.redis import get_redis_sync
+    return get_redis_sync()
 
 
 def _bump_failstreak(task_name: str) -> int:

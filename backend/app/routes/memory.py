@@ -35,9 +35,8 @@ def _get_redis():
     if _redis_client is not None:
         return _redis_client
     try:
-        import redis  # type: ignore
-        url = _os.getenv("REDIS_URL", "redis://redis:6379/0")
-        _redis_client = redis.from_url(url, decode_responses=True)
+        from app.core.redis import get_redis_sync
+        _redis_client = get_redis_sync()
         return _redis_client
     except Exception:
         return None

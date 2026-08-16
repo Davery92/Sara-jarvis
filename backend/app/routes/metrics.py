@@ -28,10 +28,8 @@ def _get_db():
 @router.get("/api/metrics")
 async def get_metrics(db: Session = Depends(_get_db)):
     """Comprehensive system metrics snapshot."""
-    import redis
-
-    redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
-    r = redis.from_url(redis_url, decode_responses=True)
+    from app.core.redis import get_redis_sync
+    r = get_redis_sync()
     user_id = os.getenv("SOLO_USER_ID", "")
     now = datetime.now(timezone.utc)
     day_ago = now - timedelta(hours=24)
@@ -143,5 +141,4 @@ async def get_metrics(db: Session = Depends(_get_db)):
         metrics["interest_graph"] = {"error": str(e)[:100]}
 
     metrics["timestamp"] = now.isoformat()
-    r.close()
     return metrics

@@ -32,10 +32,9 @@ def process_text_input(
 
     Sources: user_message, notification, calendar_event, system_event
     """
-    import redis
+    from app.core.redis import get_redis_sync_bytes
 
-    redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
-    r = redis.from_url(redis_url)
+    r = get_redis_sync_bytes()
 
     timestamp = datetime.now(timezone.utc)
     entry_data = {
@@ -81,10 +80,9 @@ def process_notification(
     """
     Process incoming notification and add to raw buffer.
     """
-    import redis
+    from app.core.redis import get_redis_sync_bytes
 
-    redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
-    r = redis.from_url(redis_url)
+    r = get_redis_sync_bytes()
 
     timestamp = datetime.now(timezone.utc)
     entry_data = {
@@ -131,10 +129,9 @@ def process_calendar_event(
     """
     Process calendar event and add to raw buffer.
     """
-    import redis
+    from app.core.redis import get_redis_sync_bytes
 
-    redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
-    r = redis.from_url(redis_url)
+    r = get_redis_sync_bytes()
 
     timestamp = datetime.now(timezone.utc)
     entry_data = {
@@ -181,10 +178,9 @@ def process_environmental(
     """
     Process environmental/Home Assistant state change.
     """
-    import redis
+    from app.core.redis import get_redis_sync_bytes
 
-    redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
-    r = redis.from_url(redis_url)
+    r = get_redis_sync_bytes()
 
     timestamp = datetime.now(timezone.utc)
     entry_data = {
@@ -238,11 +234,10 @@ def process_screen_capture(
 
     Returns analysis result stored in raw buffer.
     """
-    import redis
+    from app.core.redis import get_redis_sync_bytes
     import asyncio
 
-    redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
-    r = redis.from_url(redis_url)
+    r = get_redis_sync_bytes()
 
     timestamp = datetime.now(timezone.utc)
 
@@ -468,10 +463,9 @@ def process_audio_input(
 
     Returns result stored in raw buffer.
     """
-    import redis
+    from app.core.redis import get_redis_sync_bytes
 
-    redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
-    r = redis.from_url(redis_url)
+    r = get_redis_sync_bytes()
 
     timestamp = datetime.now(timezone.utc)
 
@@ -634,11 +628,10 @@ def process_visual_input(
 
     Returns result stored in raw buffer.
     """
-    import redis
+    from app.core.redis import get_redis_sync_bytes
     import asyncio
 
-    redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
-    r = redis.from_url(redis_url)
+    r = get_redis_sync_bytes()
 
     timestamp = datetime.now(timezone.utc)
 

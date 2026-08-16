@@ -205,14 +205,10 @@ async def get_sara_status(
 
         # Get pending observations from Redis (matching what debug_notifications uses)
         try:
-            import redis as sync_redis
-            r = sync_redis.Redis.from_url(
-                os.environ.get("REDIS_URL", "redis://localhost:6379/0"),
-                decode_responses=True,
-            )
+            from app.core.redis import get_redis_sync
+            r = get_redis_sync()
             obs_key = f"sara:observations:{user_id}"
             result["pending_observations"] = r.zcard(obs_key) or 0
-            r.close()
         except Exception:
             # Fall back to journal count if Redis unavailable
             four_hours_ago = now - timedelta(hours=4)

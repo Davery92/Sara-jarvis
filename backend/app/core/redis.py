@@ -29,12 +29,22 @@ a pool's connection_kwargs at creation, so one pool can't serve both.
 
 Callers should NOT call `.close()`/`.aclose()` on the client this returns —
 it's shared and long-lived, closed only when the loop it belongs to changes.
+
+`get_redis_sync()` / `get_redis_sync_bytes()` are the blocking-client
+counterparts, for call sites that are genuinely synchronous (Celery task
+bodies, sync FastAPI deps, plain helper functions) rather than just
+un-awaited construction inside async code. They're process-level lazy
+singletons — safe under Celery prefork because `redis.Redis.from_url()`
+doesn't open a socket eagerly; the pool only connects lazily on first
+command, by which point each forked worker already has its own copy of the
+`None` global and creates its own pool on first use.
 """
 import asyncio
 import os
 import weakref
 from typing import Optional
 
+import redis
 import redis.asyncio as aioredis
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
@@ -44,6 +54,9 @@ _pool: Optional[aioredis.Redis] = None
 _pool_loop_ref: Optional["weakref.ref"] = None
 _bytes_pool: Optional[aioredis.Redis] = None
 _bytes_pool_loop_ref: Optional["weakref.ref"] = None
+
+_sync_pool: Optional["redis.Redis"] = None
+_sync_bytes_pool: Optional["redis.Redis"] = None
 
 
 def _is_stale(client: Optional[aioredis.Redis], loop_ref: Optional["weakref.ref"], cur_loop) -> bool:
@@ -83,3 +96,22 @@ async def get_redis_bytes() -> aioredis.Redis:
         _bytes_pool = aioredis.from_url(REDIS_URL, decode_responses=False, max_connections=_MAX_CONNECTIONS)
         _bytes_pool_loop_ref = weakref.ref(cur_loop)
     return _bytes_pool
+
+
+def get_redis_sync() -> "redis.Redis":
+    """Shared blocking decode_responses=True client, for synchronous callers
+    (Celery task bodies, sync helpers) — not loop-scoped since it never
+    touches an event loop."""
+    global _sync_pool
+    if _sync_pool is None:
+        _sync_pool = redis.Redis.from_url(REDIS_URL, decode_responses=True, max_connections=_MAX_CONNECTIONS)
+    return _sync_pool
+
+
+def get_redis_sync_bytes() -> "redis.Redis":
+    """Shared blocking raw-bytes client, for synchronous callers storing
+    pickled/binary payloads."""
+    global _sync_bytes_pool
+    if _sync_bytes_pool is None:
+        _sync_bytes_pool = redis.Redis.from_url(REDIS_URL, decode_responses=False, max_connections=_MAX_CONNECTIONS)
+    return _sync_bytes_pool

@@ -15,13 +15,11 @@ Endpoints:
 import asyncio
 import json
 import logging
-import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -33,8 +31,6 @@ from app.core.auth import verify_token
 from app.models.user import User
 
 logger = logging.getLogger(__name__)
-
-REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 
 router = APIRouter(prefix="/api/agents", tags=["Agent Orchestration"])
 
@@ -213,7 +209,8 @@ async def stream_task_execution(
         pubsub = None
         channel = f"sara:dispatch:live:{task_id}"
         try:
-            r = await aioredis.from_url(REDIS_URL, decode_responses=True)
+            from app.core.redis import get_redis
+            r = await get_redis()
             pubsub = r.pubsub()
             await pubsub.subscribe(channel)
             logger.info(f"Dispatch live SSE connected: task={task_id}")
@@ -245,11 +242,6 @@ async def stream_task_execution(
                 if pubsub:
                     await pubsub.unsubscribe(channel)
                     await pubsub.close()
-            except Exception:
-                pass
-            try:
-                if r:
-                    await r.close()
             except Exception:
                 pass
 

@@ -66,7 +66,8 @@ class ModeController:
     def redis(self) -> redis.Redis:
         """Lazy initialization of Redis client."""
         if self._redis is None:
-            self._redis = redis.from_url(self.redis_url, decode_responses=True)
+            from app.core.redis import get_redis_sync
+            self._redis = get_redis_sync()
         return self._redis
 
     def _key(self, pattern: str, user_id: str) -> str:

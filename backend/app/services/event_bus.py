@@ -249,11 +249,8 @@ class EventBus:
     async def connect(self):
         """Connect to Redis"""
         try:
-            self.redis_client = await redis.from_url(
-                self.redis_url,
-                encoding="utf-8",
-                decode_responses=True
-            )
+            from app.core.redis import get_redis
+            self.redis_client = await get_redis()
             self.pubsub = self.redis_client.pubsub()
             logger.info(f"✅ Event bus connected to Redis: {self.redis_url}")
         except Exception as e:
@@ -274,8 +271,7 @@ class EventBus:
         if self.pubsub:
             await self.pubsub.close()
 
-        if self.redis_client:
-            await self.redis_client.close()
+        self.redis_client = None
 
         logger.info("Event bus disconnected")
 

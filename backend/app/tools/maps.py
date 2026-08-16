@@ -23,9 +23,8 @@ logger = logging.getLogger(__name__)
 def _get_redis():
     """Get Redis client for map state tracking."""
     try:
-        import redis
-        url = os.getenv("REDIS_URL", "redis://redis:6379/0")
-        return redis.from_url(url, decode_responses=True)
+        from app.core.redis import get_redis_sync
+        return get_redis_sync()
     except Exception as e:
         logger.warning(f"Redis not available for map tracking: {e}")
         return None

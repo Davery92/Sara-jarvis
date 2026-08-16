@@ -1694,10 +1694,9 @@ def _mark_deep_consolidation_run():
     .health.system_heartbeat) — best-effort, a Redis hiccup here must never
     fail an otherwise-successful consolidation run."""
     try:
-        import os
-        import redis
+        from app.core.redis import get_redis_sync_bytes
 
-        r = redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"))
+        r = get_redis_sync_bytes()
         r.set("consolidation:last_deep_run", datetime.now(timezone.utc).isoformat())
     except Exception as e:
         logger.warning(f"Failed to stamp consolidation:last_deep_run: {e}")

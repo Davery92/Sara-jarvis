@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 
 _REDIS_KEY = "sara:system_events"
 _MAX_BUFFER = 5000
@@ -32,9 +31,8 @@ class RedisBufferingHandler(logging.Handler):
 
     def _client(self):
         if self._redis is None:
-            import redis as _redis
-            self._redis = _redis.Redis.from_url(
-                os.getenv("REDIS_URL", "redis://redis:6379/0"), decode_responses=True)
+            from app.core.redis import get_redis_sync
+            self._redis = get_redis_sync()
         return self._redis
 
     def emit(self, record: logging.LogRecord) -> None:
