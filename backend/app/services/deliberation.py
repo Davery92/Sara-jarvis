@@ -33,6 +33,12 @@ class NotificationProposal:
     priority: str = "normal"  # normal, high, critical
     category: str = "general"  # schedule, security, social, health, checkin, home
     reason: str = ""
+    # Invariant 5: one entity, one message, one mouth. Every outbound message
+    # names the thing it is about — a world_thread id, an email conversation id,
+    # a calendar event id, a task id — so the ≤1 live candidate and ≤1 delivery
+    # per entity per day cap can actually be applied. Phrasing-keyed dedup let
+    # five re-wordings of the same Laura Weippert concern through in one morning.
+    entity_ref: str = ""
 
 
 @dataclass
@@ -230,6 +236,35 @@ class DeliberationEngine:
             kernel_hands=kernel_hands_on,
         )
 
+        # WORLD_COGNITION_READ cutover: ambient cognition reads the same
+        # bounded, revisioned world packet as chat. Legacy blocks below remain
+        # additive during rollout, but this packet is the canonical state.
+        # Prose, not JSON. `format_context_for_prompt` handed the model a
+        # 14,000-character machine dump in which a light-switch event and a real
+        # meeting looked identical; it is deleted. The projection is still
+        # advanced here (catch_up_user), but what the model reads is the same
+        # rendered World Brief chat and compose read — one brief, one voice.
+        try:
+            from sqlalchemy import text
+            from app.db.session import SessionLocal, get_async_session_factory
+            from app.services.world_state.coordinator import catch_up_user
+            from app.services.world_brief import get_rendered_brief
+            with SessionLocal() as world_db:
+                enabled = world_db.execute(text(
+                    "SELECT value FROM app_settings WHERE key='WORLD_COGNITION_READ'"
+                )).scalar()
+                cognition_read = str(enabled or "").strip().lower() in {"1", "true", "yes", "on"}
+                if cognition_read:
+                    catch_up_user(world_db, str(user_id), limit=50)
+            if cognition_read:
+                factory = get_async_session_factory()
+                async with factory() as brief_db:
+                    world_context = await get_rendered_brief(brief_db, str(user_id))
+                if world_context:
+                    user_msg = f"{world_context}\n\n{user_msg}"
+        except Exception as world_error:
+            logger.warning("World context injection skipped: %s", world_error)
+
         # 3b. Interoception — inject a health digest so Sara can *feel* her own
         # broken parts and choose to tell David (Phase 2). Only surfaces tasks
         # that cross the escalation threshold; None when healthy.
@@ -328,6 +363,7 @@ class DeliberationEngine:
                     temperature=0.4,
                     max_tokens=1500,
                     extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+                    caller="deliberation",
                 )
 
             # Extract content from OpenAI-compatible response
@@ -372,6 +408,7 @@ class DeliberationEngine:
                         message=np.get("message", ""),
                         priority=np.get("priority", "normal"),
                         category=np.get("category", "general"),
+                        entity_ref=str(np.get("entity_ref") or "").strip()[:200],
                     ))
 
             # Parse home actions

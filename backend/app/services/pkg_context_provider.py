@@ -10,7 +10,11 @@ import re
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from app.services.personal_knowledge_graph import personal_kg, is_transient_health_text
+from app.services.personal_knowledge_graph import (
+    personal_kg,
+    is_authoritative_health_copy,
+    is_transient_health_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +24,12 @@ _STALE_AGE_THRESHOLD_DAYS = 21
 # Transient Health states (sick/tired/sore/...) drop out of context entirely
 # once they're this old without being reconfirmed.
 _TRANSIENT_HEALTH_TTL_DAYS = 14
+# Health facts get a far tighter staleness rule than the generic 21 days.
+# A six-day-old "sleep_duration: 7.5 hours" rendered perfectly clean under the
+# generic threshold, which is how a stale guess became indistinguishable from
+# this morning's reading (2026-08-31 incident, D4). Anything about David's body
+# older than two days carries its date.
+_HEALTH_STALE_AGE_HOURS = 48
 
 
 def _parse_iso(value: Optional[str]) -> Optional[datetime]:
@@ -53,6 +63,21 @@ def _age_suffix(last_confirmed: Optional[str]) -> str:
     months = age_days // 30
     age_str = f"~{months} month{'s' if months != 1 else ''} ago" if months >= 1 else f"~{age_days} days ago"
     return f" (noted {dt.date().isoformat()} — {age_str}, may be stale)"
+
+
+def _health_age_suffix(last_confirmed: Optional[str]) -> str:
+    """' (as of 2026-08-25, 6 days ago — not a current reading)' for anything
+    older than 48h; '' otherwise. Every health line the model sees either is
+    from today or says when it is from."""
+    dt = _parse_iso(last_confirmed)
+    if dt is None:
+        return " (no date recorded — not a current reading)"
+    age_hours = (datetime.now(timezone.utc) - dt).total_seconds() / 3600
+    if age_hours < _HEALTH_STALE_AGE_HOURS:
+        return ""
+    days = int(age_hours // 24)
+    when = f"{days} day{'s' if days != 1 else ''} ago" if days >= 1 else f"{int(age_hours)}h ago"
+    return f" (as of {dt.date().isoformat()}, {when} — not a current reading)"
 
 
 class PKGContextProvider:
@@ -237,6 +262,14 @@ class PKGContextProvider:
             trend = props.get("trend", "")
             last_confirmed = props.get("last_confirmed")
             expires_at = props.get("expires_at")
+            # Raw wins, always. `health_metric` is the only authority for a
+            # number about David's body; a graph copy carries no recorded_at
+            # and cannot be corrected. `upsert_fact` refuses to mint these now,
+            # but legacy nodes are still in Neo4j — they die here on read, in
+            # the one shared formatter, so every caller (chat, voice, brief,
+            # memory.recall) gets the same answer.
+            if is_authoritative_health_copy(metric, value):
+                return ""
             transient = bool(expires_at) or is_transient_health_text(metric, value)
             if transient:
                 if expires_at:
@@ -248,7 +281,7 @@ class PKGContextProvider:
                 if stale:
                     return ""  # transient state, unconfirmed past its TTL — drop entirely
             sentence = f"David's {metric}: {value}" + (f" (trending {trend})" if trend else "")
-            return sentence + _age_suffix(last_confirmed)
+            return sentence + _health_age_suffix(last_confirmed)
         elif fact_type == "Place":
             name = props.get("name", "")
             ptype = props.get("type", "")

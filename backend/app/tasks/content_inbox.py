@@ -99,6 +99,25 @@ def send_morning_inbox_digest():
             for row in user_rows:
                 user_id = row[0]
 
+                # The morning brief is the single wake anchor and already folds
+                # unread inbox counts into its push. If it was sent or held
+                # today, a second 08:00 "morning inbox" buzz is redundant.
+                morning_topic = f"morning_brief:{today}"
+                morning_anchor = db.execute(text("""
+                    SELECT 1
+                    WHERE EXISTS (
+                        SELECT 1 FROM notification_log
+                        WHERE user_id = :user_id AND topic = :topic
+                    ) OR EXISTS (
+                        SELECT 1 FROM held_notification
+                        WHERE user_id = :user_id AND topic = :topic
+                    )
+                    LIMIT 1
+                """), {"user_id": user_id, "topic": morning_topic}).fetchone()
+                if morning_anchor:
+                    users_skipped += 1
+                    continue
+
                 content_unread_row = db.execute(text("""
                     SELECT COUNT(*)::int AS unread_count
                     FROM shared_content

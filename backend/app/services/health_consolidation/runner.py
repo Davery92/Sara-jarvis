@@ -48,7 +48,7 @@ def _today_et() -> date:
 
 
 async def _llm_json(system: str, user: str, *, max_tokens: int = 2000, temperature: float = 0.3) -> Dict[str, Any]:
-    """Run the weekly health pipeline on the local background LLM (qwen3.6-27b).
+    """Run the weekly health pipeline on the local background LLM (qwen3.8-27b).
 
     All consolidation/background work runs locally — only interactive chat uses a
     cloud model. Parses strict JSON from the model output.

@@ -5,23 +5,6 @@ import SwiftUI
 
 private let kAppGroup = "group.cloud.avery.sara-ios"
 
-private func emoji(for emotion: String) -> String {
-  switch emotion.lowercased() {
-  case "curious": return "🤔"
-  case "calm": return "😌"
-  case "alert": return "⚡️"
-  case "concerned": return "😟"
-  case "happy": return "😊"
-  case "content": return "🙂"
-  case "focused": return "🎯"
-  case "excited": return "✨"
-  case "tired", "sleeping": return "😴"
-  case "reflective": return "🪞"
-  case "attentive": return "👀"
-  default: return "🌙"
-  }
-}
-
 /// Static gradient "orb" — the widget can't animate, so this is the still
 /// counterpart to the in-app smoke orb (cool teal/cyan/indigo).
 struct MoodOrb: View {
@@ -60,15 +43,20 @@ extension View {
 
 struct SaraEntry: TimelineEntry {
   let date: Date
-  let emotion: String
-  let thought: String
+  let state: String
+  let headline: String
+  let detail: String?
+  let revision: Int64
+  let updatedAt: Date
+  let validUntil: Date
   let nextEventTitle: String?
   let nextEventTime: Date?
 }
 
 struct SaraProvider: TimelineProvider {
   func placeholder(in context: Context) -> SaraEntry {
-    SaraEntry(date: Date(), emotion: "curious", thought: "Keeping an eye on things.",
+    SaraEntry(date: Date(), state: "observing", headline: "Keeping an eye on things.",
+              detail: nil, revision: 1, updatedAt: Date(), validUntil: Date().addingTimeInterval(600),
               nextEventTitle: "Standup", nextEventTime: Date().addingTimeInterval(3600))
   }
 
@@ -78,21 +66,31 @@ struct SaraProvider: TimelineProvider {
 
   func getTimeline(in context: Context, completion: @escaping (Timeline<SaraEntry>) -> Void) {
     let entry = readEntry()
-    let next = Calendar.current.date(byAdding: .minute, value: 30, to: Date()) ?? Date().addingTimeInterval(1800)
+    let expiry = max(Date().addingTimeInterval(60), entry.validUntil)
+    let periodic = Date().addingTimeInterval(5 * 60)
+    let next = min(expiry, periodic)
     completion(Timeline(entries: [entry], policy: .after(next)))
   }
 
   private func readEntry() -> SaraEntry {
     let d = UserDefaults(suiteName: kAppGroup)
-    let emotion = d?.string(forKey: "emotional_state") ?? "neutral"
-    let thought = d?.string(forKey: "latest_thought") ?? "Here when you need me."
+    let formatter = ISO8601DateFormatter()
+    let validUntil = d?.string(forKey: "presence_valid_until").flatMap(formatter.date) ?? Date.distantPast
+    let updatedAt = d?.string(forKey: "presence_updated_at").flatMap(formatter.date) ?? Date.distantPast
+    let expired = validUntil <= Date()
+    let state = expired ? "resting" : (d?.string(forKey: "presence_state") ?? "resting")
+    let headline = expired ? "Available" : (d?.string(forKey: "presence_headline") ?? "Available")
+    let detailRaw = expired ? nil : d?.string(forKey: "presence_detail")
+    let detail = (detailRaw?.isEmpty == false) ? detailRaw : nil
+    let revision = Int64(d?.string(forKey: "presence_revision") ?? "0") ?? 0
     let evTitleRaw = d?.string(forKey: "next_event_title")
     let evTitle = (evTitleRaw?.isEmpty == false) ? evTitleRaw : nil
     var evDate: Date? = nil
     if let iso = d?.string(forKey: "next_event_time"), !iso.isEmpty {
       evDate = ISO8601DateFormatter().date(from: iso)
     }
-    return SaraEntry(date: Date(), emotion: emotion, thought: thought,
+    return SaraEntry(date: Date(), state: state, headline: headline, detail: detail,
+                     revision: revision, updatedAt: updatedAt, validUntil: validUntil,
                      nextEventTitle: evTitle, nextEventTime: evDate)
   }
 }
@@ -117,7 +115,7 @@ struct SaraWidgetView: View {
         if let title = entry.nextEventTitle, let time = entry.nextEventTime {
           Text("\(title) · \(time, style: .time)").font(.caption2)
         } else {
-          Text(entry.thought).font(.caption2).lineLimit(2)
+          Text(entry.headline).font(.caption2).lineLimit(2)
         }
       }
     case .systemMedium:
@@ -139,13 +137,13 @@ struct SaraWidgetView: View {
         Spacer()
       }
       Text("Sara").font(.headline)
-      Text(entry.emotion.capitalized).font(.caption).foregroundStyle(.secondary)
+      Text(entry.state.capitalized).font(.caption).foregroundStyle(.secondary)
       Spacer(minLength: 0)
       if let title = entry.nextEventTitle, let time = entry.nextEventTime {
         Text("Next: \(title)").font(.caption2).lineLimit(1)
         Text(time, style: .time).font(.caption2).foregroundStyle(.secondary)
       } else {
-        Text(entry.thought).font(.caption2).foregroundStyle(.secondary).lineLimit(2)
+        Text(entry.headline).font(.caption2).foregroundStyle(.secondary).lineLimit(2)
       }
     }
     .padding(12)
@@ -158,7 +156,7 @@ struct SaraWidgetView: View {
       VStack(alignment: .leading, spacing: 4) {
         MoodOrb(size: 34)
         Text("Sara").font(.headline)
-        Text(entry.emotion.capitalized).font(.caption).foregroundStyle(.secondary)
+        Text(entry.state.capitalized).font(.caption).foregroundStyle(.secondary)
       }
       Divider()
       VStack(alignment: .leading, spacing: 6) {
@@ -167,7 +165,10 @@ struct SaraWidgetView: View {
           Text(title).font(.subheadline).bold().lineLimit(1)
           Text(time, style: .time).font(.caption).foregroundStyle(.secondary)
         }
-        Text(entry.thought).font(.caption).foregroundStyle(.secondary).lineLimit(3)
+        Text(entry.headline).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+        if let detail = entry.detail {
+          Text(detail).font(.caption2).foregroundStyle(.tertiary).lineLimit(2)
+        }
         Spacer(minLength: 0)
       }
       Spacer(minLength: 0)

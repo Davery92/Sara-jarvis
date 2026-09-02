@@ -75,6 +75,37 @@ class SearchService:
             logger.warning(f"Redis not available ({e}); falling back to no-cache mode")
             return None
 
+    async def cache_set_json(self, key: str, value: Any, ttl_seconds: int) -> bool:
+        """Best-effort JSON cache write that never makes a web tool fail."""
+        try:
+            redis = await self._get_redis()
+            if redis is None:
+                return False
+            await redis.set(key, json.dumps(value), ex=ttl_seconds)
+            return True
+        except Exception as e:
+            logger.warning(f"Search cache write failed for {key}: {e}")
+            return False
+
+    async def cache_get_json(self, key: str) -> Optional[Any]:
+        """Best-effort JSON cache read; cache misses and outages are equivalent."""
+        try:
+            redis = await self._get_redis()
+            if redis is None:
+                return None
+            cached = await redis.get(key)
+            if not cached:
+                return None
+            if isinstance(cached, bytes):
+                cached = cached.decode("utf-8")
+            return json.loads(cached)
+        except json.JSONDecodeError as e:
+            logger.warning(f"Invalid JSON in search cache for {key}: {e}")
+            return None
+        except Exception as e:
+            logger.warning(f"Search cache read failed for {key}: {e}")
+            return None
+
     async def close(self):
         try:
             await self.http.aclose()

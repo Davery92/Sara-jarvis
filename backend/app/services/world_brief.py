@@ -31,7 +31,7 @@ from typing import Any, Dict, List, Optional
 
 from sqlalchemy import text
 
-from app.core.timezone import now as local_now, render_relative
+from app.core.timezone import now as local_now, render_relative, render_when
 from app.core.config import get_owner_id
 
 logger = logging.getLogger(__name__)
@@ -93,6 +93,68 @@ def _empty_sections() -> Dict[str, Any]:
     return out
 
 
+# ── Content hygiene (ground-truth plan, Phase 1 §5) ────────────────────────
+#
+# The brief is read verbatim into chat, the judge and compose. Anything that
+# leaks into it is repeated to David in Sara's own voice, so the appraiser's
+# internal vocabulary must not survive the patch boundary. On 2026-09-02 the
+# brief carried lines like "New signal: email.analyzed (salience 0.62)" and a
+# 900-character verbatim event dump — machine bookkeeping presented as news.
+
+# The appraiser narrating its own input rather than the event.
+_SIGNAL_ECHO_RE = re.compile(r"^\s*new signal\b|\(salience\b", re.IGNORECASE)
+
+# A relative time frozen into stored text. The brief stores absolute times and
+# renders them relative at read time (§5); a stored "in 3h" is wrong the moment
+# it is written and stays wrong forever.
+_FROZEN_RELATIVE_RE = re.compile(
+    r"(—\s*in\s+\d+\s*[hm]\b|\bin\s+\d+\s+(?:minutes?|hours?|days?)\b|\b\d+\s+(?:minutes?|hours?|days?)\s+ago\b)",
+    re.IGNORECASE,
+)
+
+_MAX_HAPPENED_CHARS = 300
+_TEXT_FIELDS = ("text", "title", "summary", "detail", "note", "next_step")
+
+
+def _banned_phrases() -> tuple:
+    """The notification banned-phrase list, shared rather than duplicated."""
+    try:
+        from app.services.deliberation_gate import _BANNED_PHRASES
+        return tuple(str(p).lower() for p in _BANNED_PHRASES)
+    except Exception:  # pragma: no cover - import cycle / refactor safety
+        return ()
+
+
+def _sanitize_patch_content(
+    section: str, content: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Return cleaned content, or ``None`` when the patch must be rejected.
+
+    Rejection is silent-by-design at the caller: a patch that only carried
+    machine chatter has nothing to say, and refusing it is the correct outcome.
+    """
+    if not content:
+        return content
+
+    cleaned = dict(content)
+    banned = _banned_phrases()
+    for field in _TEXT_FIELDS:
+        value = cleaned.get(field)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        lowered = value.lower()
+        if _SIGNAL_ECHO_RE.search(value) or any(phrase in lowered for phrase in banned):
+            return None
+        value = _FROZEN_RELATIVE_RE.sub("", value)
+        value = re.sub(r"\s{2,}", " ", value).strip(" -—,;")
+        if section == "happened" and len(value) > _MAX_HAPPENED_CHARS:
+            value = value[:_MAX_HAPPENED_CHARS].rsplit(" ", 1)[0] + "…"
+        if not value:
+            return None
+        cleaned[field] = value
+    return cleaned
+
+
 # ── Patch API (§3.1: "written only via brief_patch() operations") ─────────
 
 
@@ -148,6 +210,15 @@ async def brief_patch(
     if section not in SECTIONS:
         raise ValueError(f"unknown brief section: {section!r}")
 
+    if op in ("add", "update", "move"):
+        content = _sanitize_patch_content(section, content)
+        if content is None:
+            logger.info(
+                "[world_brief] rejected %s/%s patch from %s: signal echo or banned phrase",
+                op, section, source,
+            )
+            return
+
     state = await get_brief_row(db, user_id)
     sections = state["sections"]
 
@@ -164,6 +235,14 @@ async def brief_patch(
 
         if op in ("add", "update"):
             new_item = {"key": item_key, **(content or {})}
+            # Age stamp (2026-09-01): undated items (no at/migrate_at) can
+            # never zone-migrate, so they lived forever — three stale
+            # "dog grooming ahead" variants outlived the groomed dog by days.
+            # expire_stale_items ages them out by added_at. Carry the existing
+            # stamp forward on re-patch or the sweep's unconditional re-patches
+            # would bump it (and defeat the no-op guard below) every 5 min.
+            if "added_at" not in new_item:
+                new_item["added_at"] = (existing_item or {}).get("added_at") or local_now().isoformat()  # time-ok: absolute storage; render_brief renders it
             if existing_item == new_item:
                 return
             items.insert(0, new_item)
@@ -230,6 +309,40 @@ async def migrate_zones(db, user_id: str = DEFAULT_USER_ID) -> int:
     return moved
 
 
+async def expire_stale_items(db, user_id: str = DEFAULT_USER_ID) -> int:
+    """Age out items zone migration can't touch (2026-09-01). AHEAD items
+    without a parseable at/migrate_at (LLM appraisal patches) expire 48h
+    after added_at; HAPPENED items expire 7 days after at/added_at. Items
+    with neither timestamp predate the added_at stamp — close them outright:
+    they are exactly the immortal entries this pass exists to kill (history
+    lives in the diary/day-replay, not here)."""
+    state = await get_brief_row(db, user_id)
+    now = local_now()
+    closed = 0
+    for section, max_age in (
+        ("ahead", timedelta(hours=48)),
+        ("happened", timedelta(days=7)),
+        ("open_loops", timedelta(hours=72)),
+        ("comms_needing_action", timedelta(hours=72)),
+    ):
+        for item in list(state["sections"].get(section, [])):
+            if section in ("open_loops", "comms_needing_action") and str(item.get("key", "")).startswith("thread:"):
+                continue  # sweep-owned; closed by their own thread lifecycle
+            at = _parse_iso(item.get("migrate_at") or item.get("at"))
+            if section == "ahead" and at is not None:
+                continue  # dated AHEAD items are migrate_zones' job
+            anchor = at or _parse_iso(item.get("added_at"))
+            if anchor is not None and (anchor.tzinfo is None):
+                anchor = anchor.replace(tzinfo=now.tzinfo)
+            if anchor is None or now - anchor > max_age:
+                await brief_patch(
+                    db, user_id, op="close", section=section, item_key=item["key"],
+                    source="world_brief.expire_stale_items",
+                )
+                closed += 1
+    return closed
+
+
 async def sweep_brief(db, user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]:
     """Temporary maintainer (Phase 1): a periodic sweep translating existing
     signals into brief patches. This code becomes the appraisal loop's tool
@@ -242,6 +355,12 @@ async def sweep_brief(db, user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]:
         stats["moved"] = await migrate_zones(db, user_id)
     except Exception as e:
         logger.warning(f"[world_brief] zone migration failed: {e}")
+        await _safe_rollback(db)
+
+    try:
+        stats["expired"] = await expire_stale_items(db, user_id)
+    except Exception as e:
+        logger.warning(f"[world_brief] stale-item expiry failed: {e}")
         await _safe_rollback(db)
 
     # AHEAD: next 7 days of calendar (non-all-day). `at` = start_time, so
@@ -268,18 +387,24 @@ async def sweep_brief(db, user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]:
         window_start = naive_local_now()
         window_end = window_start + timedelta(days=7)
         rows = (await db.execute(text("""
-            SELECT id, title, start_time, end_time FROM calendar_event
+            SELECT id, title, start_time, end_time, COALESCE(all_day, FALSE) AS all_day
+            FROM calendar_event
             WHERE user_id = :uid
               AND COALESCE(end_time, start_time) >= :window_start
               AND start_time < :window_end
-              AND COALESCE(all_day, FALSE) = FALSE
             ORDER BY start_time ASC LIMIT 20
         """), {"uid": user_id, "window_start": window_start, "window_end": window_end})).fetchall()
         for r in rows:
+            # All-day events included since 2026-09-01: excluding them made
+            # vacations/birthdays (all-day blocks) invisible in AHEAD while
+            # a groomed dog lingered for days. Their `at` is ET midnight of
+            # the start day; render_brief's "in Xh" phrasing is tolerable
+            # for a date-scoped item, invisibility was not.
             start_anchor = to_utc(r.start_time)  # naive ET -> aware UTC for storage
-            content = {"text": r.title, "at": start_anchor.isoformat(), "kind": "calendar"}
+            title = f"{r.title} (all day)" if r.all_day else r.title
+            content = {"text": title, "at": start_anchor.isoformat(), "kind": "calendar"}  # time-ok: absolute storage; render_brief renders it
             if r.end_time:
-                content["migrate_at"] = to_utc(r.end_time).isoformat()
+                content["migrate_at"] = to_utc(r.end_time).isoformat()  # time-ok: absolute storage; render_brief renders it
             await brief_patch(
                 db, user_id, op="update", section="ahead", item_key=f"cal:{r.id}",
                 content=content,
@@ -307,7 +432,7 @@ async def sweep_brief(db, user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]:
                 db, user_id, op="update", section="open_loops", item_key=f"thread:{r.id}",
                 content={
                     "text": r.topic,
-                    "aging_since": r.last_mentioned_at.isoformat() if r.last_mentioned_at else None,
+                    "aging_since": r.last_mentioned_at.isoformat() if r.last_mentioned_at else None,  # time-ok: absolute storage; render_brief renders it
                 },
                 source="world_brief.sweep_brief:followup_thread",
                 evidence=[{"followup_thread_id": str(r.id)}],
@@ -352,7 +477,7 @@ async def sweep_brief(db, user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]:
                 db, user_id, op="update", section="comms_needing_action", item_key=f"email:{r.id}",
                 content={
                     "text": f"{who} — '{r.subject}'",
-                    "aged_since": r.received_at.isoformat() if r.received_at else None,
+                    "aged_since": r.received_at.isoformat() if r.received_at else None,  # time-ok: absolute storage; render_brief renders it
                 },
                 source="world_brief.sweep_brief:email",
                 evidence=[{"email_id": str(r.id)}],
@@ -497,6 +622,19 @@ async def _body_training_live_async(user_id: str) -> str:
 # ── Renderer (§3.1: absolute storage, relative rendering — §5.2) ──────────
 
 
+def _when(at: Optional[datetime], now: datetime) -> str:
+    """One clock. Absolute ET plus how far away, e.g. "Tue Sep 2, 1:00 PM ET (in 3h)".
+
+    Stored `at` values are written by several producers, and a naive one is
+    ET wall-clock here (local_now() is the house style). Say so
+    explicitly rather than letting render_when guess — guessing is what turned a
+    1:00 PM call into a 5:00 AM one.
+    """
+    if at is None:
+        return ""
+    return render_when(at, now=now, source_convention="et")
+
+
 async def render_brief(db, user_id: str = DEFAULT_USER_ID, now: Optional[datetime] = None) -> str:
     """Render the brief for prompt consumption. ALL timestamps are rendered
     relative to `now` here — the stored form stays absolute UTC-backed ISO.
@@ -505,7 +643,7 @@ async def render_brief(db, user_id: str = DEFAULT_USER_ID, now: Optional[datetim
     state = await get_brief_row(db, user_id)
     sections = state["sections"]
 
-    lines: List[str] = [f"AS OF: {now.strftime('%A, %B %-d, %Y, %-I:%M %p')} ET", ""]
+    lines: List[str] = [f"AS OF: {now.strftime('%A, %B %-d, %Y, %-I:%M %p')} ET", ""]  # time-ok: the "as of" line itself
 
     lines.append("## HAPPENED (last 72h, closed items, past tense)")
     cutoff = now - timedelta(hours=_HAPPENED_WINDOW_HOURS)
@@ -514,8 +652,8 @@ async def render_brief(db, user_id: str = DEFAULT_USER_ID, now: Optional[datetim
         at = _parse_iso(item.get("at"))
         if at is not None and at < cutoff:
             continue
-        rel = f" — {render_relative(at, reference=now)}" if at else ""
-        lines.append(f"- {item.get('text', '(untitled)')}{rel}")
+        rel = f" — {_when(at, now)}" if at else ""
+        lines.append(f"- [{item.get('key', '?')}] {item.get('text', '(untitled)')}{rel}")
         shown += 1
     if not shown:
         lines.append("- Nothing notable.")
@@ -534,8 +672,9 @@ async def render_brief(db, user_id: str = DEFAULT_USER_ID, now: Optional[datetim
     if ahead:
         for item in ahead:
             at = _parse_iso(item.get("at"))
-            rel = render_relative(at, reference=now) if at else "unknown time"
-            lines.append(f"- {rel}: {item.get('text', '(untitled)')}")
+            # No time is "no time", never a guessed one.
+            rel = _when(at, now) if at else "no time given"
+            lines.append(f"- [{item.get('key', '?')}] {rel}: {item.get('text', '(untitled)')}")
     else:
         lines.append("- Nothing scheduled.")
 
@@ -545,7 +684,7 @@ async def render_brief(db, user_id: str = DEFAULT_USER_ID, now: Optional[datetim
         for item in open_loops:
             at = _parse_iso(item.get("aging_since"))
             rel = f" (aging {render_relative(at, reference=now)})" if at else ""
-            lines.append(f"- {item.get('text', '(untitled)')}{rel}")
+            lines.append(f"- [{item.get('key', '?')}] {item.get('text', '(untitled)')}{rel}")
     else:
         lines.append("- None open.")
 
@@ -555,7 +694,7 @@ async def render_brief(db, user_id: str = DEFAULT_USER_ID, now: Optional[datetim
         for item in comms[:3]:
             at = _parse_iso(item.get("aged_since"))
             rel = f" ({render_relative(at, reference=now)})" if at else ""
-            lines.append(f"- {item.get('text', '(untitled)')}{rel}")
+            lines.append(f"- [{item.get('key', '?')}] {item.get('text', '(untitled)')}{rel}")
     else:
         lines.append("- Nothing outstanding.")
 

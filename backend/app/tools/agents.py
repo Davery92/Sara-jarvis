@@ -24,9 +24,11 @@ class GetBackgroundTasksTool(BaseTool):
     @property
     def description(self) -> str:
         return """Check the status of background tasks that agents are working on.
-    Shows active tasks currently running and recently completed tasks.
+    Shows EVERYTHING Sara has dispatched — chat handoffs, agent/host dispatch,
+    code mode, and research plans — active and recently completed.
     Use this when the user asks about their background tasks, agent work,
-    or wants to know what research is pending/complete."""
+    or wants to know what research is pending/complete. This is the same feed
+    the phone and web UI show, so what it says is what David sees."""
 
     @property
     def parameters(self) -> Dict[str, Any]:
@@ -53,16 +55,21 @@ class GetBackgroundTasksTool(BaseTool):
         limit = kwargs.get("limit", 5)
 
         try:
-            from app.services.background_task_service import background_task_service
+            # Same function the web badge and the iOS pill read. Sara used to
+            # query `background_task` alone here, which is blind to research
+            # plans — that is how she reported "zero active tasks" while a plan
+            # was on step 3 (2026-09-01 Salem incident). She can never again see
+            # a different world than David.
+            from app.services.agent_activity import ACTIVE_STATUSES, get_agent_activity
             from app.main_simple import SessionLocal
 
             db = SessionLocal()
             try:
-                tasks = await background_task_service.get_recent_tasks(
-                    db=db,
-                    user_id=str(user_id),
+                tasks = await get_agent_activity(
+                    db,
+                    str(user_id),
                     limit=limit,
-                    include_active=True
+                    include_active=True,
                 )
 
                 if not tasks:
@@ -74,13 +81,19 @@ class GetBackgroundTasksTool(BaseTool):
 
                 task_list = []
                 for task in tasks:
+                    query = task.original_query or ""
                     task_info = {
                         "id": task.id,
                         "status": task.status,
-                        "query": task.original_query[:100] + "..." if len(task.original_query) > 100 else task.original_query,
-                        "created_at": task.created_at.isoformat() if task.created_at else None,
-                        "completed_at": task.completed_at.isoformat() if task.completed_at else None
+                        "kind": task.task_type,
+                        "query": query[:100] + "..." if len(query) > 100 else query,
+                        "created_at": task.created_at,
+                        "completed_at": task.completed_at,
                     }
+                    if task.status_label:
+                        task_info["progress"] = task.status_label
+                    if task.error_message:
+                        task_info["error"] = task.error_message[:300]
 
                     # Include result note link if completed
                     if task.status == "completed" and task.result_note_id:
@@ -88,15 +101,25 @@ class GetBackgroundTasksTool(BaseTool):
 
                     task_list.append(task_info)
 
-                active_count = sum(1 for t in tasks if t.status in ("pending", "running"))
+                active = [t for t in tasks if t.status in ACTIVE_STATUSES]
                 completed_count = sum(1 for t in tasks if t.status == "completed")
+
+                if active:
+                    detail = "; ".join(
+                        f"{t.task_type} {t.id[:8]} — {t.original_query[:60]}"
+                        + (f" ({t.status_label})" if t.status_label else "")
+                        for t in active
+                    )
+                    message = f"{len(active)} active: {detail}. {completed_count} recently completed."
+                else:
+                    message = f"Nothing running right now. {completed_count} recently completed."
 
                 return ToolResult(
                     success=True,
-                    message=f"Found {active_count} active and {completed_count} completed tasks",
+                    message=message,
                     data={
                         "tasks": task_list,
-                        "active_count": active_count,
+                        "active_count": len(active),
                         "completed_count": completed_count
                     }
                 )
@@ -104,10 +127,12 @@ class GetBackgroundTasksTool(BaseTool):
                 db.close()
 
         except Exception as e:
-            logger.error(f"Error getting background tasks: {e}")
+            logger.error(
+                "Error getting background tasks: %s: %s", type(e).__name__, e, exc_info=True
+            )
             return ToolResult(
                 success=False,
-                message=f"Failed to get background tasks: {str(e)}",
+                message=f"Failed to get background tasks: {type(e).__name__}: {e}",
                 data=None
             )
 

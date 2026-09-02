@@ -282,6 +282,16 @@ class EventBus:
         Args:
             event: Event to publish
         """
+        # The durable world ledger is independent of Redis availability. Older
+        # sensors still publishing only through this bus are mirrored before
+        # the ephemeral publish, so a Redis outage cannot make Sara miss part
+        # of David's world.
+        try:
+            from app.services.world_state.legacy_bridge import record_legacy_event
+            await record_legacy_event(event)
+        except Exception as e:
+            logger.warning("[world-state] legacy event mirror failed for %s: %s", event.event_type.value, e)
+
         if not await self._ensure_connected():
             return
 

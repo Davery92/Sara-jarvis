@@ -180,6 +180,15 @@ async def create_note(
         starred=bool(note_data.starred),
     )
     db.add(note)
+    from app.services.world_state.writer import append_world_event
+    append_world_event(
+        db, user_id=str(current_user.id), kind="note.created", source="notes_api",
+        source_ref=f"note:{note_id}", aggregate_type="note", aggregate_id=note_id,
+        actor_type="user", actor_id=str(current_user.id), dedupe_key=f"note-created:{note_id}",
+        payload={"note_id": note_id, "title": note_data.title, "folder_id": note_data.folder_id,
+                 "tags": normalize_note_tags(note_data.tags), "starred": bool(note_data.starred),
+                 "summary": (note_data.content or "")[:500]},
+    )
     db.commit()
     db.refresh(note)
 
@@ -396,6 +405,16 @@ async def update_note(
     if note_data.starred is not None:
         note.starred = bool(note_data.starred)
     note.updated_at = naive_local_now()
+    from app.services.world_state.writer import append_world_event
+    append_world_event(
+        db, user_id=str(current_user.id), kind="note.updated", source="notes_api",
+        source_ref=f"note:{note_id}", aggregate_type="note", aggregate_id=note_id,
+        actor_type="user", actor_id=str(current_user.id),
+        dedupe_key=f"note-updated:{note_id}:{note.updated_at.isoformat()}",
+        payload={"note_id": note_id, "title": note.title, "folder_id": note.folder_id,
+                 "tags": note.tags or [], "starred": bool(note.starred),
+                 "summary": (note.content or "")[:500]},
+    )
     db.commit()
     db.refresh(note)
 
@@ -425,6 +444,13 @@ async def delete_note(
         NoteConnection.user_id == current_user.id
     ).delete()
 
+    from app.services.world_state.writer import append_world_event
+    append_world_event(
+        db, user_id=str(current_user.id), kind="note.deleted", source="notes_api",
+        source_ref=f"note:{note_id}", aggregate_type="note", aggregate_id=note_id,
+        actor_type="user", actor_id=str(current_user.id), dedupe_key=f"note-deleted:{note_id}",
+        payload={"note_id": note_id, "title": note.title},
+    )
     db.delete(note)
     db.commit()
 

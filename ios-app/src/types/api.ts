@@ -321,11 +321,16 @@ export interface BackgroundTask {
   clarification_question: string | null;
   error_message: string | null;
   status_label?: string | null;  // friendly current-step label (e.g. "editing mul.py")
+  origin?: string | null;        // research plans: 'david_chat' | 'sara_internal'
+  cancellable?: boolean;         // server says this task can be cancelled
   created_at: string;
   started_at: string | null;
   completed_at: string | null;
+  updated_at?: string | null;
 }
 
 export interface BackgroundTasksResponse {
   tasks: BackgroundTask[];
+  active_count?: number;
+  total_count?: number;
 }

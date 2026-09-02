@@ -9,17 +9,61 @@ its verdict is persisted, but nothing downstream sends anything.
 """
 import json
 import logging
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 
-def _build_prompt(composed_text: str, candidate: Dict[str, Any], brief_text: str, utterance_history: List[Dict[str, Any]]) -> Tuple[str, str]:
+async def gather_entity_history(db, user_id: str, dedupe_key: Optional[str],
+                                days: int = 7) -> List[str]:
+    """Everything already said about THIS entity, verbatim.
+
+    The said-before check was comparing a draft against notification *titles*
+    across all topics — a coarse-grained signal that missed the failure it exists
+    to catch. On 2026-09-01 five paraphrases of one Laura Weippert concern went
+    out in a morning: same entity, different titles, so nothing matched. The
+    reviewer needs the actual text it already sent about this exact thing.
+    """
+    if not dedupe_key:
+        return []
+    from sqlalchemy import text as sa_text
+
+    try:
+        rows = (await db.execute(sa_text("""
+            SELECT cu.final_text AS said, cu.delivered_at AS at
+              FROM composed_utterance cu
+              JOIN say_candidate sc ON sc.id = cu.candidate_id
+             WHERE cu.user_id = :uid AND cu.delivered_at IS NOT NULL
+               AND cu.final_text IS NOT NULL
+               AND :key = ANY(sc.topic_entities)
+               AND cu.delivered_at >= NOW() - (:days * INTERVAL '1 day')
+            UNION ALL
+            SELECT n.message AS said, n.sent_at AS at
+              FROM notification_log n
+             WHERE n.user_id = :uid AND n.sent = TRUE
+               AND n.topic = :key
+               AND n.sent_at >= NOW() - (:days * INTERVAL '1 day')
+             ORDER BY at DESC LIMIT 10
+        """), {"uid": user_id, "key": dedupe_key, "days": days})).fetchall()
+        return [(r.said or "").strip() for r in rows if (r.said or "").strip()]
+    except Exception as e:
+        logger.warning(f"[review] entity history unavailable for {dedupe_key!r}: {e}")
+        return []
+
+
+def _build_prompt(composed_text: str, candidate: Dict[str, Any], brief_text: str,
+                  utterance_history: List[Dict[str, Any]],
+                  entity_history: Optional[List[str]] = None) -> Tuple[str, str]:
     hist_lines = [
         f"- \"{h['title']}\" ({h['category']}, {'engaged' if h['engaged'] else 'not engaged'})"
         for h in utterance_history[:20]
     ]
     hist_block = "\n".join(hist_lines) if hist_lines else "(no sends in the last 14 days)"
+
+    entity_block = (
+        "\n".join(f'- "{said[:300]}"' for said in (entity_history or [])[:10])
+        or "(nothing said about this specific thing in the last 7 days)"
+    )
 
     system_msg = (
         "You are Sara's editor: the last check before an unprompted message would go out. "
@@ -32,8 +76,10 @@ def _build_prompt(composed_text: str, candidate: Dict[str, Any], brief_text: str
         "3. Tense/temporal sanity: does every date/time reference in the draft match the "
         "World Brief below? A draft that says something is 'coming up' when the brief "
         "shows it already happened is a hard kill.\n"
-        "4. Said before? Compare against the utterance history below — if this is "
-        "substantially the same thing already sent recently, kill it.\n\n"
+        "4. Said before? First check ALREADY SAID ABOUT THIS EXACT THING below — if any "
+        "line there makes the same point as this draft, however differently worded, that "
+        "is a hard kill: he has already been told. Then check the wider utterance history "
+        "for a substantially similar recent send.\n\n"
         "Respond with ONLY valid JSON:\n"
         '{"verdict": "approve|edit|kill", "reason": "one sentence, specific", '
         '"edited_text": "only present if verdict=edit — the corrected message"}'
@@ -43,6 +89,7 @@ def _build_prompt(composed_text: str, candidate: Dict[str, Any], brief_text: str
         f"## Draft message\n{composed_text}\n\n"
         f"## Original candidate\nkind: {candidate['kind']}\nsummary: {candidate['summary']}\n\n"
         f"## Current World Brief (for tense/temporal check)\n{brief_text}\n\n"
+        f"## ALREADY SAID ABOUT THIS EXACT THING, last 7 days\n{entity_block}\n\n"
         f"## Utterance history, last 14 days (for said-before check)\n{hist_block}\n"
     )
     return system_msg, user_msg
@@ -85,11 +132,14 @@ async def review_utterance(
     candidate: Dict[str, Any],
     brief_text: str,
     utterance_history: List[Dict[str, Any]],
+    entity_history: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Returns {"verdict": approve|edit|kill, "reason": str, "edited_text": Optional[str]}.
     Fails closed to kill on any error — an editor that can't render an opinion
     should not wave a message through."""
-    system_msg, user_msg = _build_prompt(composed_text, candidate, brief_text, utterance_history)
+    system_msg, user_msg = _build_prompt(
+        composed_text, candidate, brief_text, utterance_history, entity_history,
+    )
 
     try:
         from app.core.llm import get_background_llm_client
@@ -102,6 +152,7 @@ async def review_utterance(
             temperature=0.2,
             max_tokens=400,
             extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+            caller="review",
         )
         raw = response["choices"][0]["message"].get("content", "") if isinstance(response, dict) else str(response)
         parsed = _parse_response(raw)

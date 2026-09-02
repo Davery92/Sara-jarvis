@@ -1,4 +1,5 @@
 """Document upload, management, search, and 3D model routes."""
+import asyncio
 import logging
 import os
 import uuid
@@ -31,6 +32,58 @@ MODEL_MIME_TYPES = {
     'glb': 'model/gltf-binary',
 }
 
+async def _legacy_chunk_document(document_id: str, user_id: str, extracted_text: str) -> None:
+    """Background backup path: chunk + embed a document into PostgreSQL for
+    legacy compatibility. Neo4j (via intelligence_pipeline) is the primary
+    store and is already queued async by the caller — this just mustn't block
+    the upload response on its own embedding-service round trip."""
+    from app.main_simple import DocumentProcessor, DATABASE_URL, PGVECTOR_AVAILABLE
+    from app.services.embedding_service import embedding_service
+    from app.db.base import SessionLocal
+
+    try:
+        processor = DocumentProcessor()
+        chunks = processor.chunk_text(extracted_text) if extracted_text else []
+        max_chunks = 100  # Reduced since Neo4j is primary
+        processed_chunks = chunks[:max_chunks]
+        if not processed_chunks:
+            return
+
+        chunk_embeddings = await embedding_service.generate_embeddings_batch(processed_chunks)
+
+        db = SessionLocal()
+        try:
+            saved_chunks = 0
+            skipped_chunks = 0
+            for i, (chunk_text, embedding) in enumerate(zip(processed_chunks, chunk_embeddings)):
+                if embedding is None:
+                    skipped_chunks += 1
+                    continue
+
+                embedding_data = embedding if (DATABASE_URL.startswith("postgresql") and PGVECTOR_AVAILABLE) else json.dumps(embedding)
+
+                chunk = DocumentChunk(
+                    document_id=document_id,
+                    user_id=user_id,
+                    chunk_index=i,
+                    chunk_text=chunk_text,
+                    embedding=embedding_data
+                )
+                db.add(chunk)
+                saved_chunks += 1
+
+            db.commit()
+            if skipped_chunks > 0:
+                logger.warning(f"Legacy chunking: {saved_chunks} chunks saved, {skipped_chunks} skipped (embedding failures)")
+            else:
+                logger.info(f"Legacy chunking completed: {saved_chunks} chunks")
+        finally:
+            db.close()
+
+    except Exception as chunk_error:
+        logger.warning(f"Legacy chunking failed (Neo4j processing continues): {chunk_error}")
+
+
 # ──────────────────────────────────────────────
 # Document API endpoints
 # ──────────────────────────────────────────────
@@ -43,10 +96,6 @@ async def upload_document(
     db: Session = Depends(get_db)
 ):
     """Upload a document with Neo4j-first intelligent processing"""
-    # Lazy imports to avoid circular dependencies
-    from app.main_simple import document_processor, DATABASE_URL, PGVECTOR_AVAILABLE
-    from app.services.embedding_service import embedding_service
-
     doc_id = str(uuid.uuid4())
 
     try:
@@ -151,50 +200,27 @@ async def upload_document(
         )
 
         db.add(document)
+        from app.services.world_state.writer import append_world_event
+        append_world_event(
+            db, user_id=str(current_user.id), kind="document.uploaded", source="documents_api",
+            source_ref=f"document:{doc_id}", aggregate_type="document", aggregate_id=doc_id,
+            actor_type="user", actor_id=str(current_user.id), dedupe_key=f"document-uploaded:{doc_id}",
+            payload={"document_id": doc_id, "title": document.title,
+                     "filename": document.original_filename, "mime_type": document.mime_type,
+                     "file_size": document.file_size, "is_processed": True,
+                     "summary": (extracted_text or "")[:500]},
+        )
         db.commit()
         db.refresh(document)
 
-        # Legacy chunking for PostgreSQL compatibility (reduced priority)
-        try:
-            chunks = processor.chunk_text(extracted_text) if extracted_text else []
-            max_chunks = 100  # Reduced since Neo4j is primary
-            processed_chunks = chunks[:max_chunks]
-
-            if processed_chunks:
-                # Generate embeddings for chunks
-                chunk_embeddings = await embedding_service.generate_embeddings_batch(processed_chunks)
-
-                # Save chunks to PostgreSQL (skip chunks with failed embeddings)
-                saved_chunks = 0
-                skipped_chunks = 0
-                for i, (chunk_text, embedding) in enumerate(zip(processed_chunks, chunk_embeddings)):
-                    if embedding is None:
-                        skipped_chunks += 1
-                        continue
-
-                    if DATABASE_URL.startswith("postgresql") and PGVECTOR_AVAILABLE:
-                        embedding_data = embedding
-                    else:
-                        embedding_data = json.dumps(embedding)
-
-                    chunk = DocumentChunk(
-                        document_id=document.id,
-                        user_id=current_user.id,
-                        chunk_index=i,
-                        chunk_text=chunk_text,
-                        embedding=embedding_data
-                    )
-                    db.add(chunk)
-                    saved_chunks += 1
-
-                db.commit()
-                if skipped_chunks > 0:
-                    logger.warning(f"Legacy chunking: {saved_chunks} chunks saved, {skipped_chunks} skipped (embedding failures)")
-                else:
-                    logger.info(f"Legacy chunking completed: {saved_chunks} chunks")
-
-        except Exception as chunk_error:
-            logger.warning(f"Legacy chunking failed (Neo4j processing continues): {chunk_error}")
+        # Legacy chunking for PostgreSQL compatibility (reduced priority, backup
+        # only — Neo4j + intelligence_pipeline above is the primary path).
+        # Backgrounded: generate_embeddings_batch is a real network call to the
+        # embedding service, and awaiting it here blocked the upload response —
+        # two uploads close together would contend for the same embedding
+        # endpoint, so the second one could take 5-10+ seconds with the
+        # paperclip spinner giving no indication anything was still happening.
+        asyncio.create_task(_legacy_chunk_document(document.id, current_user.id, extracted_text))
 
         return DocumentResponse(
             id=document.id,
@@ -304,6 +330,14 @@ async def delete_document(
         logger.warning(f"Failed to delete document from Neo4j: {e}")
 
     # Delete document record
+    from app.services.world_state.writer import append_world_event
+    append_world_event(
+        db, user_id=str(current_user.id), kind="document.deleted", source="documents_api",
+        source_ref=f"document:{document_id}", aggregate_type="document", aggregate_id=document_id,
+        actor_type="user", actor_id=str(current_user.id), dedupe_key=f"document-deleted:{document_id}",
+        payload={"document_id": document_id, "title": document.title,
+                 "filename": document.original_filename},
+    )
     db.delete(document)
     db.commit()
 
@@ -328,6 +362,15 @@ async def update_document(
 
     # Update document title
     document.title = title
+    from app.services.world_state.writer import append_world_event
+    append_world_event(
+        db, user_id=str(current_user.id), kind="document.updated", source="documents_api",
+        source_ref=f"document:{document_id}", aggregate_type="document", aggregate_id=document_id,
+        actor_type="user", actor_id=str(current_user.id),
+        dedupe_key=f"document-title:{document_id}:{title}",
+        payload={"document_id": document_id, "title": title,
+                 "filename": document.original_filename, "is_processed": document.is_processed},
+    )
     db.commit()
     db.refresh(document)
 

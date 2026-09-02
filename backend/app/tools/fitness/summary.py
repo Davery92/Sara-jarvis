@@ -6,7 +6,7 @@ from typing import Dict, Any
 from app.tools.base import BaseTool, ToolResult
 from sqlalchemy import text
 from datetime import datetime, timezone, timedelta
-from app.core.timezone import naive_local_now
+from app.core.timezone import naive_local_now, naive_utc_now
 import json
 
 
@@ -222,29 +222,48 @@ class FitnessSummaryTool(BaseTool):
             }
 
             # === RECOVERY METRICS ===
-            # Check for recent recovery notes in fitness_note table
+            # Recent recovery notes from fitness_note.
+            #
+            # Two fixes here (D11). The column is `category`, not `note_type` —
+            # this query raised UndefinedColumn on every call, aborting the
+            # whole fitness_summary tool before it ever returned. And it had no
+            # date bound, so once it did run, the five most recent notes came
+            # back however old they were and a soreness note from March would
+            # read as current state in an August summary.
+            #
+            # fitness_note.created_at is a naive column written with NOW() on a
+            # UTC session, so the bound is naive UTC.
             recovery_sql = text("""
-                SELECT content, note_type, created_at
+                SELECT content, category, created_at
                 FROM fitness_note
                 WHERE user_id = :user_id
-                AND note_type IN ('recovery', 'soreness', 'energy')
+                AND category IN ('recovery', 'soreness', 'energy')
+                AND created_at >= :since
                 ORDER BY created_at DESC
                 LIMIT 5
             """)
 
-            recovery_result = db.execute(recovery_sql, {"user_id": user_id})
+            recovery_result = db.execute(recovery_sql, {
+                "user_id": user_id,
+                "since": naive_utc_now() - timedelta(days=14),
+            })
 
             recovery_notes = []
             for row in recovery_result.fetchall():
                 recovery_notes.append({
-                    "type": row.note_type,
+                    "type": row.category,
                     "content": row.content,
                     "date": row.created_at.strftime("%Y-%m-%d") if row.created_at else None
                 })
 
             summary["recovery"] = {
                 "recent_notes": recovery_notes,
-                "count": len(recovery_notes)
+                "count": len(recovery_notes),
+                "window_days": 14,
+                "note": (
+                    "No recovery notes logged in the last 14 days"
+                    if not recovery_notes else None
+                ),
             }
 
             # === WEEKLY STATS ===

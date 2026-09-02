@@ -33,6 +33,7 @@ export const ROUTE_TO_VIEW: Record<string, string> = {
   Health: 'fitness',
   RecoveryForm: 'fitness',
   NutritionGoalsForm: 'fitness',
+  PhaseForm: 'fitness',
   WorkoutMode: 'fitness',
   Cardio: 'fitness',
   TabataTimer: 'fitness',
@@ -187,7 +188,10 @@ export function navigateToChat(params?: {
   notification?: { id: string; title: string; message: string; category: string; item_type: string };
 }) {
   console.log('[Navigation] navigateToChat called with params:', params);
-  navigateToStackScreen('Chat', params);
+  // Chat has one canonical, persistent owner. A second stack-level Chat route
+  // used to create independent screen state and conversation ids, making an
+  // in-flight turn appear to switch threads after navigation.
+  navigateToTab('Chat', params);
 }
 
 /**

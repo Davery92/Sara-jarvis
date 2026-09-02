@@ -161,11 +161,11 @@ async def orchestrator_status():
         "config": {
             "orchestrator": {
                 "url": "http://100.104.68.115:8081",
-                "model": "qwen3.6-27b"
+                "model": "qwen3.8-27b"
             },
             "worker": {
                 "url": "http://100.104.68.115:8081",
-                "model": "qwen3.6-27b"
+                "model": "qwen3.8-27b"
             }
         }
     }

@@ -371,12 +371,29 @@ class RecoveryLogRecentTool(BaseTool):
                     "log_date": str(row.log_date),
                     "hrv": row.hrv,
                     "heart_rate": row.heart_rate,
-                    "sleep_hours": float(row.sleep_hours) if row.sleep_hours else None,
+                    "sleep_hours": float(row.sleep_hours) if row.sleep_hours is not None else None,
                     "soreness_level": row.soreness_level,
-                    "body_weight": float(row.body_weight) if row.body_weight else None,
+                    "body_weight": float(row.body_weight) if row.body_weight is not None else None,
                     "weight_unit": row.weight_unit,
                     "notes": row.notes
                 })
+
+            # Name the days with no log at all. A short list of 3 rows for a
+            # 7-day request looks like a complete answer to a model that can't
+            # see what's missing, and it will fill the rest in.
+            from app.core.timezone import today as local_today
+            end_day = local_today()
+            logged = {log["log_date"] for log in logs}
+            missing_dates = [
+                str(end_day - timedelta(days=offset))
+                for offset in range(days)
+                if str(end_day - timedelta(days=offset)) not in logged
+            ]
+            # Per-field gaps too: a logged day with hrv=NULL is not an HRV reading.
+            missing_by_field = {
+                field: [log["log_date"] for log in logs if log[field] is None]
+                for field in ("hrv", "heart_rate", "sleep_hours", "soreness_level")
+            }
 
             # Calculate simple averages for trend analysis
             hrv_values = [log["hrv"] for log in logs if log["hrv"] is not None]
@@ -394,10 +411,17 @@ class RecoveryLogRecentTool(BaseTool):
             return ToolResult(
                 success=True,
                 data={
-                    "message": f"Retrieved {len(logs)} recovery logs from the last {days} days",
+                    "message": (
+                        f"Retrieved {len(logs)} recovery logs from the last {days} days. "
+                        + (f"No log at all on: {', '.join(missing_dates)}. " if missing_dates else "")
+                        + "Report missing days as missing — do not estimate or interpolate values."
+                    ),
                     "logs": logs,
                     "averages": averages,
-                    "days_requested": days
+                    "days_requested": days,
+                    "days_with_logs": len(logs),
+                    "missing_dates": missing_dates,
+                    "missing_by_field": missing_by_field,
                 }
             )
 

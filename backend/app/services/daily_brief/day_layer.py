@@ -34,7 +34,8 @@ class DayLayer:
         self.briefs_dir = BRIEFS_DIR
         from app.core.llm_config import llm_config
         self.fast_model = llm_config.fast_model
-        self.llm_base_url = os.environ.get("OPENAI_BASE_URL", llm_config.primary_url)
+        # bg lane — OPENAI_BASE_URL is the 1-slot chat lane in the backend process.
+        self.llm_base_url = llm_config.bg_primary_url
 
     def _ensure_user_dir(self, user_id: str) -> Path:
         """Ensure user's brief directory structure exists."""

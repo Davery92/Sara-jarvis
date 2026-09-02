@@ -109,6 +109,33 @@ async def get_state(user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]:
             "correlation_id": None}
 
 
+# 01:00–04:59 ET. Sara does not think in these hours unless something is
+# genuinely wrong (see _wakes_the_sleeping_mind).
+QUIET_NIGHT_HOURS = range(1, 5)
+
+
+def _is_quiet_night() -> bool:
+    from app.core.timezone import now as local_now
+    return local_now().hour in QUIET_NIGHT_HOURS
+
+
+# The only reasons to think at 3 AM.
+#
+# INTEROCEPTION is Sara noticing something wrong — with a subsystem or with
+# David's vitals — and it carries its own 1/day/subsystem cooldown, so it cannot
+# become a nightly habit. MANUAL is a human explicitly asking, which always wins.
+#
+# Security is deliberately absent: `reactive_engine`'s security subscriber sends
+# directly and never routes through the kernel (one of the two exemptions the
+# ground-truth plan preserves), so a door opening at 3 AM is unaffected by this
+# gate. Adding it here would suggest a dependency that does not exist.
+NIGHT_WAKE_REASONS = frozenset({WakeReason.INTEROCEPTION, WakeReason.MANUAL})
+
+
+def _wakes_the_sleeping_mind(wake_reason: WakeReason) -> bool:
+    return wake_reason in NIGHT_WAKE_REASONS
+
+
 async def ambient_turn(
     user_id: str = DEFAULT_USER_ID,
     wake_reason: WakeReason = WakeReason.PROMOTED_EVENT,
@@ -157,6 +184,18 @@ async def ambient_turn(
     except Exception:
         pass
 
+    # Ground-truth plan, Phase 8 §2: the mind sleeps between 01:00 and 05:00 ET.
+    #
+    # Overnight deliberations produced nothing David could act on and everything
+    # he later resented: on 2026-09-01, four cycles between 04:34 and 05:06
+    # paraphrased the same settled concern, one of them rendering 17:00Z as "your
+    # 5:00 AM EDT call", and all of them were held for sleep and then flushed
+    # into his inbox at 06:00. Nothing arrives at 3 AM that is better handled at
+    # 3 AM than at 7 — except the two things below, which genuinely are.
+    if _is_quiet_night() and not _wakes_the_sleeping_mind(wake_reason):
+        return {"skipped": "quiet_hours", "state": KernelState.AMBIENT.value,
+                "wake_reason": wake_reason.value, "correlation_id": kernel_turn_id}
+
     coordinator = get_coordinator()
     if not await coordinator.acquire_exclusive("deliberation", "heavy_llm"):
         return {"skipped": "exclusive_group_busy", "state": KernelState.AMBIENT.value,
@@ -185,6 +224,15 @@ async def ambient_turn(
 
         await set_state(user_id, KernelState.AMBIENT, wake_reason,
                         detail=f"thinking ({wake_reason.value})", correlation_id=kernel_turn_id)
+        try:
+            from app.services.world_state.cognition import record_cognition_event
+            await record_cognition_event(
+                user_id, kind="sara.deliberation.started", turn_id=kernel_turn_id,
+                wake_reason=wake_reason.value, headline="Thinking about what changed",
+                detail=wake_reason.value.replace("_", " "),
+            )
+        except Exception as event_error:
+            logger.warning("[kernel] cognition start event failed: %s", event_error)
 
         from app.services.deliberation import deliberation_engine
         from app.services.deliberation_gate import process_deliberation_result
@@ -223,6 +271,25 @@ async def ambient_turn(
 
         # Return to a resting ambient state once the turn completes.
         await set_state(user_id, KernelState.AMBIENT, None, detail="resting", correlation_id=kernel_turn_id)
+
+        try:
+            from app.services.world_state.cognition import record_cognition_event
+            await record_cognition_event(
+                user_id, kind="sara.deliberation.completed", turn_id=kernel_turn_id,
+                wake_reason=wake_reason.value,
+                headline="Finished thinking",
+                detail=(result.thought or "").strip()[:500] or None,
+                payload={
+                    "success": bool(result.success),
+                    "summary": {
+                        "notifications_sent": summary.get("notifications_sent", 0),
+                        "tasks_dispatched": summary.get("tasks_dispatched", 0),
+                        "observations_consumed": summary.get("observations_consumed", 0),
+                    },
+                },
+            )
+        except Exception as event_error:
+            logger.warning("[kernel] cognition completion event failed: %s", event_error)
 
         return {
             "status": "completed" if result.success else "failed",

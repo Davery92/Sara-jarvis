@@ -15,7 +15,6 @@ from app.tools.registry import tool_registry
 PRESENCE_CORE_TOOL_NAMES = [
     "memory_search", "notes_create", "notes_search",
     "list_add", "list_view", "reminders_create", "calendar_list",
-    "dispatch_and_monitor",
 ]
 
 
@@ -24,11 +23,12 @@ class TestPresenceCoreResolves:
         for name in PRESENCE_CORE_TOOL_NAMES:
             assert tool_registry.get_tool(name) is not None, f"{name} not registered"
 
-    def test_core_is_exactly_eight_tools(self):
+    def test_core_is_exactly_seven_tools(self):
         schemas = tool_registry.get_tools_by_names(PRESENCE_CORE_TOOL_NAMES)
-        assert len(schemas) == 8
+        assert len(schemas) == 7
 
-    def test_dispatch_and_monitor_is_the_escape_hatch(self):
+    def test_dispatch_and_monitor_is_registered_but_not_always_present(self):
+        assert "dispatch_and_monitor" not in PRESENCE_CORE_TOOL_NAMES
         schemas = tool_registry.get_tools_by_names(["dispatch_and_monitor"])
         assert len(schemas) == 1
         assert schemas[0]["function"]["name"] == "dispatch_and_monitor"
@@ -45,15 +45,15 @@ class TestGetToolsByNames:
 
 
 class TestConversationalPayloadShrinks:
-    def test_baseline_conversational_case_is_eight_not_twentyfive(self):
+    def test_baseline_conversational_case_is_seven_not_twentyfive(self):
         """The literal target case: no classified intent (CONVERSATIONAL ->
         empty categories). Old behavior: 5 always-add categories = 25 tools.
-        New: exactly the 8-tool core."""
+        New: exactly the 7-tool core."""
         core = tool_registry.get_tools_by_names(PRESENCE_CORE_TOOL_NAMES)
         old_always_add = tool_registry.get_tools_by_categories(
             ["devices", "vm_agents", "personal_knowledge", "inbox", "lists"]
         )
-        assert len(core) == 8
+        assert len(core) == 7
         assert len(old_always_add) > 20  # the padding this replaces
 
     def test_intent_specific_categories_still_load_fully(self):

@@ -15,6 +15,7 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional
 from app.core.timezone import now as local_now
+from app.services.note_provenance import SARA_GENERATED_TAG
 
 from sqlalchemy.orm import Session
 
@@ -359,7 +360,8 @@ class BackgroundTaskService:
             user_id=task.user_id,
             folder_id=task.workspace_folder_id,
             title=title,
-            content=note_content
+            content=note_content,
+            tags=[SARA_GENERATED_TAG],
         )
 
         db.add(note)
@@ -450,6 +452,23 @@ class BackgroundTaskService:
         """
         from ..main_simple import BackgroundTask
 
+        self.expire_stalled_tasks(db, user_id)
+
+        return db.query(BackgroundTask).filter(
+            BackgroundTask.user_id == user_id,
+            BackgroundTask.status.in_(["pending", "running", "needs_clarification"])
+        ).order_by(BackgroundTask.created_at.desc()).all()
+
+    def expire_stalled_tasks(self, db: Session, user_id: str) -> int:
+        """Auto-fail tasks that have made no progress. Returns how many died.
+
+        Split out of get_active_tasks so it runs no matter which listing the
+        client polls — the iOS pill and the web badge both read the merged
+        recent feed, and a hung task must not sit there looking alive because
+        nobody happened to call /active.
+        """
+        from ..main_simple import BackgroundTask
+
         # Progress-based watchdog (Phase 4): kill a task only after it has made NO
         # progress for `dispatch_stall_seconds` — a task streaming progress stays
         # alive indefinitely; a truly hung one dies in ~15 min. `updated_at` is
@@ -487,11 +506,7 @@ class BackgroundTaskService:
                                f"(was {orig_status}). Retry to re-run it.")
         if stuck:
             db.commit()
-
-        return db.query(BackgroundTask).filter(
-            BackgroundTask.user_id == user_id,
-            BackgroundTask.status.in_(["pending", "running", "needs_clarification"])
-        ).order_by(BackgroundTask.created_at.desc()).all()
+        return len(stuck)
 
     async def get_recent_tasks(
         self,

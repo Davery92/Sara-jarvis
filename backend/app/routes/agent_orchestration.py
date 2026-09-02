@@ -23,6 +23,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db, SessionLocal
@@ -152,6 +153,82 @@ async def list_agent_tasks(
     return {"tasks": tasks}
 
 
+_RESEARCH_DETAIL_STATUS = {
+    "draft": "pending",
+    "paused": "pending",
+    "running": "running",
+    "complete": "completed",
+    "completed": "completed",
+    "stuck": "failed",
+    "failed": "failed",
+}
+
+
+def _research_plan_detail(db: Session, task_id: str, user_id: str) -> Optional[dict]:
+    """Render a research_plan as an agent-task detail payload.
+
+    Research plans are dispatched like agent tasks but live in their own table,
+    so opening one in the detail drawer used to 404 ("task not found in agent
+    dispatch log"). Each plan step becomes a `tool_call` entry so the existing
+    execution-log renderer can display it unchanged.
+    """
+    try:
+        row = db.execute(text("""
+            SELECT id, title, objective, status, steps, findings_summary,
+                   error_log, created_at, completed_at, updated_at
+            FROM research_plan
+            WHERE id = :tid AND user_id = :uid
+        """), {"tid": task_id, "uid": user_id}).fetchone()
+    except Exception as e:
+        logger.warning(f"research_plan detail lookup failed for {task_id}: {e}")
+        return None
+    if not row:
+        return None
+
+    steps = row.steps if isinstance(row.steps, list) else []
+    log = []
+    for i, step in enumerate(steps):
+        findings = step.get("findings") or {}
+        result_parts = []
+        if findings.get("summary"):
+            result_parts.append(findings["summary"])
+        if findings.get("details"):
+            result_parts.append(findings["details"])
+        for src in (findings.get("sources") or [])[:10]:
+            result_parts.append(f"source: {src}")
+        log.append({
+            "type": "tool_call",
+            "ts": None,
+            "round": i,
+            "tool": f"research_step: {step.get('title') or f'Step {i + 1}'}",
+            "args": {
+                "description": step.get("description"),
+                "instructions": step.get("instructions"),
+                "status": step.get("status"),
+            },
+            "result": "\n\n".join(result_parts) or "(no findings recorded)",
+        })
+
+    return {
+        "id": row.id,
+        "status": _RESEARCH_DETAIL_STATUS.get(row.status, "running"),
+        "task_type": "research_plan",
+        "query": row.title or row.objective or "Research plan",
+        "mode": "research",
+        "session_id": None,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "completed_at": row.completed_at.isoformat() if row.completed_at else None,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+        "result_note_id": None,
+        "output": row.findings_summary or "",
+        "working_directory": None,
+        "exit_code": None,
+        "found_items": [],
+        "execution_log": log,
+        "error": row.error_log or None,
+    }
+
+
 @router.get("/tasks/{task_id}")
 async def get_agent_task(
     task_id: str,
@@ -166,6 +243,8 @@ async def get_agent_task(
         task_id=task_id,
         user_id=str(current_user.id),
     )
+    if not detail:
+        detail = _research_plan_detail(db, task_id, str(current_user.id))
     if not detail:
         raise HTTPException(status_code=404, detail="Task not found")
     return detail

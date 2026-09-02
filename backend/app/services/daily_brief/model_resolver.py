@@ -32,4 +32,4 @@ def resolve_qwen_122_model_label(*preferred_models: Optional[str]) -> str:
         if candidate and candidate.strip():
             return candidate.strip()
 
-    return "qwen3.6-27b"
+    return "qwen3.8-27b"

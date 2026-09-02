@@ -62,6 +62,12 @@ class ImagePickerService {
 
       const result = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        // Expo ImagePicker 17 defaults to `.current` on iOS, which preserves
+        // HEIC/AVIF. llama.cpp's Qwen vision path cannot decode those codecs,
+        // so ask PhotoKit for a broadly supported JPEG representation.
+        preferredAssetRepresentationMode:
+          ImagePicker.UIImagePickerPreferredAssetRepresentationMode.Compatible,
+
         // No allowsEditing: iOS's built-in editor forces a 1:1 square crop with no
         // free-form option, so we skip it and upload the whole image as-is.
         allowsEditing: false,

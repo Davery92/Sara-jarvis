@@ -67,11 +67,17 @@ async def _mark_failed(plan_id: str, error: str):
 
     db = next(get_db())
     try:
+        # Never stomp a terminal status the executor already wrote. A cancel
+        # revokes the worker with SIGTERM, which surfaces here as an exception —
+        # without this guard 'cancelled' would be rewritten as 'failed', and a
+        # 'stalled' plan waiting on its scheduled resume would be killed.
         db.execute(
             text("""
                 UPDATE research_plan
                 SET status = 'failed', error_log = :error, updated_at = NOW()
                 WHERE id = :id
+                  AND status NOT IN ('cancelled', 'stalled', 'complete',
+                                     'completed', 'partial', 'failed')
             """),
             {"id": plan_id, "error": error},
         )
@@ -80,23 +86,84 @@ async def _mark_failed(plan_id: str, error: str):
         db.close()
 
 
+# Bounds for Sara's answer call. These MUST stay consistent with each other:
+# the LLM request timeout sits under the soft limit so a slow primary surfaces
+# as a clean exception (not SoftTimeLimitExceeded mid-request), and the token
+# cap + enable_thinking=False keep a single answer to ~1 min on an idle server.
+#
+# Why this matters (2026-08-19 incident): the call used to run in Qwen thinking
+# mode with NO max_tokens under a 120s soft limit. Celery abandoned the request
+# at 120s but llama-server (non-streaming) can't see the disconnect and kept
+# generating 8-12k tokens for ~25 min per attempt. check_stuck_research +
+# self.retry re-fired it every ~2 min all night — 174 attempts, all 4 slots on
+# the Mac Studio permanently busy, chat starved, queue depth 260+.
+ANSWER_MAX_TOKENS = 800
+ANSWER_LLM_TIMEOUT = 240       # seconds, < soft_time_limit
+ANSWER_SOFT_LIMIT = 300
+ANSWER_HARD_LIMIT = 360
+ANSWER_LOCK_TTL = ANSWER_HARD_LIMIT + 30
+
+
 @celery_app.task(
     name="app.tasks.research.answer_research_question",
     bind=True,
     max_retries=2,
-    soft_time_limit=120,
-    time_limit=180,
+    soft_time_limit=ANSWER_SOFT_LIMIT,
+    time_limit=ANSWER_HARD_LIMIT,
     queue="cognitive",
 )
 def answer_research_question(self, message_id: str, plan_id: str):
     """Have Sara autonomously answer a research agent's question."""
-    logger.info("Sara answering research question: %s", message_id)
+    # Per-message lock: check_stuck_research and self.retry can both enqueue
+    # the same message; never run two LLM calls for one question at once.
+    lock_key = f"sara:research:answer_lock:{message_id}"
+    lock = None
+    try:
+        from app.core.redis import get_redis_sync
+        lock = get_redis_sync()
+        if not lock.set(lock_key, "1", nx=True, ex=ANSWER_LOCK_TTL):
+            logger.info("Sara answer for %s already in flight — skipping duplicate", message_id)
+            return
+    except Exception as e:  # redis trouble must not block answering
+        logger.warning("answer lock unavailable (%s) — proceeding without it", e)
+        lock = None
 
+    logger.info("Sara answering research question: %s", message_id)
     try:
         _run_async(_answer_question(message_id, plan_id))
     except Exception as e:
         logger.error("Failed to answer research question: %s", e, exc_info=True)
+        if self.request.retries >= self.max_retries:
+            # Out of retries: mark the question failed so check_stuck_research
+            # stops re-dispatching it forever. The executor's own 1h wait will
+            # then time out normally.
+            try:
+                _run_async(_mark_message(message_id, "failed"))
+            except Exception:
+                logger.exception("could not mark research message %s failed", message_id)
+            raise
         raise self.retry(countdown=60, exc=e)
+    finally:
+        if lock is not None:
+            try:
+                lock.delete(lock_key)
+            except Exception:
+                pass
+
+
+async def _mark_message(message_id: str, status: str) -> None:
+    from sqlalchemy import text
+    from app.db.base import SessionLocal
+
+    db = SessionLocal()
+    try:
+        db.execute(
+            text("UPDATE research_message SET status = :status WHERE id = :id AND status = 'pending'"),
+            {"id": message_id, "status": status},
+        )
+        db.commit()
+    finally:
+        db.close()
 
 
 async def _answer_question(message_id: str, plan_id: str):
@@ -153,12 +220,17 @@ async def _answer_question(message_id: str, plan_id: str):
                     "role": "system",
                     "content": (
                         "You are Sara, an AI assistant. A research agent you delegated work to "
-                        "has a question about the research plan you created. Help guide it."
+                        "has a question about the research plan you created. Help guide it. "
+                        "Answer directly and concisely."
                     ),
                 },
                 {"role": "user", "content": sara_prompt},
             ],
             temperature=0.5,
+            max_tokens=ANSWER_MAX_TOKENS,
+            request_timeout=ANSWER_LLM_TIMEOUT,
+            # Qwen defaults to thinking mode; with no cap it burns 10k+ tokens.
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         )
 
         answer_text = response.get("choices", [{}])[0].get("message", {}).get("content", "")
@@ -212,6 +284,7 @@ def check_stuck_research():
 async def _check_stuck():
     from sqlalchemy import text
     from app.db.base import SessionLocal
+    from app.services.research.executor import SARA_ANSWER_TIMEOUT
 
     # Use a self-contained sync session and END the read transaction explicitly.
     # The old code used `next(get_db())` (whose generator finally never runs) inside
@@ -221,6 +294,26 @@ async def _check_stuck():
     rows = []
     db = SessionLocal()
     try:
+        # Questions older than the executor's wait window have nobody waiting
+        # on them any more — expire instead of re-dispatching forever.
+        expired = db.execute(
+            text("""
+                UPDATE research_message
+                SET status = 'expired'
+                WHERE direction = 'agent_to_sara'
+                  AND status = 'pending'
+                  AND created_at < NOW() - make_interval(secs => :max_age)
+                RETURNING id
+            """),
+            {"max_age": SARA_ANSWER_TIMEOUT},
+        ).fetchall()
+        db.commit()
+        if expired:
+            logger.warning(
+                "Expired %d unanswered research question(s) older than %ss: %s",
+                len(expired), SARA_ANSWER_TIMEOUT, [str(r.id) for r in expired],
+            )
+
         result = db.execute(
             text("""
                 SELECT rm.id, rm.plan_id

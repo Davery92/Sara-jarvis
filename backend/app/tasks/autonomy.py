@@ -685,12 +685,20 @@ async def _pkg_deep_extract_async(user_id: str, since_hours: int):
         # episode.created_at is a naive `timestamp` column storing UTC; bind naive UTC.
         since = to_naive_utc(local_now() - timedelta(hours=since_hours))
 
-        # Load recent episodes (regular chat)
+        # Load recent episodes (regular chat).
+        #
+        # David's turns only. Feeding Sara's own replies to the extractor
+        # closed a loop: she'd assert something about David, the nightly pass
+        # would mint it as a durable fact, and the next turn's context would
+        # hand it back to her as evidence (2026-08-31 — a fabricated HRV of 80
+        # became a 0.99-confidence PKG node). The PKG is a record of what David
+        # told us, so it reads only what David said. The lost conversational
+        # context is a real cost and a deliberate one.
         result = await db.execute(text("""
             SELECT role, content FROM episode
             WHERE user_id = :user_id
             AND created_at >= :since
-            AND role IN ('user', 'assistant')
+            AND role = 'user'
             AND (source IS NULL OR source != 'learning_chat')
             ORDER BY created_at ASC
         """), {"user_id": user_id, "since": since})
@@ -702,7 +710,7 @@ async def _pkg_deep_extract_async(user_id: str, since_hours: int):
             FROM episode
             WHERE user_id = :user_id
             AND created_at >= :since
-            AND role IN ('user', 'assistant')
+            AND role = 'user'
             AND source = 'learning_chat'
             ORDER BY created_at ASC
         """), {"user_id": user_id, "since": since})
@@ -1563,6 +1571,16 @@ async def _deliberation_fallback_async():
 
     # Prune old observations
     pruned = await prune_old(user_id, max_age_hours=24)
+
+    # Ground-truth plan, Phase 8 §1: this is the ONLY caller that still forces a
+    # deliberation, and only during waking hours. Overnight there is nothing to
+    # be a safety net for — David is asleep, nothing he could act on is arriving,
+    # and the 1–5 AM deliberations were pure cost that then produced paraphrases
+    # to flush at 06:00.
+    from app.core.timezone import now as local_now
+    hour = local_now().hour
+    if not (6 <= hour < 22):
+        return {"status": "outside_waking_hours", "pruned": pruned, "hour": hour}
 
     # Check if deliberation is needed
     if not await salience_scorer.should_deliberate(user_id):

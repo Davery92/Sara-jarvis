@@ -412,7 +412,7 @@ export default function InboxScreen() {
     setTimeout(() => {
       try {
         (navigation as any).navigate('MainTabs', {
-          screen: 'Sara',
+          screen: 'Chat',
           params: chatParams,
         });
       } catch {

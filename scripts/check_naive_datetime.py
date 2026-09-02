@@ -46,6 +46,42 @@ MIXED_SUB = [
 ]
 
 
+# ── Raw timestamps in prompt builders (ground truth plan, invariant 4) ──────
+#
+# "One clock: no timestamp reaches a prompt or message except through one ET
+# renderer. Raw ISO in prompt builders is a lint failure."
+#
+# Sara ran three conventions at once — world_thread.due_at in UTC handed straight
+# to a prompt, calendar_event.start_time naive ET, notification_ack formatting UTC
+# with %a %H:%M — so a thread due 1:00 PM ET was announced as "your 5:00 AM EDT
+# call" and a 5:38 AM journal line said 9:38 AM. Everything below builds text a
+# model or David reads, and must go through app.core.timezone.render_when.
+PROMPT_PATH_PATTERNS = [
+    "services/world_state/",
+    "services/notification_ack.py",
+    "services/compose.py",
+    "services/judge.py",
+    "services/appraisal.py",
+    "services/context_snapshot.py",
+    "services/world_brief.py",
+]
+PROMPT_NAME_SUBSTRING = "prompt"
+
+RAW_TIMESTAMP = [
+    (re.compile(r"\.isoformat\(\s*\)"),
+     "raw .isoformat() in a prompt builder — render it with app.core.timezone.render_when()"),
+    (re.compile(r"\.strftime\("),
+     "raw .strftime() in a prompt builder — render it with app.core.timezone.render_when()"),
+]
+
+
+def is_prompt_path(path: pathlib.Path) -> bool:
+    text = str(path).replace("\\", "/")
+    if any(fragment in text for fragment in PROMPT_PATH_PATTERNS):
+        return True
+    return PROMPT_NAME_SUBSTRING in path.name and path.parts[-2:-1] == ("services",)
+
+
 def strip_comment(line: str) -> str:
     in_s = None
     for i, ch in enumerate(line):
@@ -74,6 +110,10 @@ def main() -> int:
             for rx, msg in BANNED:
                 if rx.search(code):
                     violations.append(f"{p}:{n}: {msg}")
+            if is_prompt_path(p) and "# time-ok" not in line:
+                for rx, msg in RAW_TIMESTAMP:
+                    if rx.search(code):
+                        violations.append(f"{p}:{n}: {msg}")
             if "# tz-ok" in line:
                 continue
             for rx, msg in MIXED_SUB:

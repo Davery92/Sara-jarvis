@@ -26,8 +26,21 @@ def extract_text_content(content) -> str:
 
 
 def is_local_base_url(base_url: str) -> bool:
+    """True for any self-hosted inference endpoint (LAN, Tailscale, loopback).
+
+    Host-based rather than port-based: the Mac Studio lanes (:8081 bg, :8082
+    chat), her (:8686/:8100/:11434) and anything on RFC1918 / 100.64/10 CGNAT
+    (Tailscale) are local. Port hints kept for odd hostnames.
+    """
     u = (base_url or "").lower()
-    return ("11434" in u) or ("8080" in u) or ("8686" in u) or ("ollama" in u) or ("localhost" in u)
+    if "localhost" in u or "127.0.0.1" in u or "ollama" in u:
+        return True
+    m = re.search(r"https?://(\d+\.\d+\.\d+\.\d+)", u)
+    if m:
+        a, b = (int(x) for x in m.group(1).split(".")[:2])
+        if a == 10 or (a == 172 and 16 <= b <= 31) or (a == 192 and b == 168) or (a == 100 and 64 <= b <= 127):
+            return True
+    return any(p in u for p in ("11434", "8080", "8081", "8082", "8686"))
 
 
 # Claude models that reject non-default sampling params (temperature/top_p/top_k)

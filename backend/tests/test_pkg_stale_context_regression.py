@@ -165,18 +165,39 @@ class TestFactToSentenceAgeAndTTL:
     """A4: age suffix past 21 days for Health/Goal/Fact; transient Health
     states drop out entirely past their 14-day TTL."""
 
-    def test_health_age_suffix_past_21_days(self):
+    def test_health_as_of_suffix_past_48h(self):
+        """HEALTH_DATA_ACCURACY_FIX_PLAN 2.3: Health facts get a 48-hour rule,
+        not the generic 21-day one. A six-day-old health line rendering clean is
+        how a stale guess became indistinguishable from a fresh reading."""
         provider = PKGContextProvider()
-        props = {"metric": "resting heart rate", "current_value": "58 bpm", "last_confirmed": _iso(200)}
+        props = {"metric": "chest development",
+                 "current_value": "underdeveloped relative to back",
+                 "last_confirmed": _iso(6)}
         sentence = provider._fact_to_sentence("Health", props)
-        assert "may be stale" in sentence
-        assert "resting heart rate" in sentence
+        assert "not a current reading" in sentence
+        assert "as of" in sentence
+        assert "chest development" in sentence
 
     def test_health_no_suffix_when_recent(self):
         provider = PKGContextProvider()
-        props = {"metric": "resting heart rate", "current_value": "58 bpm", "last_confirmed": _iso(2)}
+        props = {"metric": "chest development",
+                 "current_value": "underdeveloped relative to back",
+                 "last_confirmed": _iso(0)}
         sentence = provider._fact_to_sentence("Health", props)
-        assert "stale" not in sentence
+        assert "not a current reading" not in sentence
+        assert "chest development" in sentence
+
+    def test_measured_health_fact_never_rendered(self):
+        """HEALTH_DATA_ACCURACY_FIX_PLAN 2.1: `health_metric` is the only
+        authority for a number about David's body. A legacy PKG node holding one
+        — like the fabricated `hrv = 80` minted on 2026-08-31 — renders empty so
+        no read path can surface it beside (or instead of) the real reading."""
+        provider = PKGContextProvider()
+        for metric, value in [("hrv", "80"), ("resting heart rate", "58 bpm"),
+                              ("sleep_duration", "7.5 hours"),
+                              ("Sleep Quality", "Poor (barely slept)")]:
+            props = {"metric": metric, "current_value": value, "last_confirmed": _iso(0)}
+            assert provider._fact_to_sentence("Health", props) == "", metric
 
     def test_transient_health_excluded_past_ttl(self):
         provider = PKGContextProvider()

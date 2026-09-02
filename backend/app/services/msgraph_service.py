@@ -321,6 +321,45 @@ class MSGraphService:
             logger.error(f"MS Graph get_emails error for {mailbox}: {e}")
             return []
 
+    async def get_unread_ids(
+        self,
+        mailbox: str,
+        folder: str = "inbox",
+        max_pages: int = 25,
+        page_size: int = 200,
+    ) -> Optional[set]:
+        """Return the set of message ids currently UNREAD in `folder`.
+
+        Used to reconcile local read state: anything marked unread locally but
+        absent from this set has since been read, moved, or deleted upstream.
+
+        Returns None on failure — callers must treat that as "unknown" and skip
+        reconciliation, never as "nothing is unread" (which would mass-mark the
+        whole mailbox as read).
+        """
+        try:
+            unread: set = set()
+            for page in range(max_pages):
+                params = {
+                    "$top": page_size,
+                    "$skip": page * page_size,
+                    "$select": "id",
+                    "$filter": "isRead eq false",
+                }
+                endpoint = f"/users/{mailbox}/mailFolders/{folder}/messages"
+                data = await self._api_request("GET", endpoint, params=params)
+                items = data.get("value", [])
+                for item in items:
+                    if item.get("id"):
+                        unread.add(item["id"])
+                if len(items) < page_size:
+                    break
+            logger.info(f"{mailbox}: {len(unread)} unread in {folder} per Graph")
+            return unread
+        except Exception as e:
+            logger.error(f"MS Graph get_unread_ids error for {mailbox}: {e}")
+            return None
+
     async def get_email_by_id(self, mailbox: str, message_id: str) -> Optional[MSGraphEmail]:
         """
         Get a specific email by ID.

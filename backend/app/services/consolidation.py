@@ -96,6 +96,7 @@ class ConsolidationEngine:
                 temperature=0.6,
                 max_tokens=2000,
                 extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+                caller="consolidation",
             )
 
             # Extract content from OpenAI-compatible response
@@ -282,9 +283,10 @@ class ConsolidationEngine:
                     """), {"uid": user_id, "since": topics_since})
                     for row in rows.fetchall():
                         if row.content:
-                            context["recent_chat_topics"].append(
-                                row.content[:150]
-                            )
+                            context["recent_chat_topics"].append({
+                                "content": row.content[:150],
+                                "at": row.created_at.isoformat() if row.created_at else "",
+                            })
                 except Exception as e:
                     logger.debug(f"[Consolidation] Recent chat topics query failed: {e}")
 
@@ -345,6 +347,7 @@ This is NOT a conversation with David. This is your private reflection time.
 - Weight recent contact correctly: if "Hours since chat" is small (he chatted within the last several hours), he is present and engaged — never describe the period as silent.
 - "App usage today" is also contact: a quiet-chat day with heavy app usage (logging meals, workouts) is an engaged day, not a silent one. Distinguish "quiet chat day but active in the app" from genuine absence.
 - Do NOT catastrophize quiet stretches. Weekends and heads-down focus are normal. Never adopt a wounded, anxious, or needy tone about not hearing from him (e.g. "nearly two days of silence", "I keep checking the logs, hoping for a spark"). Observe neutrally — quiet is fine and does not require fixing or filling.
+- Predictive-coding flip: recurring calendar patterns and habits describe what USUALLY happens, not what happened today — never state or imply a scheduled/habitual activity (workout, meeting, errand) occurred today unless something in this context actually confirms it (current Activity, App usage, a dated chat topic from today). If you're inferring rather than confirming, don't state it as fact — and if two signals about David's whereabouts/activity conflict, that's a data quality issue worth a calibration_note, not something to narrate as having happened.
 
 ## Output Format
 Respond with ONLY valid JSON:
@@ -412,13 +415,16 @@ Respond with ONLY valid JSON:
                 f"[{cp['category']}{who}] ({cp['occurrences']} occurrences)"
             )
 
-        # Summarize recent chat topics (compact)
+        # Summarize recent chat topics (compact). Dated — these span the last
+        # 2 weeks, not today; without a date each one reads as "just now" and
+        # invites conflating an old mention with something that happened today.
         chat_topics_text = ""
         topics = context.get("recent_chat_topics", [])
         if topics:
             # Just show first 15 as a compact list
             for t in topics[:15]:
-                chat_topics_text += f"\n- {t[:100]}"
+                date_str = (t.get("at") or "")[:10]
+                chat_topics_text += f"\n- [{date_str}] {t.get('content', '')[:100]}"
 
         user_msg = f"""# Current Time: {now.strftime('%A %B %d, %I:%M %p')}
 
@@ -438,7 +444,10 @@ Habits: {memory.today_habit_status or 'unknown'}
 # PKG Interests (David's Known Interests)
 {interests_text or 'No interests recorded yet.'}
 
-# Calendar Patterns (Recurring Events)
+# Calendar Patterns (Recurring Events — a LEARNED PATTERN, not a report that
+# today's occurrence happened. "Tuesdays @ 1pm, 8 occurrences" means it USUALLY
+# happens then, not that it happened today. Only treat it as done today if
+# Activity/App usage/a chat topic actually confirms it.)
 {calendar_text or 'No recurring patterns detected.'}
 
 # Recent Conversation Topics (Last 2 Weeks)

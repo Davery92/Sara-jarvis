@@ -8,7 +8,6 @@ proactive, and anticipation services.
 
 import asyncio
 import logging
-import inspect
 import json
 import os
 import time
@@ -19,6 +18,7 @@ import httpx
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_owner_id
+from app.core.db_compat import db_execute as _db_execute
 
 logger = logging.getLogger(__name__)
 
@@ -401,7 +401,7 @@ async def _send_notification_impl(
             await _log_notification(
                 db, user_id, topic or f"{category}:{_hash_topic(title, message)}",
                 category, title, message, priority, source, agent_run_id,
-                0, sent=False, dedup_blocked=True,
+                0, sent=False, dedup_blocked=True, suppress_reason="banned_topic",
             )
         return {"sent": False, "reason": "banned_topic", "ban_reason": ban_reason}
 
@@ -465,7 +465,7 @@ async def _send_notification_impl(
                 db, user_id, effective_topic, category, title, message,
                 priority, source, agent_run_id, dedup_window,
                 sent=False, dedup_blocked=True,
-                attention_item_id=_attention_item_id,
+                attention_item_id=_attention_item_id, suppress_reason="dedup",
             )
             return {"sent": False, "reason": "dedup", "topic": effective_topic}
 
@@ -527,7 +527,7 @@ async def _send_notification_impl(
                     db, user_id, effective_topic, category, title, message,
                     priority, source, agent_run_id, 0,
                     sent=False, dedup_blocked=False,
-                    attention_item_id=_attention_item_id,
+                    attention_item_id=_attention_item_id, suppress_reason="held_asleep",
                 )
                 logger.info(
                     f"🌙 Push held (David asleep): {title[:50]!r} "
@@ -573,6 +573,7 @@ async def _send_notification_impl(
             category=category,
             extra_data=extra_push_data,
             badge=unread_badge,
+            db=db,
         )
         success = success or push_success
 
@@ -581,7 +582,8 @@ async def _send_notification_impl(
         if notification_id and db:
             try:
                 await _db_execute(db, text("""
-                    UPDATE notification_log SET sent = FALSE WHERE id = :id
+                    UPDATE notification_log SET sent = FALSE, suppress_reason = 'push_failed'
+                    WHERE id = :id
                 """), {"id": notification_id})
             except Exception:
                 pass
@@ -681,7 +683,7 @@ async def send_consolidated_notification(
                 await _log_notification(
                     db, user_id, topic, category, notif["title"], notif["message"],
                     normalized_priority, source, agent_run_id, dedup_window,
-                    sent=False, dedup_blocked=True
+                    sent=False, dedup_blocked=True, suppress_reason="dedup",
                 )
                 results.append({"topic": topic, "sent": False, "reason": "dedup"})
                 continue
@@ -724,7 +726,10 @@ async def send_consolidated_notification(
     unread_badge = await _get_unread_badge(db, user_id) if db else None
     if unread_badge is not None:
         unread_badge += len(to_send)
-    success = await _send_push(tokens, title, body, final_priority, source, category=category, badge=unread_badge)
+    success = await _send_push(
+        tokens, title, body, final_priority, source,
+        category=category, badge=unread_badge, db=db,
+    )
 
     # Log each notification
     if db:
@@ -732,7 +737,8 @@ async def send_consolidated_notification(
             await _log_notification(
                 db, user_id, n["topic"], n["category"], n["title"], n["message"],
                 n.get("priority", "normal"), source, agent_run_id, n["cooldown"],
-                sent=success, dedup_blocked=False
+                sent=success, dedup_blocked=False,
+                suppress_reason=None if success else "push_failed",
             )
 
     results.extend([{"topic": n["topic"], "sent": success} for n in to_send])
@@ -963,15 +969,13 @@ async def flush_notification_queue(
 GRACE_PUSHES_PER_CATEGORY_PER_DAY = 2
 
 
-async def _cold_start_grace_push(db: AsyncSession, user_id: str, category: str) -> bool:
-    """Bootstrap grace (Mind V2 rewire plan, Workstream A): a category with
-    fewer than 5 sends in 30d can never earn a learned buzz, because
-    engagement stats only accumulate from sends that actually happened —
-    cold-start deadlock. Grant a push anyway, capped at
-    GRACE_PUSHES_PER_CATEGORY_PER_DAY per category per day (ET), so an
-    hourly sweep can't burn the whole daily push budget on one category
-    while stats warm up. Once a category crosses the 5-send threshold in
-    _learned_buzz_decision, this path is no longer consulted for it."""
+async def _grace_push_available(db: AsyncSession, user_id: str, category: str) -> bool:
+    """Shared grace ledger (Mind V2 rewire plan, Workstream A; extended by
+    NOTIFICATION_DELIVERY_FIX_PLAN_2026_08_17 Phase 3 to a second caller —
+    see _learned_buzz_decision's silent-category path below). Caps grants at
+    GRACE_PUSHES_PER_CATEGORY_PER_DAY per category per day (ET) regardless of
+    which path is asking, so an hourly sweep can't burn the whole daily push
+    budget on one category while it re-earns stats."""
     try:
         row = await _db_execute(db, text("""
             SELECT COUNT(*) FROM notification_log
@@ -981,99 +985,116 @@ async def _cold_start_grace_push(db: AsyncSession, user_id: str, category: str) 
         """), {"uid": user_id, "cat": category})
         count_today = int(row.scalar() or 0)
     except Exception as e:
-        logger.debug(f"[buzz] cold-start grace lookup failed for {category}: {e}")
+        logger.debug(f"[buzz] grace lookup failed for {category}: {e}")
         return False
 
-    if count_today >= GRACE_PUSHES_PER_CATEGORY_PER_DAY:
-        return False
+    return count_today < GRACE_PUSHES_PER_CATEGORY_PER_DAY
 
-    logger.info(f"[buzz] cold-start grace push category={category}")
-    return True
+
+_BUZZ_ENGAGED_RATE_KEY = "notification.buzz.engaged_rate_threshold"
+_BUZZ_READ_RATE_KEY = "notification.buzz.read_rate_threshold"
+_BUZZ_INTERRUPTIBILITY_KEY = "notification.buzz.interruptibility_threshold"
+_BUZZ_SILENT_DAYS_KEY = "notification.buzz.silent_days_threshold"
+
+DEFAULT_BUZZ_ENGAGED_RATE = 0.25
+DEFAULT_BUZZ_READ_RATE = 0.5
+DEFAULT_BUZZ_INTERRUPTIBILITY = 0.5
+DEFAULT_BUZZ_SILENT_DAYS = 7.0
 
 
 async def _learned_buzz_decision(db: AsyncSession, user_id: str, category: str) -> bool:
-    """Learned buzz decision (SARA_UNLEASHED Phase A.3). Replaces the blanket
+    """Learned buzz decision (SARA_UNLEASHED Phase A.3, revised by
+    NOTIFICATION_DELIVERY_FIX_PLAN_2026_08_17 Phase 3). Replaces the blanket
     "normal/low priority never pushes, only high+ does" rule — that rule is
     exactly why proactive_checkins force-floored priority to `high` to be
     heard at all (R1-R3). The attention queue is now the single place "does
     this actually buzz the phone?" gets decided, and it learns: push a
-    normal/low item iff this category's trailing 30-day engagement rate is
-    >= 40% AND David is currently interruptible (>= 0.5). A category with
-    fewer than 5 sends in the window has no track record yet — rather than
-    failing closed forever (cold-start deadlock: no track record can ever
-    form without a send), it gets a rate-limited cold-start grace push
-    instead (Mind V2 rewire plan, Workstream A)."""
+    normal/low item iff this category's trailing 30-day engagement rate OR
+    read rate clears its threshold, AND David is currently interruptible.
+
+    The original engagement-only gate (>= 40%) was unreachable in practice —
+    engagement only accrues from pushes, so a category stuck below 40% could
+    never climb out (death spiral). Verified live 2026-08-17: every active
+    category sat under threshold (general 15%, checkin 12%, agent_task 6%)
+    and none was climbing. Blending in read_rate (recorded independently of
+    whether anything ever pushed — general read at 78%) breaks the deadlock.
+
+    Two grace paths share `_grace_push_available`'s per-day ledger:
+    cold-start (fewer than 5 sends in 30d, no track record yet) and
+    silent-category (qualified once but nothing has actually pushed in
+    `silent_days` — without this, a rate that dips below threshold stays
+    dead forever, since rates only move on sends that happen).
+
+    Every branch logs its decision inputs at INFO so
+    `/debug/notification-funnel` can show *why* a category stayed quiet."""
+    from app.services.tunables import get_tunable_float
+
+    engaged_threshold = get_tunable_float(_BUZZ_ENGAGED_RATE_KEY, DEFAULT_BUZZ_ENGAGED_RATE)
+    read_threshold = get_tunable_float(_BUZZ_READ_RATE_KEY, DEFAULT_BUZZ_READ_RATE)
+    interrupt_threshold = get_tunable_float(_BUZZ_INTERRUPTIBILITY_KEY, DEFAULT_BUZZ_INTERRUPTIBILITY)
+    silent_days = get_tunable_float(_BUZZ_SILENT_DAYS_KEY, DEFAULT_BUZZ_SILENT_DAYS)
+
     try:
         row = await _db_execute(db, text("""
             SELECT count(*) FILTER (WHERE sent = true) AS sent,
-                   count(*) FILTER (WHERE engaged = true) AS engaged
+                   count(*) FILTER (WHERE engaged = true) AS engaged,
+                   count(*) FILTER (WHERE read_at IS NOT NULL) AS read_count,
+                   MAX(sent_at) FILTER (WHERE sent = true) AS last_sent_at
             FROM notification_log
             WHERE user_id = :uid AND category = :cat
               AND sent_at > NOW() - INTERVAL '30 days'
         """), {"uid": user_id, "cat": category})
         r = row.fetchone()
-        sent, engaged = (int(r[0] or 0), int(r[1] or 0)) if r else (0, 0)
-        if sent < 5:
-            return await _cold_start_grace_push(db, user_id, category)
-        if (engaged / sent) < 0.4:
-            return False
+        sent = int(r[0] or 0) if r else 0
+        engaged = int(r[1] or 0) if r else 0
+        read_count = int(r[2] or 0) if r else 0
+        last_sent_at = r[3] if r else None
     except Exception as e:
         logger.debug(f"[buzz] engagement lookup failed for {category}: {e}")
+        return False
+
+    if sent < 5:
+        decision = await _grace_push_available(db, user_id, category)
+        logger.info(f"[buzz] category={category} path=cold_start sent={sent} decision={decision}")
+        return decision
+
+    engaged_rate = engaged / sent
+    read_rate = read_count / sent
+    qualifies = engaged_rate >= engaged_threshold or read_rate >= read_threshold
+
+    if not qualifies:
+        from datetime import datetime, timezone as dt_tz, timedelta
+        silent = last_sent_at is None or (
+            datetime.now(dt_tz.utc) - last_sent_at >= timedelta(days=silent_days)
+        )
+        if silent:
+            decision = await _grace_push_available(db, user_id, category)
+            logger.info(
+                f"[buzz] category={category} path=silent_grace sent={sent} "
+                f"engaged_rate={engaged_rate:.2f} read_rate={read_rate:.2f} "
+                f"last_sent_at={last_sent_at} decision={decision}"
+            )
+            return decision
+        logger.info(
+            f"[buzz] category={category} path=below_threshold sent={sent} "
+            f"engaged_rate={engaged_rate:.2f} read_rate={read_rate:.2f} decision=False"
+        )
         return False
 
     try:
         from app.services.activity_state_machine import activity_state_machine
         from app.services.interruptibility import compute_interruptibility
         score = compute_interruptibility(activity_state_machine.current).score
-        return score >= 0.5
+        decision = score >= interrupt_threshold
+        logger.info(
+            f"[buzz] category={category} path=qualified sent={sent} "
+            f"engaged_rate={engaged_rate:.2f} read_rate={read_rate:.2f} "
+            f"interruptibility={score:.2f} decision={decision}"
+        )
+        return decision
     except Exception as e:
         logger.debug(f"[buzz] interruptibility lookup failed: {e}")
         return False
-
-
-# SARA_PROACTIVENESS_IMPLEMENTATION_PLAN_2026_07_25 P2: "an initial adaptive
-# budget of no more than two non-urgent proactive pushes per day, excluding
-# requested timers, reminders, and critical events." Categories in this set
-# are the "requested timers, reminders" carve-out — explicit, David-requested
-# commitments are never rationed. Urgent/critical priority is exempted at the
-# call site below, not here.
-#
-# MINDV2 Phase 0 / F1 fix: 'agent_task' is also exempt. task_result_delivery
-# ._record_delivered() writes a tell-once ledger row with sent=TRUE for
-# EVERY completion delivery — including SSE chat injections and desktop
-# toasts, neither of which buzzes a phone — and the desktop-toast delivery
-# path itself also logs under 'agent_task'. Counting those against the same
-# 2/day budget as real proactive pushes let seven bookkeeping/toast rows
-# exhaust the day's budget before any push happened (observed live 07-27:
-# three concrete email-insight pushes suppressed by budget while the day's
-# "pushes" were all silent ledger/toast rows). Real completion pushes that
-# do buzz a phone (paths 3-5 in deliver_task_result) log under
-# 'background_task', which is intentionally NOT exempt — those should still
-# compete for the budget like any other proactive content.
-_BUDGET_EXEMPT_CATEGORIES = {"timer", "reminder", "reminders", "timers", "agent_task"}
-DAILY_NON_URGENT_PUSH_BUDGET = 2
-
-
-async def _daily_push_budget_available(db: AsyncSession, user_id: str, category: str, priority: str) -> bool:
-    """True iff this proactive push is exempt from the daily budget, or the
-    budget still has room today (ET). Fails open (True) on any query error —
-    a broken budget check must never itself suppress a legitimate push."""
-    if priority in ("urgent", "critical") or category in _BUDGET_EXEMPT_CATEGORIES:
-        return True
-    try:
-        row = await _db_execute(db, text("""
-            SELECT COUNT(*) FROM notification_log
-            WHERE user_id = :uid AND sent = TRUE
-              AND priority NOT IN ('urgent', 'critical')
-              AND category NOT IN ('timer', 'reminder', 'reminders', 'timers', 'agent_task')
-              AND sent_at >= (date_trunc('day', NOW() AT TIME ZONE 'America/New_York')
-                              AT TIME ZONE 'America/New_York')
-        """), {"uid": user_id})
-        count_today = int(row.scalar() or 0)
-        return count_today < DAILY_NON_URGENT_PUSH_BUDGET
-    except Exception as e:
-        logger.debug(f"[budget] daily push budget check failed, failing open: {e}")
-        return True
 
 
 async def route_through_attention_queue(
@@ -1154,7 +1175,7 @@ async def route_through_attention_queue(
             )
             await _log_notification(
                 db, user_id, dedupe_key, category, title, message, priority, source, None,
-                0, sent=False, dedup_blocked=True,
+                0, sent=False, dedup_blocked=True, suppress_reason="dedupe_key_surfaced",
             )
             return {"sent": False, "reason": "dedupe_key_already_surfaced", "routed_through_attention": True}
 
@@ -1165,13 +1186,22 @@ async def route_through_attention_queue(
     # checkins) recreates a "new" item and re-broadcasts to the desktop
     # every cycle even though nothing new actually happened. Apply the same
     # per-category cooldown here that _check_dedup enforces on direct sends.
+    #
+    # Scoped to DELIVERED items (notification_log.sent=TRUE), not created
+    # ones (NOTIFICATION_DELIVERY_FIX_PLAN_2026_08_17 Phase 2). Counting
+    # outbox_item *creations* meant distinct, never-pushed check-ins starved
+    # each other — deliberation produces them faster than the 2h window, so
+    # a genuinely new item got silently suppressed by an unpushed, unread
+    # sibling that never even surfaced. The permanent per-dedupe-key guard
+    # above already covers the original recycle-storm case this was meant
+    # to stop; an inbox row that was never delivered isn't a duplicate.
     if priority not in ("urgent", "critical"):
         effective_cooldown = _cooldown_for(category)
         if effective_cooldown > 0:
             recent = await _db_execute(db, text("""
-                SELECT COUNT(*) FROM outbox_item
-                WHERE user_id = :user_id AND category = :category
-                  AND created_at > NOW() - MAKE_INTERVAL(secs => :cooldown_secs)
+                SELECT COUNT(*) FROM notification_log
+                WHERE user_id = :user_id AND category = :category AND sent = TRUE
+                  AND sent_at > NOW() - MAKE_INTERVAL(secs => :cooldown_secs)
             """), {
                 "user_id": user_id,
                 "category": category,
@@ -1186,6 +1216,7 @@ async def route_through_attention_queue(
                     db, user_id, dedupe_key or f"{category}:{_hash_topic(title, message)}",
                     category, title, message, priority, source, None,
                     effective_cooldown, sent=False, dedup_blocked=True,
+                    suppress_reason="attention_cooldown",
                 )
                 return {"sent": False, "reason": "attention_cooldown", "routed_through_attention": True}
 
@@ -1236,21 +1267,6 @@ async def route_through_attention_queue(
     if not should_push:
         should_push = await _learned_buzz_decision(db, user_id, category)
 
-    # P2 daily budget: even an item that earned a push (by priority or the
-    # learned buzz decision) still competes for one of the day's two
-    # non-urgent push slots — this is what makes "no more than two per day"
-    # a real ceiling instead of a per-category cooldown that N different
-    # categories can each independently clear.
-    if should_push and not await _daily_push_budget_available(db, user_id, category, priority):
-        logger.info(
-            f"Attention queue push suppressed by daily budget: category={category} "
-            f"priority={priority} title={title[:60]}"
-        )
-        should_push = False
-        budget_exhausted = True
-    else:
-        budget_exhausted = False
-
     if should_push:
         result = await send_notification(
             user_id=user_id, title=title, message=message,
@@ -1262,12 +1278,23 @@ async def route_through_attention_queue(
         result["routed_through_attention"] = True
         return result
 
+    # Inbox-only outcome: an outbox item exists but no push was attempted.
+    # Logged (Phase 5) so the funnel can distinguish "made it to the inbox,
+    # buzz declined" from every pre-inbox suppression reason above — before
+    # this, these two outcomes wrote nothing to notification_log at all and
+    # were invisible to /debug/notification-funnel.
+    await _log_notification(
+        db, user_id, dedupe_key or f"{category}:{_hash_topic(title, message)}",
+        category, title, message, priority, source, None, 0,
+        sent=False, dedup_blocked=False, attention_item_id=item_id,
+        suppress_reason="buzz_declined",
+    )
+
     return {
         "sent": False,
         "attention_item_id": item_id,
         "routed_through_attention": True,
-        "reason": "daily_push_budget_exhausted" if budget_exhausted
-                  else "Low/normal priority routed to attention queue (buzz decision: inbox-only)",
+        "reason": "Low/normal priority routed to attention queue (buzz decision: inbox-only)",
     }
 
 
@@ -1543,13 +1570,20 @@ async def _log_notification(
     sent: bool,
     dedup_blocked: bool,
     attention_item_id: Optional[str] = None,
+    suppress_reason: Optional[str] = None,
 ) -> Optional[int]:
     """Log a notification attempt to notification_log.
 
     Dedup-blocked attempts (Phase A.4) don't insert a fresh churn row — they
     increment `blocked_count` on the most recent blocked row for this exact
     topic instead. This is what killed the 106/week of pure log churn from
-    repeated dedup-blocked sends (SARA_UNLEASHED R3)."""
+    repeated dedup-blocked sends (SARA_UNLEASHED R3).
+
+    `suppress_reason` (NOTIFICATION_DELIVERY_FIX_PLAN_2026_08_17 Phase 5) is
+    the same string every caller already returns to ITS caller in the
+    `{"sent": False, "reason": ...}` dict — persisted here so
+    /debug/notification-funnel can group suppressions by reason instead of
+    just "sent=false, cause unknown"."""
     if dedup_blocked:
         bumped = await _db_execute(db, text("""
             UPDATE notification_log
@@ -1571,11 +1605,11 @@ async def _log_notification(
         INSERT INTO notification_log
         (user_id, topic, category, title, message, priority, source,
          agent_run_id, cooldown_hours, sent, dedup_blocked, sent_at,
-         outbox_item_id)
+         outbox_item_id, suppress_reason)
         VALUES
         (:user_id, :topic, :category, :title, :message, :priority, :source,
          :agent_run_id, :cooldown_hours, :sent, :dedup_blocked, NOW(),
-         CAST(:attention_item_id AS uuid))
+         CAST(:attention_item_id AS uuid), :suppress_reason)
         RETURNING id
     """), {
         "user_id": user_id,
@@ -1590,6 +1624,7 @@ async def _log_notification(
         "sent": sent,
         "dedup_blocked": dedup_blocked,
         "attention_item_id": attention_item_id,
+        "suppress_reason": suppress_reason,
     })
     row = result.fetchone()
     notification_log_id = row[0] if row else None
@@ -1713,18 +1748,19 @@ _PASSIVE_CATEGORIES = {"acs_discovery", "learning_review", "inbox_digest", "atte
 _TIME_SENSITIVE_CATEGORIES = {"security", "calendar_prep", "health_alert", "timer"}
 
 
-def _interruption_level(priority: str, category: str) -> str:
+def _interruption_level(priority: str, category: str, source: str = "") -> str:
     """Map delivery-policy priority/category → iOS interruption level (§5.4.1).
 
-    passive | active | timeSensitive | critical.
+    passive | active | time-sensitive | critical.
     """
     cat = (category or "").lower()
+    src = (source or "").lower()
     prio = (priority or "").lower()
     if prio == "critical" or cat == "security":
-        return "critical" if prio == "critical" else "timeSensitive"
+        return "critical" if prio == "critical" else "time-sensitive"
     if cat in _TIME_SENSITIVE_CATEGORIES or prio == "urgent":
-        return "timeSensitive"
-    if cat in _PASSIVE_CATEGORIES or prio in ("low", "silent"):
+        return "time-sensitive"
+    if cat in _PASSIVE_CATEGORIES or src in _PASSIVE_CATEGORIES or prio in ("low", "silent"):
         return "passive"
     return "active"
 
@@ -1739,6 +1775,7 @@ async def _send_push(
     category: str = "general",
     extra_data: Optional[Dict[str, Any]] = None,
     badge: Optional[int] = None,
+    db: Optional[AsyncSession] = None,
 ) -> bool:
     """Send mobile push notification to all of the user's device tokens."""
     unique_tokens = [t for t in dict.fromkeys(tokens) if t]
@@ -1807,25 +1844,27 @@ async def _send_push(
     # Focus (prep-imminent, security, acute health); critical needs the Critical
     # Alerts entitlement + opt-in (iOS silently downgrades it otherwise, so it's
     # safe to send).
-    interruption_level = _interruption_level(normalized_priority, category)
+    interruption_level = _interruption_level(normalized_priority, category, source)
 
-    messages = [
-        {
+    messages = []
+    for token in unique_tokens:
+        message = {
             "to": token,
-            "sound": "default",
             "title": title,
             "body": body,
             "data": push_data,
             "priority": push_priority,
             "categoryId": push_category_id,
             "interruptionLevel": interruption_level,
-            "_contentAvailable": True,
             # Real unread count when the caller could compute it; the app icon
             # badge then matches the Notifications screen instead of a stuck "1".
             "badge": badge if badge is not None else 1,
         }
-        for token in unique_tokens
-    ]
+        # A passive notification should not make sound; the interruption level
+        # alone does not override an explicitly requested default sound.
+        if interruption_level != "passive":
+            message["sound"] = "default"
+        messages.append(message)
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -1837,23 +1876,54 @@ async def _send_push(
                     "Content-Type": "application/json",
                 },
             )
-            if response.status_code == 200:
-                logger.info(f"Push sent to {len(unique_tokens)} token(s): {title[:50]}")
-                return True
-            else:
+            if response.status_code != 200:
                 logger.error(f"Push failed: {response.status_code} - {response.text[:200]}")
                 return False
+
+            # Expo returns HTTP 200 even when individual tickets failed. Treat
+            # success per token, and retire permanently invalid device tokens.
+            payload = response.json()
+            tickets = payload.get("data") if isinstance(payload, dict) else None
+            if isinstance(tickets, dict):
+                tickets = [tickets]
+            if not isinstance(tickets, list):
+                logger.error(f"Push failed: malformed Expo ticket response: {response.text[:200]}")
+                return False
+
+            accepted = 0
+            invalid_tokens: List[str] = []
+            for token, ticket in zip(unique_tokens, tickets):
+                if isinstance(ticket, dict) and ticket.get("status") == "ok":
+                    accepted += 1
+                    continue
+                details = ticket.get("details") if isinstance(ticket, dict) else {}
+                error_code = details.get("error") if isinstance(details, dict) else None
+                logger.warning(
+                    "Expo push ticket rejected token=%s error=%s message=%s",
+                    token[:24], error_code,
+                    ticket.get("message") if isinstance(ticket, dict) else ticket,
+                )
+                if error_code == "DeviceNotRegistered":
+                    invalid_tokens.append(token)
+
+            if invalid_tokens and db:
+                try:
+                    await _db_execute(db, text("""
+                        UPDATE push_token SET is_active = FALSE, updated_at = NOW()
+                        WHERE token = ANY(:tokens)
+                    """), {"tokens": invalid_tokens})
+                except Exception as e:
+                    logger.warning(f"Could not deactivate invalid Expo token(s): {e}")
+
+            if len(tickets) != len(unique_tokens):
+                logger.warning(
+                    "Expo returned %d ticket(s) for %d token(s)",
+                    len(tickets), len(unique_tokens),
+                )
+            if accepted:
+                logger.info(f"Push accepted for {accepted}/{len(unique_tokens)} token(s): {title[:50]}")
+                return True
+            return False
     except Exception as e:
         logger.error(f"Push error: {e}")
         return False
-
-
-async def _db_execute(db: Any, query, params: Dict[str, Any]):
-    """
-    Execute SQL against either AsyncSession or sync Session.
-    This lets callers pass whichever session type they already have.
-    """
-    result = db.execute(query, params)
-    if inspect.isawaitable(result):
-        return await result
-    return result

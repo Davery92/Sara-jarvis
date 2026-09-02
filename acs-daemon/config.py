@@ -56,7 +56,7 @@ def _load() -> Config:
         backend_url=_required("ACS_BACKEND_URL"),
         daemon_token=_required("ACS_DAEMON_TOKEN"),
         llm_url=_optional("ACS_LLM_URL", "http://100.104.68.115:8081/v1"),
-        llm_model=_optional("ACS_LLM_MODEL", "qwen3.6-27b"),
+        llm_model=_optional("ACS_LLM_MODEL", "qwen3.8-27b"),
         tick_interval_seconds=_int("ACS_TICK_INTERVAL", 60, 5, 600),
         ticks_per_think=_int("ACS_TICKS_PER_THINK", 5, 1, 60),
         thinks_per_reflect=_int("ACS_THINKS_PER_REFLECT", 6, 1, 60),

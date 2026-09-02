@@ -79,6 +79,16 @@ class Flag(str, Enum):
     # deliberately turned on.
     SKILL_MINTING = "SKILL_MINTING"
 
+    # Continuous world model. Writes and shadow reducers can be enabled while
+    # every legacy reader remains untouched; each read surface cuts over alone.
+    WORLD_EVENTS_WRITE = "WORLD_EVENTS_WRITE"
+    WORLD_REDUCERS_SHADOW = "WORLD_REDUCERS_SHADOW"
+    WORLD_INTERPRETER = "WORLD_INTERPRETER"
+    WORLD_CONTEXT_SHADOW = "WORLD_CONTEXT_SHADOW"
+    WORLD_CONTEXT_READ = "WORLD_CONTEXT_READ"
+    WORLD_COGNITION_READ = "WORLD_COGNITION_READ"
+    WORLD_SURFACES_READ = "WORLD_SURFACES_READ"
+
 
 ALL_FLAGS: List[str] = [f.value for f in Flag]
 _TRUE_VALUES = {"1", "true", "yes", "on"}

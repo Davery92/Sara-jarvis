@@ -31,6 +31,7 @@ from sqlalchemy import text
 
 from app.core.timezone import now as local_now, to_naive_utc
 from app.core.config import get_owner_id
+from app.core.db_compat import db_execute, db_commit, db_rollback
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +44,7 @@ _ALWAYS_DELIVER_PRIORITIES = {"critical"}
 # these (they ARE the flush vehicle, or are expected/zero-interruption).
 _ALWAYS_DELIVER_SOURCES = {
     "morning_brief", "daily_brief", "evening_digest", "held_flush",
-    "delivery_flush",
+    "delivery_flush", "departure_brief",
 }
 
 # Fallback night window when rhythm is unknown.
@@ -93,7 +94,7 @@ async def _night_window(db, now_et: datetime) -> tuple[float, float]:
     bed_h = _time_to_hour(_FALLBACK_BEDTIME)
     wake_h = _time_to_hour(_FALLBACK_WAKE)
     try:
-        row = (await db.execute(text("""
+        row = (await db_execute(db, text("""
             SELECT rhythm_key, median_time, window_start, window_end
             FROM daily_rhythm
             WHERE user_id = :uid AND rhythm_key IN ('bedtime','wake')
@@ -115,7 +116,7 @@ _DAVID = get_owner_id()
 
 async def _latest_focus_on(db) -> Optional[bool]:
     try:
-        row = (await db.execute(text("""
+        row = (await db_execute(db, text("""
             SELECT to_state FROM home_activity_log
             WHERE entity_id = :e
             ORDER BY changed_at DESC LIMIT 1
@@ -131,7 +132,7 @@ async def _latest_focus_on(db) -> Optional[bool]:
 async def _home_quiet(db, minutes: int = 20) -> Optional[bool]:
     """True if no home activity in the last `minutes`. None if table unavailable."""
     try:
-        cnt = (await db.execute(text("""
+        cnt = (await db_execute(db, text("""
             SELECT COUNT(*) FROM home_activity_log
             WHERE changed_at > NOW() - MAKE_INTERVAL(mins => :m)
         """), {"m": minutes})).scalar()
@@ -144,7 +145,7 @@ async def _home_quiet(db, minutes: int = 20) -> Optional[bool]:
 async def _minutes_since_interaction(db, user_id: str) -> Optional[float]:
     """Minutes since David last interacted (most recent user-role episode)."""
     try:
-        last = (await db.execute(text("""
+        last = (await db_execute(db, text("""
             SELECT MAX(created_at) FROM episode
             WHERE user_id = :uid AND role = 'user'
         """), {"uid": user_id})).scalar()
@@ -277,7 +278,7 @@ async def decide_delivery(
 async def _latest_readiness(db, user_id: str) -> Optional[int]:
     """Today's readiness score (0-100), or None if not computed today."""
     try:
-        r = (await db.execute(text("""
+        r = (await db_execute(db, text("""
             SELECT score FROM morning_readiness
             WHERE user_id = :u AND created_at >= NOW() - INTERVAL '20 hours'
             ORDER BY created_at DESC LIMIT 1
@@ -291,7 +292,7 @@ async def _persist_why_trace(db, user_id, category, priority, source, topic, dec
     """Record the decision's causal chain (§3.10). Best-effort, never blocks."""
     import json
     try:
-        await db.execute(text("""
+        await db_execute(db, text("""
             INSERT INTO action_why_trace
               (user_id, kind, category, priority, source, topic, decision, reason, chain, created_at)
             VALUES (:u, 'notification', :cat, :prio, :src, :topic, :dec, :reason,
@@ -308,7 +309,7 @@ async def _persist_why_trace(db, user_id, category, priority, source, topic, dec
 
 async def recent_why_traces(db, user_id: str, limit: int = 10) -> list:
     """Recent interruption decisions, newest first — powers 'why did you ping me?'."""
-    rows = (await db.execute(text("""
+    rows = (await db_execute(db, text("""
         SELECT category, priority, source, topic, decision, reason, chain, created_at
         FROM action_why_trace
         WHERE user_id = :u
@@ -350,7 +351,7 @@ async def hold_notification(
     import json
     try:
         deliver_after = to_naive_utc(decision.deliver_after) if decision.deliver_after else None
-        row = (await db.execute(text("""
+        row = (await db_execute(db, text("""
             INSERT INTO held_notification
               (user_id, title, message, category, priority, source, topic,
                payload, why_trace, held_reason, deliver_after, status)
@@ -366,7 +367,7 @@ async def hold_notification(
             "reason": decision.reason,
             "deliver_after": deliver_after,
         })).first()
-        await db.commit()
+        await db_commit(db)
         hid = row[0] if row else None
         logger.info(
             f"📥 Held notification (asleep) id={hid} category={category} "
@@ -376,7 +377,7 @@ async def hold_notification(
     except Exception as e:
         logger.warning(f"Failed to persist held notification: {e}")
         try:
-            await db.rollback()
+            await db_rollback(db)
         except Exception:
             pass
         return None

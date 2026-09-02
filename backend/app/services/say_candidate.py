@@ -64,16 +64,38 @@ async def create_candidate(
         valid_until = local_now() + default
 
     if dedupe_key:
+        # Invariant 5: ≤1 live candidate and ≤1 delivered message per entity per
+        # day, ACROSS ALL SOURCES. The old guard was scoped to a single `source`,
+        # so deliberation, the appraiser and calendar_prep could each queue their
+        # own copy of the same concern and all three would go out.
         existing = (await db.execute(text("""
             SELECT id FROM say_candidate
-            WHERE user_id = :uid AND source = :source
+            WHERE user_id = :uid
               AND :dedupe_key = ANY(topic_entities)
+              AND status IN ('pending', 'judged_send', 'judged_batch')
               AND valid_until >= NOW()
             LIMIT 1
-        """), {"uid": user_id, "source": source, "dedupe_key": dedupe_key})).first()
+        """), {"uid": user_id, "dedupe_key": dedupe_key})).first()
         if existing:
             logger.debug(
                 f"[say_candidate] duplicate suppressed dedupe_key={dedupe_key!r} source={source!r}"
+            )
+            return None
+
+        # And nothing already said today. A candidate that survives the judge
+        # becomes a notification_log row whose topic is this same entity key —
+        # queueing another is asking to repeat yourself.
+        delivered = (await db.execute(text("""
+            SELECT id FROM notification_log
+            WHERE user_id = :uid AND sent = TRUE
+              AND topic = :dedupe_key
+              AND sent_at >= NOW() - INTERVAL '24 hours'
+            LIMIT 1
+        """), {"uid": user_id, "dedupe_key": dedupe_key})).first()
+        if delivered:
+            logger.info(
+                f"[say_candidate] already delivered today, not re-queuing "
+                f"dedupe_key={dedupe_key!r} source={source!r}"
             )
             return None
 

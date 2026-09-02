@@ -6,7 +6,7 @@
  *
  * React Native has no native EventSource, so (unlike the web shell, which uses the
  * /api/acs/v2/stream SSE feed) this polls — consistent with the rest of the app:
- *   - /api/sara/status        emotional state (every 20s)
+ *   - /api/world-state/presence   revisioned server presence (every 15s)
  *   - /api/acs/v2/daemon-status   liveness (every 20s)
  *   - /api/acs/v2/activity?limit=1   newest daemon activity (every 8s)
  *
@@ -45,6 +45,12 @@ const NOTABLE = new Set(Object.keys(REACTIONS));
 const REACTION_MS = 9000;
 const IDLE_COLOR = '#14b8a6'; // theme primary
 
+const STATE_TO_EMOTION: Record<string, string> = {
+  resting: 'neutral', observing: 'attentive', interpreting: 'reflective',
+  deliberating: 'curious', acting: 'focused', waiting: 'calm',
+  engaged: 'happy', degraded: 'concerned',
+};
+
 export interface SaraPresence {
   emotionalState: string;
   emoji: string;
@@ -69,8 +75,8 @@ export function useSaraPresence(): SaraPresence {
     let alive = true;
     const fetchStatus = async () => {
       try {
-        const s = await apiClient.get<any>('/api/sara/status');
-        if (alive && s?.emotional_state) setEmotionalState(s.emotional_state);
+        const s = await apiClient.get<any>('/api/world-state/presence');
+        if (alive && s?.state) setEmotionalState(STATE_TO_EMOTION[s.state] || 'neutral');
       } catch {}
       try {
         const d = await apiClient.get<any>('/api/acs/v2/daemon-status');
@@ -78,7 +84,7 @@ export function useSaraPresence(): SaraPresence {
       } catch {}
     };
     fetchStatus();
-    const t = setInterval(fetchStatus, 20000);
+    const t = setInterval(fetchStatus, 15000);
     return () => { alive = false; clearInterval(t); };
   }, []);
 

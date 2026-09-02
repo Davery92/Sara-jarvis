@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import { Dumbbell, Plus, X, TrendingUp, Calendar, FileText, Edit, ChevronRight, ChevronDown, Save, Trash2 } from 'lucide-react'
 import { APP_CONFIG } from '../../config'
+import { getLocalDateString } from '../../utils/dateUtils'
 
 interface WorkoutSet {
   id: string
@@ -325,7 +326,7 @@ export default function WorkoutLog() {
   const startEditingDate = (sessionIndex: number, currentDate: string) => {
     setEditingSessionDate(sessionIndex)
     const date = new Date(currentDate)
-    const formatted = date.toISOString().split('T')[0]
+    const formatted = getLocalDateString(date)
     setNewSessionDate(formatted)
   }
 

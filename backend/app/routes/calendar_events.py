@@ -247,6 +247,16 @@ async def create_calendar_event(
         rrule=rrule
     )
     db.add(event)
+    db.flush()
+    from app.services.world_state.writer import append_world_event
+    append_world_event(
+        db, user_id=str(current_user.id), kind="calendar.created", source="calendar_api",
+        source_ref=f"calendar_event:{event.id}", aggregate_type="calendar_event", aggregate_id=str(event.id),
+        actor_type="user", actor_id=str(current_user.id), dedupe_key=f"calendar-created:{event.id}",
+        payload={"event_id": str(event.id), "title": event.title,
+                 "start_time": event.start_time.isoformat(), "end_time": event.end_time.isoformat(),
+                 "location": event.location, "all_day": bool(event.all_day)},
+    )
     db.commit()
     db.refresh(event)
 
@@ -327,6 +337,16 @@ async def update_calendar_event(
             event.rrule = None  # Empty string clears recurrence
 
     event.updated_at = naive_local_now()
+    from app.services.world_state.writer import append_world_event
+    append_world_event(
+        db, user_id=str(current_user.id), kind="calendar.updated", source="calendar_api",
+        source_ref=f"calendar_event:{event.id}", aggregate_type="calendar_event", aggregate_id=str(event.id),
+        actor_type="user", actor_id=str(current_user.id),
+        dedupe_key=f"calendar-updated:{event.id}:{event.updated_at.isoformat()}",
+        payload={"event_id": str(event.id), "title": event.title,
+                 "start_time": event.start_time.isoformat(), "end_time": event.end_time.isoformat(),
+                 "location": event.location, "all_day": bool(event.all_day)},
+    )
     db.commit()
     db.refresh(event)
 
@@ -385,6 +405,14 @@ async def delete_calendar_event(
                 title=event.title,
             ))
 
+    from app.services.world_state.writer import append_world_event
+    append_world_event(
+        db, user_id=str(current_user.id), kind="calendar.deleted", source="calendar_api",
+        source_ref=f"calendar_event:{event.id}", aggregate_type="calendar_event", aggregate_id=str(event.id),
+        actor_type="user", actor_id=str(current_user.id), dedupe_key=f"calendar-deleted:{event.id}",
+        payload={"event_id": str(event.id), "title": event.title,
+                 "start_time": event.start_time.isoformat(), "end_time": event.end_time.isoformat()},
+    )
     db.delete(event)
     db.commit()
 
@@ -495,6 +523,22 @@ async def sync_ios_calendar_events(
                 _supersede_email_duplicates(db, current_user.id, new_event)
                 event_for_linkage = new_event
 
+            from app.services.world_state.writer import append_world_event
+            append_world_event(
+                db, user_id=str(current_user.id),
+                kind="calendar.updated" if existing_event else "calendar.created",
+                source="ios_calendar_sync", source_ref=f"calendar_event:{event_for_linkage.id}",
+                aggregate_type="calendar_event", aggregate_id=str(event_for_linkage.id),
+                actor_type="device", actor_id="ios",
+                dedupe_key=(f"ios-calendar:{event_data.ios_event_id}:{start_time.isoformat()}:"
+                            f"{end_time.isoformat()}:{event_data.title}"),
+                payload={"event_id": str(event_for_linkage.id), "ios_event_id": event_data.ios_event_id,
+                         "title": event_data.title, "start_time": start_time.isoformat(),
+                         "end_time": end_time.isoformat(), "location": event_data.location,
+                         "all_day": bool(event_data.all_day), "owner": _owner,
+                         "calendar_name": event_data.ios_calendar_name},
+            )
+
             if attendees_list:
                 try:
                     from app.services.person_service_sync import link_attendees_to_people
@@ -538,6 +582,15 @@ async def sync_ios_calendar_events(
 
             stale_events = stale_query.all()
             for stale in stale_events:
+                from app.services.world_state.writer import append_world_event
+                append_world_event(
+                    db, user_id=str(current_user.id), kind="calendar.deleted", source="ios_calendar_sync",
+                    source_ref=f"calendar_event:{stale.id}", aggregate_type="calendar_event", aggregate_id=str(stale.id),
+                    actor_type="device", actor_id="ios", dedupe_key=f"ios-calendar-deleted:{stale.id}:{stale.start_time.isoformat()}",
+                    payload={"event_id": str(stale.id), "ios_event_id": stale.ios_event_id,
+                             "title": stale.title, "start_time": stale.start_time.isoformat(),
+                             "end_time": stale.end_time.isoformat()},
+                )
                 db.delete(stale)
             deleted = len(stale_events)
         except Exception as e:

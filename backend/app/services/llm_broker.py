@@ -53,27 +53,30 @@ class Capability:
 # The capability classes. This table is the single map from "what a caller
 # needs" to "which knob holds it." Adding a capability = one row here.
 CAPABILITIES: Dict[str, Capability] = {
-    # David-facing conversation — the strong reasoning model.
+    # David-facing conversation. Not yet wired to a live call site (chat_stream
+    # reads CHAT_DEFAULT_MODEL directly, see app_state.py) — kept in sync so
+    # this table stays a true source of truth once something calls
+    # resolve("chat") for real.
     "chat": Capability(
         "chat", "chat_default_model", None,
-        default_model="claude-sonnet-5",
+        default_model="qwen3.8-27b",
     ),
     # Background cognition: deliberation / kernel ambient turns / consolidation.
     # Primary + fallback, both endpoint-bearing.
     "kernel": Capability(
         "kernel", "bg_llm_primary_model", "bg_llm_primary_url",
         fallback_model_key="bg_llm_fallback_model", fallback_url_key="bg_llm_fallback_url",
-        default_model="qwen3.6-27b", default_url="http://100.104.68.115:8081/v1",
+        default_model="qwen3.8-27b", default_url="http://100.104.68.115:8081/v1",
     ),
     # Cheap utility calls (~15 sites currently reading openai_model directly).
     "utility": Capability(
         "utility", "openai_model", "bg_llm_primary_url",
-        default_model="qwen3.6-27b", default_url="http://100.104.68.115:8081/v1",
+        default_model="qwen3.8-27b", default_url="http://100.104.68.115:8081/v1",
     ),
     # Notification phrasing / composer.
     "notification": Capability(
         "notification", "openai_notification_model", "bg_llm_primary_url",
-        default_model="qwen3.6-27b", default_url="http://100.104.68.115:8081/v1",
+        default_model="qwen3.8-27b", default_url="http://100.104.68.115:8081/v1",
     ),
     # Presence-latency follow-up, ruling 1 (2026-07-31): split embedding
     # traffic by who's waiting on it. "embedding" serves real chat turns —

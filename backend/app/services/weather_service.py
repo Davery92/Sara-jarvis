@@ -5,6 +5,7 @@ Fetches weather data from OpenWeatherMap API for Allentown, PA.
 
 import aiohttp
 import logging
+import time
 from datetime import datetime
 from typing import Dict, Optional
 from dataclasses import dataclass, asdict
@@ -75,6 +76,32 @@ class WeatherData:
         }
 
 
+# One Call 3.0 needs its own subscription. When the key doesn't have one the
+# API returns 401 on EVERY call, and this service is called often enough that
+# the "trying free API" warning was ~530 log lines a day — a permanent config
+# fact reported as if it were news. Park the endpoint for a day after an auth
+# rejection and go straight to the free API; a key that gets subscribed later
+# is picked up on the next expiry without a restart.
+_ONECALL_AUTH_BACKOFF_SECONDS = 24 * 3600
+_onecall_blocked_until: float = 0.0
+
+
+def _onecall_available() -> bool:
+    return time.monotonic() >= _onecall_blocked_until
+
+
+def _block_onecall(status: int) -> None:
+    """Called on an auth rejection; logs once per backoff window, not per call."""
+    global _onecall_blocked_until
+    if _onecall_available():
+        logger.warning(
+            "One Call API 3.0 returned %s (key not subscribed?) — using the free 2.5 API "
+            "and skipping One Call for %dh",
+            status, _ONECALL_AUTH_BACKOFF_SECONDS // 3600,
+        )
+    _onecall_blocked_until = time.monotonic() + _ONECALL_AUTH_BACKOFF_SECONDS
+
+
 class WeatherService:
     """Service for fetching weather data from OpenWeatherMap."""
 
@@ -88,6 +115,8 @@ class WeatherService:
         Fetch current weather and 7-day forecast for Allentown, PA.
         Uses OpenWeatherMap One Call API 3.0.
         """
+        if not _onecall_available():
+            return await self._get_weather_free_api()
         try:
             url = f"{self.base_url}/onecall"
             params = {
@@ -101,8 +130,16 @@ class WeatherService:
             async with aiohttp.ClientSession(timeout=self.timeout) as session:
                 async with session.get(url, params=params) as response:
                     if response.status != 200:
-                        # Fall back to free API if One Call fails
-                        logger.warning(f"One Call API returned {response.status}, trying free API")
+                        # Fall back to the free API. An auth rejection is a
+                        # standing config fact, not a transient blip — stop
+                        # re-asking (and re-logging) for a while. Anything else
+                        # may well work on the next call, so only debug-log it.
+                        if response.status in (401, 403):
+                            _block_onecall(response.status)
+                        else:
+                            logger.debug(
+                                "One Call API returned %s, trying free API", response.status
+                            )
                         return await self._get_weather_free_api()
 
                     data = await response.json()

@@ -24,17 +24,36 @@ logger = logging.getLogger(__name__)
 DEFAULT_USER_ID = get_owner_id()
 
 
-async def get_unacked_notifications(user_id: str, hours: int = 24, limit: int = 8) -> List[dict]:
+# A six-hour window, not 24. The block is replayed verbatim into every chat turn,
+# so a stale item is not a reminder — it is Sara raising a settled matter again
+# unprompted. On 2026-09-01 a push about a meeting that had already happened rode
+# in the unacknowledged block on every turn from 17:02 to 20:08, with its time
+# rendered in UTC, because phone reads never set read_at.
+UNACKED_WINDOW_HOURS = 6
+
+
+async def get_unacked_notifications(user_id: str, hours: int = UNACKED_WINDOW_HOURS,
+                                    limit: int = 8) -> List[dict]:
     from app.db.session import get_async_session_factory
     factory = get_async_session_factory()
     async with factory() as db:
         rows = (await db.execute(text("""
-            SELECT id, title, message, category, sent_at, topic, outbox_item_id AS attention_item_id
-            FROM notification_log
-            WHERE user_id = :uid AND sent = TRUE
-              AND read_at IS NULL AND dismissed_at IS NULL
-              AND sent_at >= NOW() - (:hrs * INTERVAL '1 hour')
-            ORDER BY sent_at DESC
+            SELECT n.id, n.title, n.message, n.category, n.sent_at, n.topic,
+                   n.outbox_item_id AS attention_item_id
+            FROM notification_log n
+            WHERE n.user_id = :uid AND n.sent = TRUE
+              AND n.read_at IS NULL AND n.dismissed_at IS NULL
+              AND n.sent_at >= NOW() - (:hrs * INTERVAL '1 hour')
+              -- Nothing whose subject is already settled. A notification about a
+              -- resolved thread is not unfinished business, it is noise.
+              AND NOT EXISTS (
+                    SELECT 1 FROM world_thread t
+                     WHERE t.user_id = n.user_id
+                       AND t.status IN ('resolved','cancelled','expired')
+                       AND n.topic IS NOT NULL
+                       AND n.topic = 'entity:' || t.id
+              )
+            ORDER BY n.sent_at DESC
             LIMIT :lim
         """), {"uid": user_id, "hrs": hours, "lim": limit})).mappings().all()
     return [dict(r) for r in rows]
@@ -42,20 +61,25 @@ async def get_unacked_notifications(user_id: str, hours: int = 24, limit: int = 
 
 async def get_unacked_for_context(user_id: str = DEFAULT_USER_ID) -> Optional[str]:
     """Chat-context block of sent-but-unacknowledged notifications, so Sara can
-    understand a reply that references them and recap on a return. None if empty."""
+    understand a reply that references them and recap on a return. None if empty.
+
+    Titles only. The full body was being replayed on every turn — 120 characters
+    of a stale message is 120 characters of Sara re-raising it.
+    """
     items = await get_unacked_notifications(user_id)
     if not items:
         return None
+    from app.core.timezone import render_when
+
     lines = [
-        "## Sent but unacknowledged (last 24h)",
+        f"## Sent but unacknowledged (last {UNACKED_WINDOW_HOURS}h)",
         "David may reply to any of these. If it's been a while since you last talked and there "
         "are 2+ here, open with a one-line-each recap, then call acknowledge_notifications with "
         "his answers. A blanket 'saw your messages / all good' acks them all (read, not engaged).",
     ]
     for n in items:
-        when = n["sent_at"].strftime("%a %H:%M") if n.get("sent_at") else ""
-        msg = (n.get("message") or "")[:120]
-        lines.append(f"- [#{n['id']}] ({n.get('category', '?')}, {when}) {n.get('title', '')}: {msg}")
+        when = render_when(n.get("sent_at"), source_convention="utc")
+        lines.append(f"- [#{n['id']}] ({n.get('category', '?')}, {when}) {n.get('title', '')}")
     return "\n".join(lines)
 
 
@@ -67,6 +91,7 @@ async def acknowledge(user_id: str, ids: Union[List[int], str],
     responses = {str(k): v for k, v in (responses or {}).items()}
     factory = get_async_session_factory()
     acked, engaged_count = [], 0
+    acked_topics: List[str] = []
     async with factory() as db:
         if isinstance(ids, str) and ids.strip().lower() == "all":
             rows = (await db.execute(text("""
@@ -104,7 +129,19 @@ async def acknowledge(user_id: str, ids: Union[List[int], str],
             # Route into the follow-up thread so anti-harping state updates.
             if topic and topic.startswith("followup:"):
                 await _resolve_followup_thread(db, user_id, topic, engaged, resp)
+            if topic:
+                acked_topics.append(topic)
         await db.commit()
+
+    # Invariant 3: acknowledging a push closes the thing it was about. Before
+    # this, David could clear every notification about a thread and the thread
+    # itself stayed open, so the next deliberation cycle simply sent it again.
+    for topic in acked_topics:
+        try:
+            from app.services.thread_resolution import resolve_threads_for_topic
+            await resolve_threads_for_topic(user_id, topic)
+        except Exception as e:
+            logger.debug(f"topic thread resolve skipped for {topic}: {e}")
 
     # Badge after (sync compute).
     badge = None

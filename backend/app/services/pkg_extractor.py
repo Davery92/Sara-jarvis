@@ -34,10 +34,16 @@ For each fact, classify as one of these types:
 - **Routine**: A recurring activity (activity, typical_time, day_of_week, frequency: daily/weekly/monthly/occasional)
 - **Goal**: Something David is working toward (description, status: active/completed/abandoned, target_date, progress_notes)
 - **Interest**: A topic David cares about (topic, depth: surface/moderate/deep, related_topics)
-- **Health**: A health/wellness metric (metric, current_value, trend: improving/stable/declining, notes).
+- **Health**: A *qualitative* health attribute (metric, current_value, trend: improving/stable/declining, notes).
   Distinguish a *state* (currently sick, tired, sore, in pain — true today, not true in general) from an
-  *attribute* (resting heart rate baseline, chronically underdeveloped chest — true indefinitely). Only
+  *attribute* (chronically underdeveloped chest, gets migraines from red wine — true indefinitely). Only
   extract a state if David describes it as current; don't infer it's still true days later.
+  **NEVER extract a measurement.** HRV, resting heart rate, heart rate, sleep hours, sleep quality,
+  steps, weight, calories, SpO2, blood pressure and recovery/readiness scores live in the `health_metric`
+  table, which is the only authority for them. A number here has no date attached and cannot be corrected,
+  so it silently becomes a permanent lie. Never emit a Health fact whose value is a number
+  ("80", "7.5 hours", "54 ms") or whose metric is one of those measurements — not even if it appears
+  verbatim in the transcript.
 - **Place**: A significant location (name, type: home/work/gym/restaurant/other, address, significance)
 - **Fact**: Anything else important (subject, predicate, object, category)
 
@@ -51,6 +57,10 @@ For each extracted fact, provide:
    - 0.4: Weak inference, needs confirmation
 4. `source_quote`: The conversation excerpt that supports this (brief)
 5. `is_update`: true if this updates/changes a previously known fact (e.g., "I actually prefer tea now")
+
+**Source discipline:** every fact must come from something *David* said. Sara's replies are not
+evidence — anything she asserted about David is at best a restatement and at worst a guess, and
+extracting it makes her own output permanent. If only Sara said it, don't extract it.
 
 Return a JSON array. Only include genuinely useful personal knowledge, not transient conversation topics.
 
@@ -84,6 +94,11 @@ Do NOT infer or guess. Only capture clear, direct statements.
 
 Types: Person, Preference, Routine, Goal, Interest, Health, Place, Fact
 (Same property schemas as before)
+
+Health facts are qualitative only. NEVER extract a measurement (HRV, resting heart rate, sleep
+hours, sleep quality, steps, weight, calories, recovery score) — those come from the health_metric
+table, and a copy here has no date and never expires. Extract facts only from David's own words,
+never from Sara's replies.
 
 Return a JSON array. If nothing is explicitly stated, return [].
 

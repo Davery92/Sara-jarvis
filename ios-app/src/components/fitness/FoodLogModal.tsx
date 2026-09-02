@@ -109,6 +109,11 @@ interface EditEntry {
   // Raw canonical detailed_item for the single item being edited (see
   // FoodLogCreate in backend/app/routes/fitness.py).
   item: any;
+  // The OTHER detailed_items in this meal, when it has more than one (see
+  // FitnessScreen.handleEditFood). A PUT replaces the whole row's items, so
+  // saving without these would silently drop every other item in the meal -
+  // undefined/empty means single-item meal, nothing to preserve.
+  siblingItems?: any[];
 }
 
 interface Props {
@@ -137,6 +142,7 @@ export default function FoodLogModal({
   const [showManualEntry, setShowManualEntry] = useState(false);
   const [showBarcodeScanner, setShowBarcodeScanner] = useState(false);
   const [barcodeError, setBarcodeError] = useState<string | null>(null);
+  const [notes, setNotes] = useState('');
 
   // Date/Time picker state
   const [loggedDate, setLoggedDate] = useState(new Date());
@@ -383,6 +389,7 @@ export default function FoodLogModal({
 
     setMealType(entry.meal_type || 'snack');
     setLoggedDate(entry.logged_at ? new Date(entry.logged_at) : new Date());
+    setNotes(entry.notes || '');
     setQuantity(String(qty));
     setSearchQuery(item.name || '');
     setSearchResults([]);
@@ -518,6 +525,7 @@ export default function FoodLogModal({
     setShowBarcodeScanner(false);
     setBarcodeError(null);
     setLoggedDate(new Date());
+    setNotes('');
     setShowUnitPicker(false);
     setBaseNutrition(null);
     setAvailableServings([]);
@@ -654,36 +662,53 @@ export default function FoodLogModal({
           protein: customFood.protein,
           carbs: customFood.carbs,
           fats: customFood.fats,
+          notes: notes || undefined,
           logged_at: formatLocalDateTime(loggedDate),
         });
       } else if (selectedFood && displayNutrition) {
         // Use the pre-calculated displayNutrition which handles unit conversion
         const foodName = String(selectedFood.name || '');
 
-        const logData = {
-          meal_type: String(mealType || 'snack'),
-          food_items: [{
-            name: foodName,
-            quantity: qty,
-            unit: String(unit || 'serving'),
-          }],
-          detailed_items: [{
-            food_id: selectedFood.id,
-            name: foodName,
-            source: selectedFood.source,
-            serving_id: availableServings[selectedServingIdx]?.serving_id ?? null,
-            serving_description: String(unit || selectedFood.serving_unit || ''),
-            quantity: qty,
-            unit: String(unit || 'serving'),
-            calories: displayNutrition.calories || undefined,
-            protein: displayNutrition.protein || undefined,
-            carbs: displayNutrition.carbs || undefined,
-            fats: displayNutrition.fats || undefined,
-          }],
+        const editedFoodItem = { name: foodName, quantity: qty, unit: String(unit || 'serving') };
+        const editedDetailedItem = {
+          food_id: selectedFood.id,
+          name: foodName,
+          source: selectedFood.source,
+          serving_id: availableServings[selectedServingIdx]?.serving_id ?? null,
+          serving_description: String(unit || selectedFood.serving_unit || ''),
+          quantity: qty,
+          unit: String(unit || 'serving'),
           calories: displayNutrition.calories || undefined,
           protein: displayNutrition.protein || undefined,
           carbs: displayNutrition.carbs || undefined,
           fats: displayNutrition.fats || undefined,
+        };
+
+        // Editing one item of a multi-item meal: a PUT replaces the whole
+        // row's items, so the other items must ride along or they're
+        // silently dropped. Backend re-derives calories/protein/carbs/fats
+        // from the sum of detailed_items, so the top-level numbers here only
+        // need to be a reasonable snapshot, not an exact sum.
+        const siblings = editEntry?.siblingItems ?? [];
+        const allDetailedItems = [...siblings, editedDetailedItem];
+        const allFoodItems = [
+          ...siblings.map((s: any) => ({ name: s.name, quantity: s.quantity, unit: s.unit })),
+          editedFoodItem,
+        ];
+        const siblingCalories = siblings.reduce((sum: number, s: any) => sum + (s.calories || 0), 0);
+        const siblingProtein = siblings.reduce((sum: number, s: any) => sum + (s.protein || 0), 0);
+        const siblingCarbs = siblings.reduce((sum: number, s: any) => sum + (s.carbs || 0), 0);
+        const siblingFats = siblings.reduce((sum: number, s: any) => sum + (s.fats || 0), 0);
+
+        const logData = {
+          meal_type: String(mealType || 'snack'),
+          food_items: allFoodItems,
+          detailed_items: allDetailedItems,
+          calories: siblingCalories + (displayNutrition.calories || 0),
+          protein: siblingProtein + (displayNutrition.protein || 0),
+          carbs: siblingCarbs + (displayNutrition.carbs || 0),
+          fats: siblingFats + (displayNutrition.fats || 0),
+          notes: notes || undefined,
           logged_at: formatLocalDateTime(loggedDate),
         };
 
@@ -1219,6 +1244,19 @@ export default function FoodLogModal({
             </View>
           )}
 
+          {/* Notes */}
+          <View style={styles.notesContainer}>
+            <Text style={styles.notesLabel}>Notes (optional)</Text>
+            <TextInput
+              style={styles.notesInput}
+              value={notes}
+              onChangeText={setNotes}
+              placeholder="Add a note..."
+              placeholderTextColor={colors.textMuted}
+              multiline
+            />
+          </View>
+
           {/* Submit Button */}
           <View style={styles.buttonContainer}>
             <TouchableOpacity
@@ -1524,6 +1562,26 @@ const styles = StyleSheet.create({
     fontSize: fontSizes.sm,
     fontWeight: fontWeights.semibold,
     color: colors.text,
+  },
+  notesContainer: {
+    gap: spacing.xs,
+    marginTop: spacing.md,
+  },
+  notesLabel: {
+    fontSize: fontSizes.sm,
+    fontWeight: fontWeights.semibold,
+    color: colors.text,
+  },
+  notesInput: {
+    backgroundColor: colors.surfaceLight,
+    borderRadius: borderRadius.lg,
+    padding: spacing.md,
+    fontSize: fontSizes.md,
+    color: colors.text,
+    borderWidth: 1,
+    borderColor: colors.border,
+    minHeight: 44,
+    textAlignVertical: 'top',
   },
   quantityRow: {
     flexDirection: 'row',

@@ -711,7 +711,11 @@ class NightlyDreamService:
             from app.services.pkg_extractor import pkg_extractor
             from app.services.personal_knowledge_graph import personal_kg
 
-            # Combine all conversation sessions into text
+            # Combine all conversation sessions into text — David's turns only.
+            # Sara's replies used to be included here, which let the extractor
+            # source facts from her own assertions and re-inject them next turn
+            # as evidence (2026-08-31 HRV fabrication loop). See the matching
+            # comment in tasks/autonomy.py._pkg_deep_extract_async.
             conversation_text = ""
             for session_id, episodes in conversation_sessions.items():
                 conversation_text += f"\n--- Session {session_id} ---\n"
@@ -720,8 +724,6 @@ class NightlyDreamService:
                     content = getattr(ep, 'content', '')
                     if role == 'user':
                         conversation_text += f"David: {content}\n"
-                    elif role == 'assistant':
-                        conversation_text += f"Sara: {content}\n"
 
             if len(conversation_text.strip()) < 100:
                 logger.info(f"   PKG: Skipping extraction - too little conversation text")
@@ -899,8 +901,26 @@ class NightlyDreamService:
                 except Exception as we:
                     logger.warning(f"   ⚠️ Failed to get weather for pattern detection: {we}")
 
-                # Step 3: Cache the replay for future analysis
-                await day_replay_builder.cache_replay(db, replay)
+                # Step 3: Write the diary and cache the replay.
+                # daily_log_service.generate() does the cache_replay() itself,
+                # passing the diary into the long-unused `summary` column. It
+                # reuses the replay we just built rather than re-running the
+                # twelve collectors. Wrapped so a diary failure (LLM down)
+                # never blocks pattern detection — the fallback below still
+                # caches the structured replay with a NULL summary, and the
+                # regenerate endpoint can fill it in later.
+                try:
+                    from app.services.daily_log_service import daily_log_service
+                    result = await daily_log_service.generate(
+                        db, user_id, replay_date, replay=replay
+                    )
+                    if result.diary:
+                        logger.info(f"   📔 Daily log written for {replay_date}")
+                    else:
+                        logger.warning(f"   ⚠️ Daily log cached without prose for {replay_date}")
+                except Exception as de:
+                    logger.error(f"   ❌ Daily log generation failed for {replay_date}: {de}")
+                    await day_replay_builder.cache_replay(db, replay)
 
                 # Step 4: Run pattern detection across recent days
                 logger.info(f"   🔍 Running pattern detection...")

@@ -2,19 +2,17 @@
 chat_stream's early intercept chain (B3, HYGIENE_AND_STALE_CONTEXT_FIX_PLAN
 2026-08-12).
 
-Six commands/situations that skip the normal LLM turn entirely and produce
-a direct SSE response instead: chess, code mode, host inspection, web
-investigation, UI commands, interest-model chat verbs. All six sit
+Five commands/situations that skip the normal LLM turn entirely and produce
+a direct SSE response instead: chess, code mode, host inspection, UI commands,
+and interest-model chat verbs. All five sit
 contiguously at the very top of chat_stream's generator, before any of the
 setup (event queue, streaming client, intent classification) the rest of
 the turn depends on — extracted as a unit for exactly that reason.
 
-Multi-step task detection is intercept-shaped too but is NOT part of this
-chain: it runs later in chat_stream, after intent classification, and
-reuses state that setup computes (last_user_message, tool categories).
-Moving its detection earlier would skip intent classification's own side
-effects on any turn multi-step intercepts — a real behavior change — so it
-stays inline in chat_stream rather than joining this list.
+Multi-step conversational work is intentionally not intercepted. It stays in
+the normal chat tool loop so the active model can use intermediate results,
+stream activity, and answer in the same conversation. Durable background work
+remains available through explicit research and dispatch tools.
 
 dispatch_intercepts() walks INTERCEPT_HANDLERS in order; the first handler
 that returns a non-None stream wins — chat_stream drains it and returns
@@ -25,6 +23,7 @@ next, or the normal chat flow, from running.
 """
 import json
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Awaitable, Callable, List, Optional
@@ -222,13 +221,67 @@ async def _try_interest_model_verb(ctx: ChatTurnContext) -> Optional[AsyncIterat
     return _ack_stream(ack, ctx.request.conversation_id)
 
 
+# "We had the meeting." "I already handled it." "Enough about Laura."
+#
+# Ground-truth invariant 3. This is deliberately an intercept rather than a
+# prompt instruction: on 2026-09-02 David wrote "ENOUGH WITH THE LAURA WEIPPERT
+# OVERDUE NONSENSE WE HAD OUR MEETING" and the model, having no closer, cancelled
+# two unrelated reminders and edited two notes while the three real threads stayed
+# open. When David says a thing is done, closing it must not depend on a model
+# choosing to call a tool.
+_RESOLUTION_PATTERNS = re.compile(
+    r"""
+    \b(?:
+        we\s+(?:had|already\s+had|did|already\s+did)\s+(?:the|our|that)\s+\w+
+      | (?:i|we)\s+(?:already\s+)?(?:handled|answered|replied\s+to|took\s+care\s+of|dealt\s+with|finished|did)\s+(?:it|that|this|them)
+      | (?:already|it['\s]?s)\s+(?:handled|done|taken\s+care\s+of|resolved|sorted)
+      | (?:stop|quit|enough)\s+(?:with\s+|talking\s+|bugging\s+me\s+|nagging\s+me\s+)?(?:about|on)\b
+      | done\s+with\b
+    )
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+async def _try_thread_resolution(ctx: ChatTurnContext) -> Optional[AsyncIterator[str]]:
+    message = (ctx.last_user_message or "").strip()
+    if not message or len(message) > 400:
+        return None
+    if not _RESOLUTION_PATTERNS.search(message):
+        return None
+
+    from app.services.thread_resolution import resolve_entity
+
+    result = await resolve_entity(
+        str(ctx.current_user.id), query=message, source="david_chat", reason=message[:200],
+    )
+    if not result.get("closed"):
+        # Nothing matched — say nothing and let the normal turn answer him. An
+        # intercept that fires on a phrase but closes nothing would swallow a real
+        # conversation.
+        return None
+
+    titles = "; ".join(result["threads"][:3])
+    extra = ""
+    if result["candidates"] or result["notifications"]:
+        extra = (
+            f" I also dropped {result['candidates']} queued message(s) and cleared "
+            f"{result['notifications']} notification(s) about it."
+        )
+    logger.info(f"🧵 Thread resolution intercept closed {result['closed']}: {titles}")
+    return _ack_stream(
+        f"Closed — I won't bring it up again: {titles}.{extra}",
+        ctx.request.conversation_id,
+    )
+
+
 INTERCEPT_HANDLERS: List[Callable[[ChatTurnContext], Awaitable[Optional[AsyncIterator[str]]]]] = [
     _try_chess,
     _try_code_mode,
     _try_host_inspection,
-    _try_web_investigation,
     _try_ui_command,
     _try_interest_model_verb,
+    _try_thread_resolution,
 ]
 
 

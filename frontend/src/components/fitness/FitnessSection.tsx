@@ -12,6 +12,7 @@ import PlanImporter from './PlanImporter'
 import CardioSection from './CardioSection'
 import { Upload } from 'lucide-react'
 import { APP_CONFIG } from '../../config'
+import { getLocalDateString } from '../../utils/dateUtils'
 
 type FitnessView = 'dashboard' | 'food' | 'workout' | 'notes' | 'templates' | 'recovery' | 'programs' | 'plan' | 'nutrition' | 'cardio'
 
@@ -20,6 +21,14 @@ export default function FitnessSection() {
   const [dashboardKey, setDashboardKey] = useState(0)
   const [nutritionKey, setNutritionKey] = useState(0)
   const [showImporter, setShowImporter] = useState(false)
+  // Set by the dashboard's "Log Meal" quick action so switching to Food Log
+  // opens straight into the add-meal form (see FoodLog's autoOpenAdd).
+  const [foodAutoOpen, setFoodAutoOpen] = useState(false)
+
+  const handleLogMealFromDashboard = () => {
+    setFoodAutoOpen(true)
+    handleViewChange('food')
+  }
 
   const handlePlanApplied = () => {
     // refresh the data-driven views so the new plan/guide shows immediately
@@ -92,7 +101,9 @@ export default function FitnessSection() {
 
       {/* Content */}
       <div className="flex-1 overflow-auto">
-        {currentView === 'dashboard' && <FitnessDashboard key={dashboardKey} />}
+        {currentView === 'dashboard' && (
+          <FitnessDashboard key={dashboardKey} onLogMeal={handleLogMealFromDashboard} />
+        )}
         {currentView === 'plan' && <PlanView />}
         {currentView === 'nutrition' && <NutritionGuide key={nutritionKey} />}
         {currentView === 'programs' && <ProgramManager />}
@@ -104,7 +115,9 @@ export default function FitnessSection() {
           </div>
         )}
         {currentView === 'cardio' && <CardioSection />}
-        {currentView === 'food' && <FoodLog />}
+        {currentView === 'food' && (
+          <FoodLog autoOpenAdd={foodAutoOpen} onAutoOpenConsumed={() => setFoodAutoOpen(false)} />
+        )}
         {currentView === 'workout' && <WorkoutLog />}
         {currentView === 'notes' && <FitnessNotes />}
       </div>
@@ -1031,7 +1044,7 @@ interface PR {
   achieved_at: string
 }
 
-function FitnessDashboard() {
+function FitnessDashboard({ onLogMeal }: { onLogMeal: () => void }) {
   const [goals, setGoals] = useState<NutritionGoals>({
     calories: 2000,
     protein: 150,
@@ -1195,7 +1208,7 @@ function FitnessDashboard() {
   const fetchTodayNutrition = async () => {
     try {
       setIsRefreshing(true)
-      const today = new Date().toISOString().split('T')[0]
+      const today = getLocalDateString()
       const response = await fetch(
         `${APP_CONFIG.apiUrl}/api/fitness/food-log/summary?start_date=${today}&end_date=${today}`,
         { credentials: 'include' }
@@ -1269,7 +1282,7 @@ function FitnessDashboard() {
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
         body: JSON.stringify({
-          date: new Date().toISOString().split('T')[0],
+          date: getLocalDateString(),
           raw_weight: parseFloat(newWeight)
         })
       })
@@ -1460,7 +1473,10 @@ function FitnessDashboard() {
         <div className="assistant-panel rounded-xl p-5">
           <h3 className="font-display font-semibold mb-3">Quick Actions</h3>
           <div className="space-y-2">
-            <button className="w-full px-4 py-2 bg-white/5 hover:bg-white/10 border border-white/10 hover:border-teal-400/40 rounded-lg text-sm font-medium text-slate-200 transition-colors">
+            <button
+              onClick={onLogMeal}
+              className="w-full px-4 py-2 bg-white/5 hover:bg-white/10 border border-white/10 hover:border-teal-400/40 rounded-lg text-sm font-medium text-slate-200 transition-colors"
+            >
               Log Meal
             </button>
             <button className="w-full px-4 py-2 bg-white/5 hover:bg-white/10 border border-white/10 hover:border-teal-400/40 rounded-lg text-sm font-medium text-slate-200 transition-colors">

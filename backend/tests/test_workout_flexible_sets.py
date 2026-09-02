@@ -22,6 +22,7 @@ import uuid
 
 import pytest
 from sqlalchemy import text
+from tests.conftest import WORLD_MODEL_CLEANUP_STATEMENTS
 
 pytestmark = pytest.mark.integration
 
@@ -70,6 +71,9 @@ def user_id(pg):
         "DELETE FROM active_workout_session WHERE user_id = :uid",
         "DELETE FROM workout WHERE user_id = :uid",
         "DELETE FROM fitness_template WHERE user_id = :uid",
+        # Every world event this fixture's services emitted is keyed by the
+        # throwaway user; without this the dev DB accumulates orphans.
+        *WORLD_MODEL_CLEANUP_STATEMENTS,
         "DELETE FROM app_user WHERE id = :uid",
     ):
         try:

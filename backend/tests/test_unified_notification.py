@@ -11,6 +11,8 @@ from app.services.unified_notification import (
     send_notification,
     send_consolidated_notification,
     DEFAULT_COOLDOWNS,
+    _interruption_level,
+    _send_push,
 )
 
 
@@ -225,3 +227,54 @@ class TestDesktopFirst:
         assert result["sent"] is True
         # Push should have been called since no desktop connection
         mocks["push"].assert_called_once()
+
+
+class TestPushTransport:
+    def test_interruption_level_uses_expo_values_and_source(self):
+        assert _interruption_level("normal", "general", "attention_digest") == "passive"
+        assert _interruption_level("urgent", "general") == "time-sensitive"
+        assert _interruption_level("normal", "security") == "time-sensitive"
+
+    @pytest.mark.asyncio
+    async def test_ticket_errors_are_checked_and_passive_push_is_silent(self):
+        class Response:
+            status_code = 200
+            text = '{"data": []}'
+
+            def json(self):
+                return {
+                    "data": [
+                        {"status": "ok", "id": "ticket-good"},
+                        {"status": "error", "message": "gone", "details": {"error": "DeviceNotRegistered"}},
+                    ],
+                }
+
+        class Client:
+            def __init__(self):
+                self.payload = None
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, *args):
+                return False
+            async def post(self, _url, json, headers):
+                self.payload = json
+                return Response()
+
+        client = Client()
+        db = AsyncMock()
+        with patch("app.services.unified_notification.httpx.AsyncClient", return_value=client), \
+             patch("app.services.unified_notification._db_execute", new_callable=AsyncMock) as db_execute:
+            result = await _send_push(
+                ["good-token", "bad-token"],
+                title="Inbox", body="Two things", priority="normal",
+                source="attention_digest", category="general", db=db,
+            )
+
+        assert result is True
+        assert len(client.payload) == 2
+        for message in client.payload:
+            assert message["interruptionLevel"] == "passive"
+            assert "sound" not in message
+        params = db_execute.await_args.args[2]
+        assert params["tokens"] == ["bad-token"]
+        assert db_execute.await_count == 1

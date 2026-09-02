@@ -33,7 +33,13 @@ class TestDaemonAmbientTurnEndpoint:
         mock_ambient_turn.assert_awaited_once()
         args, kwargs = mock_ambient_turn.call_args
         assert kwargs["wake_reason"].value == "daemon_proxy"
-        assert kwargs["force"] is True
+        # Ground-truth plan, Phase 8 §1: the proxy does NOT force. `force=True`
+        # skipped should_deliberate entirely, so every daemon tick became a
+        # deliberation whether or not anything had happened — the single largest
+        # contributor to ~140 deliberations a day, 1-5 AM included. The daemon
+        # keeps its cadence; whether there is anything worth thinking about is
+        # the kernel's call.
+        assert kwargs["force"] is False
         assert out.status == "completed"
         assert out.produced is True  # 1 notification sent
         assert out.correlation_id == "turn_abc"

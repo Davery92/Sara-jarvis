@@ -95,7 +95,11 @@ class WorkoutListTool(BaseTool):
                 }
                 workouts.append(workout)
 
-            # Fallback: If no workouts found, query fitness_template table
+            # Fallback: if there are no real workouts, show the *templates* —
+            # but kept in their own key, never mixed into `workouts`. Merged in,
+            # a template is indistinguishable from a session that happened, and
+            # a plan David never executed comes back as a workout he did (D8).
+            templates = []
             if not workouts:
                 template_sql = text("""
                     SELECT id, name, scheduled_days, exercises, created_at
@@ -116,29 +120,36 @@ class WorkoutListTool(BaseTool):
                     current_day = naive_local_now().strftime('%A').lower()
                     is_today = current_day in [day.lower() for day in scheduled_days]
 
-                    workout = {
-                        "workout_id": row.id,
+                    templates.append({
+                        "template_id": row.id,
                         "title": row.name,
-                        "plan": "Workout Template",
-                        "phase": None,
-                        "week": None,
-                        "day": ", ".join(scheduled_days) if scheduled_days else "Not scheduled",
-                        "duration_min": None,
-                        "status": "scheduled" if is_today else "template",
+                        "source": "template",
+                        "scheduled_days": scheduled_days,
+                        "scheduled_today": is_today,
                         "exercises": exercises if isinstance(exercises, list) else [],
                         "created_at": row.created_at.isoformat() if row.created_at else None,
-                        "is_template": True
-                    }
-                    workouts.append(workout)
+                    })
+
+            if workouts:
+                message = f"Found {len(workouts)} workout(s)"
+            elif templates:
+                message = (
+                    f"No workouts found. Showing {len(templates)} saved workout TEMPLATE(s) instead — "
+                    "these are plans, not sessions David performed. Do not describe them as completed "
+                    "or scheduled workouts."
+                )
+            else:
+                message = "No workouts and no workout templates found."
 
             return ToolResult(
                 success=True,
                 data={
                     "workouts": workouts,
                     "total": len(workouts),
+                    "templates": templates,
                     "status_filter": status
                 },
-                message=f"Found {len(workouts)} workout(s)"
+                message=message
             )
 
         except Exception as e:
@@ -618,18 +629,35 @@ class WorkoutStatsTool(BaseTool):
                     "end": end_date.isoformat()
                 },
                 "summary": {
-                    "total_workouts": row.total_workouts or 0,
-                    "total_sets": row.total_sets or 0,
-                    "total_volume": round(row.total_volume, 1) if row.total_volume else 0,
-                    "avg_rpe": round(row.avg_rpe, 1) if row.avg_rpe else 0
+                    # COUNT is always a real number; SUM/AVG come back NULL when
+                    # nothing matched. `or 0` collapsed that into "avg RPE 0",
+                    # which reads as a logged effort of zero rather than as no
+                    # logged effort at all (D10) — so nulls stay null.
+                    "total_workouts": int(row.total_workouts or 0),
+                    "total_sets": int(row.total_sets or 0),
+                    "total_volume": round(float(row.total_volume), 1) if row.total_volume is not None else None,
+                    "avg_rpe": round(float(row.avg_rpe), 1) if row.avg_rpe is not None else None,
                 },
                 "workouts": workouts
             }
 
+            if not stats["summary"]["total_sets"]:
+                message = (
+                    f"No sets logged between {start_date} and {end_date}. "
+                    "Volume and RPE are null because nothing was recorded — not because they were zero."
+                )
+            else:
+                rpe = stats["summary"]["avg_rpe"]
+                message = (
+                    f"Workout stats for {start_date} to {end_date}: "
+                    f"{stats['summary']['total_workouts']} workouts, {stats['summary']['total_sets']} sets, "
+                    f"avg RPE {rpe if rpe is not None else 'not recorded'}"
+                )
+
             return ToolResult(
                 success=True,
                 data=stats,
-                message=f"Workout stats for {start_date} to {end_date}: {row.total_workouts or 0} workouts, {row.total_sets or 0} sets"
+                message=message
             )
 
         except Exception as e:

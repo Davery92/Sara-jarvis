@@ -123,17 +123,15 @@ def refresh_context(self) -> Dict[str, Any]:
             context = json.loads(context_data)
             result["context_segments"] = len(context.get("segments", []))
 
-        # Update user state inference
-        user_state = infer_user_state(r, solo_user_id)
-        user_state_key = f"working_memory:{solo_user_id}:user_state"
-        r.setex(user_state_key, 3600, json.dumps(user_state))
-        result["user_state_updated"] = True
-        result["user_state"] = user_state
-
-        # Update system state
-        system_state = get_system_state(r)
-        system_state_key = f"working_memory:{solo_user_id}:system_state"
-        r.setex(system_state_key, 3600, json.dumps(system_state))
+        # Ground-truth plan, Phase 5 §1: one state. These two keys were a second,
+        # independently-inferred answer to "what is David doing" and "is the
+        # system healthy", written here on a beat from Redis recency heuristics.
+        # They disagreed with `sara:unified_context` — in_meeting/busy against
+        # unknown/Office, while David was typing on his phone in the kitchen — and
+        # nothing could adjudicate. `sara:unified_context` is now the only
+        # snapshot; `cognitive.working_memory.get_user_state` reads through to it.
+        result["user_state_updated"] = False
+        result["user_state"] = "read from sara:unified_context"
 
         # Apply capacity limits across all working memory
         apply_capacity_limits(r, solo_user_id)

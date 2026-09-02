@@ -97,12 +97,23 @@ async def _shadow_kernel_engaged_turn(user_id: str, last_user_text: str, convers
         pass  # Non-critical — the shadow path must never affect real chat
 
 
+# A device says where David is only when it cannot move. A phone says nothing —
+# and guessing from one would be exactly the kind of invention this whole plan
+# exists to stop, so an ambiguous device leaves `current_place` alone.
+_DEVICE_PLACES = {"desktop": "Office", "pi-dashboard": "Kitchen"}
+
+
+def _place_for_device(device: str):
+    return _DEVICE_PLACES.get((device or "").strip().lower())
+
+
 async def _update_context_snapshot(user_id: str, request) -> None:
     """Update the unified context snapshot + cross-device active session:
     David is chatting now."""
     try:
         from app.services.context_writer import update_fields as ctx_update
         device = getattr(request, "source", None) or "unknown"
+        place = _place_for_device(device)
         await ctx_update(
             user_id, source="chat_stream",
             last_chat_at=datetime.now(timezone.utc).isoformat(),
@@ -111,6 +122,16 @@ async def _update_context_snapshot(user_id: str, request) -> None:
             turn_count=len(request.messages),
             active_conversation_id=request.conversation_id,
             active_conversation_device=device,
+            # A chat turn is direct evidence of what David is doing: he is
+            # talking to Sara, right now, on this device. Chat never wrote this,
+            # so the context she assembled *for the very turn he was typing* said
+            # "David: unknown (interruptibility 0.50)". Nothing is more certain
+            # than the message in front of her.
+            activity_state="engaged",
+            activity_confidence=1.0,
+            interruptibility=1.0,
+            app_active=1,
+            **({"current_place": place} if place else {}),
         )
         # A brand-new conversation has no id yet — skip it here; the
         # post-stream update (elsewhere in chat_stream) stamps the real id.

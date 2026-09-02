@@ -2947,7 +2947,7 @@ async def generate_blueprint_lessons(
         if not blueprint:
             raise HTTPException(status_code=404, detail="Blueprint not found")
 
-        default_lesson_model = getattr(settings, "bg_llm_primary_model", None) or "qwen3.6-27b"
+        default_lesson_model = getattr(settings, "bg_llm_primary_model", None) or "qwen3.8-27b"
         model = (request.model or default_lesson_model).strip() or default_lesson_model
         num_ctx = int(request.num_ctx or 49152)
         # Keep lesson generation under model-stable context limits.

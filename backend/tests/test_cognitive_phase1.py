@@ -263,23 +263,49 @@ class TestWorkingMemory:
         assert len(context) <= 50
 
     @pytest.mark.asyncio
-    async def test_user_state(self, wm_service, test_user_id):
-        """Test user state management."""
-        from app.services.cognitive.working_memory import UserState, UserAvailability
+    async def test_user_state_reads_through_to_the_one_snapshot(self, wm_service, test_user_id):
+        """Ground-truth plan, Phase 5 §1: ONE state.
 
-        state = UserState(
-            inferred_activity="coding",
-            availability=UserAvailability.BUSY,
-            location="home office",
-            last_interaction=datetime.utcnow().isoformat()
+        `update_user_state` is gone. `working_memory:<uid>:user_state` was a
+        second, independently-inferred answer to "what is David doing", written
+        on a Celery beat from Redis recency heuristics. On 2026-09-02 it said
+        in_meeting/busy while `sara:unified_context` said unknown/Office and
+        David was in fact typing on his phone in the kitchen — two states, at
+        least one lying, and nothing able to adjudicate. This now reads through
+        to `sara:unified_context`, which is the only snapshot.
+        """
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from app.services.cognitive.working_memory import UserAvailability
+
+        assert not hasattr(wm_service, "update_user_state")
+
+        snapshot = MagicMock(
+            activity_state="in_meeting", interruptibility=0.2,
+            current_place="Office", mood=None, activity_confidence=0.9,
         )
+        with patch("app.services.unified_context.read_snapshot",
+                   new=AsyncMock(return_value=snapshot)):
+            retrieved = await wm_service.get_user_state(test_user_id)
 
-        result = await wm_service.update_user_state(test_user_id, state)
-        assert result is True
-
-        retrieved = await wm_service.get_user_state(test_user_id)
-        assert retrieved.inferred_activity == "coding"
+        assert retrieved.inferred_activity == "in_meeting"
         assert retrieved.availability == UserAvailability.BUSY
+        assert retrieved.location == "Office"
+
+    @pytest.mark.asyncio
+    async def test_unknown_activity_stays_unknown(self, wm_service, test_user_id):
+        """"Unknown" is a real answer and must not be upgraded to "available"."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from app.services.cognitive.working_memory import UserAvailability
+
+        snapshot = MagicMock(
+            activity_state="unknown", interruptibility=0.5,
+            current_place=None, mood=None, activity_confidence=0.3,
+        )
+        with patch("app.services.unified_context.read_snapshot",
+                   new=AsyncMock(return_value=snapshot)):
+            retrieved = await wm_service.get_user_state(test_user_id)
+
+        assert retrieved.availability == UserAvailability.UNKNOWN
 
     @pytest.mark.asyncio
     async def test_pending_actions(self, wm_service, test_user_id):

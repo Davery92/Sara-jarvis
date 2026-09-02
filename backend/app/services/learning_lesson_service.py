@@ -32,7 +32,7 @@ from app.services.learning_source_service import learning_source_service
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_LESSON_MODEL = "qwen3.6-27b"
+DEFAULT_LESSON_MODEL = "qwen3.8-27b"
 
 
 class JobCancelledError(Exception):

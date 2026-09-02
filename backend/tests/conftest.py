@@ -12,6 +12,7 @@ Provides test fixtures for:
 - Intent classifier / context router
 """
 
+import os
 import pytest
 import asyncio
 from datetime import datetime, timezone
@@ -34,6 +35,68 @@ from app.services.interruptibility import NotificationQueue
 from app.services.intent_classifier import ToolIntentClassifier
 from app.services.context_router import ContextRouter
 from app.services.unified_context import UnifiedContextSnapshot
+
+
+# ==========================================
+# WORLD-MODEL CLEANUP (integration fixtures)
+# ==========================================
+
+# Tests do not write into Sara's world model. Without this, a fixture's events
+# were picked up by the live Celery drain mid-run and reduced into facts and
+# threads — sometimes after the fixture had already cleaned up, leaving rows
+# that outlived their own throwaway user, and once tripping the drain's own
+# outcome contract when the events vanished underneath it. No current test
+# asserts on world_event; one that wants to can re-enable this itself.
+os.environ.setdefault("WORLD_EVENTS_ENABLED", "0")
+
+# Any service that appends a world event now writes rows keyed by user_id —
+# workout_command_service, the fitness/notes/calendar/email routes, chat.
+# Integration fixtures that create a throwaway app_user must purge these too;
+# their cleanup lists were written before the world model existed, so a full
+# suite run was leaving orphaned events behind (398 of them, across 145 ghost
+# users, the first time anyone looked — 2026-08-28).
+#
+# world_event goes FIRST — it cascades to world_event_processing and
+# world_event_disposition, and removing it first means a reducer that is
+# somehow still in flight has nothing left to project into facts/threads.
+WORLD_MODEL_CLEANUP_STATEMENTS = (
+    "DELETE FROM world_event WHERE user_id = :uid",
+    "DELETE FROM world_fact WHERE user_id = :uid",
+    "DELETE FROM world_thread WHERE user_id = :uid",
+    "DELETE FROM world_entity WHERE user_id = :uid",
+    "DELETE FROM world_attention_item WHERE user_id = :uid",
+    "DELETE FROM world_snapshot WHERE user_id = :uid",
+    "DELETE FROM sara_presence_snapshot WHERE user_id = :uid",
+)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _purge_orphan_world_rows():
+    """Safety net: after the whole session, drop world-model rows belonging to
+    users that don't exist.
+
+    Per-fixture cleanup (WORLD_MODEL_CLEANUP_STATEMENTS) handles the integration
+    fixtures, but plenty of unit tests drive services with a throwaway id like
+    "user-1" and those services now write world events through a real session.
+    A row keyed to a user_id with no app_user is garbage by definition, so this
+    can never touch real data.
+    """
+    yield
+    if not os.getenv("DATABASE_URL", "").startswith("postgresql"):
+        return
+    try:
+        from sqlalchemy import text as _text
+        from app.db.session import SessionLocal as _SessionLocal
+
+        with _SessionLocal() as db:
+            for statement in WORLD_MODEL_CLEANUP_STATEMENTS:
+                db.execute(_text(statement.replace(
+                    "user_id = :uid", "user_id NOT IN (SELECT id FROM app_user)"
+                )))
+            db.commit()
+    except Exception:
+        # Never fail a test run over cleanup.
+        pass
 
 
 # ==========================================

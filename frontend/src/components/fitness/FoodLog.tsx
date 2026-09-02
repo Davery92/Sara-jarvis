@@ -37,12 +37,34 @@ interface TodayTarget {
   } | null
 }
 
-export default function FoodLog() {
-  const [showAddForm, setShowAddForm] = useState(false)
+interface FoodLogProps {
+  // Set by FitnessSection's "Log Meal" quick action so navigating here opens
+  // straight into the add-meal form instead of landing on the (possibly
+  // collapsed) entries list. onAutoOpenConsumed lets the parent clear its
+  // flag once we've used it, so a later plain tab click to Food Log doesn't
+  // also auto-open the form.
+  autoOpenAdd?: boolean
+  onAutoOpenConsumed?: () => void
+}
+
+// Must match the grouping key built below (`toLocaleDateString` with these
+// exact options) or seeding "today" into expandedDays silently no-ops.
+const dayGroupKey = (date: Date) =>
+  date.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })
+
+export default function FoodLog({ autoOpenAdd = false, onAutoOpenConsumed }: FoodLogProps) {
+  const [showAddForm, setShowAddForm] = useState(autoOpenAdd)
   const [entries, setEntries] = useState<FoodLogEntry[]>([])
   const [loading, setLoading] = useState(false)
   const [editingEntry, setEditingEntry] = useState<FoodLogEntry | null>(null)
-  const [expandedDays, setExpandedDays] = useState<Set<string>>(new Set())
+  // Today's section starts expanded - every other day starts collapsed.
+  const [expandedDays, setExpandedDays] = useState<Set<string>>(new Set([dayGroupKey(new Date())]))
+
+  useEffect(() => {
+    if (autoOpenAdd) onAutoOpenConsumed?.()
+    // Only ever consume the flag this component was mounted with.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
   const [todayTarget, setTodayTarget] = useState<TodayTarget | null>(null)
   const [togglingTrainingDay, setTogglingTrainingDay] = useState(false)
 
@@ -237,12 +259,7 @@ export default function FoodLog() {
             // Group entries by date
             const groupedEntries: Record<string, FoodLogEntry[]> = {}
             entries.forEach(entry => {
-              const date = new Date(entry.logged_at).toLocaleDateString('en-US', {
-                weekday: 'long',
-                year: 'numeric',
-                month: 'long',
-                day: 'numeric'
-              })
+              const date = dayGroupKey(new Date(entry.logged_at))
               if (!groupedEntries[date]) {
                 groupedEntries[date] = []
               }

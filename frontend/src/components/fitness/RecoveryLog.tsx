@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import { APP_CONFIG } from '../../config'
+import { getLocalDateString } from '../../utils/dateUtils'
 
 interface RecoveryData {
   id?: string
@@ -18,7 +19,7 @@ interface RecoveryLogProps {
 }
 
 const RecoveryLog: React.FC<RecoveryLogProps> = ({ onSave }) => {
-  const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0])
+  const [selectedDate, setSelectedDate] = useState(getLocalDateString())
   const [hrv, setHrv] = useState<string>('')
   const [heartRate, setHeartRate] = useState<string>('')
   const [sleepHours, setSleepHours] = useState<string>('')
@@ -144,7 +145,7 @@ const RecoveryLog: React.FC<RecoveryLogProps> = ({ onSave }) => {
           type="date"
           value={selectedDate}
           onChange={(e) => setSelectedDate(e.target.value)}
-          max={new Date().toISOString().split('T')[0]}
+          max={getLocalDateString()}
           className="w-full px-4 py-2 bg-gray-900 border border-gray-700 rounded text-white focus:outline-none focus:border-teal-500"
         />
       </div>

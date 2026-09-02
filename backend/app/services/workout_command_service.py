@@ -329,6 +329,19 @@ class WorkoutCommandService:
                 origin_device=origin_device,
                 healthkit_started_at=healthkit_started_at,
             )
+            from app.services.world_state.writer import append_world_event
+            _session_id = str((projection or {}).get("session_id") or "")
+            append_world_event(
+                db, user_id=str(user_id), kind="workout.started", source="workout_command_service",
+                source_ref=f"active_workout_session:{_session_id}", aggregate_type="workout_session",
+                aggregate_id=_session_id, actor_type="device", actor_id=origin_device,
+                correlation_id=_session_id,
+                dedupe_key=f"workout-started:{_session_id}",
+                payload={"session_id": _session_id, "template_id": template_id,
+                         "name": (projection or {}).get("workout_name"),
+                         "origin_device": origin_device,
+                         "started_at": (projection or {}).get("started_at")},
+            )
             db.commit()
             return {"status": "accepted", "projection": projection}
 
@@ -587,6 +600,32 @@ class WorkoutCommandService:
             # 7. Store the result so a replay is free and exact.
             self._record_command(db, command_id, session["id"], user_id, origin, kind,
                                  expected_version, payload, result, "applied")
+            from app.services.world_state.writer import append_world_event
+            _world_kind = (
+                "workout.set_logged" if kind in {"log_set", "log_drop_segment"}
+                else "workout.completed" if kind == "complete"
+                else "workout.abandoned" if kind == "abandon"
+                else "workout.updated"
+            )
+            _projection = result.get("projection") or {}
+            _logged = result.get("logged") or {}
+            append_world_event(
+                db, user_id=str(user_id), kind=_world_kind, source="workout_command_service",
+                source_ref=f"active_workout_session:{session['id']}",
+                aggregate_type="workout_session", aggregate_id=str(session["id"]),
+                actor_type="device", actor_id=origin, correlation_id=str(session["id"]),
+                dedupe_key=f"workout-command:{command_id}",
+                payload={
+                    "session_id": str(session["id"]), "command_id": command_id,
+                    "command_kind": kind, "origin_device": origin,
+                    "version": _projection.get("version"),
+                    "name": _projection.get("workout_name"),
+                    "exercise": _logged.get("exercise"), "set_number": _logged.get("set_number"),
+                    "weight": _logged.get("weight"), "reps": _logged.get("reps"),
+                    "rpe": _logged.get("rpe"), "status": _projection.get("status"),
+                    "summary": result.get("summary"),
+                },
+            )
             db.commit()
 
             # Coaching happens strictly after the commit (§6.7): the set is

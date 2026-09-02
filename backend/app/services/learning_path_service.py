@@ -294,7 +294,7 @@ Output ONLY valid JSON:
 
             messages = [{"role": "user", "content": prompt}]
 
-            # enable_thinking=False — without it qwen3.6 burns the whole token/time
+            # enable_thinking=False — without it qwen burns the whole token/time
             # budget "thinking" and the request ReadTimeouts before emitting JSON.
             # Retry once to absorb the occasional transient drop from the .115 server.
             result = None

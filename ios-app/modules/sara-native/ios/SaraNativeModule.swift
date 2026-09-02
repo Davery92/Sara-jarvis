@@ -21,13 +21,14 @@ public class SaraNativeModule: Module {
 
   public func definition() -> ModuleDefinition {
     Name("SaraNative")
+    Events("liveActivityToken")
 
     Function("setWidgetData") { (data: [String: String]) in
       guard let defaults = UserDefaults(suiteName: SaraNativeModule.appGroup) else { return }
       for (key, value) in data {
         defaults.set(value, forKey: key)
       }
-      defaults.set(ISO8601DateFormatter().string(from: Date()), forKey: "updated_at")
+      defaults.set(ISO8601DateFormatter().string(from: Date()), forKey: "cache_written_at")
       if #available(iOS 14.0, *) {
         WidgetCenter.shared.reloadAllTimelines()
       }
@@ -149,7 +150,16 @@ public class SaraNativeModule: Module {
           // 30 min the app is gone and the activity should read as stale
           // instead of "working" forever.
           let content = ActivityContent(state: state, staleDate: Date().addingTimeInterval(30 * 60))
-          let activity = try Activity.request(attributes: attrs, content: content, pushType: nil)
+          let activity = try Activity.request(attributes: attrs, content: content, pushType: .token)
+          Task {
+            for await tokenData in activity.pushTokenUpdates {
+              let token = tokenData.map { String(format: "%02x", $0) }.joined()
+              self.sendEvent("liveActivityToken", [
+                "action": "registered", "activityId": activity.id,
+                "logicalId": id, "kind": kind, "pushToken": token,
+              ])
+            }
+          }
           return activity.id
         } catch {
           return nil
@@ -172,12 +182,35 @@ public class SaraNativeModule: Module {
       #endif
     }
 
+    // Re-register restored activities after a cold launch. pushTokenUpdates may
+    // not emit again until rotation, so read the current token explicitly.
+    Function("syncEventActivityTokens") {
+      #if canImport(ActivityKit)
+      if #available(iOS 16.2, *) {
+        for activity in Activity<SaraEventAttributes>.activities {
+          if let tokenData = activity.pushToken {
+            let token = tokenData.map { String(format: "%02x", $0) }.joined()
+            self.sendEvent("liveActivityToken", [
+              "action": "registered", "activityId": activity.id,
+              "logicalId": activity.attributes.id, "kind": activity.attributes.kind,
+              "pushToken": token,
+            ])
+          }
+        }
+      }
+      #endif
+    }
+
     Function("endEventActivity") { (id: String) in
       #if canImport(ActivityKit)
       if #available(iOS 16.2, *) {
         Task {
           for activity in Activity<SaraEventAttributes>.activities where activity.attributes.id == id {
             await activity.end(nil, dismissalPolicy: .immediate)
+            self.sendEvent("liveActivityToken", [
+              "action": "ended", "activityId": activity.id,
+              "logicalId": activity.attributes.id, "kind": activity.attributes.kind,
+            ])
           }
         }
       }

@@ -2,6 +2,23 @@ import apiClient, { ChatOptions } from './api';
 import { Message, MessageContent } from '../types/api';
 import { ImageAttachment } from './imagePicker';
 import { DocumentAttachment } from './documentPicker';
+import { AssistantActivity } from '../types/cards';
+
+/**
+ * Give every new chat a stable id before its first request leaves the phone.
+ * The backend accepts client-provided string ids and reuses them, which means
+ * navigation and active-session tracking never have to wait for final_response
+ * to discover which thread owns an in-flight turn.
+ */
+export function createClientConversationId(): string {
+  let timestamp = Date.now();
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (token) => {
+    const random = (timestamp + Math.random() * 16) % 16 | 0;
+    timestamp = Math.floor(timestamp / 16);
+    const value = token === 'x' ? random : (random & 0x3) | 0x8;
+    return value.toString(16);
+  });
+}
 
 export interface SendMessageParams {
   messages: Message[];  // Changed from single message to full conversation history
@@ -18,6 +35,7 @@ export interface SendMessageParams {
   onContentCard?: (card: any) => void;
   onToolStatus?: (status: { tool: string; status: string }) => void;
   onSuggestedActions?: (actions: any[]) => void;
+  onAssistantActivity?: (activity: AssistantActivity) => void;
   onUiCommand?: (command: any) => void;
 }
 
@@ -111,6 +129,9 @@ class ChatService {
       }
       if (params.onToolStatus) {
         chatOptions.onToolStatus = params.onToolStatus;
+      }
+      if (params.onAssistantActivity) {
+        chatOptions.onAssistantActivity = params.onAssistantActivity;
       }
       if (params.onSuggestedActions) {
         chatOptions.onSuggestedActions = params.onSuggestedActions;

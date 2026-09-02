@@ -87,7 +87,9 @@ celery_app = Celery(
         "app.tasks.interoception",
         "app.tasks.dispatch",
         "app.tasks.db_maintenance",
+        "app.tasks.truth_maintenance",
         "app.tasks.delivery_flush",
+        "app.tasks.departure_brief",
         "app.tasks.predictions",
         "app.tasks.belief_promotion",
         "app.tasks.ml_train",
@@ -103,6 +105,7 @@ celery_app = Celery(
         "app.tasks.compose",
         "app.tasks.mindv2_deliver",
         "app.tasks.mindv2_batch_flush",
+        "app.tasks.world_state",
     ]
 )
 
@@ -125,6 +128,17 @@ celery_app.conf.update(
 
     # Broker startup behavior
     broker_connection_retry_on_startup=True,
+
+    # Redis re-delivers any un-acked message after `visibility_timeout` seconds.
+    # With task_acks_late=True the ack only lands when the task FINISHES, so any
+    # task running longer than this gets handed to a second worker while the
+    # first is still going. The default is 3600s, but run_research_plan allows
+    # 22000s — observed 2026-08-21: a research plan started 16:00:44 was
+    # re-delivered at 17:01:01 (3617s later, to the second) and ran twice
+    # concurrently, racing writes on the same research_plan.steps row.
+    # Keep this ABOVE the longest task time_limit in app/tasks/.
+    broker_transport_options={"visibility_timeout": 25200},  # 7h > 22000s
+    result_backend_transport_options={"visibility_timeout": 25200},
 
     # Rate limiting
     task_default_rate_limit="60/m",  # Default: 60 tasks per minute
@@ -173,7 +187,9 @@ celery_app.conf.task_routes = {
     "app.tasks.dispatch.*": {"queue": "dispatch"},
     "app.tasks.interoception.*": {"queue": "maintenance"},
     "app.tasks.db_maintenance.*": {"queue": "maintenance"},
+    "app.tasks.truth_maintenance.*": {"queue": "maintenance"},
     "app.tasks.delivery_flush.*": {"queue": "cognitive"},
+    "app.tasks.departure_brief.*": {"queue": "cognitive"},
     "app.tasks.predictions.*": {"queue": "cognitive"},
     "app.tasks.belief_promotion.*": {"queue": "cognitive"},
     "app.tasks.ml_train.*": {"queue": "cognitive"},
@@ -187,12 +203,17 @@ celery_app.conf.task_routes = {
     "app.tasks.mindv2_weekly_review.*": {"queue": "cognitive"},
     "app.tasks.compose.*": {"queue": "cognitive"},
     "app.tasks.mindv2_deliver.*": {"queue": "cognitive"},
+    "app.tasks.world_state.*": {"queue": "critical"},
 }
 
 # Define queues with priorities
 celery_app.conf.task_queues = {
     "critical": {"exchange": "critical", "routing_key": "critical"},
     "david_priority": {"exchange": "david_priority", "routing_key": "david_priority"},
+    # celery-acs subscribes to this (CELERY_WORKER_QUEUES=acs). Leaving it
+    # undeclared made the topology check warn on every healthcheck ping —
+    # ~1.3k warnings/day into a 5k-entry diagnostics ring buffer.
+    "acs": {"exchange": "acs", "routing_key": "acs"},
     "cognitive": {"exchange": "cognitive", "routing_key": "cognitive"},
     "health": {"exchange": "health", "routing_key": "health"},
     "input": {"exchange": "input", "routing_key": "input"},
@@ -262,6 +283,34 @@ def _validate_queue_topology():
 
 
 _validate_queue_topology()
+
+
+# ---------------------------------------------------------------------------
+# Fork safety — a forked worker must not reuse the parent's DB connections.
+# The sync engine in app.db.base is built at import time, i.e. in the celery
+# PARENT. Every prefork child inherits those live sockets and interleaves
+# traffic on them, which surfaced for months as "server closed the connection
+# unexpectedly" and "can't change 'autocommit' now: connection in transaction
+# status INTRANS" across unrelated tasks. The async factory already guards on
+# PID; this closes the same hole for the sync engine.
+# ---------------------------------------------------------------------------
+try:
+    from celery.signals import worker_process_init as _worker_process_init_sig
+
+    @_worker_process_init_sig.connect
+    def _dispose_inherited_db_pools(**_kwargs):
+        try:
+            from app.db.base import engine as _sync_engine
+            # close=False: drop our references WITHOUT closing the sockets,
+            # which still belong to the parent process.
+            _sync_engine.dispose(close=False)
+            from app.db.session import reset_async_session_factory
+            reset_async_session_factory()
+            logger.info("Disposed inherited DB pools after worker fork")
+        except Exception as e:
+            logger.warning(f"Post-fork pool disposal failed: {e}")
+except Exception as _fork_e:
+    logger.error(f"Failed to register post-fork pool disposal: {_fork_e}")
 
 
 # ---------------------------------------------------------------------------

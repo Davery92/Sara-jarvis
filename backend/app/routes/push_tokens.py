@@ -401,6 +401,10 @@ async def list_notifications(
                 response_text
             FROM notification_log
             WHERE user_id = :user_id AND sent = TRUE
+              -- held_flush_item rows are log-only cooldown-arming bookkeeping
+              -- (MORNING_NOTIFICATIONS_PLAN_2026_08_18 Phase 3c) — the real
+              -- push already went out as the digest/brief, never its own row.
+              AND source != 'held_flush_item'
             {cat_filter} {src_filter}
         """
 
@@ -449,7 +453,9 @@ async def list_notifications(
         count_row = db.execute(text(f"""
             SELECT (
                 SELECT COUNT(*) FROM notification_log
-                WHERE user_id = :user_id AND sent = TRUE {cat_filter} {src_filter}
+                WHERE user_id = :user_id AND sent = TRUE
+                  AND source != 'held_flush_item'
+                  {cat_filter} {src_filter}
             ) {acs_count}
         """), params).fetchone()
 

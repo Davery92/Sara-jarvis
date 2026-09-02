@@ -26,14 +26,16 @@ class AppState:
 
         # ── AI Provider ──
         self.ai_provider: str = os.getenv("AI_PROVIDER", "local")
-        self.openai_base_url: str = os.getenv("OPENAI_BASE_URL", "http://100.104.68.115:8081/v1")
+        # Chat lane (:8082) — interactive chat/voice only. Background work uses
+        # bg_llm_primary_url (:8081). See docs/plans/LOCAL_LLM_LANES_PLAN_2026_08_19.md
+        self.openai_base_url: str = os.getenv("OPENAI_BASE_URL", "http://100.104.68.115:8082/v1")
         self.openai_model: str = os.getenv("OPENAI_MODEL", "Qwen3.5-35B-A3B")
         # Default model for the interactive chat selector, decoupled from the
         # shared `openai_model` above (which many background/utility services
-        # reuse). Kept separate so the chat can default to a reasoning-only
-        # Claude model (Sonnet 5) without forcing every utility LLM call — most
-        # of which send `temperature` — onto a model that would 400 on it.
-        self.chat_default_model: str = os.getenv("CHAT_DEFAULT_MODEL", "claude-sonnet-5")
+        # reuse) so changing one doesn't silently change the other. Defaults
+        # to the local Qwen3.8-27B host (2026-08-17) — Claude models remain
+        # selectable per-conversation but are no longer the default persona.
+        self.chat_default_model: str = os.getenv("CHAT_DEFAULT_MODEL", "qwen3.8-27b")
         self.openai_api_key: str = os.getenv("OPENAI_API_KEY", "dummy")
         self.anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
         self.google_api_key: str = os.getenv("GOOGLE_API_KEY", "")
@@ -103,7 +105,7 @@ class AppState:
             {"id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro", "provider": "google"},
             {"id": "gemini-2.5-flash", "name": "Gemini 2.5 Flash", "provider": "google"},
             {"id": "Qwen3.5-35B-A3B", "name": "Local 35B", "provider": "local"},
-            {"id": "qwen3.6-27b", "name": "Local MLX Qwen3.6 27B", "provider": "local", "base_url": "http://100.104.68.115:8081/v1"},
+            {"id": "qwen3.8-27b", "name": "Local Qwen3.8 27B (chat lane)", "provider": "local", "base_url": "http://100.104.68.115:8082/v1"},
             {"id": "nemotron-3-nano", "name": "Nemotron Nano", "provider": "local"},
         ]
 
@@ -122,9 +124,9 @@ class AppState:
         from app.core.text_utils import is_local_base_url
 
         model_id_l = (model_id or "").lower()
-        configured_base = self.openai_base_url or "http://100.104.68.115:8081/v1"
+        configured_base = self.openai_base_url or "http://100.104.68.115:8082/v1"
         configured_key = self.openai_api_key or "dummy"
-        local_default_base = "http://100.104.68.115:8081/v1"
+        local_default_base = "http://100.104.68.115:8082/v1"  # chat lane
 
         catalog_entry = next(
             (m for m in self.available_models if (m.get("id") or "").lower() == model_id_l),

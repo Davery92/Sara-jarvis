@@ -4,7 +4,7 @@ Archives day layers nightly for historical analysis.
 """
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from app.core.timezone import naive_local_now
 from pathlib import Path
 from typing import Optional, List, Dict
@@ -88,6 +88,26 @@ class Archiver:
         compiled_path.write_text(content)
 
         logger.info(f"📦 Archived compiled brief for {user_id[:8]} to {archive_date.date()}")
+
+    def get_archived_day_layer(self, user_id: str, day: "date") -> Optional[str]:
+        """Read the archived day layer for one specific calendar date.
+
+        The live day layer is archived (under the covered day's own folder)
+        and cleared at midnight ET, so anything running after that — e.g. the
+        2 AM dream cycle — must read the archive, not ``day_layer.read()``,
+        which by then holds the *new* day (usually empty).
+        """
+        archive_dir = (
+            self.briefs_dir / user_id / "archive" /
+            f"{day.year:04d}" / f"{day.month:02d}" / f"{day.day:02d}"
+        )
+        day_path = archive_dir / "day.md"
+        try:
+            if day_path.exists():
+                return day_path.read_text()
+        except Exception as e:
+            logger.warning(f"Failed to read archived day layer for {day}: {e}")
+        return None
 
     def get_recent_archives(
         self,

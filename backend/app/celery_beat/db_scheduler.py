@@ -34,6 +34,26 @@ logger = logging.getLogger(__name__)
 RELOAD_INTERVAL = 60
 
 
+def _entry_tz(row):
+    """Resolve a scheduled_job row's tz, falling back to America/New_York."""
+    tz_name = getattr(row, "timezone", None) or "America/New_York"
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(tz_name)
+    except Exception:
+        import pytz
+        return pytz.timezone(tz_name)
+
+
+def _to_tz(dt: datetime, tz) -> datetime:
+    """Convert an aware datetime into `tz`. Naive datetimes are assumed UTC
+    (matches _record_run, which always writes datetime.now(timezone.utc))."""
+    if dt.tzinfo is None:
+        from datetime import timezone as dt_tz
+        dt = dt.replace(tzinfo=dt_tz.utc)
+    return dt.astimezone(tz)
+
+
 def _parse_cron(expr: str, tz_name: str):
     """Parse a 5-field crontab string into a celery.schedules.crontab.
 
@@ -130,12 +150,22 @@ class DBScheduler(Scheduler):
                 #      (it has the most recent dispatch time tracked by beat).
                 #   2. Otherwise the persisted `last_run_at` from the DB row,
                 #      so process restarts also stay sane.
+                # `crontab.is_due()` does its calendar-field arithmetic in
+                # last_run_at's OWN tz frame. The DB always hands back a
+                # UTC-aware timestamptz, so seeding it as-is makes a
+                # `0 6 * * *` ET schedule come due at both 06:00 UTC (02:00
+                # ET) and 06:00 ET — a real double-fire confirmed live on
+                # 2026-08-17 (see NOTIFICATION_DELIVERY_FIX_PLAN_2026_08_17.md
+                # Phase 1). Converting into the row's own tz (not stripping
+                # awareness) fixes the frame without touching storage, which
+                # stays UTC in _record_run below.
+                tz = _entry_tz(row)
                 prev = self._schedule.get(row.key)
                 if prev is not None and getattr(prev, "last_run_at", None):
-                    entry.last_run_at = prev.last_run_at
+                    entry.last_run_at = _to_tz(prev.last_run_at, tz)
                     entry.total_run_count = getattr(prev, "total_run_count", 0)
                 elif row.last_run_at is not None:
-                    entry.last_run_at = row.last_run_at
+                    entry.last_run_at = _to_tz(row.last_run_at, tz)
 
                 new_entries[row.key] = entry
 

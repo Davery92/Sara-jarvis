@@ -12,8 +12,8 @@ class LocalSettings(BaseSettings):
     
     # LLM Configuration
     ai_provider: str = "local"  # Options: local, gemini, openai, custom
-    openai_base_url: str = "http://100.104.68.115:8081/v1"
-    openai_model: str = "qwen3.6-27b"
+    openai_base_url: str = "http://100.104.68.115:8082/v1"  # chat lane; bg lane is :8081
+    openai_model: str = "qwen3.8-27b"
     openai_api_key: str = "dummy"
     embedding_base_url: str = "http://embeddings:8100"
     embedding_model: str = "bge-m3"

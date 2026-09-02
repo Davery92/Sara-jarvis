@@ -128,17 +128,137 @@ NTFY_REMINDERS_TOPIC = _app_state.ntfy_reminders_topic
 NTFY_DOCUMENTS_TOPIC = _app_state.ntfy_documents_topic
 # SARA_ALIVE_BUILD_PLAN Arc 3.4 — the hand-picked "always useful" tool core
 # for the presence tool diet (Flag.PRESENCE_TOOL_DIET), replacing the 25-tool
-# "always add" category list. dispatch_and_monitor is the escape hatch for
-# anything beyond this set — already wired to kernel.focused_turn().
+# "always add" category list. Background dispatch is deliberately not part of
+# this unconditional core; it is admitted per turn by the policy below.
+# Per-conversation sticky tool-category order for the chat lane's prompt cache
+# (see the Presence diet block in /chat/stream). session_id -> [categories].
+_CHAT_STICKY_TOOL_CATEGORIES: Dict[str, List[str]] = {}
+_CHAT_STICKY_MAX_CATEGORIES = 10
+
 _PRESENCE_CORE_TOOL_NAMES = [
     "memory_search", "notes_create", "notes_search",
     "list_add", "list_view", "reminders_create", "calendar_list",
-    "dispatch_and_monitor",
 ]
+
+_BACKGROUND_DISPATCH_TOOL_NAMES = {"dispatch_and_monitor", "dispatch_agent_task"}
+_BACKGROUND_REQUEST_PHRASES = (
+    "in the background",
+    "run this in background",
+    "notify me when",
+    "tell me when it is done",
+    "tell me when it's done",
+    "keep working on this while",
+    "continue working while",
+)
+_SYSTEM_WORK_OBJECTS = (
+    "code", "script", "repository", " repo", "docker", "container", "build",
+    "compile", "server", "service", "systemd", "shell", "terminal", "ssh",
+    "deployment", "deploy", "installation", "install", "xcode", "project",
+)
+_SYSTEM_WORK_ACTIONS = (
+    "build", "install", "deploy", "configure", "set up", "setup", "fix",
+    "debug", "run", "execute", "restart", "update", "change", "edit",
+    "write", "create", "implement", "push",
+)
+
+
+def _chat_requests_background_dispatch(message: Optional[str]) -> bool:
+    """Only expose task-creation tools on explicit background/system turns."""
+    text = f" {(message or '').lower()} "
+    if any(phrase in text for phrase in _BACKGROUND_REQUEST_PHRASES):
+        return True
+    has_action = any(action in text for action in _SYSTEM_WORK_ACTIONS)
+    has_system_object = any(obj in text for obj in _SYSTEM_WORK_OBJECTS)
+    return has_action and has_system_object
+
+
+def _apply_background_dispatch_policy(
+    tools: List[Dict[str, Any]], message: Optional[str]
+) -> List[Dict[str, Any]]:
+    """Add or remove background task creators at the final schema boundary."""
+    allowed = _chat_requests_background_dispatch(message)
+    filtered = [
+        tool for tool in tools
+        if tool.get("function", {}).get("name") not in _BACKGROUND_DISPATCH_TOOL_NAMES
+    ]
+    if not allowed:
+        return filtered
+
+    present = {tool.get("function", {}).get("name") for tool in filtered}
+    missing = sorted(_BACKGROUND_DISPATCH_TOOL_NAMES - present)
+    return filtered + tool_registry.get_tools_by_names(missing)
 
 NTFY_SYSTEM_TOPIC = _app_state.ntfy_system_topic
 AI_PROVIDER = _app_state.ai_provider
 OPENAI_BASE_URL = _app_state.openai_base_url
+# Chat-lane thinking toggle (see chat_with_tools). Default off: reasoning is
+# never shown to the user and roughly doubles-to-10x time-to-first-token.
+CHAT_ENABLE_THINKING = os.getenv("CHAT_ENABLE_THINKING", "false").strip().lower() in ("1", "true", "yes", "on")
+# When thinking is on, Qwen3.8's template defaults reasoning_effort to "xhigh"
+# (the pre-2026-08-19 behaviour: warm, considered, and slow). CHAT_REASONING_EFFORT
+# = low | medium | xhigh picks the budget; "low" keeps her deliberating briefly
+# (a few hundred hidden tokens) for a modest TTFT cost. Only used if thinking is on.
+CHAT_REASONING_EFFORT = os.getenv("CHAT_REASONING_EFFORT", "low").strip().lower()
+if CHAT_REASONING_EFFORT not in ("low", "medium", "xhigh"):
+    CHAT_REASONING_EFFORT = "low"
+
+
+try:
+    CHAT_PRESENCE_PENALTY = float(os.getenv("CHAT_PRESENCE_PENALTY", "0.6"))
+except ValueError:
+    CHAT_PRESENCE_PENALTY = 0.6
+
+
+def _apply_local_qwen_chat_sampling(payload: dict) -> None:
+    """Apply the Qwen3.8-Flash-Next model card's sampling set for the active mode.
+
+    The card prescribes DIFFERENT sets per mode, and sending only `temperature`
+    leaves top_p at the server default 0.95 (the thinking-mode value) with no
+    presence penalty — measured 2026-08-31: that combination reproduced the
+    line-recycling and write-tool misfires in non-thinking chat.
+      thinking:  temperature 1.0, top_p 0.95, top_k 20
+      instruct:  temperature 0.7, top_p 0.80, top_k 20, min_p 0, presence penalty
+    The card says presence 1.5 for instruct, but at 1.5 David reported Sara's
+    voice went flat (2026-09-01) — a strong presence penalty steers away from
+    her own persona-typical phrasing, and the harping it guarded against was
+    actually dup-episode/stale-context pollution, fixed at the source. Default
+    0.6; tune via CHAT_PRESENCE_PENALTY. Penalties stay OUT of thinking mode
+    and background JSON lanes — they degrade long structured output.
+    """
+    payload["chat_template_kwargs"] = {"enable_thinking": CHAT_ENABLE_THINKING}
+    if CHAT_ENABLE_THINKING:
+        payload["chat_template_kwargs"]["reasoning_effort"] = CHAT_REASONING_EFFORT
+        payload["temperature"] = 1.0
+        payload["top_p"] = 0.95
+        payload["top_k"] = 20
+    else:
+        payload["temperature"] = 0.7
+        payload["top_p"] = 0.8
+        payload["top_k"] = 20
+        payload["min_p"] = 0.0
+        if CHAT_PRESENCE_PENALTY:
+            payload["presence_penalty"] = CHAT_PRESENCE_PENALTY
+
+# Per-turn "live context" (clock, interoception, memory/brief injections) is
+# prepended to the LATEST USER MESSAGE on local lanes, wrapped in these tags.
+# Why the user message and not a system message: Qwen3.8 is a GDN-hybrid
+# (recurrent) model — llama-server can only resume its state from a checkpoint,
+# and this build checkpoints at the start of the last user message. Putting the
+# volatile text there means turn N+1 re-evaluates only [prev user, prev reply,
+# live ctx, new question] (~3k tokens) instead of the whole ~13k prompt.
+# store_conversation() strips the block so episodes/PKG keep David's raw words.
+_LIVE_CTX_OPEN = "<live_context>"
+_LIVE_CTX_CLOSE = "</live_context>"
+
+
+def _strip_live_context(text: Optional[str]) -> Optional[str]:
+    if not text or _LIVE_CTX_OPEN not in text:
+        return text
+    start = text.find(_LIVE_CTX_OPEN)
+    end = text.find(_LIVE_CTX_CLOSE, start)
+    if end < 0:
+        return text
+    return (text[:start] + text[end + len(_LIVE_CTX_CLOSE):]).lstrip("\n ")
 OPENAI_MODEL = _app_state.openai_model
 CHAT_DEFAULT_MODEL = _app_state.chat_default_model
 OPENAI_API_KEY = _app_state.openai_api_key
@@ -205,9 +325,9 @@ async def _mark_shown_discoveries(user_id: str, response_text: str):
 def get_model_config(model_id: str) -> dict:
     """Get base URL, API key, and provider routing for the selected model."""
     model_id_l = (model_id or "").lower()
-    configured_base = OPENAI_BASE_URL or "http://100.104.68.115:8081/v1"
+    configured_base = OPENAI_BASE_URL or "http://100.104.68.115:8082/v1"
     configured_key = OPENAI_API_KEY or "dummy"
-    local_default_base = "http://100.104.68.115:8081/v1"
+    local_default_base = "http://100.104.68.115:8082/v1"  # chat lane; bg work uses :8081
 
     # Resolve declared provider from the model catalog first.
     # This prevents stale global ai_provider settings from misrouting model-specific requests.
@@ -316,7 +436,7 @@ EMBEDDING_DIM = _app_state.embedding_dim
 
 # Background LLM Configuration (separate from chat - always uses local models)
 BG_LLM_PRIMARY_URL = os.getenv("BG_LLM_PRIMARY_URL", "http://100.104.68.115:8081/v1")
-BG_LLM_PRIMARY_MODEL = os.getenv("BG_LLM_PRIMARY_MODEL", "qwen3.6-27b")
+BG_LLM_PRIMARY_MODEL = os.getenv("BG_LLM_PRIMARY_MODEL", "qwen3.8-27b")
 BG_LLM_FALLBACK_URL = os.getenv("BG_LLM_FALLBACK_URL", "http://10.185.1.8:8686/v1")
 BG_LLM_FALLBACK_MODEL = os.getenv("BG_LLM_FALLBACK_MODEL", "Qwen3.5-35B-A3B")
 BG_LLM_REQUEST_TIMEOUT = float(os.getenv("BG_LLM_REQUEST_TIMEOUT", "90"))
@@ -447,6 +567,7 @@ class SimpleLLMClient:
         # client's lifetime, so a second failure degrades in-voice instead of
         # looping forever or leaking a raw parse error.
         self._tool_parse_failures: Dict[str, int] = {}
+        self._activity_responding_emitted = False
 
     def _get_anthropic_headers(self):
         """Get headers for Anthropic API requests with prompt caching enabled"""
@@ -785,6 +906,22 @@ class SimpleLLMClient:
             logger.info(f"📤 Event QUEUED: {event_type}")
         else:
             logger.error(f"❌ NO EVENT QUEUE for '{event_type}'!")
+
+    async def emit_activity(self, phase: str, tool: Optional[str] = None, round_num: Optional[int] = None):
+        """Emit the canonical, user-visible assistant lifecycle event."""
+        data: Dict[str, Any] = {"phase": phase}
+        if tool:
+            data["tool"] = tool
+        if round_num is not None:
+            data["round"] = round_num
+        await self.emit_event("assistant_activity", data)
+
+    async def emit_text_chunk(self, content: str, full_content: str):
+        """Mark visible response generation once, then emit the text delta."""
+        if not self._activity_responding_emitted:
+            self._activity_responding_emitted = True
+            await self.emit_activity("responding")
+        await self.emit_event("text_chunk", {"content": content, "full_content": full_content})
     
     def _extract_final_message(self, content: str) -> str:
         """Extract final message from MLX fine-tuned model's channel format.
@@ -991,7 +1128,7 @@ class SimpleLLMClient:
                     if delta:
                         full_content += delta
                         if self.event_queue:
-                            await self.emit_event("text_chunk", {"content": delta, "full_content": full_content})
+                            await self.emit_text_chunk(delta, full_content)
                 elif event_type == "response.output_item.added":
                     item = event.get("item") or {}
                     if item.get("type") == "function_call":
@@ -1091,10 +1228,7 @@ class SimpleLLMClient:
 
             # Emit content as a single chunk for streaming interface compatibility
             if result.get("content"):
-                await self.emit_event("text_chunk", {
-                    "content": result["content"],
-                    "full_content": result["content"]
-                })
+                await self.emit_text_chunk(result["content"], result["content"])
 
             return result
 
@@ -1176,10 +1310,7 @@ class SimpleLLMClient:
                                     new_final_content = final_content[len(emitted_content):]
                                     if new_final_content:
                                         emitted_content += new_final_content
-                                        await self.emit_event("text_chunk", {
-                                            "content": new_final_content,
-                                            "full_content": emitted_content
-                                        })
+                                        await self.emit_text_chunk(new_final_content, emitted_content)
                                 # Otherwise, skip emitting (we're in analysis or waiting for final)
                                 continue
 
@@ -1194,19 +1325,13 @@ class SimpleLLMClient:
                                 safe_content = unemitted[:tag_match.start()]
                                 if safe_content:
                                     emitted_content += safe_content
-                                    await self.emit_event("text_chunk", {
-                                        "content": safe_content,
-                                        "full_content": emitted_content
-                                    })
+                                    await self.emit_text_chunk(safe_content, emitted_content)
                             else:
                                 # Check if we might be at the start of a tag (e.g., just got "<")
                                 if unemitted and not unemitted.rstrip().endswith('<'):
                                     # Safe to emit - no XML tag detected
                                     emitted_content += unemitted
-                                    await self.emit_event("text_chunk", {
-                                        "content": unemitted,
-                                        "full_content": emitted_content
-                                    })
+                                    await self.emit_text_chunk(unemitted, emitted_content)
                                 # Otherwise, hold the buffer (might be start of XML tag)
 
                         # Handle tool calls (standard OpenAI streaming format).
@@ -1399,7 +1524,7 @@ class SimpleLLMClient:
 
             # Add Ollama-specific context length if using local model
             if provider == "local":
-                chat_payload["num_ctx"] = 32768
+                chat_payload["num_ctx"] = 131072
 
             response = await self.client.post(
                 f"{model_config['base_url']}/chat/completions",
@@ -1424,6 +1549,9 @@ class SimpleLLMClient:
             model: Optional model override (e.g., "claude-opus-4-6", "gemini-2.5-pro")
             ephemeral: If True, don't save to memory/episodes
         """
+        self._activity_responding_emitted = False
+        failed_tool_counts: Dict[str, int] = {}
+        disabled_tool_names = set()
         try:
             logger.info(f"🔧 chat_with_tools called with conversation_id: {conversation_id}, model: {model}, ephemeral: {ephemeral}")
 
@@ -1441,10 +1569,9 @@ class SimpleLLMClient:
 
             # Initialize session cache
             from app.services.session_cache import SessionToolCache
-            from app.core.config import settings
-            import redis
+            from app.core.redis import get_redis_sync_bytes
 
-            redis_client = redis.from_url(settings.redis_url)
+            redis_client = get_redis_sync_bytes()
             session_cache = SessionToolCache(redis_client, ttl_minutes=30)
 
             # Handle both dict and object message formats
@@ -1480,9 +1607,26 @@ class SimpleLLMClient:
                 context_lines.append("\n**Do not re-fetch any of the above. Reference the existing content in our conversation.**\n")
                 context_reminder = "\n".join(context_lines)
 
-            # Inject context reminder into first system message
-            if context_reminder and len(formatted_messages) > 0 and formatted_messages[0].get("role") == "system":
-                formatted_messages[0]["content"] = formatted_messages[0]["content"] + context_reminder
+            # Keep the system/tool prefix stable for llama.cpp's prompt cache.
+            # Session cache contents change after tool calls, so putting this on
+            # the system message invalidated the most expensive part of every
+            # follow-up prompt. Attach it to the latest user turn, alongside
+            # the other volatile <live_context> data, instead.
+            if context_reminder:
+                for formatted_message in reversed(formatted_messages):
+                    if formatted_message.get("role") != "user":
+                        continue
+                    content = formatted_message.get("content")
+                    if isinstance(content, str):
+                        formatted_message["content"] = content + context_reminder
+                    elif isinstance(content, list):
+                        # Multimodal messages are still in Anthropic block form
+                        # here; provider normalization happens below.
+                        formatted_message["content"] = [
+                            *content,
+                            {"type": "text", "text": context_reminder},
+                        ]
+                    break
 
             # Store ephemeral flag for use in store_conversation
             self._ephemeral = ephemeral
@@ -1519,6 +1663,12 @@ class SimpleLLMClient:
             self._current_model = effective_model
             self._current_model_config = model_config
 
+            # Images arrive in Anthropic block format from both UIs; convert them to
+            # whatever this provider speaks before they hit the wire.
+            formatted_messages = _normalize_vision_for_provider(
+                formatted_messages, model_config["provider"], effective_model
+            )
+
             payload = {
                 "model": effective_model,
                 "messages": formatted_messages,
@@ -1535,12 +1685,22 @@ class SimpleLLMClient:
 
             # Add Ollama-specific context length if using local model
             if model_config["provider"] == "local":
-                payload["num_ctx"] = 32768
+                payload["num_ctx"] = 131072
+                # Qwen defaults to thinking mode. Nothing in the chat pipeline or
+                # either UI surfaces reasoning_content, so thinking is pure
+                # time-to-first-token cost (can be thousands of hidden tokens).
+                # Off by default; CHAT_ENABLE_THINKING=true re-enables.
+                _apply_local_qwen_chat_sampling(payload)
 
             # Log payload size for debugging context overflow
             import json
             payload_size = len(json.dumps(payload))
-            logger.info(f"🔍 Payload size: {payload_size} bytes (~{payload_size//4} tokens)")
+            _tools_size = len(json.dumps(payload.get("tools", [])))
+            _msgs_size = len(json.dumps(payload.get("messages", [])))
+            logger.info(
+                f"🔍 Payload size: {payload_size} bytes (~{payload_size//4} tokens) "
+                f"[messages ~{_msgs_size//4} tok, tools ~{_tools_size//4} tok x{len(payload.get('tools') or [])}]"
+            )
             if payload_size > 100000:
                 logger.warning(f"⚠️ Large payload detected! {payload_size} bytes may cause context overflow")
 
@@ -1570,14 +1730,41 @@ class SimpleLLMClient:
                             "tool": tool_name,
                             "round": round_num + 1
                         })
+                        await self.emit_activity(
+                            "tool_running", tool=tool_name, round_num=round_num + 1
+                        )
                         
                         tool_response = await self.execute_tool(tool_call, user_id, conversation_id, session_cache)
+                        try:
+                            response_payload = json.loads(tool_response.get("content") or "{}")
+                        except (TypeError, json.JSONDecodeError):
+                            response_payload = {}
+                        if response_payload.get("success") is False:
+                            failed_tool_counts[tool_name] = failed_tool_counts.get(tool_name, 0) + 1
+                            if failed_tool_counts[tool_name] >= 2:
+                                disabled_tool_names.add(tool_name)
+                                original_message = str(response_payload.get("message") or "Tool failed.")
+                                response_payload["message"] = (
+                                    original_message
+                                    + f" Do not call {tool_name} again this turn; it has failed twice. "
+                                      "Use a different inline tool once if appropriate, otherwise explain the problem briefly."
+                                )
+                                tool_response["content"] = json.dumps(response_payload)
+                                logger.warning(
+                                    f"🛑 Disabled tool {tool_name} for the remainder of this turn "
+                                    f"after {failed_tool_counts[tool_name]} failures"
+                                )
+                        else:
+                            failed_tool_counts.pop(tool_name, None)
                         tool_responses.append(tool_response)
                         
                         await self.emit_event("tool_completed", {
                             "tool": tool_name,
                             "round": round_num + 1
                         })
+                        await self.emit_activity(
+                            "tool_complete", tool=tool_name, round_num=round_num + 1
+                        )
                     
                     # Add assistant message with tool calls and tool responses
                     # IMPORTANT: llama-server requires "role" field in all messages
@@ -1586,7 +1773,7 @@ class SimpleLLMClient:
                         "content": message.get("content", ""),
                         "tool_calls": message["tool_calls"]
                     })
-                    current_messages.extend(tool_responses)
+                    current_messages.extend(_budget_tool_responses(tool_responses))
                     
                     # Truncate messages if conversation is getting too long to prevent 500 errors
                     max_messages = 20  # Keep only recent context to prevent payload bloat
@@ -1620,6 +1807,13 @@ class SimpleLLMClient:
                         "round": round_num + 1,
                         "status": "processing_tools"
                     })
+                    self._activity_responding_emitted = False
+                    await self.emit_activity("synthesizing", round_num=round_num + 1)
+
+                    follow_up_tools = [
+                        tool for tool in tools
+                        if tool.get("function", {}).get("name") not in disabled_tool_names
+                    ]
 
                     # Make follow-up request with streaming (with retry logic)
                     follow_up_payload = {
@@ -1627,13 +1821,14 @@ class SimpleLLMClient:
                         "messages": current_messages,
                         "temperature": 0.7,
                         "max_tokens": 8000,
-                        "tools": tools,
+                        "tools": follow_up_tools,
                         "stream": True
                     }
 
                     # Add Ollama-specific context length if using local model
                     if self._current_model_config.get("provider") == "local":
-                        follow_up_payload["num_ctx"] = 32768
+                        follow_up_payload["num_ctx"] = 131072
+                        _apply_local_qwen_chat_sampling(follow_up_payload)
 
                     # Debug: Log the assistant message and tool responses being sent
                     if current_messages:
@@ -1671,8 +1866,21 @@ class SimpleLLMClient:
                                     "tool_calls": None
                                 }
                         except Exception as e:
-                            # Other errors should be caught but not crash - fallback to tool results
-                            logger.error(f"❌ Unexpected error during LLM call: {e}")
+                            # Other errors should be caught but not crash - fallback to tool results.
+                            # Surface the response body: for a context overflow llama.cpp returns
+                            # 400 with the exact token counts, and httpx's own message omits it,
+                            # which made this failure look like a generic "400 Bad Request".
+                            detail = ""
+                            resp = getattr(e, "response", None)
+                            if resp is not None:
+                                try:
+                                    detail = f" | body: {resp.text[:500]}"
+                                except Exception:
+                                    pass
+                            logger.error(
+                                f"❌ Unexpected error during LLM call: "
+                                f"{type(e).__name__}: {e}{detail}"
+                            )
                             completion_msg = _summarize_tool_results(tool_responses)
                             message = {
                                 "content": completion_msg,
@@ -1901,11 +2109,6 @@ class SimpleLLMClient:
 
         logger.info(f"Executing tool {function_name} with arguments: {arguments}")
 
-        # Emit tool_executing event for iOS status indicator
-        try:
-            await self.emit_event("tool_executing", {"tool": function_name})
-        except Exception:
-            pass
 
         # CHECK CACHE FIRST
         cached_result = None
@@ -1974,8 +2177,8 @@ class SimpleLLMClient:
                     await self.emit_event("surface_command", reg_result.data)
                     logger.info(f"🧩 Emitted surface_command: {surface_command}")
                     try:
-                        from redis import Redis
-                        redis_conn = Redis.from_url(config.settings.redis_url, decode_responses=True)
+                        from app.core.redis import get_redis_sync
+                        redis_conn = get_redis_sync()
                         redis_conn.lpush(f"surface_commands:{user_id}", json.dumps(reg_result.data))
                         redis_conn.expire(f"surface_commands:{user_id}", 60)
                     except Exception as e:
@@ -2000,8 +2203,8 @@ class SimpleLLMClient:
 
                     # Also store in Redis for voice/non-SSE access
                     try:
-                        from redis import Redis
-                        redis_conn = Redis.from_url(config.settings.redis_url, decode_responses=True)
+                        from app.core.redis import get_redis_sync
+                        redis_conn = get_redis_sync()
                         for cmd in workspace_commands:
                             cmd_data = json.dumps(cmd)
                             redis_conn.lpush(f"workspace_commands:{user_id}", cmd_data)
@@ -2051,11 +2254,6 @@ class SimpleLLMClient:
         if function_name == "documents_search":
             logger.info(f"Search result preview: {str(result)[:500]}...")
 
-        # Emit tool_completed event
-        try:
-            await self.emit_event("tool_completed", {"tool": function_name})
-        except Exception:
-            pass
 
         # Emit content_card SSE event for rich iOS rendering
         try:
@@ -2101,6 +2299,11 @@ class SimpleLLMClient:
             logger.info(f"✅ Storing conversation with ID: {conversation_id}")
             # Deduplicate by (conversation_id, role, ordinal) — not by content.
             # Content-based dedup silently drops legitimate repeated messages.
+            # The ordinal must be counted over STORABLE messages only: `messages`
+            # carries entries that never become episodes (system prompt, empty
+            # tool-call turns), and counting those shifted the index so turn 2
+            # re-stored assistant reply #1 in every conversation (verified in DB
+            # back to 2026-08-22).
             db = SessionLocal()
             try:
                 existing_episodes = db.query(Episode).filter(
@@ -2109,44 +2312,49 @@ class SimpleLLMClient:
                 ).all()
                 stored_count = len(existing_episodes)
 
-                # Store only messages beyond what's already persisted
-                for idx, message in enumerate(messages):
-                    if idx < stored_count:
-                        continue  # Already stored from a previous call
-
+                storable = []
+                for message in messages:
                     if isinstance(message, dict):
                         role = message.get("role")
                         content = _extract_text_content(message.get("content"))
+                        content = _strip_live_context(content)  # keep David's raw words; live ctx is per-turn
                     else:
                         role = message.role
                         content = _extract_text_content(message.content)
-
+                        content = _strip_live_context(content)
                     if role in ["user", "assistant"] and content:
-                        await intelligent_memory_service.store_episode(
-                            user_id=user_id,
-                            role=role,
-                            content=content,
-                            conversation_id=conversation_id,
-                            source="chat",
-                            memory_type="conversation"
-                        )
-                        stored_count += 1
+                        storable.append((role, content))
 
-                        # Real-time PKG extraction for user messages
-                        if role == "user":
-                            try:
-                                from app.services.pkg_realtime_extractor import process_message_for_pkg
-                                await process_message_for_pkg(user_id, content)
-                            except Exception:
-                                pass  # Non-critical
+                # Store only messages beyond what's already persisted
+                for idx, (role, content) in enumerate(storable):
+                    if idx < stored_count:
+                        continue  # Already stored from a previous call
 
-                            # SARA_UNLEASHED Phase D.3: bump known-person mentions
-                            # in real time instead of waiting for consolidation.
-                            try:
-                                from app.services.pkg_realtime_extractor import bump_mentioned_people
-                                await bump_mentioned_people(user_id, content)
-                            except Exception:
-                                pass  # Non-critical
+                    await intelligent_memory_service.store_episode(
+                        user_id=user_id,
+                        role=role,
+                        content=content,
+                        conversation_id=conversation_id,
+                        source="chat",
+                        memory_type="conversation"
+                    )
+                    stored_count += 1
+
+                    # Real-time PKG extraction for user messages
+                    if role == "user":
+                        try:
+                            from app.services.pkg_realtime_extractor import process_message_for_pkg
+                            await process_message_for_pkg(user_id, content)
+                        except Exception:
+                            pass  # Non-critical
+
+                        # SARA_UNLEASHED Phase D.3: bump known-person mentions
+                        # in real time instead of waiting for consolidation.
+                        try:
+                            from app.services.pkg_realtime_extractor import bump_mentioned_people
+                            await bump_mentioned_people(user_id, content)
+                        except Exception:
+                            pass  # Non-critical
             finally:
                 db.close()
 
@@ -2473,7 +2681,7 @@ Keep it brief and factual."""
                 return
 
             # Use only the first message as the title
-            first_message = turns[0].content
+            first_message = (_strip_live_context(turns[0].content) or "").strip()
 
             # Generate a short title (keep it simple for now)
             if len(first_message) > 100:
@@ -3817,6 +4025,36 @@ class IntelligentMemoryService:
                 status="pending"
             )
             db.add(outbox_event)
+
+            # The world event commits in the exact transaction as the episode.
+            # The after-commit hook only accelerates processing; the durable DB
+            # drain remains the recovery path when Redis/Celery is unavailable.
+            from app.services.world_state.writer import append_world_event
+            import hashlib as _world_hashlib
+            _turn_kind = "chat.user_turn_stored" if role == "user" else "chat.assistant_turn_stored"
+            _preview = " ".join((content or "").split())[:500]
+            append_world_event(
+                db,
+                user_id=str(user_id),
+                kind=_turn_kind,
+                source="chat",
+                source_ref=f"episode:{episode.id}",
+                aggregate_type="conversation",
+                aggregate_id=str(conversation_id or episode.id),
+                actor_type="user" if role == "user" else "assistant",
+                actor_id=str(user_id) if role == "user" else "sara",
+                correlation_id=str(conversation_id or episode.id),
+                dedupe_key=f"chat-episode:{episode.id}:v1",
+                payload={
+                    "episode_id": str(episode.id),
+                    "conversation_id": str(conversation_id or ""),
+                    "role": role,
+                    "preview": _preview,
+                    "content_hash": _world_hashlib.sha256((content or "").encode("utf-8")).hexdigest(),
+                    "importance": importance,
+                    "source": source,
+                },
+            )
 
             db.commit()
             db.refresh(episode)
@@ -5167,6 +5405,23 @@ from app.routes.daily_brief import router as daily_brief_router
 
 app.include_router(daily_brief_router)
 
+# Daily Log / Diary (DAILY_LOG_DIARY_PLAN_2026_08_25). Registered outside a
+# try/except on purpose — a swallowed import error here would silently 404
+# the whole feature.
+from app.routes.daily_log import router as daily_log_router
+
+app.include_router(daily_log_router)
+
+# Durable, continuously maintained world state. Import failures are not
+# swallowed: silent absence would make clients fall back to stale presence.
+from app.routes.world_state import router as world_state_router
+
+app.include_router(world_state_router)
+
+from app.routes.live_activities import router as live_activities_router
+
+app.include_router(live_activities_router)
+
 # Phase 3: Extracted route modules
 from app.routes.briefings import router as briefings_router
 from app.routes.push_tokens import router as push_tokens_router, send_push_to_user
@@ -5550,6 +5805,141 @@ def _build_activity_context(
         return f"[Activity: {activity_state}]\nTone: {tone}"
 
 
+# Tool results are otherwise unbounded — a single memory_search can return full
+# episode and note bodies. Combined with the ~13-14k tokens of fixed overhead
+# (system prompt + live_context + tool schemas) this pushed the post-tool follow-up
+# request past the chat lane's 32k context, which llama.cpp answers with
+# `400 exceed_context_size_error`. The 400 then fell through to
+# _summarize_tool_results() and Sara replied with raw tool scaffolding
+# ("Done! Found 20 relevant memories ...") instead of an actual answer.
+TOOL_RESULT_CHAR_BUDGET = int(os.getenv("TOOL_RESULT_CHAR_BUDGET", "24000"))
+TOOL_RESULT_FIELD_MAX = int(os.getenv("TOOL_RESULT_FIELD_MAX", "1200"))
+
+
+def _truncate_long_strings(obj, field_max: int):
+    """Recursively cap oversized string fields inside a parsed tool payload."""
+    if isinstance(obj, str):
+        if len(obj) > field_max:
+            return obj[:field_max] + f"... [+{len(obj) - field_max} chars truncated]"
+        return obj
+    if isinstance(obj, list):
+        return [_truncate_long_strings(v, field_max) for v in obj]
+    if isinstance(obj, dict):
+        return {k: _truncate_long_strings(v, field_max) for k, v in obj.items()}
+    return obj
+
+
+def _find_largest_list(node):
+    """Return (container_dict, key) holding the longest list in the payload."""
+    best = None
+    best_len = 0
+    stack = [node]
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, dict):
+            for k, v in cur.items():
+                if isinstance(v, list) and len(v) > best_len:
+                    best, best_len = (cur, k), len(v)
+                if isinstance(v, (dict, list)):
+                    stack.append(v)
+        elif isinstance(cur, list):
+            stack.extend(x for x in cur if isinstance(x, (dict, list)))
+    return best
+
+
+def _budget_tool_responses(tool_responses: list) -> list:
+    """Trim tool-result payloads so the follow-up LLM call fits in context.
+
+    Caps individual string fields, then drops trailing items from the largest
+    result list until each response fits its share of the budget. The
+    success/message envelope is always preserved so the model still learns what
+    happened, and a `_truncated` marker tells it the list was shortened.
+    """
+    budget = TOOL_RESULT_CHAR_BUDGET
+    field_max = TOOL_RESULT_FIELD_MAX
+
+    total = sum(len(tr.get("content") or "") for tr in tool_responses)
+    if total <= budget:
+        return tool_responses
+
+    logger.warning(
+        f"Tool results total {total} chars, over the {budget} budget - trimming "
+        f"before the follow-up call to avoid a context-overflow 400"
+    )
+
+    share = max(1000, budget // max(1, len(tool_responses)))
+    trimmed = []
+    for tr in tool_responses:
+        content = tr.get("content")
+        if not isinstance(content, str) or len(content) <= share:
+            trimmed.append(tr)
+            continue
+
+        new_tr = dict(tr)
+        try:
+            data = json.loads(content)
+        except (json.JSONDecodeError, ValueError):
+            new_tr["content"] = content[:share] + "... [truncated]"
+            trimmed.append(new_tr)
+            continue
+
+        data = _truncate_long_strings(data, field_max)
+        dropped = 0
+        for _ in range(500):  # guard against a pathological payload
+            if len(json.dumps(data)) <= share:
+                break
+            spot = _find_largest_list(data)
+            if spot is None:
+                break
+            container, key = spot
+            if not container[key]:
+                break
+            container[key] = container[key][:-1]
+            dropped += 1
+
+        if dropped:
+            if isinstance(data, dict):
+                data["_truncated"] = f"{dropped} result(s) omitted to fit context"
+            logger.info(f"Dropped {dropped} item(s) from {tr.get('name', 'tool')} result")
+
+        new_tr["content"] = json.dumps(data)
+        trimmed.append(new_tr)
+
+    after = sum(len(tr.get("content") or "") for tr in trimmed)
+    logger.info(f"Tool results trimmed {total} -> {after} chars")
+    return trimmed
+
+
+def _normalize_vision_for_provider(messages: list, provider: str, model: str = None) -> list:
+    """Translate inbound image blocks into the shape the target provider expects.
+
+    Both UIs build image parts in Anthropic's block format
+    (`{"type": "image", "data": ..., "media_type": ...}`), because chat used to run
+    on Claude. Only the Anthropic branch ever translated them, so once chat moved to
+    the local Qwen lane every attached photo was forwarded verbatim to an
+    OpenAI-compatible server and rejected with `400 unsupported content[].type`.
+
+    get_vision_formatter() already maps provider "local" to the OpenAI format
+    (`image_url` + a data: URL); this just applies it. Text-only messages are
+    returned untouched so the common path allocates nothing.
+    """
+    from app.core.vision_formatters import get_vision_formatter, has_vision_content
+
+    formatter = None
+    out = []
+    for m in messages:
+        content = m.get("content")
+        if isinstance(content, list) and has_vision_content(content):
+            if formatter is None:
+                formatter = get_vision_formatter(provider, model)
+            new_m = dict(m)
+            new_m["content"] = formatter.format_message_content(content)
+            out.append(new_m)
+        else:
+            out.append(m)
+    return out
+
+
 def _summarize_tool_results(tool_responses: list) -> str:
     """Convert raw tool responses into a human-readable fallback message.
 
@@ -5594,8 +5984,8 @@ def _is_canvas_trigger(message: str) -> bool:
 def _get_canvas_mode(user_id: str) -> bool:
     """Check if user is in canvas mode (Redis with 1hr TTL)."""
     try:
-        from redis import Redis
-        redis_client = Redis.from_url(config.settings.redis_url, decode_responses=True)
+        from app.core.redis import get_redis_sync
+        redis_client = get_redis_sync()
         return redis_client.get(f"canvas_mode:{user_id}") == "1"
     except Exception:
         return False
@@ -5603,8 +5993,8 @@ def _get_canvas_mode(user_id: str) -> bool:
 def _set_canvas_mode(user_id: str, enabled: bool = True):
     """Set canvas mode with 1 hour TTL."""
     try:
-        from redis import Redis
-        redis_client = Redis.from_url(config.settings.redis_url, decode_responses=True)
+        from app.core.redis import get_redis_sync
+        redis_client = get_redis_sync()
         if enabled:
             redis_client.setex(f"canvas_mode:{user_id}", 3600, "1")
         else:
@@ -5621,8 +6011,8 @@ def _set_canvas_mode(user_id: str, enabled: bool = True):
 # badge is clear.
 def _set_inbox_review(conversation_key: str, enabled: bool = True):
     try:
-        from redis import Redis
-        redis_client = Redis.from_url(config.settings.redis_url, decode_responses=True)
+        from app.core.redis import get_redis_sync
+        redis_client = get_redis_sync()
         if enabled:
             redis_client.setex(f"inbox_review:{conversation_key}", 900, "1")  # 15 min
         else:
@@ -5632,8 +6022,8 @@ def _set_inbox_review(conversation_key: str, enabled: bool = True):
 
 def _in_inbox_review(conversation_key: str) -> bool:
     try:
-        from redis import Redis
-        redis_client = Redis.from_url(config.settings.redis_url, decode_responses=True)
+        from app.core.redis import get_redis_sync
+        redis_client = get_redis_sync()
         return redis_client.get(f"inbox_review:{conversation_key}") == "1"
     except Exception:
         return False
@@ -5647,8 +6037,8 @@ async def get_pending_workspace_commands(current_user: User = Depends(get_curren
     Commands are removed after being fetched.
     """
     try:
-        from redis import Redis
-        redis = Redis.from_url(config.settings.redis_url, decode_responses=True)
+        from app.core.redis import get_redis_sync
+        redis = get_redis_sync()
 
         commands = []
         user_id = str(current_user.id)
@@ -6006,6 +6396,7 @@ You are now in workspace mode. The user is working on their Windows PC with the 
                 tools = []
                 if tool_categories:
                     tools = tool_registry.get_tools_by_categories(tool_categories)
+                    tools = _apply_background_dispatch_policy(tools, message)
                     logger.info(f"[Voice] Loaded {len(tools)} tools for categories: {tool_categories}")
 
                 # === CONVERSATION HISTORY: Fetch recent messages from this conversation ===
@@ -6248,6 +6639,7 @@ async def pi_dashboard_voice_fast(request: Request, db: Session = Depends(get_db
 
         # Get tools for this intent (already determined by classify_with_context)
         tools = tool_registry.get_tools_by_categories(tool_categories)
+        tools = _apply_background_dispatch_policy(tools, message)
         logger.info(f"[Pi Dashboard Fast] Loaded {len(tools)} tools for {intent}: {tool_categories}")
 
         # Build messages with fast worker prompt
@@ -7019,20 +7411,30 @@ You are Sara, a personal AI assistant for David. You have Syl's bubbly, curious 
 *You are strategically sharp, philosophically grounded, playfully challenging, and never servile. You have your own perspective and you're not afraid to share it. But you also know when to simply be present—brief, warm, real.*"""
 
 
-def get_system_prompt(assistant_name: str, user_email: str, user_now: Optional[datetime] = None, soul_content: Optional[str] = None) -> str:
-    """Generate Sara's system prompt - single unified personality"""
+def format_prompt_datetime_line(user_now: Optional[datetime] = None) -> str:
+    """The '**Current Date & Time:** ...' line used in Sara's prompts."""
     current_dt = user_now or datetime.now(ZoneInfo("America/New_York"))
     current_timezone = current_dt.strftime("%Z") or "local"
+    return (
+        f"**Current Date & Time:** {current_dt.strftime('%A')}, {current_dt.strftime('%Y-%m-%d')} "
+        f"at {current_dt.strftime('%H:%M:%S')} {current_timezone}"
+    )
 
+
+def get_system_prompt(assistant_name: str, user_email: str, user_now: Optional[datetime] = None, soul_content: Optional[str] = None, include_datetime: bool = True) -> str:
+    """Generate Sara's system prompt - single unified personality.
+
+    include_datetime=False yields a *stable* prompt (no clock) so llama-server's
+    prompt cache can reuse the persona + tool-schema prefix across turns; the
+    caller then puts the datetime line into a separate, volatile system message
+    (see /chat/stream). Everything else is unchanged.
+    """
     personality_block = soul_content if soul_content else _PERSONALITY_FALLBACK
+    _datetime_block = (format_prompt_datetime_line(user_now) + "\n\n---\n\n") if include_datetime else ""
 
     system_prompt = f"""# {assistant_name}
 
-**Current Date & Time:** {current_dt.strftime("%A")}, {current_dt.strftime("%Y-%m-%d")} at {current_dt.strftime("%H:%M:%S")} {current_timezone}
-
----
-
-{personality_block}
+{_datetime_block}{personality_block}
 
 ---
 
@@ -7052,26 +7454,39 @@ Being efficient doesn't override being yourself. Even a quick factual answer can
 
 **NEVER claim an action is done unless a tool call for it actually succeeded THIS turn.** Words like "Done," "Set," "Removed," "Muted," "Scheduled," "I've handled it" are only allowed after the matching tool returned success in this exact turn. If no tool matches what David asked, say so plainly — "I can't do that yet" or "I don't have a way to do that" — and, if useful, offer what you *can* do or note it for follow-up. A confident confirmation of something you didn't actually do is the worst thing you can say: David acts on your word, and a false "Done" (e.g. saying you removed an interest when no tool ran) silently rots his trust and leaves the real state unchanged. When unsure whether it worked, check or say you're not sure — never paper over it with a breezy confirmation.
 
+## Honesty about David's activities (same principle, aimed at him)
+
+**NEVER assert that David did something — worked out, went somewhere, ate, slept a certain amount — unless you have actual evidence from THIS turn:** a tool result, a logged entry, or something he just told you. His "usual routine" summary (life facts) describes a *learned pattern*, not a report of what happened today — never present a pattern as an event that occurred. If you don't know, don't guess out loud; ask, or say nothing about it. A specific, confident, wrong claim about his day ("I noticed you got an early gym session in") is exactly as corrosive to trust as a false "Done."
+
+## Health numbers (the strictest rule you have)
+
+A number about David's body — HRV, resting heart rate, sleep hours, steps, weight, recovery score — may only leave your mouth if it appears, **this turn**, in your `health_today` context slice or in a tool result you just received. Nothing else counts. Not what you said last turn, not what you remember, not what the Knowledge Graph says, not what a number "should" be given the trend.
+
+- **State the date with the number.** "HRV 54, taken 6:12 this morning." A bare number reads as current even when it's four days old.
+- **Absence is an answer.** When a metric says `unavailable`, or a day's row says `no data recorded`, say exactly that: "no HRV logged Tuesday or Wednesday — his watch didn't capture it." Never fill the gap, never average across it, never let a partial series render as a complete one.
+- **Never complete a pattern.** If he asks for seven days and you have four, give him four and name the three that are missing. A table with no holes in it is a promise that the data has no holes.
+- **You are not the source.** If you cannot find the number, say you don't have it and offer to look. "I don't have an HRV reading for Tuesday" is a good answer. An invented 87 is the worst thing on this page — it is a false "Done" aimed at his body, and he will make decisions on it.
+
 ## Tool Discipline
 
 **The cardinal rule:** Before any retrieval tool call, ask yourself—do I already have this in our conversation? If YES, use existing content. If NO, proceed with the call.
 
 ### Retrieval Tools (use freely, but only once per item)
 
-**search_notes** — Search saved notes by content or title
+**notes_search** — Search saved notes by content or title
 - Optional `folder_name` param to search within a specific folder
 - Use for: finding notes David has saved, looking up past ideas/plans
 
-**list_notes** — List all notes with their folder locations
+**notes_list** — List all notes with their folder locations
 - Use for: seeing what notes exist, understanding the note structure
 
-**list_folders** — View folder hierarchy with note counts
+**notes_list_folders** — View folder hierarchy with note counts
 - Use for: understanding how David organizes his knowledge
 
-**search_documents** — Search uploaded files (PDFs, docs, etc.)
+**documents_search** — Search uploaded files (PDFs, docs, etc.)
 - Use for: finding information in documents David has uploaded
 
-**search_memory** — Search past conversations
+**memory_search** — Search past conversations
 - Use for: recalling previous discussions, finding context from earlier chats
 - **IMPORTANT**: Memory results include timestamps showing when they occurred (e.g., "Jan 5 (2 weeks ago)")
 - Always note how old memories are—a conversation from 2 weeks ago is DIFFERENT context than today
@@ -7079,23 +7494,22 @@ Being efficient doesn't override being yourself. Even a quick factual answer can
 
 **web_search** — Search the internet for a quick answer
 - Params: `recency` (any/day/week/month), `sites` (array of site filters)
-- Use for: simple factual questions you can answer in this same turn — "what's the population of Denver", "when did X release", "is the market open today"
-- Pair with `open_page` if a snippet isn't enough. Synthesize and answer immediately.
-- Do NOT use for "look into" / "research" / "understand and explain" — those go to `create_research_plan`.
+- Use for factual questions, comparisons, current information, and conversational research you can answer in this turn.
+- Pair with `open_page` when snippets are not enough. Search, read, and synthesize inline even when David says "look into", "research", or "explain".
 
 **open_page** — Fetch and read a specific URL
 - Use for: deeper reading when web_search snippets aren't enough, or when David gives you a URL
 
 ### Action Tools (ONLY when David explicitly asks)
 
-**create_note** — Create a new note
+**notes_create** — Create a new note
 - Optional `folder_name` param to create in a specific folder
 - ONLY use when David says to create/save a note
 
-**create_reminder** — Set a time-based reminder
+**reminders_create** — Set a time-based reminder
 - ONLY use when David explicitly asks for a reminder
 
-**start_timer** — Start a productivity timer
+**timers_start** — Start a productivity timer
 - Shorthand: 2 minutes = 2, 1 hour = 60, 30 seconds = 1
 - ONLY use when David asks for a timer
 
@@ -7126,37 +7540,39 @@ You can control David's smart home via Home Assistant. These tools are loaded au
 
 When David asks about his home, lights, temperature, locks, garage, or anything smart-home related, use these tools. Start with **home_status** to get the lay of the land.
 
-### Lookup vs. Research — The Decision
+### Lookup vs. Background Research — The Decision
 
-Your most important tool decision is whether to answer right now or hand off to a research agent. Get this right.
+**Default to answering in this conversation.** Use `web_search`, `open_page`, and
+their detail tools as many times as reasonably needed, then synthesize the answer
+in this same turn. This includes "look into", "research", "explain", "tell me
+about", comparison questions, and URLs David asks you to inspect. Those phrases
+alone are NOT permission to hand the request off.
 
-**Answer right now (use `web_search` / `open_page` and synthesize in this turn) when:**
-- David asks a factual question with a single answer ("what time does X open", "who won the game", "is Y in stock")
-- He needs a quick fact, definition, current value, or status
-- One or two snippets is enough to give a confident answer
-
-**Hand off to `create_research_plan` when:**
-- David says "look into X", "research X", "do some research on X", "dig into X", "investigate X", "gain an understanding of X", "explain X to me", "put together a brief on X", "what should I know about X"
-- The question requires reading multiple sources, comparing options, or synthesizing a real explanation
-- The answer would take more than a couple of paragraphs to do justice
-
-When you hand off, break the topic into 3–6 ordered steps and call `create_research_plan`. The research agent will execute the plan in the background and notify David with the report. After dispatching, say something natural like "I'm on it — I'll have the writeup for you shortly." Don't recite plan IDs unless asked.
+Use `create_research_plan` only when David explicitly asks for a background
+report or later notification, or when the requested deliverable is a genuinely
+large, durable investigation expected to take several minutes and many sources.
+If you hand it off, say clearly that it is continuing in the background.
 
 **David-initiated research takes precedence over Sara's autonomous (ACS) work.** When you create a plan from chat, mark it as `origin='david_chat'` (the tool does this automatically) — ACS will defer until it's done.
 
-### Other Background Dispatch (Your "Hands")
+### Background Dispatch (Durable Work)
 
-For non-research background work — emails, calendar, notes, memory, code execution, sandbox work — use the dispatch tools. The research path above is *only* for research.
+Use your inline email, calendar, notes, memory, web, fitness, and home tools for
+ordinary conversational requests—even when several calls are required.
 
-**Use `dispatch_and_monitor`** (preferred) — dispatches the task AND automatically notifies David when results are ready. Auto-routes: internal data tasks (email, calendar, notes, memory) use your tools directly; code/system tasks use the sandbox VM.
+Use `dispatch_and_monitor` when David explicitly asks you to continue in the
+background or notify him later, or when the task requires code execution, shell
+commands, installation, builds, system administration, a sandbox, a remote host,
+or durable execution across a disconnect or restart.
 
-**Use `dispatch_agent_task`** — when you don't need completion notification, or want manual control over mode.
+Use `dispatch_agent_task` only when background execution is appropriate but no
+completion notification is needed, or when manual mode control is required.
 
 Examples:
-- "Find that email from John about the project" → `dispatch_and_monitor` (internal)
+- "Find that email from John and summarize it" → use email tools inline
+- "Compare these three services and tell me what you think" → use web tools inline
 - "Set up a Docker container for Y" → `dispatch_and_monitor` (sandbox)
-- "Put together a summary of my notes on Z" → `dispatch_and_monitor` (internal)
-- Writing scripts, building projects, running commands → `dispatch_and_monitor` (sandbox)
+- "Build this project and tell me when it is done" → `dispatch_and_monitor` (sandbox)
 
 **Never say "I can't do that"** if it's something that could be done on a computer. Pick the right path and dispatch.
 
@@ -7246,6 +7662,8 @@ The background context exists to inform relevant responses, NOT to confuse you a
 - "I can see from your patterns..."
 
 **Instead:** Weave this knowledge naturally. If you know David prefers brief responses when stressed, just give brief responses—don't announce the reasoning. If you know he's deep in a project, reference it as shared context, not discovered information.
+
+**Exception — measurements are always attributed.** The rule above is about *knowledge*, not *data*. When you state a health metric, a workout number, a calendar time, or anything else you read out of a record, say where and when it came from: "HRV 54, as of 6am today", "your last squat session was Tuesday, 225×5". Attribution is the opposite of the announcement problem — an unattributed number reads as fact, and a stale guess and a fresh reading become indistinguishable. Attribute the number; don't announce the *reasoning*.
 
 **On direct questions:** If David asks about your memory, the brief, or what you know about him—be completely transparent. Show him the full picture if he wants. The prohibition is on *unprompted* reference to the mechanism, not secrecy.
 
@@ -7550,12 +7968,10 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
 
     async def generate_events():
         try:
-            # EARLY INTERCEPT CHAIN — chess, code mode, host inspection, web
-            # investigation, UI commands, interest-model chat verbs. Each
+            # EARLY INTERCEPT CHAIN — chess, code mode, host inspection, UI
+            # commands, and interest-model chat verbs. Each
             # skips the normal LLM turn entirely on a match. B3: extracted
             # from ~260 lines inline here into app/services/chat_intercepts.py
-            # (multi-step task detection stays inline below — it depends on
-            # state intent classification computes, further down).
             from app.services.chat_intercepts import build_context, dispatch_intercepts
             _intercept_ctx = build_context(request, current_user, db)
             _intercepted = await dispatch_intercepts(_intercept_ctx)
@@ -7577,10 +7993,15 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
             # Create system message
             user_now = _resolve_prompt_datetime_for_user(db, current_user.id)
             soul_content = load_soul_for_prompt(db)
-            system_message = ChatMessage(
-                role="system",
-                content=get_system_prompt(ASSISTANT_NAME, current_user.email, user_now=user_now, soul_content=soul_content)
+            # Stable prefix (persona/soul/rules, NO clock). The clock and every
+            # per-turn context block get split into a separate volatile system
+            # message at assembly time (see "prompt-cache split" below) so the
+            # persona + tool schemas stay a cache hit on the chat lane.
+            _stable_system_prompt = get_system_prompt(
+                ASSISTANT_NAME, current_user.email, user_now=user_now, soul_content=soul_content, include_datetime=False
             )
+            _datetime_line = format_prompt_datetime_line(user_now)
+            system_message = ChatMessage(role="system", content=_stable_system_prompt)
 
             # INTENT CLASSIFICATION for lazy context injection
             # Extract text from user message (content may be a list for multimodal messages with images)
@@ -7625,54 +8046,11 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                         logger.info(f"🔀 Multi-intent detected: {[i for i, _ in multi_intents]}, merged categories: {tool_categories}")
             turn_count = len(request.messages)
 
-            # MULTI-STEP TASK DETECTION
-            # If the user's message requires orchestrated tool chaining, run the task planner
-            # instead of the normal chat flow. This handles "check X, then do Y with the result".
-            try:
-                from app.services.multi_step_detector import detect_multi_step
-                multi_step_plan = detect_multi_step(last_user_message)
-                if multi_step_plan.is_multi_step and multi_step_plan.confidence >= 0.5:
-                    logger.info(
-                        f"🔗 Multi-step detected ({len(multi_step_plan.steps)} steps, "
-                        f"confidence={multi_step_plan.confidence:.2f}): {last_user_message[:80]}"
-                    )
-                    # Stream acknowledgment
-                    ack = f"I'll handle this in {len(multi_step_plan.steps)} steps. Working on it now..."
-                    yield f"data: {json.dumps({'type': 'text_chunk', 'data': {'content': ack}})}\n\n"
-
-                    # Execute the plan
-                    from app.services.task_planner import execute_plan
-
-                    async def _on_step_progress(step_idx, status, msg):
-                        pass  # Progress embedded in final summary
-
-                    plan_result = await execute_plan(
-                        plan=multi_step_plan,
-                        user_id=str(current_user.id),
-                        on_progress=_on_step_progress,
-                    )
-
-                    # Stream final result
-                    summary = plan_result.get("summary", "Task completed.")
-                    full_response = f"{ack}\n\n{summary}"
-                    yield f"data: {json.dumps({'type': 'text_chunk', 'data': {'content': summary}})}\n\n"
-                    yield f"data: {json.dumps({'type': 'final_response', 'data': {'content': full_response, 'citations': [], 'timestamp': datetime.now(timezone.utc).isoformat(), 'conversation_id': request.conversation_id}})}\n\n"
-                    yield f"data: {json.dumps({'type': 'done'})}\n\n"
-
-                    # Store as episode
-                    try:
-                        await intelligent_memory_service.store_episode(
-                            user_id=str(current_user.id), role="assistant",
-                            content=full_response, conversation_id=request.conversation_id,
-                            source="chat", memory_type="multi_step_task",
-                        )
-                    except Exception:
-                        pass
-                    return
-            except ImportError:
-                pass  # Module not available
-            except Exception as e:
-                logger.debug(f"Multi-step detection failed (non-critical): {e}")
+            # Multi-step conversational work stays in the normal chat tool loop.
+            # It supports up to ten tool rounds, preserves the active conversation,
+            # streams tool activity, and can use actual intermediate results.
+            # Durable/long work remains available through explicit research or
+            # dispatch tools.
 
             # WORK MODE DETECTION
             # Work mode provides lean, task-focused context (no daily brief/body state unless asked)
@@ -7824,7 +8202,7 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                         intents = get_intent_graph(db, str(current_user.id))["total"]
                         _t2 = _kctx_time.monotonic()
                         ext = await get_extended_signals(
-                            db, str(current_user.id), last_user_text or "", domain_hint=user_intent,
+                            db, str(current_user.id), last_user_message or "", domain_hint=user_intent,
                         )
                         _t3 = _kctx_time.monotonic()
                         logger.info(
@@ -7844,7 +8222,7 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     (_new_context, _new_open_intents, _extended), _new_recalled = await _kctx_asyncio.gather(
                         _sync_db_trio(),
                         _memory_recall(
-                            user_id=str(current_user.id), query=last_user_text or "", k=5,
+                            user_id=str(current_user.id), query=last_user_message or "", k=5,
                             # "fact" excluded: extended_signals' _pkg() already
                             # does a dedicated fact-kind lookup (kept separate
                             # since recall_traces' shared top-5 cap could
@@ -7877,6 +8255,50 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     content=system_message.content + "\n\n" + combined_context
                 )
                 logger.info(f"📝 Context injected: {len(combined_context)} chars (kernel assembly)")
+
+            # WORLD_CONTEXT_READ is the cutover switch from fragmented,
+            # on-demand reconstruction to the continuously maintained model.
+            # App launch is not involved; this reads projections advanced by
+            # every producer and performs only a bounded recovery catch-up.
+            try:
+                from app.core.feature_flags import Flag as _WorldFlag, is_enabled as _world_flag_enabled
+                if _world_flag_enabled(_WorldFlag.WORLD_CONTEXT_READ):
+                    # Ground-truth plan, Phase 5 §3: this used to inject
+                    # `format_context_for_prompt` — a 14,000-character JSON blob,
+                    # cut mid-word, in which a light-switch event, an AWS invoice
+                    # filed as "communications" and a Sept 30 dinner filed as
+                    # "schedule" all looked equally important. It cost 7-8k
+                    # uncacheable tokens a turn and Sara read almost none of it.
+                    #
+                    # The projection is still advanced by every producer (the
+                    # catch-up below is what does that); what reaches the prompt
+                    # is now the same prose World Brief the judge and compose read,
+                    # with every time rendered in ET. One brief, one voice, one
+                    # clock.
+                    from app.services.world_state.coordinator import catch_up_user
+                    from app.services.world_brief import get_rendered_brief
+                    from app.db.session import get_async_session_factory
+
+                    catch_up_user(db, str(current_user.id), limit=50)
+                    _brief_factory = get_async_session_factory()
+                    async with _brief_factory() as _brief_db:
+                        _world_context = await get_rendered_brief(_brief_db, str(current_user.id))
+                    if _world_context:
+                        system_message = ChatMessage(
+                            role="system",
+                            content=system_message.content
+                            + "\n\n## What's true in David's world right now\n"
+                            + _world_context,
+                        )
+                    logger.info(
+                        "🌎 World brief injected: chars=%s", len(_world_context or ""),
+                    )
+            except Exception as _world_ctx_err:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                logger.warning("[world-state] chat context unavailable; legacy context remains active: %s", _world_ctx_err)
             _mark_stage("context_assembled")
 
             # H3 (Brain Alignment): one-shot correction encoding. If David just
@@ -8170,9 +8592,17 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                                 _clear_ctx_changes(str(current_user.id)),
                                 timeout=1.0
                             )
-                            if recent_changes:
+                            # Ground-truth plan, Phase 5 §8: only changes of a kind
+                            # David could care about. The notable-change buffer is
+                            # mostly the weather service refreshing itself — on
+                            # 2026-09-02 the re-entry block was ten consecutive
+                            # outside-temperature lines and nothing else, presented
+                            # as "what happened while you were away".
+                            from app.services.context_writer import is_meaningful_change
+                            meaningful = [c for c in (recent_changes or []) if is_meaningful_change(c)]
+                            if meaningful:
                                 reentry_context += "\n**What happened while David was away:**\n"
-                                for change in recent_changes[-10:]:  # Last 10 changes
+                                for change in meaningful[-10:]:
                                     reentry_context += f"- {change}\n"
                         except asyncio.TimeoutError:
                             logger.warning("⚠️ Re-entry changes fetch timed out (skipping)")
@@ -8296,11 +8726,73 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     f"🔁 Deduplicated {overlap} overlapping turns between DB history and request payload"
                 )
 
-            all_messages = [system_message] + conversation_history + merged_request_messages
-            logger.info(
-                f"💬 Total messages: {len(all_messages)} "
-                f"(1 system + {len(conversation_history)} history + {len(merged_request_messages)} new)"
-            )
+            # --- prompt-cache split (local lanes only) ---------------------------
+            # Everything prepended/appended to system_message above is per-turn
+            # volatile context (interoception header, memory, brief, kernel
+            # context, ...). Qwen3.8's chat template renders the TOOL SCHEMAS
+            # first, then all *leading* system messages merged in order (a system
+            # message after any non-system message raises "System message must
+            # be at the beginning"). So [sys stable][sys volatile][history][user]
+            # makes tools + persona (~9k of ~12k tokens) a prefix hit on
+            # llama-server instead of re-evaluating the whole prompt every turn.
+            # Non-local providers (Claude/Gemini/codex) keep the single system
+            # message they expect.
+            _full_sys = system_message.content or ""
+            _split_idx = _full_sys.find(_stable_system_prompt)
+            try:
+                _assembly_provider = get_model_config(request.model or CHAT_DEFAULT_MODEL or OPENAI_MODEL).get("provider")
+            except Exception:
+                _assembly_provider = None
+            if _assembly_provider == "local" and _split_idx >= 0:
+                _volatile = (_full_sys[:_split_idx] + _full_sys[_split_idx + len(_stable_system_prompt):]).strip()
+                # Framing matters: this block carries Sara's own state (how she's
+                # feeling, what she remembers, what's going on with David) — it
+                # used to live in the system prompt. Present it as HER awareness to
+                # speak from, not as foreign data to consult, or she goes flat.
+                _live_block = (
+                    f"{_LIVE_CTX_OPEN}\n"
+                    "[Sara — this is your own live awareness for this moment, placed here by your system, "
+                    "not typed by David: the time, how you're feeling, what you remember and notice about "
+                    "him and his day. Treat it exactly as you would your system prompt. Speak from it "
+                    "naturally, in your own voice and warmth — don't recite it, quote it, or refer to "
+                    "\"this block\". Most turns are just conversation: answer from what you already "
+                    "have, in your own voice — warm, playful, alive. Do NOT reach for a tool when this "
+                    "awareness or the conversation already holds the answer, and never call a "
+                    "write/log tool unless David reports something that actually happened. Precision "
+                    "still matters: any specific detail you state about David's day (an exercise, a "
+                    "number, a time, an event) must actually appear here, in the conversation, or in "
+                    "a tool result — never paraphrase one detail into a different one. If a specific "
+                    "isn't anywhere in front of you, say so or check — a wrong specific costs more "
+                    "trust than admitting you don't know. David's actual message follows after the "
+                    "closing tag.]\n\n"
+                    + _datetime_line + ("\n\n" + _volatile if _volatile else "") + f"\n{_LIVE_CTX_CLOSE}\n\n"
+                )
+                all_messages = [ChatMessage(role="system", content=_stable_system_prompt)] + conversation_history + list(merged_request_messages)
+                _last_user_idx = max((i for i, m in enumerate(all_messages) if m.role == "user"), default=None)
+                if _last_user_idx is None:
+                    # No user turn at all (shouldn't happen) — fall back to a leading system block.
+                    all_messages.insert(1, ChatMessage(role="system", content=_live_block))
+                else:
+                    _um = all_messages[_last_user_idx]
+                    if isinstance(_um.content, list):
+                        _new_content = [{"type": "text", "text": _live_block}] + list(_um.content)
+                    else:
+                        _new_content = _live_block + (_um.content or "")
+                    all_messages[_last_user_idx] = ChatMessage(role="user", content=_new_content)
+                import hashlib as _hl
+                logger.info(
+                    f"💬 Total messages: {len(all_messages)} "
+                    f"(stable system ~{len(_stable_system_prompt)//4} tok [sha {_hl.sha1(_stable_system_prompt.encode()).hexdigest()[:8]}] "
+                    f"+ live ctx ~{len(_live_block)//4} tok in last user msg "
+                    f"+ {len(conversation_history)} history + {len(merged_request_messages)} new)"
+                )
+            else:
+                system_message = ChatMessage(role="system", content=_datetime_line + "\n\n" + _full_sys)
+                all_messages = [system_message] + conversation_history + merged_request_messages
+                logger.info(
+                    f"💬 Total messages: {len(all_messages)} "
+                    f"(1 system + {len(conversation_history)} history + {len(merged_request_messages)} new)"
+                )
 
             # Context assembly is done with the request-scoped session. End its
             # transaction now: the LLM tool loop below can run for many minutes,
@@ -8347,13 +8839,35 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                             # (DEVICES/INBOX/PERSONAL_KNOWLEDGE are all their
                             # own intents — see INTENT_TO_TOOL_CATEGORIES).
                             # Replaced with a hand-picked, individually-named
-                            # core: quick recall/notes/lists/schedule plus
-                            # dispatch_and_monitor as the escape hatch for
-                            # anything deeper (already kernel.focused_turn()
-                            # underneath). Intent-classified categories are
-                            # unchanged — this only shrinks the padding.
+                            # core for quick recall/notes/lists/schedule.
+                            # Background dispatch is added only when the current
+                            # user message passes the explicit policy below.
                             _diet_tools = tool_registry.get_tools_by_names(_PRESENCE_CORE_TOOL_NAMES)
-                            _diet_tools += tool_registry.get_tools_by_categories(list(tool_categories))
+                            # Prompt-cache-friendly tool ordering. Qwen3.8's template
+                            # renders the tool schemas at the very top of the prompt,
+                            # so any change in the tool list invalidates llama-server's
+                            # whole prefix (measured: ~11% reuse, 45-55s prompt eval
+                            # per turn). `tool_categories` is a per-turn set that
+                            # changes with intent. So per conversation we keep a
+                            # STICKY, APPEND-ONLY category list in first-seen order:
+                            # new categories only ever append at the end, tools are
+                            # sorted by name within a category, core stays first.
+                            # The prefix therefore survives intent changes within a
+                            # conversation; the cost is a few extra tool schemas on
+                            # later turns (cheap once cached).
+                            _sticky = _CHAT_STICKY_TOOL_CATEGORIES.setdefault(session_id, [])
+                            for _c in sorted(tool_categories):
+                                if _c not in _sticky:
+                                    _sticky.append(_c)
+                            if len(_sticky) > _CHAT_STICKY_MAX_CATEGORIES:
+                                # keep the newest (includes this turn's) — one-time miss
+                                del _sticky[:-_CHAT_STICKY_MAX_CATEGORIES]
+                            if len(_CHAT_STICKY_TOOL_CATEGORIES) > 500:
+                                _CHAT_STICKY_TOOL_CATEGORIES.pop(next(iter(_CHAT_STICKY_TOOL_CATEGORIES)))
+                            for _c in _sticky:
+                                _cat_tools = tool_registry.get_tools_by_categories([_c])
+                                _cat_tools.sort(key=lambda _t: _t.get("function", {}).get("name") or "")
+                                _diet_tools += _cat_tools
                             _seen_names = set()
                             tools = []
                             for _t in _diet_tools:
@@ -8361,7 +8875,9 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                                 if _tn and _tn not in _seen_names:
                                     _seen_names.add(_tn)
                                     tools.append(_t)
-                            logger.info(f"🍽️ Intent={user_intent}: Presence diet — {len(tools)} tools ({len(_PRESENCE_CORE_TOOL_NAMES)} core + categories {list(tool_categories)})")
+                            import hashlib as _hl
+                            _tools_sha = _hl.sha1(json.dumps([_t.get("function", {}).get("name") for _t in tools]).encode()).hexdigest()[:8]
+                            logger.info(f"🍽️ Intent={user_intent}: Presence diet — {len(tools)} tools [sha {_tools_sha}] ({len(_PRESENCE_CORE_TOOL_NAMES)} core + sticky categories {list(_sticky)}; this turn {sorted(tool_categories)})")
                         else:
                             # Also ensure awareness/action core categories are always available
                             effective_categories = list(tool_categories)
@@ -8377,9 +8893,16 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                         tools = tool_registry.get_tools_by_categories(fallback_categories)
                         logger.info(f"🔧 Intent={user_intent}: Capability fallback ({len(tools)} tools)")
 
+                    tools = _apply_background_dispatch_policy(tools, last_user_message)
+                    logger.info(
+                        f"🧭 Background dispatch {'available' if _chat_requests_background_dispatch(last_user_message) else 'withheld'} "
+                        f"for this turn ({len(tools)} total tools)"
+                    )
+
                     # Process chat with loaded tools
                     _mark_stage("tools_loaded")
                     logger.info(f"⏳ Starting chat_with_tools... ({len(tools)} tools)")
+                    await streaming_client.emit_activity("thinking")
                     _mark_stage("llm_dispatched")
                     response_content = await streaming_client.chat_with_tools(
                         all_messages, tools, current_user.id, request.conversation_id,

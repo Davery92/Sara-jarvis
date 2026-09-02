@@ -187,13 +187,23 @@ class TestUiCommandIntercept:
 
 
 class TestAllHandlersRegistered:
-    def test_six_handlers_in_order(self):
+    def test_handlers_in_order(self):
         names = [h.__name__ for h in INTERCEPT_HANDLERS]
         assert names == [
             "_try_chess",
             "_try_code_mode",
             "_try_host_inspection",
-            "_try_web_investigation",
             "_try_ui_command",
             "_try_interest_model_verb",
+            # Ground-truth plan, Phase 2 §3. Deliberately an intercept rather
+            # than a prompt instruction: on 2026-09-02 David wrote "ENOUGH WITH
+            # THE LAURA WEIPPERT OVERDUE NONSENSE WE HAD OUR MEETING" and the
+            # model, having no closer tool, cancelled two unrelated reminders
+            # while the three real threads stayed open. Closing what David says
+            # is done must not depend on a model choosing to call a tool.
+            "_try_thread_resolution",
         ]
+
+    def test_web_investigation_does_not_bypass_chat(self):
+        names = [h.__name__ for h in INTERCEPT_HANDLERS]
+        assert "_try_web_investigation" not in names

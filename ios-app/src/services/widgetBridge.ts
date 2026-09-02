@@ -2,10 +2,8 @@
  * widgetBridge — pushes Sara's state into the App Group so WidgetKit can render
  * it on the home & lock screens (P3).
  *
- * Pulls emotional state + latest thought from /api/sara/status and the next
- * calendar event from /api/sara/brief, then hands them to the native module,
- * which writes the App Group defaults and reloads the widget timelines. No-ops
- * when the native module isn't present.
+ * Pulls a revisioned, expiring presence projection maintained by the server.
+ * A widget cache is a delivery surface, never the source of Sara's state.
  */
 import { apiClient } from './api'
 import { setWidgetData, isAvailable, type WidgetData } from '../../modules/sara-native'
@@ -13,37 +11,28 @@ import { setWidgetData, isAvailable, type WidgetData } from '../../modules/sara-
 export async function refreshWidgetData(): Promise<void> {
   if (!isAvailable()) return
   try {
-    const [statusRes, briefRes, mindRes] = await Promise.allSettled([
-      apiClient.get<any>('/api/sara/status'),
+    const [presenceRes, briefRes] = await Promise.allSettled([
+      apiClient.get<any>('/api/world-state/presence'),
       apiClient.get<any>('/api/sara/brief'),
-      // The global workspace synthesis (§3.1) — what Sara is holding in mind
-      // right now. This is the "she's alive" surface (§5.2.5): the widget shows
-      // her live internal state (prediction violations, open loops, concern),
-      // not a static thought.
-      apiClient.get<any>('/api/mind/anything-i-should-know'),
     ])
 
-    const data: WidgetData = {}
-
-    // Sara's actual first-person thought (the daemon's journal voice) is the
-    // best widget line — warm and conversational ("You just got home — quiet
-    // evening, holding off until you're settled"). Keep it as primary.
-    const GENERIC = /^(keeping an eye|here when you need|resting between)/i
-    let thought = ''
-    if (statusRes.status === 'fulfilled' && statusRes.value) {
-      data.emotional_state = statusRes.value.emotional_state || 'neutral'
-      if (statusRes.value.latest_thought) {
-        thought = String(statusRes.value.latest_thought).trim()
-      }
+    // Send every field, including empty strings, so old cached values are
+    // cleared instead of surviving forever after the server omits a field.
+    const data: WidgetData = {
+      presence_state: 'resting', presence_headline: 'Available', presence_detail: '',
+      presence_revision: '0', presence_updated_at: new Date().toISOString(),
+      presence_valid_until: new Date(Date.now() + 5 * 60_000).toISOString(),
+      next_event_title: '', next_event_time: '',
     }
-    // Only fall back to the workspace synthesis when she has no real thought to
-    // show (avoids replacing a warm line with mechanical "predictions violated"
-    // plumbing).
-    if ((!thought || GENERIC.test(thought)) && mindRes.status === 'fulfilled' && mindRes.value?.summary) {
-      const s = String(mindRes.value.summary).trim()
-      if (s && !/^nothing pressing/i.test(s)) thought = s
+    if (presenceRes.status === 'fulfilled' && presenceRes.value) {
+      const presence = presenceRes.value
+      data.presence_state = String(presence.state || 'resting')
+      data.presence_headline = String(presence.headline || 'Available').slice(0, 160)
+      data.presence_detail = String(presence.detail || '').slice(0, 240)
+      data.presence_revision = String(presence.revision || 0)
+      data.presence_updated_at = String(presence.updated_at || new Date().toISOString())
+      data.presence_valid_until = String(presence.valid_until || data.presence_valid_until)
     }
-    if (thought) data.latest_thought = thought.slice(0, 140)
 
     if (briefRes.status === 'fulfilled' && briefRes.value) {
       const sections = briefRes.value.brief_sections || []

@@ -5,7 +5,7 @@ All datetime operations should use these helpers to ensure Eastern timezone.
 
 from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
-from typing import Optional
+from typing import Optional, Union
 
 # User's timezone - Eastern Time
 USER_TIMEZONE = ZoneInfo("America/New_York")
@@ -141,6 +141,33 @@ def end_of_day(d: Optional[date] = None) -> datetime:
     if d is None:
         d = today()
     return datetime.combine(d, datetime.max.time(), tzinfo=USER_TIMEZONE)
+
+
+def local_day_bounds(d: Optional[date] = None) -> tuple[datetime, datetime]:
+    """[start, end) of a local (Eastern) day as **aware** datetimes.
+
+    This is the one right answer to "what does today mean" for any
+    ``timestamp with time zone`` column — `health_metric.recorded_at` chief
+    among them. Binding a *naive* ET midnight against a timestamptz column on a
+    UTC session made "today" start at 8 PM ET the previous day, which is how a
+    2026-08-31 health snapshot could pick up the evening-before's readings and
+    miss the morning's (see HEALTH_DATA_ACCURACY_FIX_PLAN, D5).
+
+    For the legacy naive-ET columns (calendar_event.start_time, the various
+    created_at columns) use ``naive_local_day_bounds`` instead — asyncpg can't
+    encode an aware datetime into a naive column.
+    """
+    if d is None:
+        d = today()
+    start = datetime.combine(d, datetime.min.time(), tzinfo=USER_TIMEZONE)
+    return start, start + timedelta(days=1)
+
+
+def naive_local_day_bounds(d: Optional[date] = None) -> tuple[datetime, datetime]:
+    """[start, end) of a local (Eastern) day as *naive* ET wall-clock — the
+    correct bounds for a ``timestamp without time zone`` column storing ET."""
+    start, end = local_day_bounds(d)
+    return start.replace(tzinfo=None), end.replace(tzinfo=None)
 
 
 def days_ago(n: int) -> date:
@@ -290,6 +317,85 @@ def render_relative(dt: Optional[datetime], reference: Optional[datetime] = None
 
     years = int(days / 365)
     return f"in {years} year{'s' if years != 1 else ''}"
+
+
+def _delta_phrase(seconds: float) -> str:
+    """"in 3h 10m" / "2h ago" / "now" — the parenthetical half of render_when."""
+    past = seconds < 0
+    seconds = abs(seconds)
+    if seconds < 90:
+        return "now"
+
+    minutes = int(seconds // 60)
+    if minutes < 60:
+        body = f"{minutes}m"
+    elif minutes < 60 * 24:
+        hours, rest = divmod(minutes, 60)
+        body = f"{hours}h {rest}m" if rest and hours < 6 else f"{hours}h"
+    else:
+        days, rest_minutes = divmod(minutes, 60 * 24)
+        hours = rest_minutes // 60
+        body = f"{days}d {hours}h" if hours and days < 3 else f"{days}d"
+    return f"{body} ago" if past else f"in {body}"
+
+
+def render_when(
+    dt: Union[datetime, date, None],
+    now: Optional[datetime] = None,
+    source_convention: Optional[str] = None,
+    all_day: bool = False,
+) -> str:
+    """The one way a moment is allowed to reach a prompt or a message.
+
+    Ground-truth invariant 4, "one clock": no timestamp reaches a model or David
+    except through here. Sara had three conventions in flight at once —
+    `world_thread.due_at` in UTC handed raw to prompts, `calendar_event.start_time`
+    naive ET, `notification_ack` formatting UTC with `%a %H:%M` — so a thread due
+    1:00 PM ET was announced as "your 5:00 AM EDT call" and a journal entry
+    written at 5:38 AM said 9:38 AM.
+
+    Returns e.g. ``"Tue Sep 1, 1:00 PM ET (in 3h 10m)"``, or ``"Thu Sep 3 (all
+    day)"`` for a date. Empty string for None — a missing time renders as nothing,
+    never as midnight.
+
+    A *naive* datetime is ambiguous and this function will not guess: pass
+    ``source_convention='utc'`` or ``'et'`` to say which column it came from.
+    Passing a naive datetime without one raises ValueError, which is the point —
+    the guess is what produced the bug.
+    """
+    if dt is None:
+        return ""
+
+    if isinstance(dt, datetime):
+        if dt.tzinfo is None:
+            convention = (source_convention or "").strip().lower()
+            if convention == "utc":
+                dt = dt.replace(tzinfo=UTC)
+            elif convention == "et":
+                dt = dt.replace(tzinfo=USER_TIMEZONE)
+            else:
+                raise ValueError(
+                    "render_when received a naive datetime without a "
+                    "source_convention; pass 'utc' or 'et' to say which column "
+                    f"it came from (got {dt!r})"
+                )
+        local_dt = dt.astimezone(USER_TIMEZONE)
+    elif isinstance(dt, date):
+        all_day = True
+        local_dt = datetime.combine(dt, datetime.min.time(), tzinfo=USER_TIMEZONE)
+    else:
+        raise TypeError(f"render_when expects a datetime or date, got {type(dt).__name__}")
+
+    reference = now.astimezone(USER_TIMEZONE) if now is not None else datetime.now(USER_TIMEZONE)
+    day = local_dt.strftime("%a %b %-d")
+    if local_dt.year != reference.year:
+        day = local_dt.strftime("%a %b %-d, %Y")
+
+    if all_day:
+        return f"{day} (all day)"
+
+    clock = local_dt.strftime("%-I:%M %p")
+    return f"{day}, {clock} ET ({_delta_phrase((local_dt - reference).total_seconds())})"
 
 
 def format_memory_timestamp(dt: Optional[datetime]) -> str:

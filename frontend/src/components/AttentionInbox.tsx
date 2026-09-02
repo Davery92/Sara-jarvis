@@ -29,6 +29,19 @@ interface AttentionInboxProps {
   onOpenNote?: (noteId: string) => void
 }
 
+interface FyiItem {
+  id: string
+  kind: string
+  ref_id: string
+  title: string
+  body?: string | null
+  priority: string
+  source: string
+  status: string
+  unread: boolean
+  created_at: string
+}
+
 const DAILY_REPORT_PREFIX = "Sara's Daily Report"
 
 async function findDailyReportNoteId(item: AttentionItem): Promise<string | null> {
@@ -96,6 +109,13 @@ export default function AttentionInbox({ onStartChat, onOpenNote }: AttentionInb
   const [customDateTime, setCustomDateTime] = useState('')
   const [toast, setToast] = useState<string | null>(null)
   const [hitlReply, setHitlReply] = useState<HITLReplyState | null>(null)
+  // The sidebar badge (compute_badge) counts needs-you + unread notifications,
+  // but this screen used to only fetch /autonomy/attention (needs-you) — so
+  // whenever there were unread notifications and zero pending attention items,
+  // the badge said N while this screen said "nothing needs your attention."
+  const [fyiItems, setFyiItems] = useState<FyiItem[]>([])
+  const [fyiLoading, setFyiLoading] = useState(true)
+  const [fyiBusy, setFyiBusy] = useState<string | null>(null)
 
   const showToast = (msg: string) => {
     setToast(msg)
@@ -152,6 +172,51 @@ export default function AttentionInbox({ onStartChat, onOpenNote }: AttentionInb
     const interval = setInterval(loadItems, 30000)
     return () => clearInterval(interval)
   }, [loadItems])
+
+  const loadFyi = useCallback(async () => {
+    try {
+      const res = await fetch(`${APP_CONFIG.apiUrl}/api/assistant-inbox/unified?limit=50`, {
+        credentials: 'include',
+      })
+      if (res.ok) {
+        const data = await res.json()
+        setFyiItems((data.fyi || []).filter((i: FyiItem) => i.unread))
+      }
+    } catch (err) {
+      console.error('Failed to load FYI items:', err)
+    } finally {
+      setFyiLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    loadFyi()
+    const interval = setInterval(loadFyi, 30000)
+    return () => clearInterval(interval)
+  }, [loadFyi])
+
+  const fyiFeedback = async (item: FyiItem, action: 'read' | 'dismissed') => {
+    if (item.kind !== 'notification') {
+      setFyiItems(prev => prev.filter(i => i.id !== item.id))
+      return
+    }
+    setFyiBusy(item.id)
+    try {
+      const res = await fetch(`${APP_CONFIG.apiUrl}/api/notifications/${item.ref_id}/feedback`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action }),
+      })
+      if (res.ok) {
+        setFyiItems(prev => prev.filter(i => i.id !== item.id))
+      }
+    } catch (err) {
+      console.error('Failed to record notification feedback:', err)
+    } finally {
+      setFyiBusy(null)
+    }
+  }
 
   const markRead = async (id: string) => {
     await fetch(`${APP_CONFIG.apiUrl}/autonomy/attention/${id}/read`, {
@@ -321,9 +386,9 @@ export default function AttentionInbox({ onStartChat, onOpenNote }: AttentionInb
         </div>
       )}
 
-      {items.length === 0 ? (
+      {items.length === 0 && !fyiLoading && fyiItems.length === 0 ? (
         <p className="pt-2 text-sm text-slate-500">Nothing needs your attention.</p>
-      ) : (
+      ) : items.length === 0 ? null : (
         <>
           <div className="flex justify-end pb-2">
             <button
@@ -537,6 +602,50 @@ export default function AttentionInbox({ onStartChat, onOpenNote }: AttentionInb
             })}
           </div>
         </>
+      )}
+
+      {fyiItems.length > 0 && (
+        <div className="mt-4">
+          <p className="pb-2 text-xs uppercase tracking-wide text-slate-500">FYI</p>
+          <div className="space-y-1">
+            {fyiItems.map(item => (
+              <div
+                key={item.id}
+                className="border-l-2 border-transparent px-3 py-2.5 transition-colors hover:bg-white/[0.04]"
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-[15px] text-slate-300">{item.title}</p>
+                    {item.body && (
+                      <p className="mt-0.5 line-clamp-2 text-xs text-slate-500">{item.body}</p>
+                    )}
+                    <p className="mt-0.5 text-xs text-slate-600">
+                      {item.source} · {new Date(item.created_at).toLocaleString()}
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 items-baseline gap-3 pt-0.5">
+                    <button
+                      onClick={() => fyiFeedback(item, 'read')}
+                      disabled={fyiBusy === item.id}
+                      className="text-xs text-slate-500 transition-colors hover:text-slate-300 disabled:opacity-50"
+                      title="Mark read"
+                    >
+                      Mark read
+                    </button>
+                    <button
+                      onClick={() => fyiFeedback(item, 'dismissed')}
+                      disabled={fyiBusy === item.id}
+                      className="text-xs text-slate-500 transition-colors hover:text-slate-300 disabled:opacity-50"
+                      title="Dismiss"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
       )}
     </div>
   )

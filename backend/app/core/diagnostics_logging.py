@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 
 _REDIS_KEY = "sara:system_events"
 _MAX_BUFFER = 5000
@@ -67,7 +68,15 @@ class RedisBufferingHandler(logging.Handler):
 
 
 def install(service_name: str = "backend") -> None:
-    """Attach the buffering handler to the root logger (idempotent)."""
+    """Attach the buffering handler to the root logger (idempotent).
+
+    Never attached under pytest. A test that deliberately exercises a failing
+    path logs WARNING/ERROR like any other caller, and those records were
+    landing in Sara's real diagnostics ring buffer — where they read back later
+    as genuine malfunctions and crowd out actual signal.
+    """
+    if "pytest" in sys.modules:
+        return
     root = logging.getLogger()
     for h in root.handlers:
         if isinstance(h, RedisBufferingHandler):

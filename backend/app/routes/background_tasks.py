@@ -2,6 +2,10 @@
 Background Tasks API Routes
 
 Endpoints for creating, monitoring, and managing background agent tasks.
+
+The listing endpoints are thin wrappers over `app.services.agent_activity`,
+which is the single source of truth shared with Sara's `get_background_tasks`
+tool. Response shapes are unchanged — web and iOS clients need no changes.
 """
 
 import asyncio
@@ -11,6 +15,14 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+
+from ..services.agent_activity import (
+    TaskListResponse,
+    TaskResponse,
+    get_agent_activity,
+    list_response as _list_response,
+    task_to_response as _task_to_response,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -25,50 +37,6 @@ class CreateTaskRequest(BaseModel):
 
 class ClarificationResponse(BaseModel):
     response: str
-
-
-class TaskResponse(BaseModel):
-    id: str
-    status: str
-    task_type: str
-    original_query: str
-    result_note_id: Optional[str] = None
-    workspace_folder_id: Optional[str] = None
-    clarification_question: Optional[str] = None
-    error_message: Optional[str] = None
-    status_label: Optional[str] = None  # friendly current-step label (e.g. code mode: "editing mul.py")
-    created_at: str
-    started_at: Optional[str] = None
-    completed_at: Optional[str] = None
-    updated_at: Optional[str] = None
-
-    class Config:
-        from_attributes = True
-
-
-class TaskListResponse(BaseModel):
-    tasks: List[TaskResponse]
-    active_count: int
-    total_count: int
-
-
-def _task_to_response(task) -> TaskResponse:
-    """Convert BackgroundTask model to response."""
-    return TaskResponse(
-        id=task.id,
-        status=task.status,
-        task_type=task.task_type,
-        original_query=task.original_query,
-        result_note_id=task.result_note_id,
-        workspace_folder_id=task.workspace_folder_id,
-        clarification_question=task.clarification_question,
-        error_message=task.error_message,
-        status_label=(task.task_metadata or {}).get("status_label"),
-        created_at=task.created_at.isoformat() if task.created_at else None,
-        started_at=task.started_at.isoformat() if task.started_at else None,
-        completed_at=task.completed_at.isoformat() if task.completed_at else None,
-        updated_at=task.updated_at.isoformat() if getattr(task, 'updated_at', None) else None
-    )
 
 
 @router.post("", response_model=TaskResponse)
@@ -120,15 +88,8 @@ async def get_active_tasks(
     current_user = Depends(lambda: _get_current_user())
 ):
     """Get all active (pending/running) tasks for current user."""
-    from ..services.background_task_service import get_background_task_service
-
-    service = get_background_task_service()
-    tasks = await service.get_active_tasks(db, current_user.id)
-
-    return TaskListResponse(
-        tasks=[_task_to_response(t) for t in tasks],
-        active_count=len(tasks),
-        total_count=len(tasks)
+    return _list_response(
+        await get_agent_activity(db, current_user.id, limit=25, active_only=True)
     )
 
 
@@ -140,19 +101,10 @@ async def get_recent_tasks(
     current_user = Depends(lambda: _get_current_user())
 ):
     """Get recent tasks for current user."""
-    from ..services.background_task_service import get_background_task_service
-
-    service = get_background_task_service()
-    tasks = await service.get_recent_tasks(
-        db, current_user.id, limit=limit, include_active=include_active
-    )
-
-    active_count = len([t for t in tasks if t.status in ["pending", "running", "needs_clarification"]])
-
-    return TaskListResponse(
-        tasks=[_task_to_response(t) for t in tasks],
-        active_count=active_count,
-        total_count=len(tasks)
+    return _list_response(
+        await get_agent_activity(
+            db, current_user.id, limit=limit, include_active=include_active
+        )
     )
 
 
@@ -164,7 +116,6 @@ async def get_task_status(
 ):
     """Get status of a specific task."""
     from ..services.background_task_service import get_background_task_service
-    from ..main_simple import BackgroundTask
 
     service = get_background_task_service()
     task = await service.get_task_status(db, task_id)
@@ -231,25 +182,6 @@ def _get_current_user():
     raise NotImplementedError("Integrate with actual auth system")
 
 
-# Alternative: Export setup function to be called from main_simple.py
-def setup_routes(app, get_db_func, get_user_func):
-    """
-    Setup routes with proper dependency injection.
-
-    Call this from main_simple.py after app is created:
-        from app.routes.background_tasks import setup_routes, router as bg_tasks_router
-        setup_routes(app, get_db, get_current_user)
-        app.include_router(bg_tasks_router)
-    """
-    global _get_db, _get_current_user
-
-    def _get_db():
-        return next(get_db_func())
-
-    # For current_user, we need the request context
-    # This will be handled differently - see integration below
-
-
 # For cleaner integration, here's a function that returns properly configured routes
 def get_configured_router(get_db, get_current_user):
     """
@@ -300,13 +232,8 @@ def get_configured_router(get_db, get_current_user):
         db: Session = Depends(get_db),
         current_user = Depends(get_current_user)
     ):
-        from ..services.background_task_service import get_background_task_service
-        service = get_background_task_service()
-        tasks = await service.get_active_tasks(db, current_user.id)
-        return TaskListResponse(
-            tasks=[_task_to_response(t) for t in tasks],
-            active_count=len(tasks),
-            total_count=len(tasks)
+        return _list_response(
+            await get_agent_activity(db, current_user.id, limit=25, active_only=True)
         )
 
     @configured_router.get("/recent")
@@ -316,15 +243,45 @@ def get_configured_router(get_db, get_current_user):
         db: Session = Depends(get_db),
         current_user = Depends(get_current_user)
     ):
+        return _list_response(
+            await get_agent_activity(
+                db, current_user.id, limit=limit, include_active=include_active
+            )
+        )
+
+    @configured_router.post("/{task_id}/cancel")
+    async def cancel(
+        task_id: str,
+        db: Session = Depends(get_db),
+        current_user = Depends(get_current_user)
+    ):
+        """Cancel an in-flight agent task.
+
+        Research plans are revoked through the research cancel service (which
+        also terminates the Celery worker); background_task rows are marked
+        failed so the UI stops showing them as active.
+        """
+        from ..services.research.cancel import cancel_research_plan
+
+        result = cancel_research_plan(db, current_user.id, task_id)
+        if result.get("cancelled"):
+            return result
+
+        # Not a research plan — fall back to the background_task table.
         from ..services.background_task_service import get_background_task_service
         service = get_background_task_service()
-        tasks = await service.get_recent_tasks(db, current_user.id, limit=limit, include_active=include_active)
-        active_count = len([t for t in tasks if t.status in ["pending", "running", "needs_clarification"]])
-        return TaskListResponse(
-            tasks=[_task_to_response(t) for t in tasks],
-            active_count=active_count,
-            total_count=len(tasks)
-        )
+        task = await service.get_task_status(db, task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail=result.get("error") or "Task not found")
+        if task.user_id != current_user.id:
+            raise HTTPException(status_code=403, detail="Not authorized")
+        if task.status not in ("pending", "running", "needs_clarification"):
+            return {"cancelled": False, "error": f"Task is already {task.status}"}
+
+        task.status = "failed"
+        task.error_message = "Cancelled by user"
+        db.commit()
+        return {"cancelled": True, "id": task_id, "kind": "background_task"}
 
     @configured_router.get("/{task_id}")
     async def get_status(

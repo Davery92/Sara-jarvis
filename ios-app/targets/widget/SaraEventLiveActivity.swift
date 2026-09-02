@@ -14,11 +14,11 @@ struct SaraEventLiveActivity: Widget {
           .foregroundStyle(.tint)
         VStack(alignment: .leading, spacing: 2) {
           Text(context.attributes.title).font(.headline).lineLimit(1)
-          Text(context.isStale ? "No longer updating — open the app" : context.state.subtitle)
+          Text(isExpired(context) ? "Available" : context.state.subtitle)
             .font(.caption).foregroundStyle(.secondary).lineLimit(1)
         }
         Spacer()
-        if context.state.startEpochMs > 0 && !context.isStale {
+        if context.state.startEpochMs > 0 && !isExpired(context) {
           Text(timerInterval: elapsedRange(context.state.startEpochMs), countsDown: false)
             .font(.title3).monospacedDigit().frame(width: 64).multilineTextAlignment(.trailing)
         }
@@ -38,7 +38,13 @@ struct SaraEventLiveActivity: Widget {
           }
         }
         DynamicIslandExpandedRegion(.bottom) {
-          Text(context.state.subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+          VStack(alignment: .leading, spacing: 2) {
+            Text(isExpired(context) ? "Available" : context.state.subtitle)
+              .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            if !context.state.detail.isEmpty && !isExpired(context) {
+              Text(context.state.detail).font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
+            }
+          }
         }
       } compactLeading: {
         Image(systemName: icon(for: context.attributes.kind))
@@ -66,5 +72,9 @@ struct SaraEventLiveActivity: Widget {
     let now = Date()
     let lower = start <= now ? start : now
     return lower...now.addingTimeInterval(60 * 60 * 24)
+  }
+
+  private func isExpired(_ context: ActivityViewContext<SaraEventAttributes>) -> Bool {
+    context.isStale || context.state.validUntilEpochMs <= Date().timeIntervalSince1970 * 1000
   }
 }

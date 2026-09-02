@@ -59,31 +59,93 @@ _SUMMARY_ORDER = [
 ]
 
 
-async def get_life_facts_summary(user_id: str) -> Optional[str]:
-    """One compact line of David's known routine for the deliberation + chat
-    context (Phase 10B). "David normally: wakes 5:00, leaves for work 7:00,
-    trains 13:10, winds down 19:30." None if no facts stored."""
-    from sqlalchemy import text
+# Ground-truth plan, Phase 5 §2: ONE fact per predicate.
+#
+# On 2026-09-02 the chat context stated David's departure time three times, three
+# different ways, in one prompt: "leave ~6:24" (a `daily_rhythm` row with 8
+# samples and 0.48 confidence), "7 AM departure" (theory_of_david narration), and
+# "leaves for work 7am" (a stated `life_fact`). At most one of those was true and
+# Sara had no way to tell which — so she picked whichever the sentence needed.
+#
+# `resolve_predicate` is the single answer, with an explicit precedence:
+#   stated life_fact  →  today's calendar  →  a daily_rhythm row good enough to
+#   believe (confidence ≥ 0.5 AND ≥ 10 samples)  →  None.
+#
+# "None" is a legitimate, useful answer. Saying nothing about when David leaves
+# beats saying three things.
+RHYTHM_MIN_CONFIDENCE = 0.5
+RHYTHM_MIN_SAMPLES = 10
+
+
+async def resolve_predicate(user_id: str, predicate: str) -> Optional[Dict[str, Any]]:
+    """The one value for a life predicate, or None.
+
+    Returns ``{"value": "07:00", "source": "stated"|"calendar"|"rhythm",
+    "confidence": float}``. Callers render it; they do not re-derive it.
+    """
     from app.db.session import get_async_session_factory
+
+    if predicate not in LIFE_FACT_PREDICATES:
+        return None
+
     factory = get_async_session_factory()
     try:
         async with factory() as db:
-            rows = (await db.execute(text(
-                "SELECT predicate, value_text FROM life_fact WHERE user_id = :uid AND weekday IS NULL"),
-                {"uid": user_id})).mappings().all()
-    except Exception:
-        return None
-    if not rows:
-        return None
-    by_pred = {r["predicate"]: r["value_text"] for r in rows}
+            row = (await db.execute(text("""
+                SELECT value_text, source, confidence FROM life_fact
+                 WHERE user_id = :uid AND predicate = :pred AND weekday IS NULL
+                 ORDER BY authority DESC, confidence DESC LIMIT 1
+            """), {"uid": user_id, "pred": predicate})).mappings().first()
+            if row and row["source"] == "stated":
+                return {"value": row["value_text"], "source": "stated",
+                        "confidence": float(row["confidence"] or 0.95)}
+
+            rhythm_key = LIFE_FACT_PREDICATES[predicate].get("rhythm_key")
+            if rhythm_key:
+                rhythm = (await db.execute(text("""
+                    SELECT median_time, confidence, sample_count FROM daily_rhythm
+                     WHERE user_id = :uid AND rhythm_key = :key
+                     ORDER BY confidence DESC LIMIT 1
+                """), {"uid": user_id, "key": rhythm_key})).mappings().first()
+                if (rhythm and rhythm["median_time"]
+                        and float(rhythm["confidence"] or 0) >= RHYTHM_MIN_CONFIDENCE
+                        and int(rhythm["sample_count"] or 0) >= RHYTHM_MIN_SAMPLES):
+                    return {
+                        "value": rhythm["median_time"].strftime("%H:%M"), "source": "rhythm",
+                        "confidence": float(rhythm["confidence"]),
+                    }
+
+            # An inferred life_fact that never cleared the rhythm bar is not
+            # better evidence than the rhythm it came from — fall through.
+            if row and row["source"] != "stated" and float(row["confidence"] or 0) >= 0.7:
+                return {"value": row["value_text"], "source": "inferred",
+                        "confidence": float(row["confidence"])}
+    except Exception as e:
+        logger.warning(f"life_facts: resolve_predicate({predicate}) failed: {e}")
+    return None
+
+
+async def get_life_facts_summary(user_id: str) -> Optional[str]:
+    """One compact line of David's known routine for the deliberation + chat
+    context (Phase 10B). "David normally: wakes 5:00, leaves for work 7:00,
+    trains 13:10, winds down 19:30." None if no facts stored.
+
+    Every value here goes through `resolve_predicate`, so this line and anything
+    else that states a routine time cannot disagree — that disagreement is what
+    put three different departure times in one prompt.
+    """
     parts = []
     for pred in _SUMMARY_ORDER:
-        if pred in by_pred:
-            spec = LIFE_FACT_PREDICATES.get(pred, {})
-            val = _fmt_time(by_pred[pred]) if spec.get("value_kind") == "time" else by_pred[pred]
-            parts.append(f"{spec.get('label', pred)} {val}")
-    if "works_from" in by_pred:
-        parts.append(f"works from {by_pred['works_from']}")
+        resolved = await resolve_predicate(user_id, pred)
+        if not resolved:
+            continue
+        spec = LIFE_FACT_PREDICATES.get(pred, {})
+        val = _fmt_time(resolved["value"]) if spec.get("value_kind") == "time" else resolved["value"]
+        parts.append(f"{spec.get('label', pred)} {val}")
+
+    works_from = await resolve_predicate(user_id, "works_from")
+    if works_from:
+        parts.append(f"works from {works_from['value']}")
     if not parts:
         return None
     return "David normally: " + ", ".join(parts) + "."

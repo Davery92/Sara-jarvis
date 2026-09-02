@@ -35,7 +35,10 @@ from app.tools.fitness.program_tools import (
     PhaseListTool,
     PhaseGetTool,
     PhaseUpdateTool,
-    PhaseActivateTool
+    PhaseActivateTool,
+    PhaseInsertBlockTool,
+    PhaseEndBlockTool,
+    NutritionGuideUpdateTool
 )
 from app.tools.fitness.training_schedule import TrainingScheduleTool
 
@@ -68,6 +71,9 @@ __all__ = [
     "PhaseGetTool",
     "PhaseUpdateTool",
     "PhaseActivateTool",
+    "PhaseInsertBlockTool",
+    "PhaseEndBlockTool",
+    "NutritionGuideUpdateTool",
     # Training Schedule
     "TrainingScheduleTool",
 ]

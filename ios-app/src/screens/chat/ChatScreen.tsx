@@ -22,9 +22,9 @@ import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { HealthAlertContext, NudgeContext, QuickReplyContext, HeartbeatContext, NotificationContext, NoteContext } from '../../types/navigation';
 import { Message } from '../../types/api';
-import { ContentCard as ContentCardType, SuggestedAction, ToolStatus } from '../../types/cards';
+import { AssistantActivity, ContentCard as ContentCardType, SuggestedAction } from '../../types/cards';
 import { assistantAnalytics } from '../../services/assistantAnalytics';
-import { chatService } from '../../services/chat';
+import { chatService, createClientConversationId } from '../../services/chat';
 import { surfacesService } from '../../services/surfaces';
 import { voiceService } from '../../services/voice';
 import { ImageAttachment } from '../../services/imagePicker';
@@ -35,7 +35,7 @@ import StreamingIndicator from '../../components/chat/StreamingIndicator';
 import ChatInput from '../../components/chat/ChatInput';
 import ContentCard from '../../components/cards/ContentCard';
 import SuggestedActions from '../../components/chat/SuggestedActions';
-import ToolStatusIndicator from '../../components/chat/ToolStatusIndicator';
+import AssistantActivityIndicator from '../../components/chat/AssistantActivityIndicator';
 import { borderRadius, colors, fontSizes, shadows, spacing } from '../../styles/theme';
 import { apiClient, ChatModel, ChatModelsResponse } from '../../services/api';
 import { navigateToNoteEditor, handleSaraUiCommand } from '../../services/navigation';
@@ -91,13 +91,16 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
   const onBriefCollapse = 'onBriefCollapse' in props ? props.onBriefCollapse : undefined;
   const navigation = 'navigation' in props ? props.navigation : undefined;
   const route = 'route' in props ? props.route : undefined;
+  // The tab bar already owns the device's bottom safe-area inset. Applying it
+  // here too leaves a home-indicator-sized gap below the composer.
+  const isTabScreen = navigation?.getState?.().type === 'tab';
   const [messages, setMessages] = useState<Message[]>([]);
   const [streamingMessage, setStreamingMessage] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
   // Content cards and suggested actions state
   const [pendingCards, setPendingCards] = useState<ContentCardType[]>([]);
   const [suggestedActions, setSuggestedActions] = useState<SuggestedAction[]>([]);
-  const [activeToolStatus, setActiveToolStatus] = useState<ToolStatus | null>(null);
+  const [assistantActivity, setAssistantActivity] = useState<AssistantActivity | null>(null);
   const [isPlayingAudio, setIsPlayingAudio] = useState(false);
   const [voiceInitialized, setVoiceInitialized] = useState(false);
   const [continuousVoiceMode, setContinuousVoiceMode] = useState(false);
@@ -118,6 +121,10 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
   const [inboxCount, setInboxCount] = useState(0);
   const [availableModels, setAvailableModels] = useState<ChatModelsResponse | null>(null);
   const [showConversationControls, setShowConversationControls] = useState(false);
+  // Sara's live status, folded into the header (Phase C of the chat layout
+  // cleanup) instead of occupying its own full-width strip.
+  const saraStatus = useSaraStatus(!isEmbedded);
+  const [statusExpanded, setStatusExpanded] = useState(false);
   const [conversationContext, setConversationContext] = useState<ConversationContextState | null>(null);
   const [contextExpanded, setContextExpanded] = useState(false);
   // Collapse the context summary whenever a new context loads.
@@ -630,6 +637,7 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
           setIsStreaming(false);
           setStreamingMessage('');
           streamingMessageRef.current = '';
+          setAssistantActivity(null);
           // Reload conversation to get completed response
           reloadConversationHistory();
         }
@@ -725,6 +733,18 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
   }, [loadInboxCount]);
   useEffect(() => { if (!isStreaming) loadInboxCount(); }, [isStreaming, loadInboxCount]);
 
+  const ensureConversationIdForTurn = useCallback(() => {
+    if (conversationId) return conversationId;
+
+    const newConversationId = createClientConversationId();
+    // Claim the thread before starting the request. This immediately drives
+    // the active-conversation effect and the same id is sent to the backend,
+    // so navigating away cannot move the completed turn to another thread.
+    setConversationId(newConversationId);
+    console.log('[Chat] Claimed new conversation before send:', newConversationId);
+    return newConversationId;
+  }, [conversationId]);
+
   const handleSendMessage = async (
     messageText: string,
     images?: ImageAttachment[],
@@ -743,7 +763,7 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
     setSuggestedActions([]);
     setPendingCards([]);
     pendingCardsRef.current = [];
-    setActiveToolStatus(null);
+    setAssistantActivity(null);
     if (activeConversationContext) {
       setConversationContext(null);
     }
@@ -782,17 +802,20 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
     setIsStreaming(true);
     setStreamingMessage('');
     streamingMessageRef.current = '';
+    setAssistantActivity({ phase: 'thinking' });
 
     // Send FULL conversation history to backend with streaming
     // Filter out the welcome message - it's not part of the real conversation
     const conversationMessages = updatedMessages.filter(m => m.id !== 'welcome');
 
-    console.log('[Chat] 📤 Sending message with conversationId:', conversationId, 'model:', selectedModel, 'ephemeral:', isEphemeral, 'images:', images?.length || 0);
+    const turnConversationId = ensureConversationIdForTurn();
+
+    console.log('[Chat] 📤 Sending message with conversationId:', turnConversationId, 'model:', selectedModel, 'ephemeral:', isEphemeral, 'images:', images?.length || 0);
 
     await chatService.sendMessage(
       {
         messages: conversationMessages,  // Send full history, not just new message
-        conversationId,
+        conversationId: turnConversationId,
         images,  // Pass images to the service
         documents,  // Pass document attachments (PDF/Word/text) to the service
         model: selectedModel,  // Pass selected model
@@ -805,8 +828,8 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
           pendingCardsRef.current = [...pendingCardsRef.current, card];
           setPendingCards(prev => [...prev, card]);
         },
-        onToolStatus: (status: ToolStatus) => {
-          setActiveToolStatus(status.status === 'executing' ? status : null);
+        onAssistantActivity: (activity: AssistantActivity) => {
+          setAssistantActivity(activity);
         },
         onSuggestedActions: (actions: SuggestedAction[]) => {
           setSuggestedActions(actions);
@@ -823,7 +846,7 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
         // Haptic feedback on complete
         try { Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success); } catch {}
 
-        const resolvedConversationId = newConversationId || conversationId;
+        const resolvedConversationId = newConversationId || turnConversationId;
         const responseText = await resolveAssistantResponseText(
           streamingMessageRef.current,
           resolvedConversationId
@@ -846,14 +869,14 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
         setIsStreaming(false);
         setPendingCards([]);
         pendingCardsRef.current = [];
-        setActiveToolStatus(null);
+        setAssistantActivity(null);
 
         // Always update conversation_id if backend provides one
         console.log('[Chat] 📨 Received conversation_id from backend:', newConversationId);
-        console.log('[Chat] 📊 Current conversation_id:', conversationId);
+        console.log('[Chat] 📊 Turn conversation_id:', turnConversationId);
         if (resolvedConversationId) {
-          if (resolvedConversationId !== conversationId) {
-            console.log('[Chat] 🔄 Updating conversation_id from', conversationId, 'to', resolvedConversationId);
+          if (resolvedConversationId !== turnConversationId) {
+            console.log('[Chat] 🔄 Updating conversation_id from', turnConversationId, 'to', resolvedConversationId);
             setConversationId(resolvedConversationId);
           } else {
             console.log('[Chat] ✅ conversation_id already matches');
@@ -868,6 +891,7 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
         setIsStreaming(false);
         setStreamingMessage('');
         streamingMessageRef.current = '';
+        setAssistantActivity(null);
 
         // If the app was backgrounded during streaming, don't show error -
         // the AppState handler will reload the completed response
@@ -1057,12 +1081,14 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
       setIsStreaming(true);
       setStreamingMessage('Transcribing...');
 
+      setAssistantActivity(null);
       // Transcribe audio with backend Whisper endpoint.
       const transcribedText = await voiceService.transcribeAudio(audioUri);
 
       if (!transcribedText || transcribedText.trim().length === 0) {
         setIsStreaming(false);
         setStreamingMessage('');
+        setAssistantActivity(null);
 
         // Resume listening if in continuous mode
         if (shouldResumeListening.current) {
@@ -1088,21 +1114,26 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
       });
 
       setMessages((prev) => [...prev, userMessage]);
-      setStreamingMessage('Thinking...');
+      setStreamingMessage('');
+      setAssistantActivity({ phase: 'thinking' });
       streamingMessageRef.current = '';
 
       // Send transcribed text through regular chat (same as text messages)
       const updatedMessages = [...messagesRef.current, userMessage];
       const conversationMessages = updatedMessages.filter(m => m.id !== 'welcome');
 
+      const turnConversationId = ensureConversationIdForTurn();
       await chatService.sendMessage(
         {
           messages: conversationMessages,
-          conversationId,
+          conversationId: turnConversationId,
           model: selectedModel,  // Pass selected model
           ephemeral: isEphemeral,  // Pass ephemeral mode
           source: 'ios',
           onUiCommand: handleSaraUiCommand,
+          onAssistantActivity: (activity: AssistantActivity) => {
+            setAssistantActivity(activity);
+          },
         },
         // onChunk
         (chunk: string) => {
@@ -1113,7 +1144,7 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
         async (newConversationId: string, episodeId?: string) => {
           const responseText = await resolveAssistantResponseText(
             streamingMessageRef.current,
-            newConversationId || conversationId
+            newConversationId || turnConversationId
           );
 
           // Add assistant message with episode_id for rating
@@ -1130,8 +1161,9 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
           setStreamingMessage('');
           streamingMessageRef.current = '';
           setIsStreaming(false);
+          setAssistantActivity(null);
 
-          if (newConversationId && newConversationId !== conversationId) {
+          if (newConversationId && newConversationId !== turnConversationId) {
             setConversationId(newConversationId);
           }
 
@@ -1160,6 +1192,7 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
           console.error('Chat error:', error);
           setIsStreaming(false);
           setStreamingMessage('');
+          setAssistantActivity(null);
           Alert.alert('Error', 'Failed to send message. Please try again.');
 
           // Resume listening if in continuous mode
@@ -1264,7 +1297,7 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
             setSuggestedActions([]);
             setPendingCards([]);
             pendingCardsRef.current = [];
-            setActiveToolStatus(null);
+            setAssistantActivity(null);
 
             // Clear active conversation on backend
             try {
@@ -1295,13 +1328,12 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
 
     return (
       <View>
-        {streamingMessage ? (
-          <MessageBubble message={tempMessage} />
-        ) : activeToolStatus ? (
-          <ToolStatusIndicator toolName={activeToolStatus.tool} status={activeToolStatus.status} />
-        ) : (
+        {streamingMessage ? <MessageBubble message={tempMessage} /> : null}
+        {assistantActivity ? (
+          <AssistantActivityIndicator activity={assistantActivity} />
+        ) : !streamingMessage ? (
           <StreamingIndicator />
-        )}
+        ) : null}
       </View>
     );
   };
@@ -1386,7 +1418,10 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
   }, [navigation]);
 
   return (
-    <SafeAreaView style={[styles.container, isEphemeral && styles.ephemeralContainer]} edges={isEmbedded ? [] : ['top', 'bottom']}>
+    <SafeAreaView
+      style={[styles.container, isEphemeral && styles.ephemeralContainer]}
+      edges={isEmbedded ? [] : isTabScreen ? ['top'] : ['top', 'bottom']}
+    >
       <KeyboardAvoidingView
         style={styles.container}
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
@@ -1404,14 +1439,43 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
               <Text style={styles.backButtonText}>Back</Text>
             </TouchableOpacity>
           ) : null}
-          <View style={styles.headerCopy}>
-            <Text style={styles.headerEyebrow}>
+          {/* One line of chrome. The old eyebrow + never-changing tagline
+              ("Ask, speak, or pick up where you left off.") cost two rows of
+              the message list on every screen. */}
+          <TouchableOpacity
+            style={styles.headerCopy}
+            onPress={() => saraStatus && setStatusExpanded((v) => !v)}
+            activeOpacity={saraStatus ? 0.7 : 1}
+            disabled={!saraStatus}
+          >
+            <Text style={styles.headerTitle} numberOfLines={1}>
               {isEmbedded ? 'Sara conversation' : 'Sara'}
             </Text>
-            <Text style={styles.headerTitle}>
-              {isEphemeral ? 'Private mode is on for this conversation.' : 'Ask, speak, or pick up where you left off.'}
-            </Text>
-          </View>
+            {isEphemeral ? (
+              <Text style={styles.headerSubtitle} numberOfLines={1}>Private mode</Text>
+            ) : saraStatus ? (
+              <View style={styles.statusLine}>
+                <Text style={styles.statusLineText} numberOfLines={1}>
+                  {saraStatus.headline || `is ${STATUS_LABELS[saraStatus.state] || 'available'}`}
+                </Text>
+                <Ionicons
+                  name={statusExpanded ? 'chevron-up' : 'chevron-down'}
+                  size={12}
+                  color={colors.textMuted}
+                />
+              </View>
+            ) : null}
+          </TouchableOpacity>
+          {messages.length > 0 ? (
+            <TouchableOpacity
+              style={styles.headerIconButton}
+              onPress={handleClearChat}
+              accessibilityLabel="Start a new chat"
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            >
+              <Ionicons name="create-outline" size={18} color={colors.textMuted} />
+            </TouchableOpacity>
+          ) : null}
           <TouchableOpacity
             style={[styles.controlsButton, isEphemeral && styles.controlsButtonActive]}
             onPress={() => setShowConversationControls(true)}
@@ -1426,6 +1490,8 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
             </Text>
           </TouchableOpacity>
         </View>
+
+        {statusExpanded && !isEphemeral ? <SaraStatusDetails status={saraStatus} /> : null}
 
         {/* Conversation Controls Modal */}
         <Modal
@@ -1507,9 +1573,6 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
           </Pressable>
         </Modal>
 
-        {/* Sara Status Bar - hidden in embedded mode (shown in IntelligentBrief) */}
-        {!isEmbedded && <SaraStatusBar />}
-
         {/* Messages List */}
         <FlatList
           ref={flatListRef}
@@ -1525,16 +1588,6 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
             flatListRef.current?.scrollToEnd({ animated: false });
           }}
         />
-
-        {/* New Chat button - show only if there are messages */}
-        {messages.length > 0 && (
-          <TouchableOpacity
-            style={styles.clearButton}
-            onPress={handleClearChat}
-          >
-            <Text style={styles.clearButtonText}>+ New Chat</Text>
-          </TouchableOpacity>
-        )}
 
         {conversationContext && (
           <View style={styles.contextBanner}>
@@ -1611,7 +1664,11 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
 
         {/* Suggested Actions */}
         {suggestedActions.length > 0 && !isStreaming && (
-          <SuggestedActions actions={suggestedActions} onAction={handleSuggestedAction} />
+          <SuggestedActions
+            actions={suggestedActions}
+            onAction={handleSuggestedAction}
+            onDismiss={() => setSuggestedActions([])}
+          />
         )}
 
         {/* Inbox chip (Phase 12K.4) — pull pending items into the chat */}
@@ -1638,6 +1695,11 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
         <ChatInput
           onSend={handleSendMessage}
           onVoiceMessage={handleVoiceMessage}
+          onTextChange={(text) => {
+            if (text.length > 0 && suggestedActions.length > 0) {
+              setSuggestedActions([]);
+            }
+          }}
           onHoldToTalkStart={() => {
             assistantAnalytics.track('assistant.voice_hold_to_talk_started', {
               screen: isEmbedded ? 'sara_embedded' : 'chat',
@@ -1701,100 +1763,73 @@ export default ChatScreen;
 
 // --- Sara Status Bar Component ---
 const STATUS_LABELS: Record<string, string> = {
-  curious: 'looking into something',
-  calm: 'ready',
-  alert: 'watching closely',
-  concerned: 'flagging something important',
-  happy: 'in a good groove',
-  focused: 'working through something',
-  neutral: 'available',
-  reflective: 'connecting context',
-  attentive: 'paying attention',
+  resting: 'available',
+  observing: 'paying attention',
+  interpreting: 'connecting context',
+  deliberating: 'thinking something through',
+  acting: 'working',
+  waiting: 'waiting on something',
+  engaged: 'here with you',
+  degraded: 'dealing with a problem',
 };
 
-function SaraStatusBar() {
+/**
+ * Sara's versioned presence, polled every 15s. Expiry is enforced by the
+ * server, so a killed worker can never leave a permanent "thinking" line.
+ * This used to render its own
+ * full-width strip under the header; it is now a one-line subtitle inside the
+ * header (see `statusLine` below) with the details on tap, so the message list
+ * has exactly one band of chrome above it. Returns null until the first poll
+ * lands, and stays null if the endpoint is unreachable.
+ */
+function useSaraStatus(enabled: boolean = true) {
   const [status, setStatus] = useState<any>(null);
-  const [expanded, setExpanded] = useState(false);
 
   useEffect(() => {
+    if (!enabled) {
+      setStatus(null);
+      return;
+    }
     const fetchStatus = async () => {
       try {
-        const data = await apiClient.get('/api/sara/status');
+        const data = await apiClient.get('/api/world-state/presence');
         setStatus(data);
       } catch {
         // Graceful degradation - renders nothing
       }
     };
     fetchStatus();
-    const interval = setInterval(fetchStatus, 60000);
+    const interval = setInterval(fetchStatus, 15000);
     return () => clearInterval(interval);
-  }, []);
+  }, [enabled]);
 
+  return status;
+}
+
+function SaraStatusDetails({ status }: { status: any }) {
   if (!status) return null;
-
-  const statusLabel = STATUS_LABELS[status.emotional_state] || 'available';
-  const thought = status.latest_thought
-    ? (status.latest_thought.length > 60 ? status.latest_thought.slice(0, 60) + '...' : status.latest_thought)
-    : null;
-
   return (
-    <TouchableOpacity
-      onPress={() => setExpanded(!expanded)}
-      style={statusBarStyles.container}
-      activeOpacity={0.7}
-    >
-      <View style={statusBarStyles.row}>
-        <View style={statusBarStyles.statusBadge}>
-          <Ionicons name="sparkles-outline" size={13} color={colors.accent} />
-        </View>
-        <Text style={statusBarStyles.state}>Sara is {statusLabel}</Text>
-        {thought && <Text style={statusBarStyles.thought} numberOfLines={1}>{thought}</Text>}
-        <Ionicons name={expanded ? 'chevron-up' : 'chevron-down'} size={14} color={colors.textMuted} />
-      </View>
-      {expanded && (
-        <View style={statusBarStyles.details}>
-          {status.watching_for && (
-            <Text style={statusBarStyles.detail}>Watching for: {status.watching_for}</Text>
-          )}
-          {status.last_action && (
-            <Text style={statusBarStyles.detail}>Recently: {status.last_action.slice(0, 80)}</Text>
-          )}
-          {status.david_energy != null && (
-            <Text style={statusBarStyles.detail}>Energy estimate: {(status.david_energy * 100).toFixed(0)}%</Text>
-          )}
-          {status.pkg_facts_count > 0 && (
-            <Text style={statusBarStyles.detail}>Loaded context: {status.pkg_facts_count} memory item{status.pkg_facts_count === 1 ? '' : 's'}</Text>
-          )}
-        </View>
+    <View style={statusBarStyles.details}>
+      {status.detail ? (
+        <Text style={statusBarStyles.detail}>{status.detail.slice(0, 200)}</Text>
+      ) : (
+        <Text style={statusBarStyles.detail}>
+          {STATUS_LABELS[status.state] || 'available'}
+        </Text>
       )}
-    </TouchableOpacity>
+    </View>
   );
 }
 
 const statusBarStyles = StyleSheet.create({
-  container: {
-    backgroundColor: colors.assistant.panel,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.assistant.border,
+  details: {
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.sm,
+    gap: 3,
+    backgroundColor: colors.assistant.panelMuted,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.assistant.border,
   },
-  row: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.xs,
-  },
-  statusBadge: {
-    width: 22,
-    height: 22,
-    borderRadius: borderRadius.full,
-    backgroundColor: colors.assistant.passiveSoft,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  state: { color: colors.textSecondary, fontSize: fontSizes.xs, fontWeight: '600' },
-  thought: { flex: 1, color: colors.textMuted, fontSize: 11, fontStyle: 'italic' },
-  details: { marginTop: spacing.xs, gap: 3 },
   detail: { color: colors.textMuted, fontSize: 11 },
 });
 
@@ -1836,18 +1871,35 @@ const styles = StyleSheet.create({
     flex: 1,
     paddingRight: spacing.md,
   },
-  headerEyebrow: {
-    color: colors.textMuted,
-    fontSize: fontSizes.xs,
-    fontWeight: '600',
-    letterSpacing: 0.6,
-    textTransform: 'uppercase',
-    marginBottom: 2,
-  },
   headerTitle: {
     color: colors.text,
-    fontSize: fontSizes.sm,
-    fontWeight: '500',
+    fontSize: fontSizes.md,
+    fontWeight: '600',
+  },
+  headerSubtitle: {
+    color: colors.secondary,
+    fontSize: fontSizes.xs,
+    fontWeight: '600',
+  },
+  statusLine: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+  },
+  statusLineText: {
+    color: colors.textMuted,
+    fontSize: fontSizes.xs,
+    flexShrink: 1,
+  },
+  headerIconButton: {
+    width: 32,
+    height: 32,
+    borderRadius: borderRadius.full,
+    borderWidth: 1,
+    borderColor: colors.assistant.border,
+    backgroundColor: colors.assistant.panelMuted,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   controlsButton: {
     flexDirection: 'row',
@@ -2003,21 +2055,6 @@ const styles = StyleSheet.create({
   messageList: {
     paddingVertical: spacing.md,
     flexGrow: 1,
-  },
-  clearButton: {
-    alignSelf: 'center',
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
-    marginBottom: spacing.sm,
-    borderRadius: borderRadius.full,
-    backgroundColor: colors.assistant.panel,
-    borderWidth: 1,
-    borderColor: colors.assistant.border,
-  },
-  clearButtonText: {
-    color: colors.textSecondary,
-    fontSize: 14,
-    fontWeight: '600',
   },
   contextBanner: {
     marginHorizontal: spacing.md,

@@ -23,13 +23,16 @@ function endTaskActivityFromPush(data: any): void {
 
 // Configure how notifications appear when app is in foreground
 Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldShowAlert: true,
-    shouldPlaySound: true,
-    shouldSetBadge: true,
-    shouldShowBanner: true,
-    shouldShowList: true,
-  }),
+  handleNotification: async (notification) => {
+    const silentPresence = notification.request.content.data?.type === 'world_presence_update'
+    return {
+      shouldShowAlert: !silentPresence,
+      shouldPlaySound: !silentPresence,
+      shouldSetBadge: !silentPresence,
+      shouldShowBanner: !silentPresence,
+      shouldShowList: !silentPresence,
+    }
+  },
 });
 
 // Notification action identifiers
@@ -299,6 +302,9 @@ class PushNotificationService {
         // Task finished while the app is foregrounded — don't wait for the
         // next poll cycle (or a tap) to clear the Live Activity.
         endTaskActivityFromPush(notification.request.content.data);
+        if (notification.request.content.data?.type === 'world_presence_update') {
+          void import('./widgetBridge').then(({ refreshWidgetData }) => refreshWidgetData())
+        }
         if (this.onNotificationReceived) {
           this.onNotificationReceived(notification);
         }

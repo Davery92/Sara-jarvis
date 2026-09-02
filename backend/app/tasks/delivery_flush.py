@@ -22,6 +22,21 @@ _DAVID = get_owner_id()
 # Don't sit on held items forever, even if we can't confidently sense wake.
 _MAX_HOLD_HOURS = 12
 
+# Give the 06:00 morning-brief task first refusal on overnight items. Without
+# this small coordination window, the 15-minute generic flush can observe wake
+# at 05:xx/06:00, drain the queue, and then the brief creates a second morning
+# push a few minutes later.
+_MORNING_ANCHOR_START_HOUR = 4
+_MORNING_ANCHOR_READY_HOUR = 6
+_MORNING_ANCHOR_READY_MINUTE = 10
+
+
+def _waiting_for_morning_anchor(moment) -> bool:
+    minutes = moment.hour * 60 + moment.minute
+    start = _MORNING_ANCHOR_START_HOUR * 60
+    ready = _MORNING_ANCHOR_READY_HOUR * 60 + _MORNING_ANCHOR_READY_MINUTE
+    return start <= minutes < ready
+
 
 def _run_async(coro):
     try:
@@ -40,17 +55,37 @@ async def _flush(user_id: str) -> dict:
     from app.services.delivery_policy import sense_sleep_state
     from app.services.unified_notification import send_notification
 
+    from app.services.unified_notification import _log_notification
+
     sf = get_async_session_factory()
     async with sf() as db:
+        # 'await_departure' items (Phase 4) are drained by departure_brief.py,
+        # not swept into this generic wake digest — queuing them here would
+        # defeat the point of timing them to just before David leaves.
         pending = (await db.execute(text("""
             SELECT id, title, message, category, priority, source, topic, held_at, deliver_after
             FROM held_notification
             WHERE user_id = :uid AND status = 'held'
+              AND held_reason IS DISTINCT FROM 'await_departure'
             ORDER BY held_at ASC
         """), {"uid": user_id})).fetchall()
 
         if not pending:
             return {"effect": "no_held_items", "flushed": 0}
+        # The brief owns the normal wake-anchor window and folds these rows into
+        # one useful push. Truly stale rows may still escape the guard so a
+        # failed brief job cannot strand a notification indefinitely.
+        now = local_now()
+        if _waiting_for_morning_anchor(now):
+            stale = [
+                row for row in pending
+                if row.held_at and (now - row.held_at).total_seconds() >= _MAX_HOLD_HOURS * 3600
+            ]
+            if not stale:
+                return {
+                    "effect": "awaiting_morning_anchor", "flushed": 0,
+                    "held": len(pending),
+                }
 
         sleep = await sense_sleep_state(db, user_id)
 
@@ -58,6 +93,7 @@ async def _flush(user_id: str) -> dict:
         force_ids = (await db.execute(text("""
             SELECT id FROM held_notification
             WHERE user_id = :uid AND status = 'held'
+              AND held_reason IS DISTINCT FROM 'await_departure'
               AND (
                 (deliver_after IS NOT NULL AND deliver_after <= NOW())
                 OR held_at <= NOW() - MAKE_INTERVAL(hours => :maxh)
@@ -108,6 +144,22 @@ async def _flush(user_id: str) -> dict:
             WHERE id = ANY(:ids)
         """), {"st": "delivered" if delivered else "dropped", "ids": ids})
         await db.commit()
+
+        if delivered:
+            # Phase 3c: log-only per-item rows (sent=True, original category) so
+            # category cooldowns/rate-limits see these as delivered even though
+            # only the single digest push actually buzzed.
+            for row in to_deliver:
+                try:
+                    await _log_notification(
+                        db, user_id, row.topic or f"{row.category}:held{row.id}",
+                        row.category or "general", row.title, row.message or "",
+                        row.priority or "normal", "held_flush_item", None, 0,
+                        sent=True, dedup_blocked=False,
+                    )
+                except Exception as e:
+                    logger.debug(f"held-item cooldown arming skipped for id={row.id}: {e}")
+            await db.commit()
 
         logger.info(
             f"🌅 Flushed {len(ids)} held notification(s) as digest "

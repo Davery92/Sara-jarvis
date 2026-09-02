@@ -2,8 +2,8 @@
 Sandbox Orchestrator — GLM-based multi-step agent coordinator.
 
 Three-tier system:
-1. Sara (qwen3.6-27b) → understands user intent, crafts task prompt, dispatches
-2. Orchestrator (qwen3.6-27b) → plans approach, decomposes into steps,
+1. Sara (qwen3.8-27b) → understands user intent, crafts task prompt, dispatches
+2. Orchestrator (qwen3.8-27b) → plans approach, decomposes into steps,
    manages Claude Code agents on the sandbox VM
 3. Claude Code (on VM 10.185.1.176) → executes individual steps
 
@@ -189,8 +189,9 @@ class SandboxOrchestrator:
         self.user_id = user_id
         self.skill_context = skill_context or ""
         from app.core.llm_config import llm_config
-        self.llm_url = llm_config.primary_url
-        self.model = llm_config.primary_model
+        # bg lane (:8081): agent loops with tools are background work, never the chat lane.
+        self.llm_url = llm_config.bg_primary_url
+        self.model = llm_config.bg_primary_model
         self.max_iterations = 30
         self.active_sessions: Dict[str, str] = {}  # session_id → description
         self._step_counter = 0

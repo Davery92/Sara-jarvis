@@ -11,6 +11,7 @@ import EventFormScreen from '../screens/calendar/EventFormScreen';
 import ReminderFormScreen from '../screens/calendar/ReminderFormScreen';
 import NoteEditorScreen from '../screens/notes/NoteEditorScreen';
 import NutritionGoalsFormScreen from '../screens/fitness/NutritionGoalsFormScreen';
+import PhaseFormScreen from '../screens/fitness/PhaseFormScreen';
 import RecipeFormScreen from '../screens/recipes/RecipeFormScreen';
 import WorkoutModeScreen from '../screens/fitness/WorkoutModeScreen';
 import CardioScreen from '../screens/fitness/CardioScreen';
@@ -93,6 +94,14 @@ export default function RootNavigator() {
             <Stack.Screen
               name="NutritionGoalsForm"
               component={NutritionGoalsFormScreen}
+              options={{
+                presentation: 'modal',
+                headerShown: false,
+              }}
+            />
+            <Stack.Screen
+              name="PhaseForm"
+              component={PhaseFormScreen}
               options={{
                 presentation: 'modal',
                 headerShown: false,

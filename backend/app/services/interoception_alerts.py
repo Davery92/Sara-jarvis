@@ -57,28 +57,39 @@ async def escalate_task_failure(task_name: str, error_class: str, res: Dict[str,
         body = (f"Something just broke: my {feature} hit a {error_class}. "
                 f"I'll keep an eye on it — ask me 'what's broken?' for details.")
 
+    # Invariant 5: one mouth. This used to call send_notification directly,
+    # beside the judge→compose→review→deliver pipeline, so a bad morning could
+    # produce a health alert per broken subsystem regardless of what else Sara
+    # was already saying. It queues a candidate now: one per subsystem per day
+    # (the Redis cooldown above), keyed on the entity so nothing else re-raises
+    # the same failure.
+    topic = f"health:{short}"
     try:
-        from app.services.unified_notification import send_notification
-        result = await send_notification(
-            user_id=user_id,
-            title="Sara: internal health",
-            message=body,
-            priority="normal",
-            topic=f"health:{short}",
-            category="system_health",
-            source="interoception",
-            extra_push_data={"target": "chat"},
-            payload={
-                "prediction_grade": "novel",
-                "stimulus_key": f"health:{task_name}",
-                "generator": "interoception",
-                "event_id": event_id,
-                "task_name": task_name,
-                "diagnostics": True,
-            },
-        )
-        logger.info(f"[interoception] health alert sent for {task_name}: {result}")
-        return {"sent": True, "result": result, "event_id": event_id}
+        from datetime import timedelta
+        from app.core.timezone import now as local_now
+        from app.db.session import get_async_session_factory
+        from app.services.say_candidate import create_candidate
+
+        factory = get_async_session_factory()
+        async with factory() as db:
+            candidate_id = await create_candidate(
+                db, user_id=user_id, source="interoception", kind="alert",
+                summary=body,
+                evidence=[{
+                    "task_name": task_name, "error_class": error_class,
+                    "event_id": event_id, "count_24h": count, "diagnostics": True,
+                }],
+                topic_entities=[topic],
+                # Long enough to survive a night; a broken subsystem at 2 AM is
+                # still broken at 7, and the alert's 30-minute default would have
+                # expired it unheard.
+                valid_until=local_now() + timedelta(hours=12),
+                value_guess=0.8,
+                dedupe_key=topic,
+            )
+        logger.info(f"[interoception] health candidate queued for {task_name}: {candidate_id}")
+        return {"sent": bool(candidate_id), "candidate_id": str(candidate_id) if candidate_id else None,
+                "event_id": event_id}
     except Exception as e:
-        logger.error(f"[interoception] failed to send health alert: {e}")
+        logger.error(f"[interoception] failed to queue health alert: {e}")
         return {"sent": False, "error": str(e)}

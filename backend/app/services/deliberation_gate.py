@@ -3,7 +3,8 @@ Deliberation Gate — validates and executes deliberation outputs.
 
 After the deliberation engine produces proposals, this gate:
 1. Validates notifications against HEARTBEAT.md hard bans
-2. Delivers notifications via the existing pipeline (dedup, interruptibility)
+2. Queues everything it wants to say as a `say_candidate` keyed on the entity
+   — it never sends directly (ground-truth invariant 5, "one mouth")
 3. Executes home actions via ha_control_service
 4. Routes task proposals through autonomy tiers (auto-execute / propose / block)
 5. Updates Sara's internal state in working memory
@@ -114,6 +115,60 @@ HARD_BLOCK_CATEGORIES = {"email_send", "purchase", "external_message"}
 # routing category, not a new channel — it reuses thread_manager's existing
 # anti-nag mention caps instead of the generic task-proposal notification path.
 SPECIAL_TASK_HANDLERS = {"email_draft", "commitment_nudge"}
+
+# Ground-truth invariant 2: Sara's words are not evidence. An auto-executed
+# note_organization task about a person writes a note ("Draft Reply to Laura
+# Weippert — Reschedule") that immediately becomes memory-visible and PKG-visible,
+# so Sara then recalls her own draft as a fact about David. Anything naming a
+# person or an email goes to David first instead of being written silently.
+_PERSON_NAME_RE = re.compile(r"\b[A-Z][a-z]{1,20}\s+[A-Z][a-z]{1,20}\b")
+_COMMUNICATION_RE = re.compile(
+    r"(@|\b(?:e-?mail|reply|respond|reschedule|meeting with|call with)\b)",
+    re.IGNORECASE,
+)
+
+def _names_a_person_or_email(proposal) -> bool:
+    """True when a proposal is about a human or a message, not about filing."""
+    text = " ".join(
+        str(getattr(proposal, field, "") or "")
+        for field in ("description", "title", "rationale", "detail")
+    )
+    return bool(_PERSON_NAME_RE.search(text) or _COMMUNICATION_RE.search(text))
+
+
+async def _queue_candidate(
+    user_id: str, dedupe_key: str, summary: str,
+    evidence: Optional[list] = None, kind: str = "inform", ttl_hours: int = 12,
+) -> Optional[str]:
+    """Deliberation's only way to say anything.
+
+    Invariant 5: one entity, one message, one mouth. Every path out of this
+    module used to call `send_notification` directly, in parallel with the
+    judge→compose→review→deliver pipeline — two mouths, neither aware of the
+    other, which is how five re-wordings of one concern reached David in a single
+    morning. Now everything becomes a candidate keyed on the entity it is about,
+    and the judge decides whether it earns an interruption at all.
+    """
+    from datetime import timedelta
+    from app.db.session import get_async_session_factory
+    from app.services.say_candidate import create_candidate
+
+    try:
+        factory = get_async_session_factory()
+        async with factory() as db:
+            candidate_id = await create_candidate(
+                db, user_id=user_id, source="deliberation", kind=kind,
+                summary=summary[:2000],
+                evidence=evidence or [],
+                topic_entities=[dedupe_key],
+                valid_until=local_now() + timedelta(hours=ttl_hours),
+                dedupe_key=dedupe_key,
+            )
+        return str(candidate_id) if candidate_id else None
+    except Exception as e:
+        _GATE_TRACKER.note(f"queue_candidate:{type(e).__name__}")
+        logger.warning(f"[DeliberationGate] candidate queue failed for {dedupe_key}: {e}")
+        return None
 
 
 def _normalize_journal_text(content: str) -> str:
@@ -584,7 +639,15 @@ async def _process_task_proposals(
                 logger.error(f"[DeliberationGate] {proposal.category} failed: {e}")
             continue
 
-        if proposal.category in AUTO_EXECUTE_CATEGORIES and proposal.confidence >= auto_execute_confidence:
+        auto_categories = set(AUTO_EXECUTE_CATEGORIES)
+        if "note_organization" in auto_categories and _names_a_person_or_email(proposal):
+            auto_categories.discard("note_organization")
+            logger.info(
+                "[DeliberationGate] note_organization about a person/email — "
+                f"proposing instead of writing: {proposal.description[:80]}"
+            )
+
+        if proposal.category in auto_categories and proposal.confidence >= auto_execute_confidence:
             # MINDV2 Phase 0 / F2: every auto-execute category is gated, not
             # just research — it must respect a per-category daily cap AND
             # must not re-dispatch a topic already attempted recently.
@@ -930,12 +993,17 @@ async def _generate_email_draft(user_id: str) -> bool:
     if not draft:
         return False
 
-    from app.services.unified_notification import send_notification
-    await send_notification(
-        user_id=user_id,
-        title=f"Draft reply: {row['subject'][:60]}",
-        message=f"To: {row['sender_name'] or row['sender_email']}\n\n{draft}\n\n— draft only, not sent. Copy/edit/discard.",
-        topic=topic, priority="normal", source="deliberation",
+    # Invariant 5: one mouth. A draft is something Sara has to offer, not
+    # something she gets to announce; the judge decides whether it is worth an
+    # interruption, keyed on the email so a second cycle cannot re-announce it.
+    await _queue_candidate(
+        user_id, topic,
+        summary=(
+            f"Draft reply ready for '{row['subject'][:60]}' "
+            f"(to {row['sender_name'] or row['sender_email']}): {draft[:600]} "
+            "— draft only, not sent. Copy/edit/discard."
+        ),
+        evidence=[{"email_id": str(row["id"]), "generator": "email_draft"}],
     )
     await _write_action_ledger(user_id, "email_draft", f"Drafted a reply to '{row['subject']}'", source_ref=str(row["id"]))
     return True
@@ -948,7 +1016,6 @@ async def _nudge_commitment(user_id: str) -> bool:
     True if a commitment was actually surfaced."""
     from app.db.session import get_async_session_factory
     from app.services.thread_manager import get_open_threads, record_mention
-    from app.services.unified_notification import send_notification
 
     session_factory = get_async_session_factory()
     async with session_factory() as db:
@@ -965,10 +1032,11 @@ async def _nudge_commitment(user_id: str) -> bool:
                 return False
         except Exception as e:
             logger.debug(f"[DeliberationGate] commitment habituation check skipped: {e}")
-        await send_notification(
-            user_id=user_id, title="Following up on a commitment", message=message,
-            topic=stimulus_key, priority="normal", source="deliberation", db=db,
-            payload={"prediction_grade": "novel", "stimulus_key": stimulus_key, "generator": "deliberation"},
+        await _queue_candidate(
+            user_id, stimulus_key,
+            summary=f"Following up on a commitment: {message}",
+            evidence=[{"thread_id": thread["id"], "generator": "commitment_nudge"}],
+            kind="followup",
         )
         await record_mention(thread["id"], db)
         await db.commit()
@@ -1016,8 +1084,8 @@ async def _dispatch_from_deliberation(user_id: str, proposal: TaskProposal) -> N
 
 
 async def _propose_task_to_david(user_id: str, proposal: TaskProposal) -> None:
-    """Send a notification proposing a task to David for approval."""
-    from app.services.unified_notification import send_notification
+    """Queue a task suggestion for David. The judge decides if it is worth saying."""
+    import hashlib
 
     confidence_pct = f"{proposal.confidence:.0%}"
     message = (
@@ -1026,13 +1094,15 @@ async def _propose_task_to_david(user_id: str, proposal: TaskProposal) -> None:
         f"Confidence: {confidence_pct}"
     )
 
-    await send_notification(
-        user_id=user_id,
-        title=f"Task suggestion: {proposal.description[:60]}",
-        message=message,
-        topic=f"task_proposal:{proposal.category}",
-        priority="normal",
-        source="deliberation",
+    # Keyed on the proposal itself, not just its category — a category key made
+    # every "research" suggestion collide, so the second useful one of the day was
+    # silently dropped while three re-wordings of the first all got through.
+    digest = hashlib.md5(proposal.description.strip().lower().encode()).hexdigest()[:12]
+    await _queue_candidate(
+        user_id, f"task_proposal:{proposal.category}:{digest}",
+        summary=f"Task suggestion: {message}",
+        evidence=[{"category": proposal.category, "confidence": proposal.confidence,
+                   "generator": "task_proposal"}],
     )
 
     await _write_task_dispatch_log(
@@ -1084,10 +1154,136 @@ async def _write_task_dispatch_log(
         logger.error(f"[DeliberationGate] Task dispatch log write failed: {e}")
 
 
+_MORNING_ANCHOR_START_HOUR = 4
+_MORNING_ANCHOR_END_HOUR = 12
+# Category is the forward-looking/greeting split for the morning-anchor gate
+# (MORNING_NOTIFICATIONS_PLAN_2026_08_18 Phase 3b): "schedule" proposals carry
+# calendar/event content David still needs delivered — just later, riding the
+# departure brief (Phase 4) — while "checkin" is a pure greeting the brief
+# already covered.
+_MORNING_ANCHOR_GATED_CATEGORIES = {"checkin", "schedule"}
+
+
+async def _morning_anchor_logged_today(db, user_id: str) -> bool:
+    """True if today's wake-anchor (the morning brief, sent or held) already
+    exists — checked by the deterministic topic morning_brief_service stamps
+    on both notification_log (delivered) and held_notification (asleep-hold)."""
+    from sqlalchemy import text
+    from app.core.timezone import today as local_today
+
+    topic = f"morning_brief:{local_today().isoformat()}"
+    try:
+        row = await db.execute(text("""
+            SELECT EXISTS(
+                SELECT 1 FROM notification_log WHERE user_id = :uid AND topic = :topic
+                UNION ALL
+                SELECT 1 FROM held_notification WHERE user_id = :uid AND topic = :topic
+            )
+        """), {"uid": user_id, "topic": topic})
+        return bool(row.scalar())
+    except Exception as e:
+        logger.debug(f"[DeliberationGate] morning anchor check skipped: {e}")
+        return False
+
+
+async def _queue_for_departure_brief(db, user_id: str, proposal: NotificationProposal) -> None:
+    """Phase 4: forward-looking schedule content caught by the morning-anchor
+    gate isn't dropped — it rides the departure brief instead of pushing now."""
+    from app.services.delivery_policy import hold_notification, DeliveryDecision
+
+    decision = DeliveryDecision(
+        action="hold", reason="await_departure",
+        why_trace={"routed_from": "deliberation_gate", "original_category": proposal.category},
+    )
+    await hold_notification(
+        db, user_id=user_id, title=proposal.title, message=proposal.message,
+        category=proposal.category, priority=proposal.priority, source="deliberation",
+        topic=None, payload=None, decision=decision,
+    )
+
+
+_ARRIVAL_MARKERS = (
+    "glad you're home", "glad you're back", "welcome back", "welcome home",
+    "you're home", "you're back",
+)
+
+
+def _greeting_slot(proposal: NotificationProposal, now_et) -> str:
+    """MORNING_NOTIFICATIONS_PLAN_2026_08_18 Phase 5: which day-part bucket a
+    checkin/greeting proposal belongs to — arrival check-ins get their own
+    slot regardless of hour, everything else buckets by time of day."""
+    blob = f"{proposal.title} {proposal.message}".lower()
+    if any(m in blob for m in _ARRIVAL_MARKERS):
+        return "arrival"
+    hour = now_et.hour
+    if 4 <= hour < 12:
+        return "morning"
+    if 12 <= hour < 17:
+        return "afternoon"
+    return "evening"
+
+
+async def _schedule_dedup_key(db, user_id: str, proposal: NotificationProposal, now_et, content_hash: str) -> str:
+    """Phase 5: event-reminder dedup should key on the real calendar event,
+    not the LLM's wording. Best-effort match against today's calendar_event
+    titles; falls back to a date-scoped content hash when nothing matches
+    (still better than the old unscoped hash, which never expired)."""
+    from sqlalchemy import text
+
+    date_str = now_et.date().isoformat()
+    try:
+        blob = f"{proposal.title} {proposal.message}".lower()
+        rows = (await db.execute(text("""
+            SELECT id, title FROM calendar_event
+            WHERE user_id = :uid AND start_time::date = :d
+        """), {"uid": user_id, "d": now_et.date()})).fetchall()
+        for row in rows:
+            if row.title and row.title.lower() in blob:
+                return f"schedule:{row.id}:{date_str}"
+    except Exception as e:
+        logger.debug(f"[DeliberationGate] event-id dedup match skipped: {e}")
+    return f"schedule:{date_str}:{content_hash}"
+
+
+async def _dedup_topic_for(db, user_id: str, proposal: NotificationProposal, cat: str, now_et, content_hash: str) -> str:
+    """Phase 5: dedup key must survive LLM rephrasing (the old
+    category:md5(content) key made every re-worded copy look "new")."""
+    if cat == "checkin":
+        slot = _greeting_slot(proposal, now_et)
+        return f"checkin:{now_et.date().isoformat()}:{slot}"
+    if cat == "schedule":
+        return await _schedule_dedup_key(db, user_id, proposal, now_et, content_hash)
+    return f"{proposal.category}:{content_hash}"
+
+
+def entity_dedupe_key(proposal: NotificationProposal, content_hash: str) -> str:
+    """The identity a candidate is deduped on: the entity, not the phrasing.
+
+    `entity_ref` comes off the proposal (the model is asked for it, and the
+    whiteboard's Entity Ledger tells it which ids exist). When a proposal names
+    no entity — an ambient observation, a check-in — fall back to the old
+    category+content hash, which at least keeps identical text from doubling.
+    """
+    ref = (proposal.entity_ref or "").strip()
+    if ref:
+        return ref if ":" in ref else f"entity:{ref}"
+    return f"{proposal.category}:{content_hash}"
+
+
 async def _deliver_notification(user_id: str, proposal: NotificationProposal) -> None:
-    """Deliver a notification through the existing pipeline WITH dedup."""
+    """Queue what deliberation wants to say. It does not get to say it.
+
+    Invariant 5, "one mouth": deliberation used to call `send_notification`
+    directly, in parallel with the Mind V2 judge→compose→review→deliver pipeline,
+    which is how the same Laura Weippert concern reached David five separate times
+    in one morning in five different phrasings. Everything deliberation produces
+    is now a `say_candidate` keyed on the entity, and the judge decides whether it
+    is worth a message at all.
+
+    The pre-existing gates that legitimately belong to the *generator* — morning
+    anchor coverage, habituation — still run here. What is gone is the send.
+    """
     import hashlib
-    from app.services.unified_notification import send_notification
     from app.db.session import get_async_session_factory
 
     # MINDV2 Phase 0 / F6: was mapping critical -> "max", a value
@@ -1101,13 +1297,33 @@ async def _deliver_notification(user_id: str, proposal: NotificationProposal) ->
     }
     ntfy_priority = priority_map.get(proposal.priority, "default")
 
-    # Build a content-specific topic for proper dedup (not just the category)
     content_hash = hashlib.md5(f"{proposal.title}:{proposal.message[:100]}".encode()).hexdigest()[:12]
-    effective_topic = f"{proposal.category}:{content_hash}"
-
+    # Habituation stays content-hash keyed (it's throttling the generator, not
+    # deduping delivery) — only the notification_log dedup topic below needs
+    # the rephrasing-proof key (Phase 5).
     stimulus_key = f"{proposal.category}:{content_hash}"
     AsyncSession = get_async_session_factory()
     async with AsyncSession() as db:
+        cat = (proposal.category or "").lower()
+        now_et = local_now()
+        effective_topic = await _dedup_topic_for(db, user_id, proposal, cat, now_et, content_hash)
+        now_et_hour = now_et.hour
+        if cat in _MORNING_ANCHOR_GATED_CATEGORIES and _MORNING_ANCHOR_START_HOUR <= now_et_hour < _MORNING_ANCHOR_END_HOUR:
+            if await _morning_anchor_logged_today(db, user_id):
+                if cat == "schedule":
+                    await _queue_for_departure_brief(db, user_id, proposal)
+                    logger.info(f"[DeliberationGate] Routed to departure brief queue: {proposal.title}")
+                else:
+                    from app.services.unified_notification import _log_notification
+                    await _log_notification(
+                        db, user_id, effective_topic, proposal.category, proposal.title,
+                        proposal.message, ntfy_priority, "deliberation", None, 0,
+                        sent=False, dedup_blocked=False, suppress_reason="covered_by_brief",
+                    )
+                    await db.commit()
+                    logger.info(f"[DeliberationGate] Suppressed (covered by brief): {proposal.title}")
+                return
+
         try:
             from app.services.habituation import should_generate
             if not await should_generate(db, "deliberation", stimulus_key):
@@ -1116,26 +1332,38 @@ async def _deliver_notification(user_id: str, proposal: NotificationProposal) ->
         except Exception as e:
             logger.debug(f"[DeliberationGate] habituation check skipped: {e}")
 
-        result = await send_notification(
-            user_id=user_id,
-            title=proposal.title,
-            message=proposal.message,
-            topic=effective_topic,
-            category=proposal.category,
-            priority=ntfy_priority,
-            source="deliberation",
-            db=db,
-            payload={
-                "prediction_grade": "deviation" if proposal.category in ("home", "security") else "novel",
-                "stimulus_key": stimulus_key,
+        from datetime import timedelta as _timedelta
+        from app.services.say_candidate import create_candidate
+
+        dedupe_key = entity_dedupe_key(proposal, content_hash)
+        summary = proposal.message.strip() or proposal.title
+        candidate_id = await create_candidate(
+            db, user_id=user_id, source="deliberation",
+            # A deliberation proposal is something that might be worth saying,
+            # not something that must be said now. Only an explicitly critical
+            # one is an alert.
+            kind="alert" if proposal.priority == "critical" else "inform",
+            summary=f"{proposal.title} — {summary}"[:2000],
+            evidence=[{
                 "generator": "deliberation",
-            },
+                "category": proposal.category,
+                "priority": ntfy_priority,
+                "topic": effective_topic,
+                "reason": proposal.reason,
+            }],
+            topic_entities=[effective_topic],
+            valid_until=local_now() + _timedelta(hours=12),
+            dedupe_key=dedupe_key,
         )
         await db.commit()
-        if result.get("sent"):
-            logger.info(f"[DeliberationGate] Sent notification: {proposal.title}")
+        if candidate_id:
+            logger.info(
+                f"[DeliberationGate] Queued candidate {dedupe_key}: {proposal.title}"
+            )
         else:
-            logger.info(f"[DeliberationGate] Notification blocked by pipeline: {result.get('reason')} — {proposal.title}")
+            logger.info(
+                f"[DeliberationGate] Duplicate suppressed for {dedupe_key}: {proposal.title}"
+            )
 
 
 async def _execute_home_action(user_id: str, action: HomeActionProposal) -> None:

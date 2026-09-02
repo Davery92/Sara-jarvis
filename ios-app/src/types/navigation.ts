@@ -26,6 +26,11 @@ export type RootStackParamList = {
   NutritionGoalsForm: {
     onSave?: () => void;
   };
+  PhaseForm: {
+    phase?: import('../services/fitness').Phase;
+    mode?: 'edit' | 'block';
+    onSave?: () => void;
+  } | undefined;
   RecipeForm: {
     recipe?: any;
     onSave?: () => void;

@@ -28,6 +28,17 @@ logger = logging.getLogger(__name__)
 # (prediction_engine._DAVID, kernel.DEFAULT_USER_ID) uses.
 _DAVID_USER_ID = get_owner_id()
 
+# The two fold-forward documents (self-story, theory-of-David) run once a night,
+# not on every reflection cycle. Both feed themselves back in as input, so a
+# 4-hourly cadence let a single day's mood compound six times over and stick.
+NIGHTLY_WINDOW_HOURS = range(1, 5)  # 01:00–04:59 ET
+
+
+def _is_nightly_window() -> bool:
+    from app.core.timezone import now as local_now
+    return local_now().hour in NIGHTLY_WINDOW_HOURS
+
+
 
 @dataclass
 class ReflectionCycleResult:
@@ -199,13 +210,23 @@ class ReflectionAgent:
             # calibration above) — a separate sync session for just this
             # step, matching the pattern other services already use when
             # they need to call a sync-session service from async code.
+            # Ground-truth plan, Phase 5 §5: ONCE NIGHTLY, not every four hours.
+            # Regenerated six times a day from a deliberation journal that
+            # produces ~130 "staying quiet" lines, this document drifted into
+            # "cowardice wearing a mask… I am terrified…" on a day when nothing
+            # had happened — and it was injected into every chat turn. It is no
+            # longer prompt input (context_snapshot), and it now folds once a
+            # night, from a day's worth of material rather than four hours of it.
             try:
                 from app.db.session import SessionLocal
                 from app.services.sara_journal_service import sara_journal
-                with SessionLocal() as sync_db:
-                    result.self_story = await sara_journal.write_self_story(sync_db, _DAVID_USER_ID)
-                if result.self_story:
-                    logger.info(f"Self-story updated ({len(result.self_story)} chars)")
+                if _is_nightly_window():
+                    with SessionLocal() as sync_db:
+                        result.self_story = await sara_journal.write_self_story(sync_db, _DAVID_USER_ID)
+                    if result.self_story:
+                        logger.info(f"Self-story updated ({len(result.self_story)} chars)")
+                else:
+                    logger.debug("Self-story skipped — nightly only")
             except Exception as e:
                 logger.warning(f"Self-story consolidation failed (non-critical): {e}")
 
@@ -215,10 +236,13 @@ class ReflectionAgent:
             try:
                 from app.db.session import SessionLocal
                 from app.services.sara_journal_service import sara_journal
-                with SessionLocal() as sync_db:
-                    result.theory_of_david = await sara_journal.write_theory_of_david(sync_db, _DAVID_USER_ID)
-                if result.theory_of_david:
-                    logger.info(f"Theory-of-David updated ({len(result.theory_of_david)} chars)")
+                if _is_nightly_window():
+                    with SessionLocal() as sync_db:
+                        result.theory_of_david = await sara_journal.write_theory_of_david(sync_db, _DAVID_USER_ID)
+                    if result.theory_of_david:
+                        logger.info(f"Theory-of-David updated ({len(result.theory_of_david)} chars)")
+                else:
+                    logger.debug("Theory-of-David skipped — nightly only")
             except Exception as e:
                 logger.warning(f"Theory-of-David consolidation failed (non-critical): {e}")
 

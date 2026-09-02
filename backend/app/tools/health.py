@@ -17,7 +17,7 @@ from typing import Optional, Dict, Any
 from sqlalchemy import text
 
 from app.tools.base import BaseTool, ToolResult
-from app.services.health_insight_service import health_insight_service
+from app.services.health_insight_service import health_insight_service, render_recorded_at
 from app.db.session import get_db
 
 logger = logging.getLogger(__name__)
@@ -129,14 +129,33 @@ class HealthStatusTool(BaseTool):
                 status_note = " (below normal)"
 
             baseline_note = ""
-            if baseline:
+            if baseline is not None:
                 if metric_type in ['resting_hr', 'hrv', 'steps', 'heart_rate']:
                     baseline_str = f"{int(baseline)}"
                 else:
                     baseline_str = f"{baseline:.1f}"
                 baseline_note = f", 7-day baseline: {baseline_str} {unit}"
 
-            result_parts.append(f"- **{display_name}**: {value_str} {unit}{status_note}{baseline_note}")
+            # Every number carries the moment it was taken. Without this the
+            # block reads as one coherent "Current Health Status" even when the
+            # readings are from different days (D6) — and an undated number is
+            # indistinguishable from a fresh one.
+            result_parts.append(
+                f"- **{display_name}**: {value_str} {unit}{status_note}{baseline_note}"
+                f" — recorded {render_recorded_at(data.get('recorded_at'))}"
+            )
+
+        # Absent metrics are stated, not omitted. A gap the model can't see is
+        # a gap it will fill (2026-08-31: seven days of invented HRV).
+        missing = [
+            metric_display[m][0] for m in ('resting_hr', 'hrv', 'sleep_hours')
+            if metrics.get(m, {}).get('current_value') is None
+        ]
+        if missing:
+            result_parts.append(
+                f"- **No reading in the last 24h for**: {', '.join(missing)}. "
+                "Do not estimate these — say they weren't recorded."
+            )
 
         # Add alerts
         alerts = summary.get('recent_alerts', [])
@@ -256,18 +275,32 @@ class HealthTrendTool(BaseTool):
         if not trend or not trend.get('daily_data'):
             return f"No {display_name} data available for the last {days} days."
 
+        days_with_data = trend.get('days_with_data', 0)
+        missing_days = trend.get('missing_days') or []
+
+        if not days_with_data:
+            return (
+                f"No {display_name} readings at all in the last {days} days "
+                f"({', '.join(missing_days)}). Report this as missing data — "
+                "do not produce values for these days."
+            )
+
         result_parts = [f"## {display_name} Trend ({days} Days)\n"]
+        result_parts.append(
+            f"**Coverage**: {days_with_data} of {days} days have a reading."
+            + (f" No data on: {', '.join(missing_days)}." if missing_days else "")
+        )
 
         # Overall summary
         overall_avg = trend.get('overall_avg')
         trend_direction = trend.get('trend', 'stable')
 
-        if overall_avg:
+        if overall_avg is not None:
             if metric_type in ['resting_hr', 'hrv', 'steps', 'heart_rate']:
                 avg_str = f"{int(overall_avg)}"
             else:
                 avg_str = f"{overall_avg:.1f}"
-            result_parts.append(f"**Average**: {avg_str}")
+            result_parts.append(f"**Average** (over the {days_with_data} days with data): {avg_str}")
 
         trend_emoji = {
             'increasing': '📈',
@@ -276,18 +309,23 @@ class HealthTrendTool(BaseTool):
         }
         result_parts.append(f"**Trend**: {trend_emoji.get(trend_direction, '')} {trend_direction.title()}\n")
 
-        # Daily breakdown
+        # Daily breakdown — every calendar day in the window appears, including
+        # the ones with nothing recorded. A series that silently skips gap days
+        # reads as continuous, which is how "HRV on 4 of 7 days" became a tidy
+        # seven-row table of invented numbers (2026-08-31).
         result_parts.append("### Daily Values")
         daily_data = trend.get('daily_data', [])
-        for day_data in daily_data[-7:]:  # Show last 7 days max
+        for day_data in daily_data[-days:]:
             day = day_data.get('day', 'Unknown')
             avg_value = day_data.get('avg_value')
-            if avg_value:
-                if metric_type in ['resting_hr', 'hrv', 'steps', 'heart_rate']:
-                    value_str = f"{int(avg_value)}"
-                else:
-                    value_str = f"{avg_value:.1f}"
-                result_parts.append(f"- {day}: {value_str}")
+            if avg_value is None:
+                result_parts.append(f"- {day}: no data recorded")
+                continue
+            if metric_type in ['resting_hr', 'hrv', 'steps', 'heart_rate']:
+                value_str = f"{int(avg_value)}"
+            else:
+                value_str = f"{avg_value:.1f}"
+            result_parts.append(f"- {day}: {value_str}")
 
         # Add interpretation
         result_parts.append("\n### Interpretation")

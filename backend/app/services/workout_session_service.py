@@ -24,21 +24,22 @@ logger = logging.getLogger(__name__)
 # which would never see a live rename_model() DB update.
 from app.core.llm_config import llm_config as _llm_cfg
 _WORKOUT_LLM_MODEL_OVERRIDE = os.getenv("WORKOUT_LLM_MODEL")
-_WORKOUT_LLM_BASE_URL_OVERRIDE = os.getenv("OPENAI_BASE_URL")
+# Dedicated override only — OPENAI_BASE_URL is the chat lane in the backend process.
+_WORKOUT_LLM_BASE_URL_OVERRIDE = os.getenv("WORKOUT_LLM_BASE_URL")
 
 
 def _resolve_workout_llm() -> tuple:
     if _WORKOUT_LLM_MODEL_OVERRIDE and _WORKOUT_LLM_BASE_URL_OVERRIDE:
         return _WORKOUT_LLM_BASE_URL_OVERRIDE, _WORKOUT_LLM_MODEL_OVERRIDE
     try:
-        from app.services.llm_broker import resolve as _resolve_capability
-        _cap = _resolve_capability("utility")
-        base_url = _WORKOUT_LLM_BASE_URL_OVERRIDE or _cap["base_url"] or _llm_cfg.primary_url
-        model = _WORKOUT_LLM_MODEL_OVERRIDE or _cap["model"] or _llm_cfg.fast_model
+        # Fast tier (her A3B, ~0.7s): in-session coaching lines are ≤100 tokens
+        # and latency-sensitive; the Mac lanes are for long-form / chat.
+        base_url = _WORKOUT_LLM_BASE_URL_OVERRIDE or _llm_cfg.fast_model_url
+        model = _WORKOUT_LLM_MODEL_OVERRIDE or _llm_cfg.fast_model
         return base_url, model
     except Exception:
         return (
-            _WORKOUT_LLM_BASE_URL_OVERRIDE or _llm_cfg.primary_url,
+            _WORKOUT_LLM_BASE_URL_OVERRIDE or _llm_cfg.fast_model_url,
             _WORKOUT_LLM_MODEL_OVERRIDE or _llm_cfg.fast_model,
         )
 

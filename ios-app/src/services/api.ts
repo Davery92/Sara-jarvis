@@ -1,5 +1,24 @@
 import axios, { AxiosInstance, AxiosRequestConfig, AxiosResponse } from 'axios';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { DeviceEventEmitter } from 'react-native';
+import { AssistantActivity } from '../types/cards';
+
+// Signals the background-task indicator listens for. Emitted as events rather
+// than imported directly: backgroundTasks.ts imports this module, so calling
+// into it from here would be a require cycle.
+const TASK_DISPATCH_HINT_EVENT = 'saraTaskDispatchHint';
+const CHAT_TURN_COMPLETE_EVENT = 'saraChatTurnComplete';
+
+// Tools whose execution means work is now running in the background. Seeing one
+// go by in the stream is the earliest possible moment to show the pill —
+// polling wouldn't catch it for another 10s.
+const DISPATCH_TOOLS = new Set([
+  'create_research_plan',
+  'dispatch_agent_task',
+  'dispatch_and_monitor',
+  'queue_for_sara',
+  'code_mode',
+]);
 
 // API Configuration
 const API_URL = __DEV__
@@ -32,6 +51,7 @@ export interface ChatOptions {
   onContentCard?: (card: any) => void;  // Content card callback
   onToolStatus?: (status: { tool: string; status: string }) => void;  // Tool execution status
   onSuggestedActions?: (actions: any[]) => void;  // Suggested follow-up actions
+  onAssistantActivity?: (activity: AssistantActivity) => void;  // Canonical assistant lifecycle
   onUiCommand?: (command: any) => void;  // Jarvis-style navigation/overlay command ("open my inbox")
 }
 
@@ -275,6 +295,10 @@ class ApiClient {
             console.warn('[API] ⚠️ Stream complete but NO conversation_id received!');
           }
           onComplete(receivedConversationId, receivedEpisodeId);
+          // Any dispatch row Sara created during this turn exists by now —
+          // reconcile the task indicator immediately instead of waiting out the
+          // poll interval.
+          DeviceEventEmitter.emit(CHAT_TURN_COMPLETE_EVENT);
           resolve();
           try {
             xhr.abort();
@@ -285,8 +309,14 @@ class ApiClient {
 
         xhr.open('POST', `${API_URL}/chat/stream`, true);
         xhr.setRequestHeader('Content-Type', 'application/json');
-        // Never let chat stream hang forever on iOS.
-        xhr.timeout = 180000;
+        // Vision prompt evaluation is materially slower than text (a real
+        // iPhone photo took 168s on the local Qwen lane). Keep text bounded at
+        // three minutes, but leave enough headroom for image turns.
+        const hasImageContent = messages.some(
+          (message) => Array.isArray(message?.content)
+            && message.content.some((part: any) => part?.type === 'image' || part?.type === 'image_url')
+        );
+        xhr.timeout = hasImageContent ? 300000 : 180000;
         if (token) {
           xhr.setRequestHeader('Authorization', `Bearer ${token}`);
         }
@@ -383,10 +413,19 @@ class ApiClient {
                   completeOnce();
                 } else if (parsed.type === 'content_card' && options?.onContentCard) {
                   options.onContentCard(parsed.data);
-                } else if (parsed.type === 'tool_executing' && options?.onToolStatus) {
-                  options.onToolStatus({ tool: parsed.data?.tool, status: 'executing' });
-                } else if (parsed.type === 'tool_completed' && options?.onToolStatus) {
-                  options.onToolStatus({ tool: parsed.data?.tool, status: 'completed' });
+                } else if (parsed.type === 'assistant_activity' && options?.onAssistantActivity) {
+                  options.onAssistantActivity(parsed.data as AssistantActivity);
+                } else if (parsed.type === 'tool_executing') {
+                  const tool = parsed.data?.tool;
+                  if (tool && DISPATCH_TOOLS.has(tool)) {
+                    DeviceEventEmitter.emit(TASK_DISPATCH_HINT_EVENT, tool);
+                  }
+                  options?.onToolStatus?.({ tool, status: 'executing' });
+                  options?.onAssistantActivity?.({ phase: 'tool_running', tool, round: parsed.data?.round });
+                } else if (parsed.type === 'tool_completed') {
+                  const tool = parsed.data?.tool;
+                  options?.onToolStatus?.({ tool, status: 'completed' });
+                  options?.onAssistantActivity?.({ phase: 'tool_complete', tool, round: parsed.data?.round });
                 } else if (parsed.type === 'suggested_actions' && options?.onSuggestedActions) {
                   options.onSuggestedActions(parsed.data?.actions || []);
                 } else if (parsed.type === 'ui_command' && options?.onUiCommand) {

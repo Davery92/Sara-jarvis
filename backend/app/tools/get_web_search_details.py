@@ -1,5 +1,4 @@
 from typing import Any, Dict
-import json
 from app.tools.base import BaseTool, ToolResult
 from app.services.search_service import search_service
 
@@ -40,25 +39,15 @@ class GetWebSearchDetailsTool(BaseTool):
             )
 
         try:
-            # Retrieve from Redis
-            if not search_service.redis:
-                return ToolResult(
-                    success=False,
-                    message="Redis not available for retrieving search details"
-                )
-
             cache_key = f"websearch_details:{reference_id}"
-            cached_data = await search_service.redis.get(cache_key)
+            full_results = await search_service.cache_get_json(cache_key)
 
-            if not cached_data:
+            if full_results is None:
                 return ToolResult(
                     success=False,
                     message=f"Search results not found or expired for reference_id: {reference_id}. "
                             "Results are stored for 5 minutes after the original search."
                 )
-
-            # Parse and return full results
-            full_results = json.loads(cached_data)
 
             return ToolResult(
                 success=True,
@@ -67,11 +56,6 @@ class GetWebSearchDetailsTool(BaseTool):
                 citations=[r.get("url") for r in full_results.get("results", []) if r.get("url")]
             )
 
-        except json.JSONDecodeError as e:
-            return ToolResult(
-                success=False,
-                message=f"Failed to parse stored search results: {e}"
-            )
         except Exception as e:
             return ToolResult(
                 success=False,

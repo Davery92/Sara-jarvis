@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func, desc
 from io import BytesIO
 
+from app.core.timezone import naive_utc_now
 from app.db.session import get_db
 from app.models.user import User
 from app.models.email import Email, EmailAttachment, EmailSyncState
@@ -347,6 +348,24 @@ async def mark_email_read(
         raise HTTPException(status_code=404, detail="Email not found")
 
     email.is_read = request.is_read
+    from app.services.world_state.writer import append_world_event
+    append_world_event(
+        db,
+        user_id=str(current_user.id),
+        kind="email.read_state_changed",
+        source="email_api",
+        source_ref=f"email:{email.id}",
+        aggregate_type="email",
+        aggregate_id=str(email.id),
+        actor_type="user",
+        actor_id=str(current_user.id),
+        correlation_id=str(email.conversation_id or email.id),
+        dedupe_key=f"email-read:{email.id}:{int(request.is_read)}:{naive_utc_now().isoformat()}",  # time-ok: dedupe key
+        payload={
+            "email_id": str(email.id), "subject": email.subject,
+            "sender_email": email.sender_email, "is_read": request.is_read,
+        },
+    )
     db.commit()
 
     # Also mark as read in Graph API

@@ -66,7 +66,10 @@ from app.tools.fitness.program_tools import (
     PhaseCreateTool,
     PhaseUpdateTool,
     PhaseActivateTool,
-    PhaseDeleteTool
+    PhaseDeleteTool,
+    PhaseInsertBlockTool,
+    PhaseEndBlockTool,
+    NutritionGuideUpdateTool
 )
 from app.tools.fitness.training_schedule import TrainingScheduleTool
 from app.tools.fitness.workout_suggest import WorkoutSuggestTool
@@ -113,7 +116,11 @@ from app.tools.morning_brief import MorningBriefTool, WeatherTool
 from app.tools.projects import PROJECT_TOOLS
 from app.tools.home import HOME_TOOLS
 from app.tools.agents import GetBackgroundTasksTool
-from app.tools.research_plan import CreateResearchPlanTool, ResearchPlanStatusTool
+from app.tools.research_plan import (
+    CancelResearchPlanTool,
+    CreateResearchPlanTool,
+    ResearchPlanStatusTool,
+)
 from app.tools.meeting import MeetingPrepTool
 from app.tools.lists import LIST_TOOLS
 from app.tools.health import HEALTH_TOOLS
@@ -149,6 +156,7 @@ from app.tools.day_type import DAY_TYPE_TOOLS
 from app.tools.quiet import QUIET_TOOLS
 from app.tools.directives import DIRECTIVE_TOOLS
 from app.tools.notification_ack import NOTIFICATION_ACK_TOOLS
+from app.tools.threads import THREAD_TOOLS
 from app.tools.shell import SHELL_TOOLS
 from app.tools.recipes import RECIPE_TOOLS
 from app.tools.people import ListPeopleTool
@@ -291,7 +299,7 @@ class ToolRegistry:
             'tools': [
                 'get_background_tasks',
                 'queue_for_sara',
-                'create_research_plan', 'research_plan_status',
+                'create_research_plan', 'research_plan_status', 'cancel_research_plan',
             ]
         },
         'fleet': {
@@ -397,6 +405,10 @@ class ToolRegistry:
         'notifications': {
             'description': "Read the notifications Sara has sent David, acknowledge his replies, and CLEAR inbox items he addresses (attention items, clarifications, captures, notifications). Use when David asks \"what's the notification?\"/\"did I miss anything?\", opens his inbox, or responds to items ('saw your messages', 'yes to the first two, skip the gym thing', 'handle these').",
             'tools': ['get_recent_notifications', 'acknowledge_notifications', 'clear_inbox_items']
+        },
+        'threads': {
+            'description': "Close an open thread David says is finished — \"we already had that meeting\", \"I answered them\", \"stop bringing this up\". Resolving a thread also drops anything queued to say about it. Use it whenever David indicates something is handled; agreeing without calling it changes nothing.",
+            'tools': ['resolve_thread']
         },
         'diagnostics': {
             'description': "Read-only self-diagnostics — Sara's own health. Failing background tasks, error events, an explanation of any single event, and a handoff report for Claude Code. Use when David asks \"what's broken?\", \"are you okay?\", \"why did that fail?\", or \"is anything failing?\"",
@@ -568,6 +580,9 @@ class ToolRegistry:
             PhaseUpdateTool(),
             PhaseActivateTool(),
             PhaseDeleteTool(),
+            PhaseInsertBlockTool(),
+            PhaseEndBlockTool(),
+            NutritionGuideUpdateTool(),
 
             # Training Schedule (swap days, toggle dates)
             TrainingScheduleTool(),
@@ -717,9 +732,13 @@ class ToolRegistry:
             # Acknowledge notifications David is replying to in chat (Phase 12K)
             *NOTIFICATION_ACK_TOOLS,
 
+            # Close a thread David says is finished — the closer for invariant 3
+            *THREAD_TOOLS,
+
             # Research Plan Tools (delegate research to dedicated agent)
             CreateResearchPlanTool(),
             ResearchPlanStatusTool(),
+            CancelResearchPlanTool(),
 
             # Meeting prep ("who am I meeting with / prep me for my 2pm")
             MeetingPrepTool(),

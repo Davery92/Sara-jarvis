@@ -194,7 +194,9 @@ Return ONLY valid JSON, no other text."""
         # rename_model() DB update actually takes effect here.
         from app.services.llm_broker import resolve as _resolve_capability
         _cap = _resolve_capability("utility")
-        openai_base = os.getenv("OPENAI_BASE_URL") or _cap["base_url"] or llm_config.primary_url
+        # bg lane, not OPENAI_BASE_URL: in the backend process that env var is the
+        # 1-slot CHAT lane (:8082). Automation parsing is not a chat turn.
+        openai_base = _cap["base_url"] or llm_config.bg_primary_url
         openai_model = model or _cap["model"] or llm_config.fast_model
         openai_key = os.getenv("OPENAI_API_KEY", "")
 

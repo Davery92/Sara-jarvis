@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react'
-import { Beef, Wheat, Droplet, Flame, Target, Clock, CheckCircle2, AlertTriangle, Loader2 } from 'lucide-react'
+import { Beef, Wheat, Droplet, Flame, Target, Clock, CheckCircle2, AlertTriangle, Loader2, Pencil, Save, X } from 'lucide-react'
 import { APP_CONFIG } from '../../config'
 
 /**
@@ -76,6 +76,10 @@ const NutritionGuide: React.FC = () => {
   const [guide, setGuide] = useState<Guide>(DEFAULT_GUIDE)
   const [loading, setLoading] = useState(true)
   const [imported, setImported] = useState(false)
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState('')
+  const [saveError, setSaveError] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
 
   useEffect(() => {
     let active = true
@@ -98,6 +102,49 @@ const NutritionGuide: React.FC = () => {
     return () => { active = false }
   }, [])
 
+  const startEditing = () => {
+    setDraft(JSON.stringify(guide, null, 2))
+    setSaveError(null)
+    setEditing(true)
+  }
+
+  const cancelEditing = () => {
+    setEditing(false)
+    setSaveError(null)
+  }
+
+  const saveEditing = async () => {
+    let parsed: Guide
+    try {
+      parsed = JSON.parse(draft)
+    } catch {
+      setSaveError('Not valid JSON — check for a trailing comma or missing quote.')
+      return
+    }
+    setSaving(true)
+    setSaveError(null)
+    try {
+      const resp = await fetch(`${APP_CONFIG.apiUrl}/api/fitness/nutrition-guide`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ guide: parsed }),
+      })
+      if (resp.ok) {
+        setGuide({ ...DEFAULT_GUIDE, ...parsed })
+        setImported(true)
+        setEditing(false)
+      } else {
+        const err = await resp.json().catch(() => null)
+        setSaveError(err?.detail || 'Failed to save.')
+      }
+    } catch {
+      setSaveError('Failed to save. Check your connection.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64 text-slate-400">
@@ -115,7 +162,18 @@ const NutritionGuide: React.FC = () => {
     <div className="p-6 space-y-6 max-w-4xl mx-auto">
       {/* Header */}
       <div>
-        <h1 className="font-display text-2xl font-bold text-white">Recomp Nutrition Guide</h1>
+        <div className="flex items-start justify-between gap-3">
+          <h1 className="font-display text-2xl font-bold text-white">Recomp Nutrition Guide</h1>
+          {!editing && (
+            <button
+              onClick={startEditing}
+              className="flex-shrink-0 flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-slate-300"
+            >
+              <Pencil className="w-3.5 h-3.5" />
+              Edit
+            </button>
+          )}
+        </div>
         {g.goal && (
           <p className="text-slate-400 text-sm mt-2">
             <span className="text-slate-200 font-medium">Goal:</span> {g.goal}
@@ -132,6 +190,40 @@ const NutritionGuide: React.FC = () => {
           </p>
         )}
       </div>
+
+      {editing && (
+        <div className="assistant-panel rounded-xl p-5 space-y-3">
+          <Eyebrow>Edit Guide JSON</Eyebrow>
+          <p className="text-xs text-slate-500">
+            Fields: goal, how_it_works, weekly_average, macros (list of {'{label, training, rest}'}),
+            rules (list of {'{title, body}'}), carb_timing, staples, self_check.
+          </p>
+          <textarea
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            spellCheck={false}
+            className="w-full h-96 font-mono text-xs bg-black/30 border border-white/10 rounded-lg p-3 text-slate-200 focus:outline-none focus:border-teal-400/50"
+          />
+          {saveError && <p className="text-xs text-rose-400">{saveError}</p>}
+          <div className="flex gap-2">
+            <button
+              onClick={saveEditing}
+              disabled={saving}
+              className="flex items-center gap-1.5 text-sm font-medium px-4 py-2 rounded-lg bg-teal-600 hover:bg-teal-500 text-white disabled:opacity-50"
+            >
+              <Save className="w-4 h-4" />
+              {saving ? 'Saving...' : 'Save'}
+            </button>
+            <button
+              onClick={cancelEditing}
+              className="flex items-center gap-1.5 text-sm font-medium px-4 py-2 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-slate-300"
+            >
+              <X className="w-4 h-4" />
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Daily Targets */}
       <div className="assistant-panel rounded-xl p-5">

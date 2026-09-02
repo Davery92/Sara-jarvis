@@ -448,32 +448,46 @@ class WorkingMemoryService:
     # User State Management
     # ============================================
 
+    # Ground-truth plan, Phase 5 §1: ONE state.
+    #
+    # `working_memory:<uid>:user_state` was a second, independently-inferred
+    # answer to "what is David doing", written on a Celery beat from Redis
+    # recency heuristics. On 2026-09-02 it said in_meeting/busy while
+    # `sara:unified_context` said unknown/Office and David was in fact typing on
+    # his phone in the kitchen. Two states means at least one of them is lying,
+    # and nothing could tell which.
+    #
+    # `sara:unified_context` is now the only snapshot. This reads through to it
+    # so existing callers keep working; the separate key is no longer written.
+    _UNAVAILABLE_ACTIVITIES = {
+        "sleeping", "in_meeting", "exercising", "driving", "focused_work",
+    }
+
     async def get_user_state(self, user_id: str) -> UserState:
-        """Get the inferred user state."""
-        key = self._key(user_id, "user_state")
-
+        """David's state, read from the one snapshot that holds it."""
         try:
-            data = self.redis.get(key)
-            if not data:
-                return UserState(
-                    inferred_activity="unknown",
-                    availability=UserAvailability.UNKNOWN,
-                    location="unknown",
-                    last_interaction=None,
-                    inferred_at=datetime.now(ZoneInfo("America/New_York")).isoformat()
-                )
+            from app.services.unified_context import read_snapshot
 
-            state_data = json.loads(data)
+            snap = await read_snapshot(user_id)
+            activity = (snap.activity_state or "unknown").lower()
+            interruptibility = snap.interruptibility if snap.interruptibility is not None else 0.5
+
+            if activity in ("unknown", ""):
+                availability = UserAvailability.UNKNOWN
+            elif activity in self._UNAVAILABLE_ACTIVITIES or interruptibility < 0.3:
+                availability = UserAvailability.BUSY
+            else:
+                availability = UserAvailability.AVAILABLE
+
             return UserState(
-                inferred_activity=state_data.get("inferred_activity", "unknown"),
-                availability=UserAvailability(state_data.get("availability", "unknown")),
-                location=state_data.get("location", "unknown"),
-                last_interaction=state_data.get("last_interaction"),
-                mood_signals=state_data.get("mood_signals", []),
-                confidence=state_data.get("confidence", 0.5),
-                inferred_at=state_data.get("inferred_at", "")
+                inferred_activity=activity,
+                availability=availability,
+                location=snap.current_place or "unknown",
+                last_interaction=None,
+                mood_signals=[snap.mood] if getattr(snap, "mood", None) else [],
+                confidence=float(getattr(snap, "activity_confidence", None) or 0.5),
+                inferred_at=local_now().isoformat(),
             )
-
         except Exception as e:
             logger.error(f"Error getting user state for {user_id}: {e}")
             return UserState(
@@ -483,29 +497,6 @@ class WorkingMemoryService:
                 last_interaction=None,
                 inferred_at=local_now().isoformat()
             )
-
-    async def update_user_state(
-        self,
-        user_id: str,
-        state: UserState
-    ) -> bool:
-        """Update the inferred user state."""
-        key = self._key(user_id, "user_state")
-
-        try:
-            state_dict = asdict(state)
-            state_dict["availability"] = state.availability.value
-
-            self.redis.setex(
-                key,
-                self.TTLS["user_state"],
-                json.dumps(state_dict)
-            )
-            return True
-
-        except Exception as e:
-            logger.error(f"Error updating user state for {user_id}: {e}")
-            return False
 
     async def record_interaction(self, user_id: str) -> bool:
         """Record that an interaction occurred (updates last_interaction)."""

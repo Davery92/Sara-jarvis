@@ -18,6 +18,44 @@ from app.core.timezone import now as local_now
 logger = logging.getLogger(__name__)
 
 
+# One logical metric, more than one metric_type in the table. The raw `hrv`
+# stream went dark on 2026-05-05 (gotcha_apple_health_watch_streams_dark) and
+# every HRV reading since arrives as `hrv_morning` — which is why a chat asking
+# for HRV found nothing while a real 54 sat in the table. readiness_engine.py,
+# body_state_service.py and progressive_overload.py all already prefer
+# hrv_morning with an `hrv` fallback; the chat/tool path never got the memo, so
+# it reported an absence that wasn't real and the model filled it in.
+# Order matters: first entry with data wins.
+METRIC_ALIASES = {
+    "hrv": ["hrv_morning", "hrv"],
+}
+
+
+def alias_chain(metric_type: str) -> List[str]:
+    """Every metric_type that can satisfy a request for `metric_type`."""
+    return METRIC_ALIASES.get(metric_type, [metric_type])
+
+
+def render_recorded_at(recorded_at: Optional[str]) -> str:
+    """Render a metric's own `recorded_at` as local wall-clock — "today 06:12",
+    "yesterday 22:40", "Aug 24 07:03". Never returns an empty string: a health
+    number with no date attached is exactly the shape that gets mistaken for a
+    current reading, so an unknown timestamp says so out loud."""
+    if not recorded_at:
+        return "at an unknown time"
+    try:
+        from app.core.timezone import to_local, is_today, is_yesterday
+        dt = datetime.fromisoformat(str(recorded_at).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return "at an unknown time"
+    local_dt = to_local(dt)
+    if is_today(dt):
+        return f"today {local_dt.strftime('%H:%M')}"
+    if is_yesterday(dt):
+        return f"yesterday {local_dt.strftime('%H:%M')}"
+    return local_dt.strftime("%b %-d %H:%M")
+
+
 class HealthInsightService:
     """
     Service for surfacing health insights during conversations.
@@ -66,7 +104,10 @@ class HealthInsightService:
 
             metrics = summary.get('metrics', {})
             for metric_type, data in metrics.items():
-                if data.get('current_value'):
+                # `is not None`, not truthiness: 0 steps and a 0-hour sleep are
+                # real readings, and dropping them turns "he didn't move today"
+                # into "no data" (D7).
+                if data.get('current_value') is not None:
                     status = data.get('status', 'normal')
                     status_emoji = {
                         'above_normal': '⬆️',
@@ -75,10 +116,24 @@ class HealthInsightService:
                     }.get(status, '')
 
                     context_parts.append(
-                        f"- {metric_type.replace('_', ' ').title()}: {data['current_value']} {status_emoji}"
+                        f"- {metric_type.replace('_', ' ').title()}: {data['current_value']} "
+                        f"{status_emoji} (recorded {render_recorded_at(data.get('recorded_at'))})"
                     )
-                    if data.get('baseline'):
+                    if data.get('baseline') is not None:
                         context_parts.append(f"  (7-day avg: {data['baseline']})")
+
+            # State the gaps. This block is ambient context the model reads as
+            # evidence; a metric that simply isn't mentioned reads as "nothing
+            # notable" rather than "unknown", and that's what it interpolates.
+            absent = [
+                m.replace('_', ' ').title() for m in ('resting_hr', 'hrv', 'sleep_hours')
+                if metrics.get(m, {}).get('current_value') is None
+            ]
+            if absent:
+                context_parts.append(
+                    f"- Not recorded in the last 24h: {', '.join(absent)} — "
+                    "state this as missing if asked; never estimate it."
+                )
 
             # Add recent alerts if any
             alerts = summary.get('recent_alerts', [])
@@ -151,6 +206,16 @@ class HealthInsightService:
                     "baseline": float(baseline.average_value) if baseline and baseline.average_value else None,
                     "status": status,
                 }
+
+            # Fill a logical metric from whichever stream actually carries it,
+            # so "no HRV reading" is only ever said when there genuinely is none.
+            for canonical, chain in METRIC_ALIASES.items():
+                if metrics.get(canonical, {}).get("current_value") is not None:
+                    continue
+                for alt in chain:
+                    if metrics.get(alt, {}).get("current_value") is not None:
+                        metrics[canonical] = {**metrics[alt], "aliased_from": alt}
+                        break
 
             # Get recent alerts
             alerts = db.execute(text("""
@@ -228,40 +293,68 @@ class HealthInsightService:
         Analyze trend for a specific metric over the given number of days.
         """
         try:
-            cutoff = naive_local_now() - timedelta(days=days)
+            # `recorded_at` is timestamptz and the DB session runs in UTC, so
+            # both the window and the day-bucketing have to be pinned to ET
+            # explicitly: a naive-ET cutoff bound against a timestamptz column
+            # is silently read as UTC, and a bare DATE() buckets a 9 PM ET
+            # reading onto the following day (D5/D14).
+            from app.core.timezone import local_day_bounds
+            cutoff = local_day_bounds(local_now().date() - timedelta(days=days - 1))[0]
 
             # Get daily averages
             result = db.execute(text("""
                 SELECT
-                    DATE(recorded_at) as day,
+                    DATE(recorded_at AT TIME ZONE 'America/New_York') as day,
                     AVG(value) as avg_value,
                     MIN(value) as min_value,
                     MAX(value) as max_value,
                     COUNT(*) as sample_count
                 FROM health_metric
                 WHERE user_id = :user_id
-                  AND metric_type = :metric_type
+                  AND metric_type = ANY(:metric_types)
                   AND recorded_at >= :cutoff
-                GROUP BY DATE(recorded_at)
+                GROUP BY DATE(recorded_at AT TIME ZONE 'America/New_York')
                 ORDER BY day
             """), {
                 "user_id": user_id,
-                "metric_type": metric_type,
+                "metric_types": alias_chain(metric_type),
                 "cutoff": cutoff,
             })
 
+            # SQL GROUP BY DATE only returns days that HAVE rows, so a gap day
+            # silently vanishes and a 7-day request comes back as a tidy 3-day
+            # series — which reads as continuous. Fill the calendar so an absent
+            # day is an explicit {"value": None} the caller has to render, the
+            # same shape patterns.py:378-382 already produces (D12).
+            by_day = {}
+            for row in result.fetchall():
+                if not row.day:
+                    continue
+                by_day[row.day] = {
+                    "day": row.day.isoformat(),
+                    "avg_value": float(row.avg_value) if row.avg_value is not None else None,
+                    "min_value": float(row.min_value) if row.min_value is not None else None,
+                    "max_value": float(row.max_value) if row.max_value is not None else None,
+                    "sample_count": row.sample_count,
+                }
+
             daily_data = []
             values = []
-            for row in result.fetchall():
-                daily_data.append({
-                    "day": row.day.isoformat() if row.day else None,
-                    "avg_value": float(row.avg_value) if row.avg_value else None,
-                    "min_value": float(row.min_value) if row.min_value else None,
-                    "max_value": float(row.max_value) if row.max_value else None,
-                    "sample_count": row.sample_count,
-                })
-                if row.avg_value:
-                    values.append(float(row.avg_value))
+            end_day = local_now().date()
+            for offset in range(days - 1, -1, -1):
+                day = end_day - timedelta(days=offset)
+                entry = by_day.get(day) or {
+                    "day": day.isoformat(),
+                    "avg_value": None,
+                    "min_value": None,
+                    "max_value": None,
+                    "sample_count": 0,
+                }
+                daily_data.append(entry)
+                if entry["avg_value"] is not None:
+                    values.append(entry["avg_value"])
+
+            missing_days = [d["day"] for d in daily_data if d["avg_value"] is None]
 
             # Calculate trend direction
             trend = "stable"
@@ -282,6 +375,8 @@ class HealthInsightService:
                 "daily_data": daily_data,
                 "trend": trend,
                 "overall_avg": sum(values) / len(values) if values else None,
+                "days_with_data": len(values),
+                "missing_days": missing_days,
             }
 
         except Exception as e:

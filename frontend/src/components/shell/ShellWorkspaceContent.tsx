@@ -29,6 +29,7 @@ const loadDial = () => import('../../pages/Dial')
 const loadLife = () => import('../../pages/Life')
 const loadWork = () => import('../../pages/Work')
 const loadMemory = () => import('../../pages/Memory')
+const loadDailyLog = () => import('../DailyLog')
 const loadEmailPage = () => import('../EmailPage')
 const loadPersonalKnowledge = () => import('../PersonalKnowledge')
 const loadAutomationsView = () => import('../AutomationsView')
@@ -50,6 +51,7 @@ const Dial = lazy(loadDial)
 const Life = lazy(loadLife)
 const Work = lazy(loadWork)
 const Memory = lazy(loadMemory)
+const DailyLog = lazy(loadDailyLog)
 const ACSPage = lazy(loadACSPage)
 const EmailPage = lazy(loadEmailPage)
 const PersonalKnowledge = lazy(loadPersonalKnowledge)
@@ -428,6 +430,14 @@ export default function ShellWorkspaceContent({
     return (
       <div className="flex-1 min-h-0">
         {renderDeferredView('Loading Memory…', <Memory />)}
+      </div>
+    )
+  }
+
+  if (targetView === 'daily-log') {
+    return (
+      <div className="flex-1 min-h-0">
+        {renderDeferredView('Loading daily log…', <DailyLog />)}
       </div>
     )
   }

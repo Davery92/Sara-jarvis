@@ -19,6 +19,7 @@ incrementally (recall-paths → 1) without a big-bang cutover.
 
 import asyncio
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 from app.core.config import get_owner_id
@@ -168,6 +169,11 @@ def _fact_text(r: Dict[str, Any]) -> str:
         sentence = ""
     if sentence and sentence.strip() and sentence.strip() != "David":
         return sentence.strip()
+    if (r.get("type") or "") == "Health":
+        # An empty sentence for a Health fact is a deliberate suppression
+        # (`health_metric` owns that number, or the state is past its TTL) —
+        # falling through to the raw column would smuggle it back in.
+        return ""
     return (r.get("value") or r.get("description") or r.get("content_text")
             or r.get("content") or "").strip()
 
@@ -338,6 +344,88 @@ async def _from_artifacts(user_id: str, query: str, per: int) -> List[Dict[str, 
     ]
 
 
+# Ground-truth invariant 2: Sara's words are not evidence.
+#
+# On 2026-09-02 four of the five memory.recall hits for a chat turn were notes
+# Sara had written herself the night before — three near-identical "Salem MA
+# Historical Guide - Completed" rows — and `note` is ranked "confirmed", the
+# highest tier, above David's own episodes. She was recalling her own output as
+# authoritative knowledge about the world, three times over.
+_AGENT_OUTPUT_ASKED_FOR_RE = re.compile(
+    r"\b(research|report|agent|background (?:task|job|work)|what did you (?:find|write)|"
+    r"your notes?|the write-?up)\b",
+    re.IGNORECASE,
+)
+
+
+def _asked_about_agent_output(query: str) -> bool:
+    """When David asks about a report, his own agent's notes ARE the answer."""
+    return bool(_AGENT_OUTPUT_ASKED_FOR_RE.search(query or ""))
+
+
+async def _drop_saras_own_output(
+    user_id: str, query: str, traces: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Remove notes Sara wrote herself, unless David asked about them."""
+    note_ids = [str(t["id"]) for t in traces if t.get("kind") == "note" and t.get("id")]
+    if not note_ids or _asked_about_agent_output(query):
+        return traces
+
+    try:
+        from sqlalchemy import text as sa_text
+        from app.core.config import settings
+        from app.db.session import get_async_session_factory
+        from app.services.note_provenance import SARA_GENERATED_TAG
+
+        workspace_ids = [
+            str(v) for v in (getattr(settings, "acs_default_note_folder_id", None),)
+            if v
+        ]
+        factory = get_async_session_factory()
+        async with factory() as db:
+            rows = (await db.execute(sa_text("""
+                SELECT n.id FROM note n
+                 LEFT JOIN folder f ON f.id = n.folder_id
+                 WHERE n.id = ANY(:ids)
+                   AND (
+                        n.tags::jsonb @> :tag::jsonb
+                     OR f.name ILIKE '%Agent Workspace%'
+                     OR (:has_ws AND n.folder_id = ANY(:ws))
+                   )
+            """), {
+                "ids": note_ids, "tag": f'["{SARA_GENERATED_TAG}"]',
+                "has_ws": bool(workspace_ids), "ws": workspace_ids or [""],
+            })).fetchall()
+        excluded = {str(r.id) for r in rows}
+    except Exception as e:
+        logger.debug(f"[recall] sara_generated filter skipped: {e}")
+        return traces
+
+    if not excluded:
+        return traces
+    logger.debug(f"[recall] dropped {len(excluded)} note(s) Sara wrote herself")
+    return [t for t in traces if not (t.get("kind") == "note" and str(t.get("id")) in excluded)]
+
+
+def _dedupe_by_title(traces: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Three copies of one note is one hit, not three.
+
+    Duplicate result notes are a real thing this system produces (four identical
+    Salem research plans ran on 2026-09-01), and each duplicate crowded a genuine
+    memory out of the top five.
+    """
+    seen: set = set()
+    kept: List[Dict[str, Any]] = []
+    for t in traces:
+        title = re.sub(r"[^a-z0-9]+", " ", (t.get("text") or "")[:80].lower()).strip()
+        key = (t.get("kind"), title)
+        if title and key in seen:
+            continue
+        seen.add(key)
+        kept.append(t)
+    return kept
+
+
 async def recall(
     user_id: str = DEFAULT_USER_ID,
     query: str = "",
@@ -382,6 +470,8 @@ async def recall(
             continue
         traces.extend(res or [])
 
+    traces = await _drop_saras_own_output(user_id, query, traces)
+    traces = _dedupe_by_title(traces)
     traces.sort(key=lambda t: t["score"], reverse=True)
     traces = traces[:k]
 

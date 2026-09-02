@@ -342,8 +342,19 @@ def trigger_company_research_sync(
     )
     db.commit()
 
+    # david_priority is the single-flight research lane (--concurrency=1).
+    # Autonomous prep used to go to `cognitive` (concurrency 4), where it could
+    # land on the LLM lane alongside a chat-initiated plan — the concurrency
+    # that OOM'd the Mac Studio on 2026-09-01. Queued here it simply waits.
     from app.tasks.research import run_research_plan
-    run_research_plan.apply_async(args=[plan_id, user_id], queue="cognitive")
+    async_result = run_research_plan.apply_async(
+        args=[plan_id, user_id], queue="david_priority"
+    )
+    db.execute(
+        text("UPDATE research_plan SET celery_task_id = :tid WHERE id = :id"),
+        {"tid": async_result.id, "id": plan_id},
+    )
+    db.commit()
     logger.info("Auto-triggered meeting research for %s (plan %s)", company, plan_id)
     return True
 

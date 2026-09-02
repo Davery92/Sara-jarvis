@@ -10,6 +10,7 @@ Used by AgentDispatchService when a task is classified as "internal".
 
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -152,6 +153,20 @@ When done, call report_complete with:
   David wants to be able to open and review them directly."""
 
 
+def _looks_like_junk_output(text: str) -> bool:
+    """True when a 'summary' is not actually a deliverable — an unexecuted
+    text-format tool call, or too short to carry any finding. Such runs used to
+    be recorded as `completed`, which put raw XML in the result note and taught
+    the notification tuner that agent results are worthless.
+    """
+    t = (text or "").strip()
+    if len(t) < 40:
+        return True
+    if "<tool_call>" in t or "<function=" in t:
+        return True
+    return False
+
+
 class InternalToolAgent:
     """LLM agent loop that uses Sara's tool registry for internal tasks."""
 
@@ -166,8 +181,9 @@ class InternalToolAgent:
         self.mission_id = mission_id
         self.user_id = user_id
         from app.core.llm_config import llm_config
-        self.llm_url = llm_config.primary_url
-        self.model = llm_config.primary_model
+        # bg lane (:8081): tool-agent loops are background work, never the chat lane.
+        self.llm_url = llm_config.bg_primary_url
+        self.model = llm_config.bg_primary_model
         self.max_iterations = 25
         self._step_counter = 0
         self._should_pause = False
@@ -176,6 +192,9 @@ class InternalToolAgent:
         self._complete_summary: Optional[str] = None
         self._complete_findings: List[str] = []
         self._found_items: List[dict] = []
+        # Drawer-compatible execution log (same entry shape the VM
+        # dispatch loop emits) so internal tasks are inspectable too.
+        self._execution_log: List[dict] = []
 
         # Use classifier-provided categories if available, else fall back to all
         # Note: empty list [] also falls back (classifier returned no categories)
@@ -191,6 +210,14 @@ class InternalToolAgent:
         self._tool_schemas.extend(EXTRA_TOOLS)
 
         logger.info(f"[internal-agent] Loaded {len(self._tool_schemas)} tools total")
+
+        # Names the model is allowed to call — used to validate salvaged
+        # text-format tool calls (see _run_loop).
+        self._valid_tool_names = {
+            t["function"]["name"]
+            for t in self._tool_schemas
+            if t.get("function", {}).get("name")
+        }
 
         # Build a set of registry tool names for dispatching
         self._registry_tool_names = set()
@@ -238,16 +265,50 @@ class InternalToolAgent:
                 logger.error(f"[internal-agent] LLM call failed on iteration {iteration}: {e}")
                 # Build fallback summary from what we have
                 fallback = self._build_fallback_summary(tool_results_log)
+                if not fallback:
+                    # Nothing was accomplished — report the failure instead of
+                    # dressing the exception string up as a result.
+                    return {
+                        "status": "failed",
+                        "error": f"Internal agent LLM call failed: {e}",
+                        "summary": "",
+                        "artifacts": [],
+                        "found_items": [],
+                        "messages": messages,
+                        "execution_log": self._execution_log,
+                    }
                 return {
                     "status": "completed",
-                    "summary": fallback or f"Internal agent LLM call failed: {e}",
+                    "summary": fallback,
                     "artifacts": [],
                     "found_items": [],
                     "messages": messages,
+                    "execution_log": self._execution_log,
                 }
 
             assistant_content = response.get("content") or ""
             tool_calls = response.get("tool_calls")
+
+            # Qwen intermittently emits tool calls as plain text instead of real
+            # tool_calls. The VM dispatch loop already salvages these; without the
+            # same treatment here the raw XML fell through to "implicit completion"
+            # and got stored as the task's answer.
+            if not tool_calls and assistant_content:
+                from app.services.agent_dispatch import (
+                    _parse_text_tool_calls,
+                    _strip_text_tool_calls,
+                )
+                salvaged = _parse_text_tool_calls(
+                    assistant_content, self._valid_tool_names,
+                )
+                if salvaged:
+                    logger.warning(
+                        "[internal-agent] Salvaged %d text-format tool call(s) the "
+                        "server didn't parse (iteration %d)",
+                        len(salvaged), iteration,
+                    )
+                    tool_calls = salvaged
+                    assistant_content = _strip_text_tool_calls(assistant_content)
 
             # Build assistant message for history
             assistant_msg: Dict[str, Any] = {"role": "assistant"}
@@ -259,10 +320,20 @@ class InternalToolAgent:
                 assistant_msg["content"] = ""
             messages.append(assistant_msg)
 
+            if assistant_content.strip():
+                self._execution_log.append({
+                    "type": "llm_response",
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "round": iteration,
+                    "content": assistant_content[:10000],
+                })
+
             if tool_calls:
                 has_called_tools = True
                 for tc in tool_calls:
+                    _t0 = time.monotonic()
                     result = await self._execute_tool(tc)
+                    _dur_ms = int((time.monotonic() - _t0) * 1000)
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tc["id"],
@@ -275,12 +346,26 @@ class InternalToolAgent:
                         "tool": func_name,
                         "result": result[:2000],
                     })
+                    try:
+                        _args = json.loads(tc.get("function", {}).get("arguments") or "{}")
+                    except (json.JSONDecodeError, TypeError):
+                        _args = {}
+                    self._execution_log.append({
+                        "type": "tool_call",
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                        "round": iteration,
+                        "tool": func_name,
+                        "args": _args,
+                        "result": result[:10000],
+                        "duration_ms": _dur_ms,
+                    })
 
                     if self._should_pause:
                         return {
                             "status": "needs_clarification",
                             "question": self._pause_question,
                             "messages": messages,
+                            "execution_log": self._execution_log,
                         }
 
                     if self._is_complete:
@@ -290,6 +375,7 @@ class InternalToolAgent:
                             "artifacts": self._complete_findings,
                             "found_items": self._found_items,
                             "messages": messages,
+                            "execution_log": self._execution_log,
                         }
 
                 # Compact messages periodically to keep context manageable
@@ -315,23 +401,51 @@ class InternalToolAgent:
                 summary = assistant_content
                 if not summary or len(summary) < 50:
                     summary = self._build_fallback_summary(tool_results_log) or summary or "Task completed"
+                if _looks_like_junk_output(summary):
+                    return {
+                        "status": "failed",
+                        "error": (
+                            "Agent stopped without producing a result "
+                            "(no executable tool calls)."
+                        ),
+                        "summary": "",
+                        "artifacts": [],
+                        "found_items": [],
+                        "messages": messages,
+                        "execution_log": self._execution_log,
+                    }
                 return {
                     "status": "completed",
                     "summary": summary,
                     "artifacts": [],
                     "found_items": [],
                     "messages": messages,
+                    "execution_log": self._execution_log,
                 }
 
         # Max iterations reached — build a meaningful summary from tool results
         logger.warning(f"[internal-agent] Hit max iterations ({self.max_iterations}) for task {self.task_id}")
         fallback = self._build_fallback_summary(tool_results_log)
+        if not fallback:
+            return {
+                "status": "failed",
+                "error": (
+                    f"Agent hit the {self.max_iterations}-iteration limit without "
+                    "producing any usable output."
+                ),
+                "summary": "",
+                "artifacts": [],
+                "found_items": [],
+                "messages": messages,
+                "execution_log": self._execution_log,
+            }
         return {
             "status": "completed",
-            "summary": fallback or "Task completed (reached iteration limit)",
+            "summary": fallback,
             "artifacts": [],
             "found_items": [],
             "messages": messages,
+            "execution_log": self._execution_log,
         }
 
     async def _call_llm(
@@ -351,12 +465,23 @@ class InternalToolAgent:
                 clean["tool_call_id"] = msg["tool_call_id"]
             clean_messages.append(clean)
 
-        # Force the model to call report_complete on the final iteration
+        # Force the model to call report_complete on the final iteration.
+        # llama-server IGNORES a named tool_choice (verified against :8081 — ask
+        # for report_complete and it happily returns a different tool), so the
+        # tool_choice below is only advisory. What actually works is taking every
+        # other tool away for this call.
+        tools_for_call = self._tool_schemas
         if force_report_complete:
             tool_choice = {
                 "type": "function",
                 "function": {"name": "report_complete"},
             }
+            report_only = [
+                t for t in self._tool_schemas
+                if t.get("function", {}).get("name") == "report_complete"
+            ]
+            if report_only:
+                tools_for_call = report_only
         else:
             tool_choice = "auto"
 
@@ -366,11 +491,14 @@ class InternalToolAgent:
                 json={
                     "model": self.model,
                     "messages": clean_messages,
-                    "tools": self._tool_schemas,
+                    "tools": tools_for_call,
                     "tool_choice": tool_choice,
                     "temperature": 0.5,
                     "max_tokens": 4000,
-                    "num_ctx": 32768,
+                    "num_ctx": 131072,
+                    # Qwen returns an empty `content` (and often no tool_calls)
+                    # when thinking mode is left on for bounded tool-use turns.
+                    "enable_thinking": False,
                 },
             )
             resp.raise_for_status()

@@ -161,6 +161,29 @@ def decide_promotion(significance: float, threshold: float, anomaly_floor: float
     return False, "subthreshold"
 
 
+
+def effective_explore_rate(base_rate: float, context: str = "") -> float:
+    """Exploration is how the policy keeps learning. It is also how a light
+    switch at 3 AM becomes a thought.
+
+    Ground-truth plan, Phase 8 §3: ε is ZERO between 22:00 and 06:00 — a random
+    promotion overnight teaches nothing, because there is no engagement signal
+    coming back from a sleeping man, and it costs a full deliberation. It is also
+    halved during focused work, where an interruption is expensive and the same
+    signal will still be there in an hour.
+
+    The anomaly floor is untouched: a genuine anomaly still promotes at any hour.
+    """
+    from app.core.timezone import now as local_now
+
+    hour = local_now().hour
+    if hour >= 22 or hour < 6:
+        return 0.0
+    if (context or "").strip().lower() == "focused_work":
+        return base_rate / 2
+    return base_rate
+
+
 def evaluate_signal(db: Session, user_id: str, domain: str, context: str,
                     signal_key: str, value: float, description: str,
                     signal_ref: str = None) -> dict:
@@ -173,7 +196,8 @@ def evaluate_signal(db: Session, user_id: str, domain: str, context: str,
 
     pol = _get_or_create_policy(db, user_id, domain, context)
     promoted, reason = decide_promotion(
-        significance, pol["threshold"], pol["anomaly_floor"], pol["explore_rate"], random.random()
+        significance, pol["threshold"], pol["anomaly_floor"],
+        effective_explore_rate(pol["explore_rate"], context), random.random(),
     )
 
     pe_id = str(uuid.uuid4())

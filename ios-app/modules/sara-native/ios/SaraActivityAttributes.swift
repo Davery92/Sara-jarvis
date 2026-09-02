@@ -39,10 +39,22 @@ public struct SaraEventAttributes: ActivityAttributes {
     public var subtitle: String
     /// Epoch ms to count elapsed time up from; 0 = no timer shown.
     public var startEpochMs: Double
+    public var state: String
+    public var detail: String
+    public var revision: Int64
+    public var validUntilEpochMs: Double
 
-    public init(subtitle: String, startEpochMs: Double) {
+    public init(
+      subtitle: String, startEpochMs: Double, state: String = "acting",
+      detail: String = "", revision: Int64 = 0,
+      validUntilEpochMs: Double = Date().addingTimeInterval(30 * 60).timeIntervalSince1970 * 1000
+    ) {
       self.subtitle = subtitle
       self.startEpochMs = startEpochMs
+      self.state = state
+      self.detail = detail
+      self.revision = revision
+      self.validUntilEpochMs = validUntilEpochMs
     }
   }
 

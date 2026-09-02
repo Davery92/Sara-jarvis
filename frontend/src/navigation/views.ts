@@ -29,6 +29,7 @@ export type AppView =
   | 'life'
   | 'work'
   | 'memory'
+  | 'daily-log'
   | 'dial'
 
 interface AppViewConfig {
@@ -67,6 +68,7 @@ export const APP_VIEWS: AppViewConfig[] = [
   { view: 'life', path: '/life', title: 'Life', icon: 'favorite', keywords: ['life', 'calendar', 'email', 'fitness', 'recipes', 'routines', 'home'] },
   { view: 'work', path: '/work', title: 'Work', icon: 'work', keywords: ['work', 'projects', 'automations', 'agent tasks', 'machines', 'standing orders'] },
   { view: 'memory', path: '/memory', title: 'Memory', icon: 'psychology', keywords: ['memory', 'notes', 'documents', 'knowledge', 'learn', 'facts', 'people'] },
+  { view: 'daily-log', path: '/daily-log', title: 'Daily Log', icon: 'auto_stories', keywords: ['daily log', 'diary', 'journal', 'day', 'yesterday', 'what happened', 'replay'] },
   { view: 'dial', path: '/dial', title: 'The Dial', icon: 'tune', keywords: ['dial', 'quiet hours', 'autonomy', 'initiative', 'calendar ownership', 'ungag'] },
 ]
 

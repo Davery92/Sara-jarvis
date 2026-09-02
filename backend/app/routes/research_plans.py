@@ -201,18 +201,60 @@ async def start_research_plan(
     if not row:
         raise HTTPException(status_code=404, detail="Research plan not found")
 
-    if row.status not in ("draft", "paused", "stuck"):
+    if row.status not in ("draft", "paused", "stuck", "stalled"):
         raise HTTPException(
             status_code=400,
             detail=f"Cannot start plan in status '{row.status}'",
         )
 
+    # Single-flight: never put a second research agent on the LLM lane.
+    from app.services.agent_activity import active_research_plans
+
+    other = [p for p in active_research_plans(db, user_id) if p.id != plan_id]
+    if other:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Research plan '{other[0].title}' ({other[0].id}) is already "
+                f"{other[0].status}. Cancel it first."
+            ),
+        )
+
     # Dispatch Celery task
     from app.tasks.research import run_research_plan
 
-    run_research_plan.delay(plan_id, user_id)
+    async_result = run_research_plan.apply_async(
+        args=[plan_id, user_id], queue="david_priority"
+    )
+    db.execute(
+        text("UPDATE research_plan SET celery_task_id = :tid WHERE id = :id"),
+        {"tid": async_result.id, "id": plan_id},
+    )
+    db.commit()
 
     return {"status": "started", "plan_id": plan_id}
+
+
+@router.post("/{plan_id}/cancel")
+async def cancel_research_plan_route(
+    plan_id: str,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """Cancel a running research plan and revoke its worker.
+
+    A status flip alone is not enough — the Celery task keeps grinding through
+    steps against the LLM lane, which is the resource we are protecting.
+    """
+    from app.services.research.cancel import cancel_research_plan
+
+    result = cancel_research_plan(db, user_id, plan_id)
+    if not result.get("cancelled"):
+        raise HTTPException(
+            status_code=404 if not result.get("id") else 400,
+            detail=result.get("error") or "Research plan not found",
+        )
+    return result
 
 
 @router.post("/{plan_id}/pause")

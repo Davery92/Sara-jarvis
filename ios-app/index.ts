@@ -1,4 +1,5 @@
 import { registerRootComponent } from 'expo';
+import './src/services/presenceBackgroundTask';
 
 import App from './App';
 

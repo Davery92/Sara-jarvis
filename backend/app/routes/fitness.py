@@ -7,7 +7,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, validator
 from typing import List, Optional, Dict, Any
 from datetime import datetime, date, timedelta, timezone
-from app.core.timezone import naive_local_now
+from app.core.timezone import naive_local_now, naive_utc_now, to_naive_local, USER_TIMEZONE
 import uuid
 
 from app.core.timezone import now as local_now
@@ -116,6 +116,98 @@ class FoodLogCreate(BaseModel):
     fats: Optional[float] = None
     notes: Optional[str] = ""
     logged_at: Optional[str] = None
+    # Client-generated once per commit attempt (UUID). A retry through a
+    # dropped connection or a double-tap replays the existing row instead of
+    # creating a second meal — same lesson as workout_command_service's
+    # command_id. Optional so older clients that don't send one still work.
+    idempotency_key: Optional[str] = None
+
+
+def _coerce_logged_at(value) -> Optional[datetime]:
+    """Coerce a client-supplied ``logged_at`` into naive ET wall-clock.
+
+    ``FoodLogCreate.logged_at`` is typed ``str`` because clients (iOS + web)
+    send an ISO string, but the ``food_log.logged_at`` column stores ET
+    wall-clock and the world-event envelope needs a real ``datetime`` — the
+    raw string reached ``.isoformat()`` in the food.logged payload and 500'd
+    with "'str' object has no attribute 'isoformat'". A string with an offset
+    (or a trailing Z) is converted to ET; a naive one is already ET.
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return to_naive_local(value)
+    try:
+        parsed = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=400, detail=f"Invalid logged_at timestamp: {value!r}"
+        )
+    return to_naive_local(parsed)
+
+
+def _sum_detailed_items(detailed_items: Optional[List[dict]]) -> Optional[Dict[str, float]]:
+    """Sum per-item macros into meal totals. Returns None when there are no
+    items with usable numbers to sum (falls back to client-sent totals for
+    manual macro-only entries that have no line items)."""
+    if not detailed_items:
+        return None
+    totals = {"calories": 0.0, "protein": 0.0, "carbs": 0.0, "fats": 0.0}
+    saw_any = False
+    for item in detailed_items:
+        if not isinstance(item, dict):
+            continue
+        for field in totals:
+            val = item.get(field)
+            if val is not None:
+                try:
+                    totals[field] += float(val)
+                    saw_any = True
+                except (TypeError, ValueError):
+                    continue
+    return totals if saw_any else None
+
+
+async def _resolve_food_log_totals(
+    log,
+    logger_tag: str,
+) -> Dict[str, Optional[float]]:
+    """Meal totals are derived from line-item totals, not trusted from the
+    client — a client that sends items whose macros don't match its own
+    top-level calories/protein/carbs/fats has a bug, and silently trusting
+    the mismatched top-level numbers is how "detailed_items say chicken +
+    rice but the header says 1200 empty calories" entries happen. Alerts
+    (not raises) on mismatch so degraded/legacy clients don't hard-fail."""
+    computed = _sum_detailed_items(getattr(log, "detailed_items", None))
+    if computed is None:
+        return {
+            "calories": log.calories,
+            "protein": log.protein,
+            "carbs": log.carbs,
+            "fats": log.fats,
+        }
+
+    client_sent = {
+        "calories": log.calories,
+        "protein": log.protein,
+        "carbs": log.carbs,
+        "fats": log.fats,
+    }
+    for field, computed_val in computed.items():
+        sent_val = client_sent.get(field)
+        if sent_val is not None and abs(float(sent_val) - computed_val) > 0.5:
+            try:
+                from app.core.swallow import swallow
+                await swallow(
+                    logging.getLogger(__name__),
+                    f"{logger_tag}.total_mismatch",
+                    ValueError(
+                        f"{field}: client_sent={sent_val} computed_from_items={computed_val}"
+                    ),
+                )
+            except Exception:
+                pass
+    return computed
 
 
 class WorkoutSetLog(BaseModel):
@@ -523,6 +615,16 @@ async def create_food_log(
     import json
 
     try:
+        # Idempotent replay: a retried commit with the same key returns the
+        # row that was already created instead of logging the meal twice.
+        if log.idempotency_key:
+            existing = db.execute(text("""
+                SELECT id FROM food_log
+                WHERE user_id = :user_id AND idempotency_key = :key
+            """), {"user_id": user_id, "key": log.idempotency_key}).fetchone()
+            if existing:
+                return {"success": True, "message": "Food logged successfully", "log_id": existing[0]}
+
         log_id = str(uuid.uuid4())
         food_items = [item.dict() for item in log.food_items] if log.food_items else []
 
@@ -531,27 +633,27 @@ async def create_food_log(
         if hasattr(log, 'detailed_items') and log.detailed_items:
             detailed_items_json = json.dumps(log.detailed_items)
 
+        totals = await _resolve_food_log_totals(log, "food_log.create")
+
         query = text("""
             INSERT INTO food_log (
                 id, user_id, meal_type, food_items, detailed_items,
-                calories, protein, carbs, fats, notes, logged_at
+                calories, protein, carbs, fats, notes, logged_at, idempotency_key
             ) VALUES (
                 :id, :user_id, :meal_type, CAST(:food_items AS jsonb), CAST(:detailed_items AS jsonb),
-                :calories, :protein, :carbs, :fats, :notes, :logged_at
+                :calories, :protein, :carbs, :fats, :notes, :logged_at, :idempotency_key
             )
+            ON CONFLICT (user_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
             RETURNING id
         """)
 
-        # Use provided logged_at or current time in Eastern timezone
-        # This prevents meals logged at night from appearing as next day
-        from zoneinfo import ZoneInfo
-        eastern = ZoneInfo("America/New_York")
-
-        if log.logged_at:
-            logged_at_time = log.logged_at
-        else:
-            # Get current time in Eastern timezone, then remove timezone info for storage
-            logged_at_time = datetime.now(eastern).replace(tzinfo=None)
+        # Use provided logged_at or current time in Eastern timezone.
+        # This prevents meals logged at night from appearing as next day.
+        # Naive ET for the column; aware for the world event, whose
+        # occurred_at is timestamptz and would otherwise read the ET
+        # wall-clock as UTC and land the meal 4-5 hours early.
+        logged_at_time = _coerce_logged_at(log.logged_at) or naive_local_now()
+        logged_at_aware = logged_at_time.replace(tzinfo=USER_TIMEZONE)
 
         result = db.execute(query, {
             "id": log_id,
@@ -559,44 +661,64 @@ async def create_food_log(
             "meal_type": log.meal_type,
             "food_items": json.dumps(food_items),
             "detailed_items": detailed_items_json,
-            "calories": log.calories,
-            "protein": log.protein,
-            "carbs": log.carbs,
-            "fats": log.fats,
+            "calories": totals["calories"],
+            "protein": totals["protein"],
+            "carbs": totals["carbs"],
+            "fats": totals["fats"],
             "notes": log.notes or "",
-            "logged_at": logged_at_time
+            "logged_at": logged_at_time,
+            "idempotency_key": log.idempotency_key,
         })
 
+        row = result.fetchone()
+        from app.services.world_state.writer import append_world_event
+        append_world_event(
+            db, user_id=str(user_id), kind="food.logged", source="fitness_api",
+            source_ref=f"food_log:{log_id}", aggregate_type="food_log", aggregate_id=log_id,
+            actor_type="user", actor_id=str(user_id), dedupe_key=f"food-logged:{log_id}",
+            occurred_at=logged_at_aware,
+            payload={"log_id": log_id, "meal_type": log.meal_type, "food_items": food_items,
+                     "calories": totals["calories"], "protein": totals["protein"],
+                     "carbs": totals["carbs"], "fats": totals["fats"],
+                     "notes": log.notes or "", "logged_at": logged_at_aware.isoformat(),
+                     "summary": ", ".join(str(item.get("name") or "") for item in food_items)[:500]},
+        )
         db.commit()
+
+        if row is None:
+            # Lost the race to a concurrent identical retry — the other
+            # request's row is the one of record.
+            existing = db.execute(text("""
+                SELECT id FROM food_log
+                WHERE user_id = :user_id AND idempotency_key = :key
+            """), {"user_id": user_id, "key": log.idempotency_key}).fetchone()
+            if existing:
+                return {"success": True, "message": "Food logged successfully", "log_id": existing[0]}
 
         # Save to episodic memory
         food_list = ", ".join([f"{item['name']} ({item['quantity']} {item['unit']})" for item in food_items])
         food_content = f"Logged {log.meal_type}: {food_list}"
-        if log.calories:
-            food_content += f" | {log.calories} cal"
-        if log.protein:
-            food_content += f", {log.protein}g protein"
+        if totals["calories"]:
+            food_content += f" | {totals['calories']} cal"
+        if totals["protein"]:
+            food_content += f", {totals['protein']}g protein"
         if log.notes:
             food_content += f" | Notes: {log.notes}"
         await save_to_episodic_memory(db, user_id, "fitness_food", food_content)
 
         # Update daily log
-        nutrition_data = {
-            "calories": log.calories,
-            "protein": log.protein,
-            "carbs": log.carbs,
-            "fats": log.fats
-        }
-        await update_daily_log(db, user_id, date.today(), "food", nutrition_data=nutrition_data)
+        await update_daily_log(db, user_id, date.today(), "food", nutrition_data=totals)
 
         # Tell Sara's cognitive system David just ate (contact + domain action).
         _emit_domain_event_safe(EventType.FOOD_LOGGED, user_id, {
             "meal_type": log.meal_type,
             "food": (food_items[0]["name"] if food_items else None),
-            "calories": log.calories,
+            "calories": totals["calories"],
         })
 
         return {"success": True, "message": "Food logged successfully", "log_id": log_id}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to create food log: {e}")
         db.rollback()
@@ -621,6 +743,8 @@ async def update_food_log_entry(
         if hasattr(request, 'detailed_items') and request.detailed_items:
             detailed_items_json = json.dumps(request.detailed_items)
 
+        totals = await _resolve_food_log_totals(request, "food_log.update")
+
         query = text("""
             UPDATE food_log
             SET meal_type = :meal_type,
@@ -643,15 +767,27 @@ async def update_food_log_entry(
             "meal_type": request.meal_type,
             "food_items": json.dumps(food_items),
             "detailed_items": detailed_items_json,
-            "calories": request.calories,
-            "protein": request.protein,
-            "carbs": request.carbs,
-            "fats": request.fats,
+            "calories": totals["calories"],
+            "protein": totals["protein"],
+            "carbs": totals["carbs"],
+            "fats": totals["fats"],
             "notes": request.notes or "",
-            "logged_at": request.logged_at or naive_local_now()
+            "logged_at": _coerce_logged_at(request.logged_at) or naive_local_now()
         })
 
         updated = result.fetchone()
+        if updated:
+            from app.services.world_state.writer import append_world_event
+            append_world_event(
+                db, user_id=str(user_id), kind="food.updated", source="fitness_api",
+                source_ref=f"food_log:{log_id}", aggregate_type="food_log", aggregate_id=log_id,
+                actor_type="user", actor_id=str(user_id),
+                dedupe_key=f"food-updated:{log_id}:{naive_utc_now().isoformat()}",  # time-ok: dedupe key
+                payload={"log_id": log_id, "meal_type": request.meal_type, "food_items": food_items,
+                         "calories": totals["calories"], "protein": totals["protein"],
+                         "carbs": totals["carbs"], "fats": totals["fats"],
+                         "notes": request.notes or ""},
+            )
         db.commit()
 
         if not updated:
@@ -694,6 +830,15 @@ async def patch_food_log_entry(
 
         result = db.execute(query, fields_to_update)
         updated = result.fetchone()
+        if updated:
+            from app.services.world_state.writer import append_world_event
+            append_world_event(
+                db, user_id=str(user_id), kind="food.updated", source="fitness_api",
+                source_ref=f"food_log:{log_id}", aggregate_type="food_log", aggregate_id=log_id,
+                actor_type="user", actor_id=str(user_id),
+                dedupe_key=f"food-patched:{log_id}:{naive_utc_now().isoformat()}",  # time-ok: dedupe key
+                payload={"log_id": log_id, **{k: v for k, v in updates.items() if k in allowed_fields}},
+            )
         db.commit()
 
         if not updated:
@@ -724,6 +869,14 @@ async def delete_food_log_entry(
 
         result = db.execute(query, {"log_id": log_id, "user_id": user_id})
         deleted = result.fetchone()
+        if deleted:
+            from app.services.world_state.writer import append_world_event
+            append_world_event(
+                db, user_id=str(user_id), kind="food.deleted", source="fitness_api",
+                source_ref=f"food_log:{log_id}", aggregate_type="food_log", aggregate_id=log_id,
+                actor_type="user", actor_id=str(user_id), dedupe_key=f"food-deleted:{log_id}",
+                payload={"log_id": log_id},
+            )
         db.commit()
 
         if not deleted:
@@ -2065,6 +2218,7 @@ async def fitness_chat(
             TemplateListTool, TemplateGetTool, TemplateUpdateTool,
             ProgramListTool, ProgramGetTool,
             PhaseListTool, PhaseGetTool, PhaseUpdateTool, PhaseActivateTool,
+            PhaseInsertBlockTool, PhaseEndBlockTool, NutritionGuideUpdateTool,
             TrainingScheduleTool
         )
         from app.tools.fitness.food_search_log import FoodSearchAndLogTool
@@ -2079,6 +2233,7 @@ async def fitness_chat(
             TemplateListTool(), TemplateGetTool(), TemplateUpdateTool(),
             ProgramListTool(), ProgramGetTool(),
             PhaseListTool(), PhaseGetTool(), PhaseUpdateTool(), PhaseActivateTool(),
+            PhaseInsertBlockTool(), PhaseEndBlockTool(), NutritionGuideUpdateTool(),
             TrainingScheduleTool()
         ]
 
@@ -3170,6 +3325,121 @@ async def delete_phase(phase_id: str, user_id: str = Depends(get_current_user_id
     except Exception as e:
         db.rollback()
         logger.error(f"Failed to delete phase: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================
+# PLAN ADJUST APIs — dated block insertion / timeline surgery
+# ============================================
+
+class PhaseInsertBlockRequest(BaseModel):
+    name: Optional[str] = None
+    goal: Optional[str] = None
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+    duration_weeks: Optional[int] = None
+    calories_target: Optional[int] = None
+    protein_target: Optional[int] = None
+    carbs_target: Optional[int] = None
+    fat_target: Optional[int] = None
+    calories_training_day: Optional[int] = None
+    calories_rest_day: Optional[int] = None
+    carbs_training_day: Optional[int] = None
+    carbs_rest_day: Optional[int] = None
+    fat_training_day: Optional[int] = None
+    fat_rest_day: Optional[int] = None
+    daily_steps_target: Optional[int] = None
+    training_days_per_week: Optional[int] = None
+    mode: str = "overlay"
+    notes: Optional[str] = None
+
+
+class PhaseEndBlockRequest(BaseModel):
+    on_date: Optional[date] = None
+
+
+@router.post("/phases/insert-block")
+async def insert_phase_block_endpoint(
+    req: PhaseInsertBlockRequest,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """Insert a dated block (cut/bulk/maintenance) into the active program's timeline."""
+    from app.services.plan_adjust import insert_phase_block
+
+    try:
+        summary = insert_phase_block(
+            db, user_id,
+            name=req.name, goal=req.goal, start_date=req.start_date, end_date=req.end_date,
+            duration_weeks=req.duration_weeks, mode=req.mode, notes=req.notes,
+            nutrition={
+                "calories_target": req.calories_target, "protein_target": req.protein_target,
+                "carbs_target": req.carbs_target, "fat_target": req.fat_target,
+                "calories_training_day": req.calories_training_day, "calories_rest_day": req.calories_rest_day,
+                "carbs_training_day": req.carbs_training_day, "carbs_rest_day": req.carbs_rest_day,
+                "fat_training_day": req.fat_training_day, "fat_rest_day": req.fat_rest_day,
+                "daily_steps_target": req.daily_steps_target,
+                "training_days_per_week": req.training_days_per_week,
+            },
+        )
+        db.commit()
+        return {"success": True, **summary}
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to insert phase block: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/phases/{phase_id}/end-early")
+async def end_phase_block_early_endpoint(
+    phase_id: str,
+    req: PhaseEndBlockRequest,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """End a dated block early, re-opening whatever phase it pushed/trimmed to start after it."""
+    from app.services.plan_adjust import end_phase_block_early
+
+    try:
+        target_date = req.on_date or local_now().date()
+        summary = end_phase_block_early(db, user_id, phase_id, target_date)
+        db.commit()
+        return {"success": True, **summary}
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to end phase block: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class NutritionGuideUpdateRequest(BaseModel):
+    guide: Dict[str, Any]
+
+
+@router.patch("/nutrition-guide")
+async def update_nutrition_guide_endpoint(
+    req: NutritionGuideUpdateRequest,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """Overwrite the structured nutrition guide stored on the active program."""
+    from app.services.plan_adjust import update_nutrition_guide
+
+    try:
+        result = update_nutrition_guide(db, user_id, req.guide)
+        db.commit()
+        return {"success": True, **result}
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Failed to update nutrition guide: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/today-target")

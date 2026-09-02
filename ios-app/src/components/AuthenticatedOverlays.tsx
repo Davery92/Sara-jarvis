@@ -11,15 +11,18 @@ import { Platform, AppState, AppStateStatus, DeviceEventEmitter } from 'react-na
 import { useAuth } from '../context/AuthContext';
 import TimerOverlayContainer from './TimerOverlayContainer';
 import FloatingAssistant from './sara/FloatingAssistant';
+import FloatingTaskPill from './FloatingTaskPill';
 import { pushNotificationService } from '../services/pushNotifications';
 import { healthSyncService } from '../services/healthSync';
 import { registerBackgroundHealthSync, triggerManualSync } from '../services/backgroundHealthSync';
 import { isLocationTrackingEnabled, startTracking as startLocationTracking, refreshCurrentLocation, resyncGeofences } from '../services/locationTracking';
 import { iosCalendarSyncService } from '../services/iosCalendarSync';
-import { navigateToChat, navigationRef, getCurrentViewName } from '../services/navigation';
+import { navigateToChat, navigateToNoteEditor, navigationRef, getCurrentViewName } from '../services/navigation';
 import apiClient from '../services/api';
 import { consumeSiriPrompt } from '../services/siriDeepLink';
 import { refreshWidgetData } from '../services/widgetBridge';
+import { activateLiveActivityDelivery } from '../services/liveActivityDelivery';
+import { registerPresenceBackgroundTask } from '../services/presenceBackgroundTask';
 import { flushPendingCaptures } from '../services/universalCapture';
 import { watchWorkout } from '../services/watchWorkout';
 import { workoutCoordinator } from '../services/workoutCoordinator';
@@ -250,6 +253,8 @@ export const AuthenticatedOverlays: React.FC = () => {
     logPresence('app_open');
     checkHealth();
     refreshWidgetData();
+    activateLiveActivityDelivery();
+    void registerPresenceBackgroundTask();
 
     // Siri "Ask Sara": consume any prompt stashed by the App Intent (cold start).
     consumeSiriPrompt();
@@ -311,6 +316,9 @@ export const AuthenticatedOverlays: React.FC = () => {
   return (
     <>
       <TimerOverlayContainer />
+      {/* Every agent task Sara dispatches is visible here, on every screen —
+          the whole point of the 2026-09-01 task-visibility work. */}
+      <FloatingTaskPill onNavigateToNote={(noteId) => navigateToNoteEditor(noteId)} />
       <FloatingAssistant />
     </>
   );

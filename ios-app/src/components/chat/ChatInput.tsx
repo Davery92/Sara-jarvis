@@ -23,6 +23,9 @@ interface ChatInputProps {
   onVoiceMessage?: (audioUri: string) => void;
   onHoldToTalkStart?: () => void;
   onFocus?: () => void;
+  /** Fired on every keystroke — lets the screen clear transient chrome
+   *  (suggestion chips) the moment the user starts composing. */
+  onTextChange?: (text: string) => void;
   disabled?: boolean;
   placeholder?: string;
   voiceEnabled?: boolean;
@@ -36,6 +39,7 @@ export default function ChatInput({
   onVoiceMessage,
   onHoldToTalkStart,
   onFocus,
+  onTextChange,
   disabled = false,
   placeholder = 'Ask Sara anything...',
   voiceEnabled = true,
@@ -287,7 +291,10 @@ export default function ChatInput({
           <TextInput
             style={styles.input}
             value={message}
-          onChangeText={setMessage}
+          onChangeText={(text) => {
+            setMessage(text);
+            onTextChange?.(text);
+          }}
           placeholder={placeholder}
           placeholderTextColor={colors.textMuted}
           onFocus={onFocus}

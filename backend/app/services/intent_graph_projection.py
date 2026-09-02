@@ -24,6 +24,10 @@ notifications or hidden cron tasks."
 """
 
 import logging
+import os
+from datetime import datetime, timedelta
+
+from app.core.timezone import naive_local_now
 from typing import Any, Callable, Dict, List, Tuple
 
 from sqlalchemy import text
@@ -34,13 +38,27 @@ from app.schemas.contracts import IntentV1
 logger = logging.getLogger(__name__)
 
 
+# A reminder whose time passed this long ago is dead, not open. Without this the
+# projection returned every uncompleted reminder ever created, so a one-off like
+# "Pack gym bag for tomorrow" (2026-07-07) was still being reported as an active
+# intent six weeks later and kept surfacing in the per-turn context narrative —
+# exactly the repetitive nagging David objected to on 2026-08-20.
+STALE_REMINDER_DAYS = int(os.getenv("STALE_REMINDER_DAYS", "14"))
+
+
 def _reminders(db: Session, user_id: str) -> List[IntentV1]:
     rows = db.execute(text("""
         SELECT id, title, reminder_time, created_at
         FROM reminder
-        WHERE user_id = :uid AND is_completed = false
+        WHERE user_id = :uid
+          AND is_completed = false
+          AND (reminder_time IS NULL OR reminder_time >= :horizon)
         ORDER BY reminder_time
-    """), {"uid": user_id}).fetchall()
+    """), {
+        "uid": user_id,
+        # reminder.reminder_time is a naive ET wall-clock column — bind naive ET.
+        "horizon": naive_local_now() - timedelta(days=STALE_REMINDER_DAYS),
+    }).fetchall()
     return [
         IntentV1(
             intent_id=f"reminder:{r.id}",

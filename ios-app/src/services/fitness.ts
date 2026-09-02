@@ -225,18 +225,85 @@ export interface CreatePhaseParams {
   name: string;
   goal?: string;
   parent_phase_id?: string;
+  order_index?: number;
+  duration_weeks?: number;
   start_date?: string;
   end_date?: string;
+  calories_target?: number | null;
+  protein_target?: number | null;
+  carbs_target?: number | null;
+  fat_target?: number | null;
+  calories_training_day?: number | null;
+  calories_rest_day?: number | null;
+  carbs_training_day?: number | null;
+  carbs_rest_day?: number | null;
+  fat_training_day?: number | null;
+  fat_rest_day?: number | null;
+  daily_steps_target?: number | null;
+  training_days_per_week?: number | null;
+  deload_week?: number | null;
   notes?: string;
 }
 
 export interface UpdatePhaseParams {
   name?: string;
   goal?: string;
+  order_index?: number;
+  duration_weeks?: number;
   start_date?: string;
   end_date?: string;
   status?: 'planned' | 'active' | 'completed' | 'archived';
+  calories_target?: number | null;
+  protein_target?: number | null;
+  carbs_target?: number | null;
+  fat_target?: number | null;
+  calories_training_day?: number | null;
+  calories_rest_day?: number | null;
+  carbs_training_day?: number | null;
+  carbs_rest_day?: number | null;
+  fat_training_day?: number | null;
+  fat_rest_day?: number | null;
+  daily_steps_target?: number | null;
+  training_days_per_week?: number | null;
+  deload_week?: number | null;
   notes?: string;
+}
+
+// --- Plan Adjust: dated block insertion / timeline surgery ---
+export interface InsertPhaseBlockParams {
+  name: string;
+  goal?: string;
+  start_date?: string;
+  end_date?: string;
+  duration_weeks?: number;
+  calories_target?: number | null;
+  protein_target?: number | null;
+  carbs_target?: number | null;
+  fat_target?: number | null;
+  calories_training_day?: number | null;
+  calories_rest_day?: number | null;
+  carbs_training_day?: number | null;
+  carbs_rest_day?: number | null;
+  fat_training_day?: number | null;
+  fat_rest_day?: number | null;
+  daily_steps_target?: number | null;
+  training_days_per_week?: number | null;
+  mode?: 'overlay' | 'push';
+  notes?: string;
+}
+
+export interface InsertPhaseBlockSummary {
+  block_phase_id: string;
+  name: string;
+  start_date: string;
+  end_date: string;
+  mode: string;
+  trimmed_phases: { id: string; name: string }[];
+  shifted_phases: { id: string; name: string }[];
+  shelved_phases: { id: string; name: string }[];
+  split_phase_id: string | null;
+  templates_copied: number;
+  nutrition_guide_updated: boolean;
 }
 
 export interface WorkoutTemplate {
@@ -533,8 +600,18 @@ class FitnessService {
             ? (() => { try { return JSON.parse(meal.food_items); } catch { return meal.food_items; } })()
             : meal.food_items;
 
+          // detailed_items carries each item's own macros (see FoodLogCreate
+          // in backend/app/routes/fitness.py). It's parallel to food_items
+          // when both were written together — use it so a 3-item breakfast
+          // shows eggs/toast/coffee at their real calories, not an even
+          // three-way split of the meal total. Only degrade to splitting
+          // evenly for entries old enough to lack per-item detail entirely.
+          const hasParallelDetail = Array.isArray(meal.detailed_items)
+            && meal.detailed_items.length === items.length;
+
           (Array.isArray(items) ? items : []).forEach((item: any, index: number) => {
             const itemName = typeof item === 'string' ? item : String(item.name || item.food_name || 'Unknown food');
+            const detail = hasParallelDetail ? meal.detailed_items[index] : undefined;
             foodLogs.push({
               id: `${meal.log_id}-${index}`,
               meal_log_id: meal.log_id,
@@ -544,25 +621,30 @@ class FitnessService {
               food_name: itemName,
               quantity: item.quantity,
               unit: item.unit,
-              // If single item, use full calories; if multiple non-recipe items, distribute
-              calories: meal.food_items.length === 1
-                ? Math.round(meal.calories || 0)
-                : Math.round((meal.calories || 0) / meal.food_items.length),
-              protein: meal.food_items.length === 1
-                ? Math.round((meal.protein || 0) * 100) / 100
-                : Math.round(((meal.protein || 0) / meal.food_items.length) * 100) / 100,
-              carbs: meal.food_items.length === 1
-                ? Math.round((meal.carbs || 0) * 100) / 100
-                : Math.round(((meal.carbs || 0) / meal.food_items.length) * 100) / 100,
-              fat: meal.food_items.length === 1
-                ? Math.round((meal.fats || 0) * 100) / 100
-                : Math.round(((meal.fats || 0) / meal.food_items.length) * 100) / 100,
+              calories: detail?.calories != null
+                ? Math.round(detail.calories)
+                : meal.food_items.length === 1
+                  ? Math.round(meal.calories || 0)
+                  : Math.round((meal.calories || 0) / meal.food_items.length),
+              protein: detail?.protein != null
+                ? Math.round(detail.protein * 100) / 100
+                : meal.food_items.length === 1
+                  ? Math.round((meal.protein || 0) * 100) / 100
+                  : Math.round(((meal.protein || 0) / meal.food_items.length) * 100) / 100,
+              carbs: detail?.carbs != null
+                ? Math.round(detail.carbs * 100) / 100
+                : meal.food_items.length === 1
+                  ? Math.round((meal.carbs || 0) * 100) / 100
+                  : Math.round(((meal.carbs || 0) / meal.food_items.length) * 100) / 100,
+              fat: detail?.fats != null
+                ? Math.round(detail.fats * 100) / 100
+                : meal.food_items.length === 1
+                  ? Math.round((meal.fats || 0) * 100) / 100
+                  : Math.round(((meal.fats || 0) / meal.food_items.length) * 100) / 100,
               notes: meal.notes,
-              // Full-fidelity editing only supported for single-item entries -
-              // multi-item entries fall back to the meal-type-only edit alert.
-              detailed_item: meal.food_items.length === 1 && Array.isArray(meal.detailed_items)
-                ? meal.detailed_items[index]
-                : undefined,
+              // Full-fidelity editing needs this item's own detailed_items
+              // entry, whether it's a single-item or multi-item meal.
+              detailed_item: detail,
             });
           });
         }
@@ -675,6 +757,24 @@ class FitnessService {
 
   async activatePhase(id: string): Promise<{ success: boolean; message: string; summary: any }> {
     return await apiClient.post(`/api/fitness/phases/${id}/activate`, {});
+  }
+
+  async insertPhaseBlock(params: InsertPhaseBlockParams): Promise<{ success: boolean } & InsertPhaseBlockSummary> {
+    return await apiClient.post('/api/fitness/phases/insert-block', params);
+  }
+
+  async endPhaseBlockEarly(id: string, onDate?: string): Promise<{
+    success: boolean;
+    phase_id: string;
+    name: string;
+    end_date: string;
+    restored_neighbor: { id: string; name: string; start_date: string } | null;
+  }> {
+    return await apiClient.post(`/api/fitness/phases/${id}/end-early`, { on_date: onDate });
+  }
+
+  async updateNutritionGuide(guide: NutritionGuideData): Promise<{ success: boolean; program_id: string; guide: NutritionGuideData }> {
+    return await apiClient.patch('/api/fitness/nutrition-guide', { guide });
   }
 
   // Templates

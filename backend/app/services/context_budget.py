@@ -30,6 +30,90 @@ def estimate_tokens(text: str) -> int:
     return len(text) // CHARS_PER_TOKEN
 
 
+# ── The volatile block's hard budget (ground-truth plan, Phase 5 §4) ────────
+#
+# On 2026-09-02 the per-turn volatile block ran 7-8k tokens, uncacheable, and the
+# 06:03 turn made ten model calls at 20-28k prompt tokens each — 243k tokens and
+# 106 seconds for one conversational reply. The 7-day average was 23,900 prompt
+# tokens per chat call; one call on 08-26 sent 649,234.
+#
+# A cap alone just truncates the last section. Per-section allotments make the
+# trade explicit: every part of the block gets a stated share, and a section that
+# outgrows its share is cut at a sentence boundary rather than crowding out the
+# calendar.
+VOLATILE_BLOCK_MAX_TOKENS = 6000
+
+SECTION_ALLOTMENTS = {
+    "brief": 1500,
+    "calendar": 400,
+    "memory": 600,
+    "unacked": 300,
+    "directives": 300,
+    "lessons": 300,
+    "device": 150,
+    "reentry": 300,
+}
+
+
+def clip_to_tokens(text: str, max_tokens: int) -> str:
+    """Trim to a token allotment, ending at a sentence boundary.
+
+    A block cut mid-word invites the model to finish the sentence, and what it
+    finishes with is invention — the 14,000-character JSON dump was severed
+    mid-word on every turn.
+    """
+    text = (text or "").strip()
+    limit = max_tokens * CHARS_PER_TOKEN
+    if len(text) <= limit:
+        return text
+    head = text[:limit]
+    for boundary in ("\n\n", ". ", "\n"):
+        cut = head.rfind(boundary)
+        if cut > limit // 2:
+            return head[:cut].rstrip() + ("." if boundary == ". " else "")
+    return head.rsplit(" ", 1)[0] + "…"
+
+
+class SectionBudget:
+    """Named sections, each with its own allotment, under one hard cap.
+
+    Logs one `context_budget:` line per turn naming what was kept and what was
+    cut, so a prompt that grows is visible in the logs the day it grows rather
+    than in a token bill three weeks later.
+    """
+
+    def __init__(self, max_tokens: int = VOLATILE_BLOCK_MAX_TOKENS):
+        self.max_tokens = max_tokens
+        self._sections: List[tuple] = []
+
+    def add(self, name: str, text: Optional[str]) -> None:
+        if text and text.strip():
+            self._sections.append((name, text.strip()))
+
+    def render(self) -> str:
+        kept, cut, used = [], [], 0
+        parts: List[str] = []
+        for name, text in self._sections:
+            allotment = SECTION_ALLOTMENTS.get(name, self.max_tokens)
+            allowed = min(allotment, max(0, self.max_tokens - used))
+            if allowed <= 0:
+                cut.append(f"{name}=dropped")
+                continue
+            clipped = clip_to_tokens(text, allowed)
+            tokens = estimate_tokens(clipped)
+            if tokens < estimate_tokens(text):
+                cut.append(f"{name}={estimate_tokens(text) - tokens}")
+            parts.append(clipped)
+            kept.append(f"{name}={tokens}")
+            used += tokens
+
+        logger.info(
+            "context_budget: total=%d/%d kept=[%s] cut=[%s]",
+            used, self.max_tokens, ", ".join(kept), ", ".join(cut) or "nothing",
+        )
+        return "\n\n".join(parts)
+
+
 @dataclass
 class ContextSource:
     """A single context source with priority and content."""

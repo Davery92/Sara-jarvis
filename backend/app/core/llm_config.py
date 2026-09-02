@@ -21,9 +21,9 @@ class LLMConfig:
 
     # Primary LLM (chat, tool use, main interactions)
     primary_url: str = field(default_factory=lambda: os.getenv(
-        "OPENAI_BASE_URL", "http://100.104.68.115:8081/v1"))
+        "OPENAI_BASE_URL", "http://100.104.68.115:8082/v1"))  # chat lane (:8082); bg lane :8081
     primary_model: str = field(default_factory=lambda: os.getenv(
-        "OPENAI_MODEL", "qwen3.6-27b"))
+        "OPENAI_MODEL", "qwen3.8-27b"))
 
     # Fallback LLM (used when primary is down)
     fallback_url: str = field(default_factory=lambda: os.getenv(
@@ -41,7 +41,7 @@ class LLMConfig:
     bg_primary_url: str = field(default_factory=lambda: os.getenv(
         "BG_LLM_PRIMARY_URL", "http://100.104.68.115:8081/v1"))
     bg_primary_model: str = field(default_factory=lambda: os.getenv(
-        "BG_LLM_PRIMARY_MODEL", "qwen3.6-27b"))
+        "BG_LLM_PRIMARY_MODEL", "qwen3.8-27b"))
     bg_fallback_url: str = field(default_factory=lambda: os.getenv(
         "BG_LLM_FALLBACK_URL", "http://10.185.1.8:8686/v1"))
     bg_fallback_model: str = field(default_factory=lambda: os.getenv(

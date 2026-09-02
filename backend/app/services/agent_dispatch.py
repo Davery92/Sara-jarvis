@@ -26,6 +26,7 @@ import shlex
 
 from app.core.timezone import now as local_now
 from app.services.event_bus import event_bus, EventType, Event
+from app.services.note_provenance import SARA_GENERATED_TAG
 from app.services.vm_bridge import VMBridge, VMConfig, VMConnectionStatus, get_vm_config_from_settings
 
 logger = logging.getLogger(__name__)
@@ -1234,9 +1235,28 @@ class AgentDispatchService:
             logger.warning(f"[dispatch] Classification failed: {e}")
             classified_categories = self._infer_categories(task_description)
 
-        # All tasks go to VM via claude -p (falls back to internal if VM unreachable)
-        mode = "vm_claude"
-        task_type = "vm_claude_agent"
+        # Route on the classification instead of forcing every task onto the VM.
+        # The VM shell agent has no reach into Sara's own data (email, notes,
+        # reminders, calendar), so an "internal" task sent there can only flail
+        # until it hits the round cap. An explicit caller mode still wins, and a
+        # task pinned to a specific host must run on that host regardless.
+        requested = (mode or "auto").lower()
+        if target_host or working_directory:
+            mode = "vm_claude"
+        elif requested == "internal":
+            mode = "internal"
+        elif requested in ("dispatch", "vm_claude", "self_orchestrate"):
+            mode = "vm_claude"
+        elif classified_mode == "internal":
+            mode = "internal"
+        else:
+            mode = "vm_claude"
+
+        task_type = "internal_agent" if mode == "internal" else "vm_claude_agent"
+        logger.info(
+            f"[dispatch] Routing task → mode={mode} "
+            f"(requested={requested}, classified={classified_mode})"
+        )
 
         # Find relevant skills from past successful tasks
         relevant_skills = self._find_relevant_skills(db, user_id, task_description)
@@ -1357,7 +1377,7 @@ class AgentDispatchService:
                 from app.tasks.dispatch import execute_dispatch
                 execute_dispatch.delay(
                     task_id, mission_id, user_id, task_description,
-                    skill_context, classified_categories or [],
+                    skill_context, classified_categories or [], mode,
                 )
                 launched_via_celery = True
                 logger.info(f"[dispatch] task {task_id} enqueued to Celery dispatch queue")
@@ -1365,11 +1385,18 @@ class AgentDispatchService:
             logger.error(f"[dispatch] Celery enqueue failed, falling back to in-process: {e}")
 
         if not launched_via_celery:
-            coro = self._run_vm_claude_mode(
-                task_id, mission_id, user_id, task_description,
-                skill_context=skill_context,
-                fallback_categories=classified_categories,
-            )
+            if mode == "internal":
+                coro = self._run_internal_mode(
+                    task_id, mission_id, user_id,
+                    task_description + (f"\n\n{skill_context}" if skill_context else ""),
+                    categories=classified_categories,
+                )
+            else:
+                coro = self._run_vm_claude_mode(
+                    task_id, mission_id, user_id, task_description,
+                    skill_context=skill_context,
+                    fallback_categories=classified_categories,
+                )
             async_task = asyncio.create_task(coro)
             async_task.add_done_callback(self._task_done_callback)
             self._running_tasks[task_id] = async_task
@@ -1384,7 +1411,10 @@ class AgentDispatchService:
             "status": "pending",
             "mode": mode,
             "classified_mode": classified_mode,
-            "message": "Task dispatched to VM agent",
+            "message": (
+                "Task dispatched to internal tools" if mode == "internal"
+                else "Task dispatched to VM agent"
+            ),
         }
 
     async def retry_task(
@@ -2086,6 +2116,9 @@ class AgentDispatchService:
             result = await agent.run(task_description)
 
             meta = task.task_metadata or {}
+            # Make internal runs inspectable in the task detail drawer, the same
+            # way VM dispatch runs already are.
+            meta["execution_log"] = result.get("execution_log", [])
 
             if result["status"] == "needs_clarification":
                 self._update_mission_step(db, mission_id, 1, "running")
@@ -2697,6 +2730,7 @@ class AgentDispatchService:
                     title=title,
                     content=content,
                     folder_id=folder_id,
+                    tags=[SARA_GENERATED_TAG],
                 )
                 db.add(note)
                 created_ids.append(note_id)
@@ -2861,6 +2895,7 @@ class AgentDispatchService:
                 title=note_title,
                 content=f"{files_header}{note_body}",
                 folder_id=folder_id,
+                tags=[SARA_GENERATED_TAG],
             )
             db.add(note)
             db.commit()
@@ -2920,6 +2955,33 @@ class AgentDispatchService:
             task.updated_at = naive_utc_now()
             from sqlalchemy.orm.attributes import flag_modified
             flag_modified(task, "task_metadata")
+            from app.services.world_state.writer import append_world_event
+            _normalized = (status or "").lower()
+            if _normalized in {"completed", "complete"}:
+                _event_kind = "task.completed"
+            elif _normalized in {"failed", "stuck"}:
+                _event_kind = "task.failed"
+            elif _normalized in {"running", "in_progress"}:
+                _event_kind = "task.started" if len(journal) <= 1 else "task.progressed"
+            else:
+                _event_kind = "task.queued"
+            append_world_event(
+                db, user_id=str(task.user_id), kind=_event_kind, source="agent_dispatch",
+                source_ref=f"background_task:{task.id}", aggregate_type="background_task",
+                aggregate_id=str(task.id), actor_type="assistant", actor_id="sara",
+                correlation_id=str(task.id),
+                dedupe_key=f"task-progress:{task.id}:{len(journal)}:{_normalized}",
+                payload={
+                    "task_id": str(task.id), "status": _normalized,
+                    "status_label": (summary or "")[:300],
+                    "title": (task.original_query or "")[:500],
+                    "original_query": (task.original_query or "")[:1000],
+                    "task_type": task.task_type,
+                    "step_count": len(journal),
+                    "summary": (summary or "")[:500],
+                    "error": (summary or "")[:500] if _event_kind == "task.failed" else None,
+                },
+            )
             db.commit()
         finally:
             db.close()

@@ -341,10 +341,11 @@ class DispatchAndMonitorTool(BaseTool):
     def description(self) -> str:
         return (
             "Dispatch a background task and automatically notify David when it's done. "
-            "Use this when David asks you to research something, look into something, "
-            "find out about something, set something up, or handle any task that will "
-            "take time. The task runs in the background and David gets a notification "
-            "with the results. Prefer this over dispatch_agent_task for most requests."
+            "Use this only when David explicitly asks for background/later work, or when "
+            "the task requires durable execution, code, shell commands, installation, "
+            "builds, system administration, a sandbox, or a remote host. Do not dispatch "
+            "ordinary web, email, notes, memory, calendar, fitness, or home requests; use "
+            "their tools inline and answer in the current conversation."
         )
 
     @property

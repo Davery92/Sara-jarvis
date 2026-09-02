@@ -68,8 +68,19 @@ async def deliver_task_result(
 
     chat_message = _compose_chat_message(task_query, result_summary, result_note_title)
 
-    await _dual_write_candidate(user_id, task_id, task_query, result_summary)
     await _fulfill_commitment(user_id, task_id, result_summary)
+
+    # Invariant 5: one entity, one message, one mouth. The candidate used to be
+    # written here, unconditionally, BEFORE the surface paths below — so a task
+    # that reached David's desktop or phone directly also went through
+    # judge→compose→deliver and told him a second time. The rich paths (HUD
+    # overlay, SSE chat inject, iOS deep-link to the note) are a better surface
+    # than the mouth pipeline can produce, so they win when a surface is live;
+    # the candidate is now the fallback for when nobody is home. Whichever fires,
+    # exactly one message about this task reaches him.
+    #
+    # Both routes stamp `topic = agent_task:<id>`, so say_candidate's
+    # already-delivered-today guard covers the case where they race.
 
     # --- Path 0: Active desktop (Desktop Jarvis Overhaul D) — HUD toast
     # with an "Open report" overlay action beats everything else; it's the
@@ -197,6 +208,7 @@ async def deliver_task_result(
     # Paths 0-4 (active desktop HUD, SSE, iOS push with rich routing)
     # are a genuinely better UX than the mouth pipeline replicates today
     # and stay untouched — this deletion is Path 5 only.
+    await _dual_write_candidate(user_id, task_id, task_query, result_summary)
     logger.info(f"[mouth-only] task_result_delivery candidate queued: agent_task:{task_id}")
     # _record_delivered above (tell-once ledger) still needs this commit —
     # it wrote to `db` before any path branch, and nothing else on this
@@ -223,11 +235,16 @@ async def _dual_write_candidate(user_id: str, task_id: str, task_query: str, res
         factory = get_async_session_factory()
         async with factory() as adb:
             await create_candidate(
-                adb, user_id=user_id, source="task_result_delivery", kind="inform",
+                adb, user_id=user_id, source="task_result_delivery",
+                # A finished result David is waiting on is an alert, not a
+                # background inform the judge may batch into a window he has
+                # already left the house for (Salem, 2026-09-01).
+                kind="alert",
                 summary=result_summary[:2000],
                 evidence=[{"task_id": task_id, "query": (task_query or "")[:200]}],
                 topic_entities=[topic],
                 valid_until=local_now() + timedelta(hours=12),
+                value_guess=0.9,
                 dedupe_key=topic,
             )
     except Exception as e:

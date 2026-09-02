@@ -31,6 +31,19 @@ export interface ToolStatus {
   status: 'executing' | 'completed';
 }
 
+export type AssistantActivityPhase =
+  | 'thinking'
+  | 'tool_running'
+  | 'tool_complete'
+  | 'synthesizing'
+  | 'responding';
+
+export interface AssistantActivity {
+  phase: AssistantActivityPhase;
+  tool?: string;
+  round?: number;
+}
+
 // Calendar card items
 export interface CalendarCardItem {
   id?: number;

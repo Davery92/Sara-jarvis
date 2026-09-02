@@ -59,3 +59,8 @@ from .person import Person
 from .location import KnownPlace, LocationTrigger, LocationEvent
 from .rhythm import DailyRhythm
 from .ml import DesktopFocusSpan, VoiceInteractionLog, MLFeatureDaily, MLNotificationOutcome, MLPredictionLog, MLModelVersion
+from .world_model import (
+    WorldEvent, WorldEventProcessing, WorldEntity, WorldFact, WorldThread,
+    WorldAttentionItem, WorldEventDisposition, WorldSnapshot, SaraPresenceSnapshot,
+)
+from .live_activity import LiveActivityRegistration

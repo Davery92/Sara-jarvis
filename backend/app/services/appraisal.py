@@ -48,7 +48,7 @@ def _all_ambient(observations: List[Any]) -> bool:
 
 
 def _build_prompt(observations: List[Any], brief_text: str, interest_text: str) -> Tuple[str, str]:
-    now_str = local_now().strftime("%A, %B %-d, %Y, %-I:%M %p ET")
+    now_str = local_now().strftime("%A, %B %-d, %Y, %-I:%M %p ET")  # time-ok: the "now" line itself
 
     obs_lines = [
         f"- [{o.category}] {o.description} (salience {o.salience:.2f}, source={o.source})"
@@ -90,6 +90,18 @@ def _build_prompt(observations: List[Any], brief_text: str, interest_text: str) 
         "  ],\n"
         '  "nothing": true only if this batch produced zero patches and zero candidates\n'
         "}\n\n"
+        "item_key discipline: before adding, check the CURRENT BRIEF for an item about the "
+        "same real-world thing and reuse ITS key (op=update) — never coin a second slug for "
+        "an event the brief already tracks (no '-duplicate', '-aug-29' variants). For "
+        "section=ahead, set \"at\" to the event's ISO start time whenever the signal contains "
+        "one; an ahead item with at=null expires 48h after it was added.\n"
+        "brief_patches must describe the event, never copy the signal list. Write what "
+        "happened in David's world in plain words — never the observation line's own "
+        "vocabulary (\"New signal:\", a salience or source value, an event kind like "
+        "email.analyzed). Never write a relative time into a patch (\"in 3h\", \"20 minutes "
+        "ago\"): put the absolute moment in \"at\" and let the renderer say how far away it is.\n"
+        "Never state a time for anything unless that exact time appears in the signal above. "
+        "\"Tomorrow afternoon\" is not a time; leave \"at\" null rather than choosing one.\n"
         "Never invent a recurring routine or relationship you don't see evidence for above. "
         "Never restate something the brief already says unchanged — that isn't a patch. This "
         "applies especially to health_deltas: only patch it when a health reading has actually "
@@ -245,6 +257,7 @@ async def run_appraisal(user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]:
             temperature=0.3,
             max_tokens=1200,
             extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+            caller="appraisal",
         )
         raw = response["choices"][0]["message"].get("content", "") if isinstance(response, dict) else str(response)
     except Exception as e:

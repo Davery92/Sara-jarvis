@@ -12,6 +12,7 @@ Features:
 import asyncio
 import httpx
 import json
+import os
 import logging
 import time
 from datetime import datetime
@@ -72,6 +73,32 @@ def set_token_usage_callback(callback: Callable):
 def get_token_usage_callback() -> Optional[Callable]:
     """Get the current token usage callback"""
     return _token_usage_callback
+
+
+# Ground-truth plan, Phase 8 §4: every background model call is attributed to the
+# job that made it.
+#
+# Chat calls have always reported to `token_usage`; background calls only ever
+# logged a line. So the 7-day average of 23,900 prompt tokens per chat call was
+# measurable while ~140 deliberations a day — plus appraisal, judge, compose,
+# review, interpretation, consolidation, self-story and theory-of-David — were
+# not. `caller` already names the job at most call sites; recording it as
+# `operation_type` turns those log lines into a daily number per job.
+def _record_background_usage(result, caller, model) -> None:
+    usage = (result or {}).get("usage") or {}
+    if not usage or not _token_usage_callback:
+        return
+    try:
+        _token_usage_callback(
+            prompt_tokens=usage.get("prompt_tokens", 0),
+            completion_tokens=usage.get("completion_tokens", 0),
+            total_tokens=usage.get("total_tokens", 0),
+            model=model,
+            operation_type=(caller or "background").strip()[:64],
+        )
+    except Exception as e:
+        logger.debug(f"[bg-llm] token usage callback failed for caller={caller}: {e}")
+
 
 
 def is_anthropic_provider(base_url: str) -> bool:
@@ -735,13 +762,42 @@ class BackgroundLLMClient:
     - Always uses local models configured in bg_llm_* settings
     """
 
+    # Default completion cap for background calls that pass no max_tokens.
+    # Generous for summaries/plans, but bounded — a runaway generation is the
+    # single most expensive thing a background task can do to the chat lane.
+    DEFAULT_MAX_TOKENS = 2048
+
+    # --- Fast-tier auto-routing (LOCAL_LLM_LANES plan, Phase 2.2) -----------
+    # Short-form background calls (classifiers, scorers, appraisal, judge/
+    # compose, extraction, phrasing) go to the fast tier (her:8686, Qwen3.6-
+    # 35B-A3B: ~0.7s round trip, 4 slots x 16k) instead of the Mac's bg lane,
+    # so the 27B stays free for long-form work and the chat lane's GPU time.
+    # A call is "short-form" when it has no tools, no explicit model override,
+    # output cap <= FAST_TIER_MAX_OUT and an estimated prompt <= FAST_TIER_MAX_PROMPT
+    # (her slots are 16k). Any failure on the fast tier falls through to the
+    # normal primary/fallback path, so this can only add one cheap attempt.
+    # Callers pin a lane with tier="bg" / tier="fast"; BG_LLM_FAST_TIER_AUTO=false
+    # disables auto-routing process-wide.
+    FAST_TIER_MAX_OUT = 1500
+    FAST_TIER_MAX_PROMPT = 10000
+    FAST_TIER_TIMEOUT = 120.0
+
+
     def __init__(self):
         self._load_config_from_settings()
 
         # HTTP clients (lazy initialization)
         self._primary_client: Optional[httpx.AsyncClient] = None
         self._fallback_client: Optional[httpx.AsyncClient] = None
+        self._fast_client: Optional[httpx.AsyncClient] = None
         self._started = False
+        # fast tier config (env/llm_config; no DB row yet)
+        from app.core.llm_config import llm_config as _llm_cfg
+        self.fast_url = str(_llm_cfg.fast_model_url)
+        self.fast_model = str(_llm_cfg.fast_model)
+        self.fast_tier_auto = os.getenv("BG_LLM_FAST_TIER_AUTO", "true").strip().lower() in ("1", "true", "yes", "on")
+        self._fast_requests = 0
+        self._fast_failures = 0
         self._lesson_lock_group = "lesson_generation"
         self._lesson_lock_poll_seconds = 5.0
         self._lesson_lock_log_interval_seconds = 60.0
@@ -957,6 +1013,7 @@ class BackgroundLLMClient:
             # Stale clients from a now-closed loop — abandon them, do not aclose().
             self._primary_client = None
             self._fallback_client = None
+            self._fast_client = None
             self._started = False
 
         if self._started:
@@ -970,6 +1027,10 @@ class BackgroundLLMClient:
         self._fallback_client = httpx.AsyncClient(
             base_url=self.fallback_url,
             timeout=request_timeout
+        )
+        self._fast_client = httpx.AsyncClient(
+            base_url=self.fast_url,
+            timeout=httpx.Timeout(self.FAST_TIER_TIMEOUT, connect=self.connect_timeout)
         )
         self._loop_id = cur_loop
         self._started = True
@@ -1032,12 +1093,15 @@ class BackgroundLLMClient:
         allow_fallback: bool = True,
         request_timeout: Optional[float] = None,
         extra_body: Optional[Dict[str, Any]] = None,
+        tier: Optional[str] = None,  # "fast" | "bg" | None (auto)
+        caller: Optional[str] = None,  # free-text label for logs/metrics
     ) -> Dict[str, Any]:
         """
         Send chat completion with simple failover for background tasks.
 
         Strategy:
-        1. Try primary model/endpoint first
+        0. Short-form calls (see FAST_TIER_*) try the fast tier first (her A3B)
+        1. Try primary model/endpoint (Mac bg lane)
         2. On failure, fall back to fallback model/endpoint
         """
         if not allow_during_lesson_generation:
@@ -1053,8 +1117,14 @@ class BackgroundLLMClient:
             "messages": messages,
             "temperature": temperature,
         }
-        if max_tokens:
-            payload["max_tokens"] = max_tokens
+        # Hard defaults (2026-08-19 incident, see
+        # docs/plans/LOCAL_LLM_LANES_PLAN_2026_08_19.md): a background call with
+        # no max_tokens in Qwen thinking mode generated 8-12k tokens for ~25 min
+        # per request, and llama-server keeps generating after a non-streaming
+        # client disconnects. A retry loop turned that into an all-night outage.
+        # So: every background request carries a token cap and thinking OFF
+        # unless the caller explicitly asks otherwise via max_tokens / extra_body.
+        payload["max_tokens"] = int(max_tokens) if max_tokens else self.DEFAULT_MAX_TOKENS
         merged_options: Dict[str, Any] = {}
         if options:
             merged_options.update(options)
@@ -1064,9 +1134,56 @@ class BackgroundLLMClient:
             payload["options"] = merged_options
         if extra_body:
             payload.update(extra_body)
+        _ctk = payload.get("chat_template_kwargs")
+        if not isinstance(_ctk, dict):
+            _ctk = {}
+        if "enable_thinking" not in _ctk:
+            _ctk["enable_thinking"] = False
+        payload["chat_template_kwargs"] = _ctk
 
         self._total_requests += 1
         import time as _time
+
+        # --- Fast-tier routing (Phase 2.2) ---------------------------------------
+        _eff_max = int(payload.get("max_tokens") or self.DEFAULT_MAX_TOKENS)
+        _est_prompt = len(json.dumps(messages)) // 4
+        _route_fast = (
+            tier == "fast" or (
+                tier is None and self.fast_tier_auto and model is None
+                and _eff_max <= self.FAST_TIER_MAX_OUT
+                and _est_prompt <= self.FAST_TIER_MAX_PROMPT
+                and "tools" not in payload
+            )
+        )
+        if _route_fast and self.fast_url and self.fast_url != self.primary_url:
+            _fast_payload = dict(payload)
+            _fast_payload["model"] = self.fast_model
+            _fast_payload.pop("options", None)  # ollama-ism, not for llama-server
+            _t0 = _time.time()
+            try:
+                self._fast_requests += 1
+                result = await self._request_chat_with_compat(
+                    client=self._fast_client,
+                    payload=_fast_payload,
+                    endpoint_url=self.fast_url,
+                    request_timeout=min(req_timeout, self.FAST_TIER_TIMEOUT),
+                )
+                _u = (result or {}).get("usage") or {}
+                logger.info(
+                    f"[bg-llm] tier=fast caller={caller or '-'} prompt={_u.get('prompt_tokens', _est_prompt)} "
+                    f"out={_u.get('completion_tokens', '?')} max={_eff_max} {_time.time() - _t0:.1f}s"
+                )
+                _record_background_usage(result, caller, use_model)
+                return result
+            except Exception as e:
+                self._fast_failures += 1
+                logger.warning(
+                    f"[bg-llm] fast tier failed for caller={caller or '-'} ({type(e).__name__}: {str(e)[:120]}) "
+                    f"— falling through to bg lane"
+                )
+                if tier == "fast" and not allow_fallback:
+                    raise
+        _t0 = _time.time()
 
         # --- Reachability-gated emergency failover (Phase 5) --------------------
         # If we're currently failed over, periodically re-probe the primary and
@@ -1101,6 +1218,12 @@ class BackgroundLLMClient:
                         request_timeout=req_timeout,
                     )
                     self._consecutive_primary_failures = 0
+                    _u = (result or {}).get("usage") or {}
+                    logger.info(
+                        f"[bg-llm] tier=bg caller={caller or '-'} prompt={_u.get('prompt_tokens', _est_prompt)} "
+                        f"out={_u.get('completion_tokens', '?')} max={_eff_max} {_time.time() - _t0:.1f}s"
+                    )
+                    _record_background_usage(result, caller, use_model)
                     return result
                 except httpx.ConnectError as e:
                     last_err = e
@@ -1338,6 +1461,11 @@ class BackgroundLLMClient:
             "total_requests": self._total_requests,
             "total_failures": self._total_failures,
             "failover_events": self._failover_events,
+            "fast_url": self.fast_url,
+            "fast_model": self.fast_model,
+            "fast_tier_auto": self.fast_tier_auto,
+            "fast_requests": self._fast_requests,
+            "fast_failures": self._fast_failures,
         }
 
 

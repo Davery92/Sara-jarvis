@@ -47,6 +47,10 @@ BADGE_SQL = """
           WHERE n.user_id = :user_id AND n.sent = TRUE
             AND n.read_at IS NULL AND n.dismissed_at IS NULL
             AND n.sent_at >= NOW() - INTERVAL '7 days'
+            -- MORNING_NOTIFICATIONS_PLAN_2026_08_18 Phase 3c: held_flush_item
+            -- rows are log-only cooldown-arming bookkeeping (the actual push
+            -- already went out as the digest/brief) — never a real inbox item.
+            AND n.source != 'held_flush_item'
             AND (n.outbox_item_id IS NULL OR NOT EXISTS (
                 SELECT 1 FROM outbox_item a2
                 WHERE a2.id = n.outbox_item_id
@@ -160,6 +164,9 @@ def build_unified_inbox(
         FROM notification_log
         WHERE user_id = :user_id AND sent = TRUE
           AND sent_at >= NOW() - MAKE_INTERVAL(days => :days)
+          -- held_flush_item rows are log-only cooldown-arming bookkeeping,
+          -- not a real notification David ever saw as its own push.
+          AND source != 'held_flush_item'
         ORDER BY sent_at DESC
         LIMIT :limit
     """), {"user_id": user_id, "days": fyi_days, "limit": limit}).fetchall()

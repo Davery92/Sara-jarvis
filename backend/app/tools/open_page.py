@@ -1,5 +1,4 @@
 from typing import Any, Dict
-import json
 import uuid
 from app.tools.base import BaseTool, ToolResult
 from app.services.search_service import search_service
@@ -39,14 +38,12 @@ class OpenPageTool(BaseTool):
             # Generate reference ID for storage
             reference_id = str(uuid.uuid4())
 
-            # Store full page data in Redis with 5 minute TTL
-            if search_service.redis:
-                cache_key = f"page_details:{reference_id}"
-                await search_service.redis.set(
-                    cache_key,
-                    json.dumps(data),
-                    ex=300  # 5 minutes
-                )
+            # Best-effort storage: fetching a page still succeeds if Redis is
+            # unavailable or its full-detail cache write fails.
+            cache_key = f"page_details:{reference_id}"
+            details_cached = await search_service.cache_set_json(
+                cache_key, data, ttl_seconds=300
+            )
 
             # Create compact summary
             title = data.get("title", "")
@@ -65,13 +62,21 @@ class OpenPageTool(BaseTool):
                 "text_preview": text_preview,
                 "full_text_length": len(text),
                 "reference_id": reference_id,
-                "note": "Full page content available via get_page_details tool with reference_id"
+                "note": (
+                    "Full page content available via get_page_details tool with reference_id"
+                    if details_cached
+                    else "Full-detail cache unavailable; preview remains valid"
+                )
             }
 
             return ToolResult(
                 success=True,
                 data=compact_data,
-                message=f"Opened page: {title or url} (showing 500 char preview, full content: {len(text)} chars, stored: {reference_id})",
+                message=(
+                    f"Opened page: {title or url} (showing 500 char preview, "
+                    f"full content: {len(text)} chars"
+                    + (f", stored: {reference_id})" if details_cached else ")")
+                ),
                 citations=[url]
             )
         except Exception as e:

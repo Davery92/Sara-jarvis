@@ -22,6 +22,50 @@ router = APIRouter()
 DEFAULT_USER_ID = get_owner_id()
 
 
+@router.get("/debug/cognition-cost")
+async def cognition_cost(
+    days: int = 7,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """What Sara's thinking costs, per job, per day.
+
+    Ground-truth plan, Phase 8 §5. Background model calls used to log a line and
+    nothing else, so ~140 deliberations a day — plus appraisal, judge, compose,
+    review, interpretation and the two nightly fold-forward documents — were
+    invisible while chat's per-call token count was measurable. Every background
+    call now records its job name as `operation_type`; this reads it back.
+
+    The target this exists to check: 30–40 deliberations a day, not 140.
+    """
+    rows = db.execute(text("""
+        SELECT operation_type,
+               COUNT(*)                             AS calls,
+               SUM(prompt_tokens)                   AS prompt_tokens,
+               SUM(completion_tokens)               AS completion_tokens,
+               SUM(total_tokens)                    AS total_tokens,
+               ROUND(AVG(prompt_tokens))            AS avg_prompt_tokens,
+               ROUND(COUNT(*)::numeric / :days, 1)  AS calls_per_day
+          FROM token_usage
+         WHERE created_at > NOW() - (:days || ' days')::interval
+         GROUP BY operation_type
+         ORDER BY SUM(total_tokens) DESC
+    """), {"days": days}).mappings().all()
+
+    jobs = [dict(r) for r in rows]
+    return {
+        "period_days": days,
+        "jobs": jobs,
+        "total_tokens": sum(int(j["total_tokens"] or 0) for j in jobs),
+        "total_calls": sum(int(j["calls"] or 0) for j in jobs),
+        "deliberations_per_day": next(
+            (float(j["calls_per_day"]) for j in jobs if j["operation_type"] == "deliberation"),
+            0.0,
+        ),
+        "deliberation_target_per_day": "30-40",
+    }
+
+
 @router.get("/debug/voice-register")
 async def voice_register(
     days: int = 7,
@@ -51,6 +95,7 @@ async def voice_register(
 @router.get("/debug/notification-funnel")
 async def notification_funnel(
     hours: int = 24,
+    days: int = 7,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -66,12 +111,14 @@ async def notification_funnel(
 
     funnel = {
         "period_hours": hours,
+        "period_days": days,
         "since": since_iso,
         "observations": {},
         "deliberations": {},
         "notifications": {},
         "home_actions": {},
         "attention_queue": {},
+        "daily_breakdown": {},
         "recent_deliberations": [],
         "recent_notifications": [],
         "ban_summary": {},
@@ -286,6 +333,75 @@ async def notification_funnel(
         }
     except Exception as e:
         funnel["proposal_rate_7d"] = {"error": str(e)}
+
+    # 5b. Daily created -> suppressed(by reason) -> inboxed-only -> pushed
+    # breakdown (NOTIFICATION_DELIVERY_FIX_PLAN_2026_08_17 Phase 5). Two
+    # populations, both keyed by ET day:
+    #   - attention-queue-routed items (outbox_item rows), LEFT JOINed to
+    #     their notification_log outcome (if any) via outbox_item_id — this
+    #     gives created/pushed/inboxed_only/no_push_attempt per day. Before
+    #     Phase 5, budget/buzz_declined outcomes wrote nothing at all, so
+    #     "inboxed-only" was invisible; no_push_attempt should trend to ~0
+    #     now and is a canary if some path still skips the log.
+    #   - pre-inbox suppressions (banned_topic, dedup, held_asleep,
+    #     attention_cooldown, dedupe_key_surfaced, push_failed) — these
+    #     never got an outbox_item at all, so they're read straight off
+    #     notification_log rows with no outbox_item_id, grouped by reason.
+    try:
+        since_days = (datetime.now(timezone.utc) - timedelta(days=max(1, days))).isoformat()
+
+        outcome_rows = db.execute(text("""
+            SELECT
+                (oi.created_at AT TIME ZONE 'America/New_York')::date AS day,
+                COUNT(DISTINCT oi.id) AS created,
+                COUNT(DISTINCT oi.id) FILTER (WHERE nl.sent = TRUE) AS pushed,
+                COUNT(DISTINCT oi.id) FILTER (WHERE nl.sent = FALSE AND nl.id IS NOT NULL) AS inboxed_only,
+                COUNT(DISTINCT oi.id) FILTER (WHERE nl.id IS NULL) AS no_push_attempt
+            FROM outbox_item oi
+            LEFT JOIN notification_log nl ON nl.outbox_item_id = oi.id
+            WHERE oi.user_id = :user_id AND oi.created_at >= :since
+            GROUP BY 1
+            ORDER BY 1 DESC
+        """), {"user_id": user_id, "since": since_days}).fetchall()
+
+        suppressed_rows = db.execute(text("""
+            SELECT
+                (sent_at AT TIME ZONE 'America/New_York')::date AS day,
+                COALESCE(suppress_reason, 'unknown') AS reason,
+                COUNT(*) AS count
+            FROM notification_log
+            WHERE user_id = :user_id AND sent_at >= :since
+              AND sent = FALSE AND outbox_item_id IS NULL
+            GROUP BY 1, 2
+            ORDER BY 1 DESC, 3 DESC
+        """), {"user_id": user_id, "since": since_days}).fetchall()
+
+        by_day = {}
+        for row in outcome_rows:
+            day_key = row.day.isoformat()
+            by_day.setdefault(day_key, {
+                "created": 0, "pushed": 0, "inboxed_only": 0,
+                "no_push_attempt": 0, "suppressed": {},
+            })
+            by_day[day_key]["created"] = row.created
+            by_day[day_key]["pushed"] = row.pushed
+            by_day[day_key]["inboxed_only"] = row.inboxed_only
+            by_day[day_key]["no_push_attempt"] = row.no_push_attempt
+
+        for row in suppressed_rows:
+            day_key = row.day.isoformat()
+            by_day.setdefault(day_key, {
+                "created": 0, "pushed": 0, "inboxed_only": 0,
+                "no_push_attempt": 0, "suppressed": {},
+            })
+            by_day[day_key]["suppressed"][row.reason] = row.count
+
+        for day_key, d in by_day.items():
+            d["suppressed_total"] = sum(d["suppressed"].values())
+
+        funnel["daily_breakdown"] = dict(sorted(by_day.items(), reverse=True))
+    except Exception as e:
+        funnel["daily_breakdown"] = {"error": str(e)}
 
     # 6. Build the funnel summary
     obs_count = funnel.get("observations", {}).get("pending_count", 0)

@@ -54,7 +54,7 @@ class TestClassifyUsesBrokerAndHttpx:
         }
         with patch(
             "app.services.llm_broker.resolve",
-            return_value={"model": "qwen3.6-27b", "base_url": "http://x:8081/v1"},
+            return_value={"model": "qwen3.8-27b", "base_url": "http://x:8081/v1"},
         ) as mock_resolve, patch(
             "httpx.AsyncClient.post", new=AsyncMock(return_value=_fake_response(classification))
         ):
@@ -73,7 +73,7 @@ class TestClassifyUsesBrokerAndHttpx:
         post_mock = AsyncMock(return_value=_fake_response(classification))
         with patch(
             "app.services.llm_broker.resolve",
-            return_value={"model": "qwen3.6-27b", "base_url": "http://custom-host:9999/v1"},
+            return_value={"model": "qwen3.8-27b", "base_url": "http://custom-host:9999/v1"},
         ), patch("httpx.AsyncClient.post", new=post_mock):
             await router.classify("Be more direct")
 

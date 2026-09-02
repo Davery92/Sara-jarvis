@@ -110,6 +110,14 @@ TTS_VOICE = "af_sarah(1)+af_bella(1)"
 BRIEFINGS_BASE_PATH = Path("/home/david/jarvis/data/briefings")
 
 
+def _measured(value) -> str:
+    """Render a recovery-log field, distinguishing "not recorded" from a real
+    zero. `value or 'N/A'` reported 0 hours of sleep and 0 soreness as missing
+    data, which is the mirror image of the fabrication problem: a genuine
+    reading discarded rather than an absent one invented (D7)."""
+    return "not recorded" if value is None else str(value)
+
+
 @dataclass
 class CalendarEvent:
     """Calendar event for brief."""
@@ -803,6 +811,18 @@ Synthesized summary:"""
             if stale_warning:
                 lines.append(stale_warning)
 
+            # Ground-truth plan, Phase 7 §3: one line about last night's cleanup,
+            # after the calendar. Housekeeping David can see is housekeeping he
+            # can correct — and it is the only thing in the brief that reports
+            # what Sara did rather than what the world did.
+            try:
+                from app.tasks.truth_maintenance import brief_line
+                cleanup = brief_line(db, user_id)
+                if cleanup:
+                    lines.append(f"\n{cleanup}")
+            except Exception as e:
+                logger.debug(f"truth-maintenance brief line skipped: {e}")
+
             return "\n".join(lines), [e.to_dict() for e in events]
 
         except Exception as e:
@@ -943,16 +963,41 @@ Synthesized summary:"""
             return None
 
     async def send_notification(self, user_id: str, weekday: str, db: Session = None) -> bool:
-        """Send iOS push notification that brief is ready."""
+        """Send iOS push notification that brief is ready.
+
+        MORNING_NOTIFICATIONS_PLAN_2026_08_18 Phase 3a: this is the single wake
+        anchor. Overnight held_notification items are folded into the body (one
+        line each) and marked delivered here, so the 15-min digest flush never
+        sees them and never sends a second push. If David is still asleep, the
+        brief itself holds until an 8 AM fallback instead of buzzing at 6 AM —
+        the flush task then delivers the (already-folded) brief at sensed wake.
+        """
         try:
             from app.db.base import SessionLocal
-            from app.services.unified_notification import send_notification as unified_send_notification
+            from app.services.unified_notification import send_notification as unified_send_notification, _log_notification
+            from app.services.delivery_policy import sense_sleep_state, hold_notification, DeliveryDecision
 
             # Get database session if not provided
             close_db = False
             if db is None:
                 db = SessionLocal()
                 close_db = True
+
+            async def _arm_cooldowns_for_folded(rows) -> None:
+                # Phase 3c: log-only per-item rows (sent=True) so category
+                # cooldowns/rate-limits see these as delivered even though the
+                # only push was the folded brief — otherwise a re-composed
+                # "morning heads up" for the same category sails past dedup.
+                for r in rows:
+                    try:
+                        await _log_notification(
+                            db, user_id, r.topic or f"{r.category}:held{r.id}", r.category or "general",
+                            r.title, r.message or "", r.priority or "normal", "held_flush_item",
+                            None, 0, sent=True, dedup_blocked=False,
+                        )
+                    except Exception as e:
+                        logger.debug(f"held-item cooldown arming skipped for id={r.id}: {e}")
+                db.commit()
 
             try:
                 unread_row = db.execute(text("""
@@ -963,10 +1008,59 @@ Synthesized summary:"""
                 """), {"user_id": user_id}).fetchone()
                 unread_count = int(unread_row.unread_count if unread_row else 0)
 
+                try:
+                    attention_row = db.execute(text("""
+                        SELECT COUNT(*)::int AS unread_count
+                        FROM outbox_item
+                        WHERE user_id = :user_id
+                          AND status IN ('new', 'sent')
+                    """), {"user_id": user_id}).fetchone()
+                    attention_unread = int(attention_row.unread_count if attention_row else 0)
+                except Exception:
+                    attention_unread = 0
+
                 body = f"Your {weekday} briefing is ready with tech news, weather, and your schedule."
                 if unread_count > 0:
                     item_word = "item" if unread_count == 1 else "items"
                     body += f" Plus {unread_count} unread inbox {item_word}."
+                if attention_unread > 0:
+                    item_word = "item" if attention_unread == 1 else "items"
+                    body += f" {attention_unread} attention {item_word} are waiting too."
+
+                held_rows = db.execute(text("""
+                    SELECT id, title, message, category, priority, topic FROM held_notification
+                    WHERE user_id = :uid AND status = 'held'
+                    ORDER BY held_at ASC
+                """), {"uid": user_id}).fetchall()
+                if held_rows:
+                    titles = " · ".join(r.title for r in held_rows[:6])
+                    body += f" Overnight: {titles}."
+
+                sleep = await sense_sleep_state(db, user_id)
+                if sleep.asleep and sleep.confidence >= 0.5:
+                    fallback_wake = local_now().replace(hour=8, minute=0, second=0, microsecond=0)
+                    decision = DeliveryDecision(
+                        action="hold", reason=f"brief_wake_fallback:{sleep.source}",
+                        deliver_after=fallback_wake,
+                        why_trace={"sleep_source": sleep.source, "sleep_confidence": sleep.confidence,
+                                   "folded_held_ids": [r.id for r in held_rows]},
+                    )
+                    held_id = await hold_notification(
+                        db, user_id=user_id, title="Morning Brief Ready", message=body,
+                        category="general", priority="high", source="morning_brief",
+                        topic=f"morning_brief:{local_today().isoformat()}",
+                        payload={"folded_held_ids": [r.id for r in held_rows]},
+                        decision=decision,
+                    )
+                    if held_rows and held_id:
+                        db.execute(text("""
+                            UPDATE held_notification SET status = 'delivered', resolved_at = NOW()
+                            WHERE id = ANY(:ids)
+                        """), {"ids": [r.id for r in held_rows]})
+                        db.commit()
+                        await _arm_cooldowns_for_folded(held_rows)
+                    logger.info(f"🌙 Morning brief held (David asleep) for user {user_id}, folded {len(held_rows)} item(s)")
+                    return False
 
                 result = await unified_send_notification(
                     user_id=user_id,
@@ -985,6 +1079,13 @@ Synthesized summary:"""
                 # 24h cooldown dedup could never see a prior send.
                 db.commit()
                 if result.get("sent"):
+                    if held_rows:
+                        db.execute(text("""
+                            UPDATE held_notification SET status = 'delivered', resolved_at = NOW()
+                            WHERE id = ANY(:ids)
+                        """), {"ids": [r.id for r in held_rows]})
+                        db.commit()
+                        await _arm_cooldowns_for_folded(held_rows)
                     logger.info(f"📱 iOS push notification sent for morning brief to user {user_id}")
                     return True
                 logger.info(f"Morning brief push not sent for user {user_id}: {result}")
@@ -2175,10 +2276,14 @@ Synthesized summary:"""
                             "recent_sets": [(r.weight, r.reps, r.rpe) for r in recent]
                         }
 
-            # Calculate recovery score (0-100)
-            recovery_score = 100  # Default to good
+            # Calculate recovery score (0-100). None means "not measured" —
+            # NOT 100. Defaulting to a perfect score turned an empty recovery
+            # log into "recovery looks solid, hit your target weights", which is
+            # a confident coaching instruction derived from nothing (D9).
+            recovery_score = None
             recovery_factors = []
             if recovery:
+                recovery_score = 100
                 # Sleep factor (< 6hrs = poor, 7-8 = good, > 8 = great)
                 if recovery.sleep_hours:
                     if recovery.sleep_hours < 6:
@@ -2205,7 +2310,15 @@ Synthesized summary:"""
                         recovery_score -= 10
 
             # Determine weight adjustment based on recovery
-            if recovery_score >= 85:
+            if recovery_score is None:
+                # No recovery data — hold at prescribed weights and say why,
+                # rather than implying the green light came from a measurement.
+                weight_adjustment = 1.0
+                adjustment_note = (
+                    "No recovery data logged today (no sleep/HRV/soreness entry), "
+                    "so these are your prescribed weights, not a recovery-adjusted target"
+                )
+            elif recovery_score >= 85:
                 weight_adjustment = 1.0  # Normal weights, maybe push a bit
                 adjustment_note = "Recovery looks solid - hit your target weights"
             elif recovery_score >= 70:
@@ -2265,12 +2378,16 @@ Synthesized summary:"""
                 # Recovery status
                 if recovery:
                     recovery_text += "### Recovery Status\n"
-                    recovery_text += f"- Sleep: {recovery.sleep_hours or 'N/A'} hrs\n"
-                    recovery_text += f"- Soreness: {recovery.soreness_level or 'N/A'}/10\n"
-                    recovery_text += f"- HRV: {recovery.hrv or 'N/A'} ms | HR: {recovery.heart_rate or 'N/A'} bpm\n"
+                    recovery_text += f"- Sleep: {_measured(recovery.sleep_hours)} hrs\n"
+                    recovery_text += f"- Soreness: {_measured(recovery.soreness_level)}/10\n"
+                    recovery_text += f"- HRV: {_measured(recovery.hrv)} ms | HR: {_measured(recovery.heart_rate)} bpm\n"
                     recovery_text += f"- **Recovery Score: {recovery_score}/100** - {adjustment_note}\n\n"
                 else:
-                    recovery_text += "*No recovery data logged today - using standard weights*\n\n"
+                    recovery_text += (
+                        "### Recovery Status\n"
+                        "- **Recovery Score: not measured** — no sleep, HRV or soreness logged today.\n"
+                        "- Weights below are the prescribed ones, not recovery-adjusted.\n\n"
+                    )
 
                 # Exercise table with suggested weights
                 recovery_text += "### Suggested Weights\n"
@@ -2288,12 +2405,16 @@ Synthesized summary:"""
             else:
                 # Rest day
                 recovery_text = "## Rest Day\n\n"
+                recovery_text += "### Recovery Status\n"
                 if recovery:
-                    recovery_text += "### Recovery Status\n"
-                    recovery_text += f"- Sleep: {recovery.sleep_hours or 'N/A'} hrs\n"
-                    recovery_text += f"- Soreness: {recovery.soreness_level or 'N/A'}/10\n"
-                    recovery_text += f"- HRV: {recovery.hrv or 'N/A'} ms\n"
+                    recovery_text += f"- Sleep: {_measured(recovery.sleep_hours)} hrs\n"
+                    recovery_text += f"- Soreness: {_measured(recovery.soreness_level)}/10\n"
+                    recovery_text += f"- HRV: {_measured(recovery.hrv)} ms\n"
                     recovery_text += f"- Recovery Score: {recovery_score}/100\n\n"
+                else:
+                    recovery_text += (
+                        "- **Recovery Score: not measured** — no sleep, HRV or soreness logged today.\n\n"
+                    )
                 recovery_text += "No workout scheduled. Focus on recovery - stay hydrated and get good sleep."
 
             # Generate TTS
@@ -2302,8 +2423,13 @@ Synthesized summary:"""
 
             if template:
                 tts_text = f"Today is {template.name}. "
-                if recovery:
+                if recovery_score is not None:
                     tts_text += f"Your recovery score is {recovery_score} out of 100. {adjustment_note}. "
+                else:
+                    tts_text += (
+                        "I don't have a recovery score for you today — nothing was logged, "
+                        "so these are your prescribed weights. "
+                    )
                 tts_text += f"You have {len(exercise_recommendations)} exercises planned."
             else:
                 tts_text = "Today is a rest day. Focus on recovery."

@@ -21,7 +21,7 @@ from typing import Optional, Dict, Any, List
 from html import unescape
 
 from app.celery_app import celery_app
-from app.core.timezone import now as local_now, to_naive_utc
+from app.core.timezone import now as local_now, to_naive_local, to_naive_utc
 from app.core.config import get_owner_id
 
 logger = logging.getLogger(__name__)
@@ -194,6 +194,35 @@ async def _sync_emails_async():
                             )
                             db.add(email)
 
+                            from app.services.world_state.writer import append_world_event_async
+                            await append_world_event_async(
+                                db,
+                                user_id=str(user_id),
+                                kind="email.received",
+                                source="microsoft_graph",
+                                source_ref=f"email:{email_data.id}",
+                                aggregate_type="email",
+                                aggregate_id=str(email_data.id),
+                                actor_type="external",
+                                actor_id=email_data.sender_email,
+                                correlation_id=str(email_data.conversation_id or email_data.id),
+                                dedupe_key=f"email-received:{email_data.id}:v1",
+                                occurred_at=email_data.received_at,
+                                payload={
+                                    "email_id": str(email_data.id),
+                                    "conversation_id": email_data.conversation_id,
+                                    "mailbox": mailbox,
+                                    "subject": email_data.subject,
+                                    "sender_email": email_data.sender_email,
+                                    "sender_name": email_data.sender_name,
+                                    "received_at": email_data.received_at.isoformat() if email_data.received_at else None,
+                                    "importance": email_data.importance,
+                                    "is_read": email_data.is_read,
+                                    "has_attachments": bool(email_data.has_attachments),
+                                    "summary": email_data.body_preview,
+                                },
+                            )
+
                             # Fetch, store, and download attachments if present
                             if email_data.has_attachments:
                                 from minio import Minio
@@ -273,31 +302,51 @@ async def _sync_emails_async():
 
                     # --- Read-status reconciliation ---
                     # The main sync only fetches emails newer than max_received_at,
-                    # so it misses read-status changes on older emails. This pass
-                    # fetches recent messages (last 3 days) with just id+isRead and
-                    # reconciles against locally-unread emails.
+                    # so it misses read-status changes on older emails. Reconcile
+                    # against the mailbox's CURRENT unread set instead of a rolling
+                    # window: anything unread locally but not unread upstream has
+                    # been read, moved, or deleted.
+                    #
+                    # This used to compare only the last 3 days, so an email that
+                    # aged past that window while locally unread could never be
+                    # corrected — stale unread accumulated indefinitely and the
+                    # unread badge drifted far above reality.
                     try:
-                        reconcile_since = local_now() - timedelta(days=3)
-                        read_check_emails = await msgraph.get_emails(
-                            mailbox, since=reconcile_since, top=100,
-                            select_fields=["id", "isRead"]
-                        )
-                        # Build a map of graph_id -> is_read
-                        graph_read_map = {e.id: e.is_read for e in read_check_emails}
+                        graph_unread = await msgraph.get_unread_ids(mailbox)
 
-                        if graph_read_map:
-                            # Get locally unread emails that might have been read
+                        # None = the Graph call failed. Skip rather than treat an
+                        # empty set as "everything has been read".
+                        if graph_unread is not None:
+                            # unread locally, not unread upstream -> now read/moved/deleted
                             local_unread = await db.execute(
                                 select(Email).where(
                                     Email.mailbox == mailbox,
                                     Email.user_id == user_id,
                                     Email.is_read == False,
-                                    Email.received_at >= reconcile_since,
                                 )
                             )
                             for local_email in local_unread.scalars().all():
-                                if local_email.id in graph_read_map and graph_read_map[local_email.id]:
+                                if local_email.id not in graph_unread:
                                     local_email.is_read = True
+                                    read_status_updated += 1
+
+                            # ...and the other direction: read locally but unread
+                            # upstream, which is what happens when David marks a
+                            # message unread in Outlook to deal with later. The
+                            # main sync's `since` cursor sits at the newest message
+                            # and never re-fetches those, so without this Sara
+                            # under-counts exactly the mail he flagged to action.
+                            if graph_unread:
+                                local_read = await db.execute(
+                                    select(Email).where(
+                                        Email.mailbox == mailbox,
+                                        Email.user_id == user_id,
+                                        Email.is_read == True,
+                                        Email.id.in_(list(graph_unread)),
+                                    )
+                                )
+                                for local_email in local_read.scalars().all():
+                                    local_email.is_read = False
                                     read_status_updated += 1
                     except Exception as e:
                         logger.warning(f"Read-status reconciliation failed for {mailbox}: {e}")
@@ -388,6 +437,94 @@ def sync_sent_items(self):
         raise self.retry(countdown=120, exc=e)
 
 
+async def _link_meeting_to_calendar(db, user_id: str, email) -> bool:
+    """Link a meeting-bearing email to the real calendar event, if one exists.
+
+    Matches on distinctive subject words within a week of the mail. Returns True
+    when a link was made. Deliberately does NOT create events: the calendar is
+    owned by the iOS sync, and auto-creating from mail was removed on purpose.
+    """
+    import re as _re
+    from sqlalchemy import text as sa_text
+
+    try:
+        words = [
+            w.lower() for w in _re.findall(r"[A-Za-z][A-Za-z'-]{3,}", email.subject or "")
+            if w.lower() not in {"meeting", "invite", "invitation", "call", "with", "from"}
+        ][:5]
+        if not words:
+            return False
+        row = (await db.execute(sa_text("""
+            SELECT id, title FROM calendar_event
+             WHERE user_id = :uid
+               AND start_time BETWEEN :lo AND :hi
+               AND lower(title) LIKE ANY(:pats)
+             ORDER BY start_time ASC LIMIT 1
+        """), {
+            "uid": user_id,
+            "lo": to_naive_local(email.received_at or local_now()) - timedelta(days=1),
+            "hi": to_naive_local(email.received_at or local_now()) + timedelta(days=14),
+            "pats": [f"%{w}%" for w in words],
+        })).first()
+        if not row:
+            return False
+        email.calendar_event_id = str(row.id)
+        logger.info("[email_sync] linked %s to calendar event %r", email.id, row.title)
+        return True
+    except Exception as e:
+        logger.warning(f"[email_sync] calendar link failed for {email.id}: {e}")
+        return False
+
+
+async def _resolve_threads_for_sent_reply(db, user_id: str, sent) -> int:
+    """Emit `thread.resolved` for every open thread on this conversation.
+
+    Best-effort and never fatal: a failure here must not stall the sent-items
+    cursor, which is the only thing that stops the whole sync from re-reading the
+    same window forever.
+    """
+    conversation_id = getattr(sent, "conversation_id", None)
+    if not conversation_id:
+        return 0
+    try:
+        from sqlalchemy import text as sa_text
+        from app.services.world_state.reducer import email_thread_key
+        from app.services.world_state.writer import append_world_event_async
+
+        thread_key = email_thread_key(conversation_id, getattr(sent, "id", None))
+        rows = (await db.execute(sa_text("""
+            SELECT id FROM world_thread
+             WHERE user_id = :uid AND thread_key = :key
+               AND status IN ('proposed','open','waiting','blocked')
+        """), {"uid": user_id, "key": thread_key})).fetchall()
+        if not rows:
+            return 0
+
+        thread_ids = [r.id for r in rows]
+        await append_world_event_async(
+            db, user_id=user_id, kind="thread.resolved", source="sent_reply",
+            source_ref=f"email:{getattr(sent, 'id', '')}",
+            aggregate_type="world_thread", aggregate_id=thread_ids[0],
+            actor_type="user",
+            correlation_id=str(conversation_id),
+            dedupe_key=f"thread-resolved:sent:{getattr(sent, 'id', conversation_id)}",
+            payload={
+                "thread_ids": thread_ids,
+                "thread_keys": [thread_key],
+                "conversation_id": conversation_id,
+                "reason": "David replied to this conversation",
+            },
+        )
+        logger.info(
+            "[sent-sync] closing %d thread(s) for conversation %s",
+            len(thread_ids), str(conversation_id)[:24],
+        )
+        return len(thread_ids)
+    except Exception as e:
+        logger.warning(f"[sent-sync] thread close failed for {conversation_id}: {e}")
+        return 0
+
+
 async def _sync_sent_items_async():
     from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
     from sqlalchemy.orm import sessionmaker
@@ -450,6 +587,11 @@ async def _sync_sent_items_async():
                         recv = to_naive_utc(sent.received_at) if sent.received_at else None
                         if recv and recv > latest_at:
                             latest_at = recv
+                        # A sent reply is the closer for its conversation. Without
+                        # this, David answered Laura Weippert within 20 minutes and
+                        # the thread stayed open for two days of overdue nags —
+                        # nothing in the system read a reply as an answer.
+                        await _resolve_threads_for_sent_reply(db, user_id, sent)
                         for recipient in (sent.to_recipients or []) + (sent.cc_recipients or []):
                             r_email = (recipient.get("email") or "").strip()
                             if not r_email:
@@ -582,6 +724,53 @@ async def _analyze_emails_async(mailbox: str, user_id: str):
                     email.action_required = analysis["action_required"]
                     email.analyzed_at = local_now()
                     email.has_meeting = analysis.get("has_meeting", False)
+
+                    # No half-detected meetings. `has_meeting=true` with
+                    # `calendar_event_id=NULL` is a meeting that exists only as a
+                    # rumour — which is exactly what the interpreter then invented
+                    # a time for (Laura Weippert, 2026-08-28). Either the mail
+                    # links to a real calendar event or it does not claim a
+                    # meeting at all. Events themselves still come only from
+                    # David's phone (ios_calendar); nothing here creates one.
+                    if email.has_meeting and not email.calendar_event_id:
+                        matched = await _link_meeting_to_calendar(db, user_id, email)
+                        if not matched:
+                            email.has_meeting = False
+                            logger.info(
+                                "[email_sync] %s claimed a meeting with no calendar event — "
+                                "flag cleared rather than left dangling", email.id,
+                            )
+
+                    from app.services.world_state.writer import append_world_event_async
+                    await append_world_event_async(
+                        db,
+                        user_id=str(user_id),
+                        kind="email.analyzed",
+                        source="email_analyzer",
+                        source_ref=f"email:{email.id}",
+                        aggregate_type="email",
+                        aggregate_id=str(email.id),
+                        correlation_id=str(email.conversation_id or email.id),
+                        dedupe_key=f"email-analyzed:{email.id}:{email.analyzed_at.isoformat()}",
+                        payload={
+                            "email_id": str(email.id),
+                            # The reducer keys the follow-up thread on the
+                            # conversation, so a five-message back-and-forth is one
+                            # open thread instead of five.
+                            "conversation_id": email.conversation_id,
+                            "subject": email.subject,
+                            "sender_email": email.sender_email,
+                            "sender_name": email.sender_name,
+                            "category": analysis["category"],
+                            "importance_score": analysis["importance_score"],
+                            "summary": analysis["summary"],
+                            "action_required": analysis["action_required"],
+                            "has_meeting": analysis.get("has_meeting", False),
+                            "is_read": bool(email.is_read),
+                            "actionability": 0.9 if analysis["action_required"] else 0.0,
+                            "urgency": analysis["importance_score"] if analysis["action_required"] else 0.0,
+                        },
+                    )
 
                     # People layer: upsert the sender going forward (Phase 2).
                     try:

@@ -53,14 +53,20 @@ class TestRenderEngagedContext:
         assert "kernel_state=ambient" in text
         assert "consolidation stalled" in text
 
-    def test_self_story_renders_under_own_heading(self):
-        """Arc 4.2: 'included in every context in every state' — this is
-        the chat/kernel-context half of that (dreaming writes it, this
-        reads it)."""
+    def test_self_story_is_never_injected(self):
+        """Ground-truth plan, Phase 5 §5 — reverses Arc 4.2's "included in
+        every context in every state".
+
+        `reflection/agent.py` regenerated this every four hours from a
+        deliberation journal that produces ~130 "staying quiet" lines a day, and
+        it drifted into "cowardice wearing a mask… I am terrified…" on a day when
+        nothing had happened. Sara then read that back as established fact about
+        herself on every single chat turn. The row is still written for the UI;
+        it is no longer prompt input."""
         self_state = {"kernel_state": "ambient", "self_story": "I've been helping David with Risk Ninja this week."}
         text = render_engaged_context(_context(self_state=self_state), open_intents=0, recall_traces=[])
-        assert "Your ongoing self-story" in text
-        assert "I've been helping David with Risk Ninja this week." in text
+        assert "Your ongoing self-story" not in text
+        assert "I've been helping David with Risk Ninja this week." not in text
 
     def test_no_self_story_omits_the_heading(self):
         self_state = {"kernel_state": "ambient"}
@@ -118,17 +124,26 @@ class TestExtendedSignalsRendering:
             "pkg": "David co-founded Risk Ninja.",
             "daily_brief": "Meeting at 2pm.",
             "journal": "Quiet morning, nothing urgent.",
-            "patterns": "Side door locks around midnight (100%)",
+            "patterns": "David trains around 1pm on weekdays (82%)",
             "device": "[Device awareness] iPhone online.",
             "emotional_tone": "attentive (0.60)",
         }
         text = render_engaged_context(_context(), open_intents=0, recall_traces=[], extended=extended)
         assert "attentive (0.60)" in text
-        assert "Side door locks" in text
+        assert "David trains around 1pm" in text
         assert "[Device awareness] iPhone online." in text
         assert "Meeting at 2pm." in text
         assert "David co-founded Risk Ninja." in text
         assert "Quiet morning" in text
+
+    def test_lock_and_light_cycles_are_dropped_as_noise(self):
+        """Ground-truth plan, Phase 5 §8: a "patterns" line that is only the
+        house behaving normally reads as insight into David and crowds out the
+        patterns that are. It is omitted rather than reported."""
+        extended = {"patterns": "Side door locks around midnight (100%); kitchen light cycle (99%)"}
+        text = render_engaged_context(_context(), open_intents=0, recall_traces=[], extended=extended)
+        assert "Side door locks" not in text
+        assert "patterns" not in text
 
     def test_long_extended_values_are_truncated(self):
         extended = {"daily_brief": "x" * 5000, "pkg": "y" * 5000, "journal": "z" * 5000}

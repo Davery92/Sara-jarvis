@@ -152,10 +152,56 @@ class TestUpsertFactHealthGuard:
              patch.object(pkg, "_schedule_embedding"):
             pkg.upsert_fact(
                 "Health",
-                {"metric": "resting heart rate", "current_value": "58 bpm"},
+                {"metric": "chest development",
+                 "current_value": "underdeveloped relative to back"},
                 confidence=0.8,
             )
 
         create_calls = [c for c in mock_session.run.call_args_list if "CREATE" in c.args[0]]
         assert len(create_calls) == 1
         assert "expires_at" not in create_calls[0].args[1]
+
+    def test_measured_health_fact_is_refused(self, pkg):
+        """HEALTH_DATA_ACCURACY_FIX_PLAN 0.2: `health_metric` is the only
+        authority for a number about David's body. Minting one as a PKG fact
+        creates an undated, never-expiring copy — and because the extractor read
+        Sara's own replies, that copy could be a number she invented (the
+        2026-08-31 `hrv = 80` at confidence 0.99)."""
+        for metric, value in [
+            ("hrv", "80"),
+            ("resting heart rate", "58 bpm"),
+            ("sleep_duration", "7.5 hours"),
+            ("Sleep Quality", "Poor (barely slept)"),
+            ("steps", "12,431"),
+        ]:
+            mock_session = _mock_session_with_match(None)
+            mock_driver = MagicMock()
+            mock_driver.session.return_value = mock_session
+
+            with patch.object(pkg, "_ensure_driver", return_value=True), \
+                 patch.object(pkg, "driver", mock_driver), \
+                 patch.object(pkg, "_schedule_embedding"):
+                result = pkg.upsert_fact(
+                    "Health", {"metric": metric, "current_value": value}, confidence=0.99,
+                )
+
+            assert result is None, f"{metric}={value} was minted"
+            assert not [c for c in mock_session.run.call_args_list if "CREATE" in c.args[0]]
+
+    def test_numeric_intention_is_not_a_measurement(self, pkg):
+        """A number David *chose* is not a number his body produced. Targets and
+        goals have no other home and must survive the measurement filter."""
+        mock_session = _mock_session_with_match(None)
+        mock_driver = MagicMock()
+        mock_driver.session.return_value = mock_session
+
+        with patch.object(pkg, "_ensure_driver", return_value=True), \
+             patch.object(pkg, "driver", mock_driver), \
+             patch.object(pkg, "_schedule_embedding"):
+            result = pkg.upsert_fact(
+                "Health",
+                {"metric": "daily_calorie_target", "current_value": "2760"},
+                confidence=0.95,
+            )
+
+        assert result is not None

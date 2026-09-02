@@ -1,4 +1,4 @@
-import { requireOptionalNativeModule } from 'expo-modules-core'
+import { requireOptionalNativeModule, type EventSubscription } from 'expo-modules-core'
 
 /**
  * SaraNative — local Expo module for iOS system integration (P3).
@@ -12,10 +12,22 @@ import { requireOptionalNativeModule } from 'expo-modules-core'
  */
 
 export interface WidgetData {
-  emotional_state?: string
-  latest_thought?: string
+  presence_state?: string
+  presence_headline?: string
+  presence_detail?: string
+  presence_revision?: string
+  presence_updated_at?: string
+  presence_valid_until?: string
   next_event_title?: string
   next_event_time?: string // ISO8601
+}
+
+export interface LiveActivityTokenEvent {
+  action: 'registered' | 'ended'
+  activityId: string
+  logicalId: string
+  kind: 'task' | 'workout' | 'presence'
+  pushToken?: string
 }
 
 export interface PendingShare {
@@ -44,6 +56,8 @@ interface SaraNativeModuleType {
   endEventActivity(id: string): void
   /** Ends every event activity of the given kind ('' = all kinds). */
   endAllEventActivities(kind: string): void
+  syncEventActivityTokens(): void
+  addListener(event: 'liveActivityToken', listener: (payload: LiveActivityTokenEvent) => void): EventSubscription
 }
 
 const SaraNative = requireOptionalNativeModule<SaraNativeModuleType>('SaraNative')
@@ -106,6 +120,17 @@ export function endEventActivity(id: string): void {
 
 export function endAllEventActivities(kind: 'workout' | 'task' | ''): void {
   SaraNative?.endAllEventActivities(kind)
+}
+
+export function syncEventActivityTokens(): void {
+  SaraNative?.syncEventActivityTokens()
+}
+
+export function subscribeToLiveActivityTokens(
+  listener: (event: LiveActivityTokenEvent) => void
+): () => void {
+  const subscription = SaraNative?.addListener('liveActivityToken', listener)
+  return () => subscription?.remove()
 }
 
 export default SaraNative

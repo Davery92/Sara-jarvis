@@ -1,8 +1,8 @@
 """
 Sara's tool to create and manage research plans.
 
-When David asks Sara to research something, she uses this tool to create
-a structured plan and hand it off to the research executor agent.
+For large or explicitly backgrounded research, Sara can use this tool to create
+a durable structured plan and hand it off to the research executor agent.
 """
 
 import json
@@ -19,6 +19,50 @@ logger = logging.getLogger(__name__)
 def _get_db():
     from app.db.session import get_db
     return next(get_db())
+
+
+def normalize_plan_title(title: str) -> str:
+    """Two ways of asking the same question hash to the same plan.
+
+    "Salem MA historical guide", "Salem MA Historical Guide!" and "salem ma
+    historical  guide" are one piece of work. Lowercase, strip punctuation,
+    collapse whitespace — deliberately crude, because the failure it prevents
+    (four concurrent agents against one LLM lane) is far worse than the
+    occasional false match, which Sara can resolve by cancelling.
+    """
+    import re as _re
+    return _re.sub(r"\s+", " ", _re.sub(r"[^a-z0-9\s]", " ", (title or "").lower())).strip()
+
+
+# How long a completed plan counts as "already answered". Long enough that asking
+# again the same day gets the existing report; short enough that tomorrow's
+# version of the question is genuinely new work.
+COMPLETED_PLAN_REUSE_HOURS = 12
+
+
+def _find_matching_plan(db, user_id: str, title: str):
+    """A live or freshly-completed plan for the same question, or None."""
+    normalized = normalize_plan_title(title)
+    if not normalized:
+        return None
+    try:
+        rows = db.execute(text("""
+            SELECT id, title, status, updated_at, created_at
+              FROM research_plan
+             WHERE user_id = :uid
+               AND (status IN ('draft', 'running', 'pending', 'stuck', 'paused', 'stalled')
+                    OR (status IN ('complete', 'completed', 'partial')
+                        AND COALESCE(updated_at, created_at) >= NOW() - (:hrs * INTERVAL '1 hour')))
+             ORDER BY COALESCE(updated_at, created_at) DESC LIMIT 25
+        """), {"uid": user_id, "hrs": COMPLETED_PLAN_REUSE_HOURS}).fetchall()
+    except Exception as e:
+        logger.warning("single-flight title check failed: %s", e)
+        return None
+
+    for row in rows:
+        if normalize_plan_title(row.title) == normalized:
+            return {"id": str(row.id), "title": row.title, "status": row.status}
+    return None
 
 
 async def _resolve_research_model(base_url: str, fallback: str) -> str:
@@ -57,18 +101,22 @@ class CreateResearchPlanTool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "Hand off a research task to the dedicated research agent. Use this — and only this — "
-            "when David asks you to look into, research, dig into, investigate, gain an "
-            "understanding of, or explain a topic. Trigger phrases include: 'look into X', "
-            "'research X', 'do some research on X', 'dig into X', 'investigate X', "
-            "'understand X and explain it', 'put together a brief on X'. "
+            "Hand off a large or explicitly backgrounded research task to the dedicated "
+            "research agent. Use this only when David asks for a background report, asks "
+            "to be notified later, or requests a durable multi-source investigation that "
+            "will take several minutes. Phrases such as 'look into', 'research', "
+            "'explain', or 'tell me about' do not by themselves justify a handoff: use "
+            "web_search/open_page inline and answer in the current conversation. "
             "Break the topic into 3–6 ordered, independently-researchable steps. The agent "
             "executes them in the background using web search, file I/O, and shell tools, "
             "then writes a report. "
-            "DO NOT use for simple factual lookups (e.g. 'what time does X open', 'who is Y') — "
-            "use web_search inline and answer in the same turn instead. "
+            "DO NOT use for normal web questions, URL inspection, comparisons, or explanations "
+            "that the chat tool loop can complete now. "
             "Plans created from chat are marked origin='david_chat' and take precedence "
-            "over Sara's autonomous research."
+            "over Sara's autonomous research. "
+            "If a plan for the same question is already running or finished in the last "
+            "12 hours, this returns THAT plan with attached=true — say \"already running "
+            "as <id>\" (or point him at the finished result) rather than announcing a new plan."
         )
 
     @property
@@ -126,6 +174,74 @@ class CreateResearchPlanTool(BaseTool):
 
         db = _get_db()
         try:
+            # Same question, same plan. David asked for the Salem report four
+            # times on 2026-09-01 because Sara kept telling him nothing was
+            # running; all four plans then completed, producing three duplicate
+            # "Completed" notes that went on to dominate her own memory recall.
+            # A repeat of a question already answered — or being answered — hands
+            # back the existing plan rather than starting a second one.
+            attached = _find_matching_plan(db, user_id, title)
+            if attached:
+                return ToolResult(
+                    success=True,
+                    data={
+                        "plan_id": attached["id"], "title": attached["title"],
+                        "status": attached["status"], "attached": True,
+                    },
+                    message=(
+                        f"Already running as `{attached['id']}`: **{attached['title']}** "
+                        f"({attached['status']}). Tell David it's the same work, not a new plan."
+                        if attached["status"] not in ("complete", "completed")
+                        else f"Already done — I finished **{attached['title']}** earlier today "
+                             f"(`{attached['id']}`). Point David at that result rather than re-running it."
+                    ),
+                )
+
+            # Single-flight guard. Two research agents against the same LLM lane
+            # is what OOM'd it on 2026-09-01 and destroyed three plans. Refuse
+            # at the door and hand back the running plan so Sara can answer
+            # "is it running?" truthfully instead of re-dispatching.
+            from app.services.agent_activity import active_research_plans
+
+            live = active_research_plans(db, user_id)
+            if live:
+                existing = live[0]
+                steps_total = existing.n_steps or 0
+                step_no = min((existing.current_step_index or 0) + 1, steps_total or 1)
+                step_title = (existing.current_step_title or "").strip()
+                progress = f"step {step_no}/{steps_total}" if steps_total else existing.status
+                if step_title:
+                    progress += f" — {step_title}"
+                mine = existing.origin == "sara_internal"
+                whose = (
+                    "One of my own background research plans is running"
+                    if mine else "A research plan is already running"
+                )
+                nudge = (
+                    "That's my own work, not David's — if this request matters more, "
+                    "call cancel_research_plan with that ID and then create the new plan."
+                    if mine else
+                    "Tell David it's in flight, or call cancel_research_plan with "
+                    "that ID first if he wants to replace it."
+                )
+                return ToolResult(
+                    success=False,
+                    data={
+                        "reason": "already_running",
+                        "plan_id": existing.id,
+                        "title": existing.title,
+                        "status": existing.status,
+                        "origin": existing.origin,
+                        "progress": progress,
+                    },
+                    message=(
+                        f"{whose}: **{existing.title}** ({progress}). "
+                        "Only one research agent may use the LLM lane at a time, so "
+                        "I'm not starting a duplicate.\n"
+                        f"Plan ID: `{existing.id}`\n{nudge}"
+                    ),
+                )
+
             plan_id = str(uuid.uuid4())
 
             steps = [
@@ -168,11 +284,24 @@ class CreateResearchPlanTool(BaseTool):
                 from app.tasks.research import run_research_plan
                 # Chat-initiated plans run on the david_priority queue so they
                 # never share workers with ACS or other cognitive work.
-                run_research_plan.apply_async(
+                async_result = run_research_plan.apply_async(
                     args=[plan_id, user_id],
                     queue="david_priority",
                 )
+                # Remember the worker so cancel can actually revoke it — a
+                # status flip alone leaves it grinding against the LLM lane.
+                db.execute(
+                    text("UPDATE research_plan SET celery_task_id = :tid WHERE id = :id"),
+                    {"tid": async_result.id, "id": plan_id},
+                )
+                db.commit()
                 status_msg = "created and started"
+                # "I'll ping you when it's ready" becomes a row, not a sentence.
+                # Without this the Salem report finished at 21:28 on 2026-09-01
+                # and batched itself into a morning window David had already left
+                # for work by — nothing owned the promise to tell him.
+                from app.services.commitment_service import create_delivery_commitment
+                await create_delivery_commitment(user_id, plan_id, title, origin="david_chat")
             else:
                 status_msg = "created (draft — start manually)"
 
@@ -228,7 +357,10 @@ class ResearchPlanStatusTool(BaseTool):
             "properties": {
                 "plan_id": {
                     "type": "string",
-                    "description": "The research plan ID to check",
+                    "description": (
+                        "The research plan ID to check. An id prefix of 8 or more "
+                        "characters is accepted."
+                    ),
                 },
             },
             "required": ["plan_id"],
@@ -241,6 +373,30 @@ class ResearchPlanStatusTool(BaseTool):
 
         db = _get_db()
         try:
+            # Sara quotes 8-char id prefixes in prose and reads them back to
+            # herself; an exact match answers "Plan not found" for a plan that
+            # is very much running. Resolve prefixes, and on a real miss hand
+            # back the recent plans so she self-corrects instead of concluding
+            # nothing is happening.
+            from app.services.research.cancel import resolve_plan_id, recent_plans_hint
+
+            resolved, reason = resolve_plan_id(db, user_id, plan_id)
+            if not resolved:
+                recent = recent_plans_hint(db, user_id)
+                msg = reason or f"No research plan matching '{plan_id}'."
+                if recent:
+                    listing = "\n".join(
+                        f"- `{p['plan_id']}` — {p['title']} ({p['status']}, {p['progress']})"
+                        for p in recent
+                    )
+                    msg += f"\n\nYour most recent plans:\n{listing}"
+                else:
+                    msg += " You have no research plans at all."
+                return ToolResult(
+                    success=False, message=msg, data={"recent_plans": recent}
+                )
+            plan_id = resolved
+
             result = db.execute(
                 text("SELECT * FROM research_plan WHERE id = :id AND user_id = :user_id"),
                 {"id": plan_id, "user_id": user_id},
@@ -317,6 +473,77 @@ class ResearchPlanStatusTool(BaseTool):
             )
 
         except Exception as e:
-            return ToolResult(success=False, message=f"Error: {e}")
+            logger.error(
+                "research_plan_status failed: %s: %s", type(e).__name__, e, exc_info=True
+            )
+            return ToolResult(success=False, message=f"Error: {type(e).__name__}: {e}")
+        finally:
+            db.close()
+
+
+class CancelResearchPlanTool(BaseTool):
+    """Kill a running research plan — the explicit replace path."""
+
+    @property
+    def name(self) -> str:
+        return "cancel_research_plan"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Cancel a running research plan. Only one research plan may run at a "
+            "time, so use this when David wants to replace what's in flight with "
+            "something else: cancel the old plan, then create the new one. "
+            "Accepts a full plan ID or an ID prefix of 8+ characters."
+        )
+
+    @property
+    def parameters(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "plan_id": {
+                    "type": "string",
+                    "description": "Plan ID (or an 8+ character prefix) to cancel",
+                },
+            },
+            "required": ["plan_id"],
+        }
+
+    async def execute(self, user_id: str, **kwargs) -> ToolResult:
+        plan_id = kwargs.get("plan_id", "")
+        if not plan_id:
+            return ToolResult(success=False, message="Missing plan_id")
+
+        db = _get_db()
+        try:
+            from app.services.research.cancel import cancel_research_plan, recent_plans_hint
+
+            result = cancel_research_plan(db, user_id, plan_id)
+            if result.get("cancelled"):
+                return ToolResult(
+                    success=True,
+                    data=result,
+                    message=(
+                        f"Cancelled research plan **{result.get('title')}** "
+                        f"(`{result.get('id')}`). The lane is free for a new plan."
+                    ),
+                )
+
+            msg = result.get("error") or f"No research plan matching '{plan_id}'."
+            recent = recent_plans_hint(db, user_id)
+            if recent and not result.get("id"):
+                listing = "\n".join(
+                    f"- `{p['plan_id']}` — {p['title']} ({p['status']})" for p in recent
+                )
+                msg += f"\n\nYour most recent plans:\n{listing}"
+            return ToolResult(success=False, message=msg, data={"recent_plans": recent})
+
+        except Exception as e:
+            db.rollback()
+            logger.error(
+                "cancel_research_plan failed: %s: %s", type(e).__name__, e, exc_info=True
+            )
+            return ToolResult(success=False, message=f"Error: {type(e).__name__}: {e}")
         finally:
             db.close()

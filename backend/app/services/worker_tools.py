@@ -12,6 +12,8 @@ from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
+from app.services.note_provenance import SARA_GENERATED_TAG
+
 logger = logging.getLogger(__name__)
 
 
@@ -171,7 +173,8 @@ class WorkerToolExecutor:
                 user_id=self.user_id,
                 folder_id=self.workspace_folder_id,
                 title=f"📝 {title}",
-                content=f"*Agent note - {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}*\n\n{content}"
+                content=f"*Agent note - {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}*\n\n{content}",
+                tags=[SARA_GENERATED_TAG],
             )
 
             self.db.add(note)

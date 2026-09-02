@@ -18,16 +18,42 @@ Data sources include:
 
 import logging
 import json
-from datetime import datetime, date, timedelta, timezone
+from decimal import Decimal
+from datetime import datetime, date, timezone
 from typing import List, Dict, Any, Optional
-from zoneinfo import ZoneInfo
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from enum import Enum
 
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
+from app.core.timezone import (
+    USER_TIMEZONE,
+    UTC as UTC_TZ,
+    start_of_day,
+    end_of_day,
+    to_naive_utc,
+)
+
 logger = logging.getLogger(__name__)
+
+
+def _json_default(value: Any) -> Any:
+    """Coerce the types psycopg hands back from numeric/timestamp columns.
+
+    ``daily_recovery_log`` (hrv, sleep_hours, body_weight) and other NUMERIC
+    columns arrive as ``Decimal``, which json.dumps rejects. That raised inside
+    cache_replay's try/except and silently dropped every day that had recovery
+    data from the cache — found 2026-08-25 while wiring the diary.
+    """
+    if isinstance(value, Decimal):
+        as_float = float(value)
+        return int(as_float) if as_float.is_integer() else as_float
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, set):
+        return sorted(value)
+    return str(value)
 
 
 class DataSource(str, Enum):
@@ -44,6 +70,64 @@ class DataSource(str, Enum):
     TIMERS = "timers"
     REMINDERS = "reminders"
     HOME = "home"
+
+
+@dataclass(frozen=True)
+class DayBounds:
+    """One Eastern calendar day expressed in every storage convention the
+    collectors below need — because they do NOT share one.
+
+    Verified against the live schema 2026-08-25:
+
+    * ``aware`` — ``timestamptz`` columns: ``automation_execution_log.started_at``,
+      ``email.received_at``, ``learning_session.started_at``,
+      ``workout_session.started_at``, ``daily_recovery_log.created_at``,
+      ``home_activity_log.changed_at``, ``cardio_log.logged_at``,
+      ``sara_journal.created_at``, ``notification_log.sent_at``.
+    * ``utc_naive`` — ``timestamp without time zone`` columns holding UTC
+      (PG ``now()`` on a UTC session, or aware datetimes coerced on insert):
+      ``episode.created_at``, ``background_task.created_at``,
+      ``timer.start_time``, ``reminder.reminder_time``, ``note.created_at``.
+    * ``et_naive`` — ``timestamp without time zone`` columns holding ET
+      wall-clock: ``food_log.logged_at`` (written via ``naive_local_now()``)
+      and ``calendar_event.start_time`` (see calendar_prep.py). This is also
+      the convention every emitted event timestamp is normalized to, so the
+      merged timeline sorts correctly.
+
+    Assuming one convention for all of them is what put an 11 PM chat on the
+    wrong day and shuffled the merged event list by 4-5 hours.
+    """
+    replay_date: date
+    aware_start: datetime
+    aware_end: datetime
+    utc_naive_start: datetime
+    utc_naive_end: datetime
+    et_naive_start: datetime
+    et_naive_end: datetime
+
+
+def day_bounds(replay_date: date) -> DayBounds:
+    """Build every representation of ``replay_date`` as an Eastern calendar day."""
+    aware_start = start_of_day(replay_date)
+    aware_end = end_of_day(replay_date)
+    return DayBounds(
+        replay_date=replay_date,
+        aware_start=aware_start,
+        aware_end=aware_end,
+        utc_naive_start=to_naive_utc(aware_start),
+        utc_naive_end=to_naive_utc(aware_end),
+        et_naive_start=aware_start.replace(tzinfo=None),
+        et_naive_end=aware_end.replace(tzinfo=None),
+    )
+
+
+def utc_naive_to_et_naive(dt: Optional[datetime]) -> Optional[datetime]:
+    """Reinterpret a naive-UTC column value as naive ET wall-clock."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC_TZ)
+    return dt.astimezone(USER_TIMEZONE).replace(tzinfo=None)
 
 
 @dataclass
@@ -99,77 +183,78 @@ class DayReplayBuilder:
         events: List[DayReplayEvent] = []
         sources_included: List[str] = []
 
-        # Calculate date range (start of day to end of day)
-        day_start = datetime.combine(replay_date, datetime.min.time())
-        day_end = datetime.combine(replay_date, datetime.max.time())
+        # ET calendar-day bounds in every storage convention (see DayBounds).
+        # This used to be a single naive datetime.combine() pair compared
+        # against a mix of timestamptz, naive-UTC and naive-ET columns.
+        bounds = day_bounds(replay_date)
 
         # Gather events from all sources
-        episode_events = await self._get_episode_events(db, user_id, day_start, day_end)
+        episode_events = await self._get_episode_events(db, user_id, bounds)
         if episode_events:
             events.extend(episode_events)
             sources_included.append(DataSource.EPISODES.value)
 
-        automation_events = await self._get_automation_events(db, user_id, day_start, day_end)
+        automation_events = await self._get_automation_events(db, user_id, bounds)
         if automation_events:
             events.extend(automation_events)
             sources_included.append(DataSource.AUTOMATIONS.value)
 
-        workout_events = await self._get_workout_events(db, user_id, day_start, day_end)
+        workout_events = await self._get_workout_events(db, user_id, bounds)
         if workout_events:
             events.extend(workout_events)
             sources_included.append(DataSource.FITNESS_WORKOUTS.value)
 
-        food_events = await self._get_food_events(db, user_id, day_start, day_end)
+        food_events = await self._get_food_events(db, user_id, bounds)
         if food_events:
             events.extend(food_events)
             sources_included.append(DataSource.FITNESS_FOOD.value)
 
-        recovery_events = await self._get_recovery_events(db, user_id, replay_date)
+        recovery_events = await self._get_recovery_events(db, user_id, bounds)
         if recovery_events:
             events.extend(recovery_events)
             sources_included.append(DataSource.FITNESS_RECOVERY.value)
 
-        calendar_events = await self._get_calendar_events(db, user_id, day_start, day_end)
+        calendar_events = await self._get_calendar_events(db, user_id, bounds)
         if calendar_events:
             events.extend(calendar_events)
             sources_included.append(DataSource.CALENDAR.value)
 
-        email_events = await self._get_email_events(db, user_id, day_start, day_end)
+        email_events = await self._get_email_events(db, user_id, bounds)
         if email_events:
             events.extend(email_events)
             sources_included.append(DataSource.EMAIL.value)
 
-        research_events = await self._get_research_events(db, user_id, day_start, day_end)
+        research_events = await self._get_research_events(db, user_id, bounds)
         if research_events:
             events.extend(research_events)
             sources_included.append(DataSource.RESEARCH.value)
 
-        learning_events = await self._get_learning_events(db, user_id, day_start, day_end)
+        learning_events = await self._get_learning_events(db, user_id, bounds)
         if learning_events:
             events.extend(learning_events)
             sources_included.append(DataSource.LEARNING.value)
 
-        timer_events = await self._get_timer_events(db, user_id, day_start, day_end)
+        timer_events = await self._get_timer_events(db, user_id, bounds)
         if timer_events:
             events.extend(timer_events)
             sources_included.append(DataSource.TIMERS.value)
 
-        reminder_events = await self._get_reminder_events(db, user_id, day_start, day_end)
+        reminder_events = await self._get_reminder_events(db, user_id, bounds)
         if reminder_events:
             events.extend(reminder_events)
             sources_included.append(DataSource.REMINDERS.value)
 
-        home_events = await self._get_home_events(db, day_start, day_end)
+        home_events = await self._get_home_events(db, bounds)
         if home_events:
             events.extend(home_events)
             sources_included.append(DataSource.HOME.value)
 
-        # Normalize timestamps to naive ET — sources are mixed (some columns are
-        # timestamptz, some naive); aware vs naive comparison breaks the sort.
-        et = ZoneInfo("America/New_York")
+        # Safety net: collectors already emit naive ET (naive-UTC columns are
+        # converted at the source via utc_naive_to_et_naive), but timestamptz
+        # rows arrive aware. Aware vs naive comparison breaks the sort.
         for event in events:
             if event.timestamp.tzinfo is not None:
-                event.timestamp = event.timestamp.astimezone(et).replace(tzinfo=None)
+                event.timestamp = event.timestamp.astimezone(USER_TIMEZONE).replace(tzinfo=None)
 
         # Sort all events chronologically
         events.sort(key=lambda e: e.timestamp)
@@ -197,10 +282,9 @@ class DayReplayBuilder:
         self,
         db: Session,
         user_id: str,
-        day_start: datetime,
-        day_end: datetime
+        bounds: DayBounds
     ) -> List[DayReplayEvent]:
-        """Get conversation episodes for the day."""
+        """Get conversation episodes for the day. episode.created_at is naive UTC."""
         events = []
         try:
             result = db.execute(
@@ -211,21 +295,23 @@ class DayReplayBuilder:
                       AND created_at BETWEEN :day_start AND :day_end
                     ORDER BY created_at
                 """),
-                {"user_id": user_id, "day_start": day_start, "day_end": day_end}
+                {"user_id": user_id,
+                 "day_start": bounds.utc_naive_start, "day_end": bounds.utc_naive_end}
             ).fetchall()
 
             # Group by conversation for summary
             conversations = {}
             for row in result:
                 conv_id = row.conversation_id or "unknown"
+                created_at = utc_naive_to_et_naive(row.created_at)
                 if conv_id not in conversations:
-                    conversations[conv_id] = {"messages": [], "start": row.created_at}
+                    conversations[conv_id] = {"messages": [], "start": created_at}
                 conversations[conv_id]["messages"].append({
                     "role": row.role,
                     "content": row.content[:200] if row.content else "",
                     "importance": row.importance
                 })
-                conversations[conv_id]["end"] = row.created_at
+                conversations[conv_id]["end"] = created_at
 
             for conv_id, conv_data in conversations.items():
                 user_messages = [m for m in conv_data["messages"] if m["role"] == "user"]
@@ -254,10 +340,9 @@ class DayReplayBuilder:
         self,
         db: Session,
         user_id: str,
-        day_start: datetime,
-        day_end: datetime
+        bounds: DayBounds
     ) -> List[DayReplayEvent]:
-        """Get automation executions for the day."""
+        """Get automation executions for the day. started_at is timestamptz."""
         events = []
         try:
             result = db.execute(
@@ -270,7 +355,8 @@ class DayReplayBuilder:
                       AND el.started_at BETWEEN :day_start AND :day_end
                     ORDER BY el.started_at
                 """),
-                {"user_id": user_id, "day_start": day_start, "day_end": day_end}
+                {"user_id": user_id,
+                 "day_start": bounds.aware_start, "day_end": bounds.aware_end}
             ).fetchall()
 
             # Group by automation name to see patterns
@@ -319,10 +405,9 @@ class DayReplayBuilder:
         self,
         db: Session,
         user_id: str,
-        day_start: datetime,
-        day_end: datetime
+        bounds: DayBounds
     ) -> List[DayReplayEvent]:
-        """Get workout sessions for the day."""
+        """Get workout sessions for the day. Keyed on session_date (a DATE, already ET)."""
         events = []
         try:
             result = db.execute(
@@ -334,7 +419,7 @@ class DayReplayBuilder:
                     WHERE ws.user_id = :user_id
                       AND ws.session_date = :session_date
                 """),
-                {"user_id": user_id, "session_date": day_start.date()}
+                {"user_id": user_id, "session_date": bounds.replay_date}
             ).fetchall()
 
             for row in result:
@@ -344,7 +429,7 @@ class DayReplayBuilder:
                         duration = int((row.completed_at - row.started_at).total_seconds() // 60)
                     workout_type = row.workout_title or "workout"
                     events.append(DayReplayEvent(
-                        timestamp=row.started_at or day_start,
+                        timestamp=row.started_at or bounds.et_naive_start,
                         source=DataSource.FITNESS_WORKOUTS,
                         event_type="workout_completed",
                         summary=f"Completed {workout_type} workout"
@@ -367,10 +452,9 @@ class DayReplayBuilder:
         self,
         db: Session,
         user_id: str,
-        day_start: datetime,
-        day_end: datetime
+        bounds: DayBounds
     ) -> List[DayReplayEvent]:
-        """Get food log entries for the day."""
+        """Get food log entries for the day. food_log.logged_at is naive ET wall-clock."""
         events = []
         try:
             result = db.execute(
@@ -382,7 +466,8 @@ class DayReplayBuilder:
                       AND logged_at BETWEEN :day_start AND :day_end
                     ORDER BY logged_at
                 """),
-                {"user_id": user_id, "day_start": day_start, "day_end": day_end}
+                {"user_id": user_id,
+                 "day_start": bounds.et_naive_start, "day_end": bounds.et_naive_end}
             ).fetchall()
 
             total_calories = 0
@@ -420,13 +505,17 @@ class DayReplayBuilder:
                     importance=0.4
                 ))
 
-            # Add daily nutrition summary as high importance event
+            # Add daily nutrition summary as high importance event.
+            # Round the running totals: they accumulate floats/Decimals, so
+            # raw they render as "186.60000000000002g protein" in the UI.
             if meals_logged:
+                total_calories = int(round(float(total_calories)))
+                total_protein = int(round(float(total_protein)))
                 events.append(DayReplayEvent(
-                    timestamp=day_end,
+                    timestamp=bounds.et_naive_end,
                     source=DataSource.FITNESS_FOOD,
                     event_type="nutrition_summary",
-                    summary=f"Nutrition: {len(meals_logged)} meals, {total_calories} cal, {total_protein}g protein",
+                    summary=f"Nutrition: {len(meals_logged)} meals, {total_calories:,} cal, {total_protein}g protein",
                     details={
                         "total_meals": len(meals_logged),
                         "total_calories": total_calories,
@@ -446,9 +535,9 @@ class DayReplayBuilder:
         self,
         db: Session,
         user_id: str,
-        replay_date: date
+        bounds: DayBounds
     ) -> List[DayReplayEvent]:
-        """Get recovery/health metrics for the day."""
+        """Get recovery/health metrics for the day. Keyed on log_date (a DATE, already ET)."""
         events = []
         try:
             result = db.execute(
@@ -459,12 +548,12 @@ class DayReplayBuilder:
                     WHERE user_id = :user_id
                       AND log_date = :log_date
                 """),
-                {"user_id": user_id, "log_date": replay_date}
+                {"user_id": user_id, "log_date": bounds.replay_date}
             ).fetchone()
 
             if result:
                 events.append(DayReplayEvent(
-                    timestamp=result.created_at or datetime.combine(replay_date, datetime.min.time()),
+                    timestamp=result.created_at or bounds.et_naive_start,
                     source=DataSource.FITNESS_RECOVERY,
                     event_type="recovery_metrics",
                     summary=f"Recovery: {result.sleep_hours}h sleep, HRV {result.hrv}, resting HR {result.heart_rate}",
@@ -488,10 +577,9 @@ class DayReplayBuilder:
         self,
         db: Session,
         user_id: str,
-        day_start: datetime,
-        day_end: datetime
+        bounds: DayBounds
     ) -> List[DayReplayEvent]:
-        """Get calendar events for the day."""
+        """Get calendar events for the day. calendar_event.start_time is naive ET."""
         events = []
         try:
             # calendar_event holds the real calendar (iOS-synced + email-extracted);
@@ -506,7 +594,8 @@ class DayReplayBuilder:
                       AND start_time BETWEEN :day_start AND :day_end
                     ORDER BY start_time
                 """),
-                {"user_id": user_id, "day_start": day_start, "day_end": day_end}
+                {"user_id": user_id,
+                 "day_start": bounds.et_naive_start, "day_end": bounds.et_naive_end}
             ).fetchall()
 
             for row in result:
@@ -555,10 +644,9 @@ class DayReplayBuilder:
         self,
         db: Session,
         user_id: str,
-        day_start: datetime,
-        day_end: datetime
+        bounds: DayBounds
     ) -> List[DayReplayEvent]:
-        """Get email activity for the day."""
+        """Get email activity for the day. email.received_at is timestamptz."""
         events = []
         try:
             result = db.execute(
@@ -570,12 +658,13 @@ class DayReplayBuilder:
                     WHERE user_id = :user_id
                       AND received_at BETWEEN :day_start AND :day_end
                 """),
-                {"user_id": user_id, "day_start": day_start, "day_end": day_end}
+                {"user_id": user_id,
+                 "day_start": bounds.aware_start, "day_end": bounds.aware_end}
             ).fetchone()
 
             if result and result.total > 0:
                 events.append(DayReplayEvent(
-                    timestamp=day_end,
+                    timestamp=bounds.et_naive_end,
                     source=DataSource.EMAIL,
                     event_type="email_summary",
                     summary=f"Email: {result.total} received, {result.high_priority} high priority, {result.read_count} read",
@@ -597,10 +686,12 @@ class DayReplayBuilder:
         self,
         db: Session,
         user_id: str,
-        day_start: datetime,
-        day_end: datetime
+        bounds: DayBounds
     ) -> List[DayReplayEvent]:
-        """Get research job completions for the day."""
+        """Get research job completions for the day.
+
+        background_task timestamps are naive UTC (durable-dispatch convention).
+        """
         events = []
         try:
             # background_task holds dispatched agent work (research, code, etc.)
@@ -613,13 +704,14 @@ class DayReplayBuilder:
                       AND created_at BETWEEN :day_start AND :day_end
                     ORDER BY created_at
                 """),
-                {"user_id": user_id, "day_start": day_start, "day_end": day_end}
+                {"user_id": user_id,
+                 "day_start": bounds.utc_naive_start, "day_end": bounds.utc_naive_end}
             ).fetchall()
 
             for row in result:
                 query = row.original_query or row.task_type or "task"
                 events.append(DayReplayEvent(
-                    timestamp=row.created_at,
+                    timestamp=utc_naive_to_et_naive(row.created_at) or bounds.et_naive_start,
                     source=DataSource.RESEARCH,
                     event_type="research_task",
                     summary=f"Agent task: {query[:50]}... ({row.status})",
@@ -641,10 +733,9 @@ class DayReplayBuilder:
         self,
         db: Session,
         user_id: str,
-        day_start: datetime,
-        day_end: datetime
+        bounds: DayBounds
     ) -> List[DayReplayEvent]:
-        """Get learning session activity for the day."""
+        """Get learning session activity for the day. started_at is timestamptz."""
         events = []
         try:
             result = db.execute(
@@ -658,7 +749,8 @@ class DayReplayBuilder:
                       AND ls.started_at BETWEEN :day_start AND :day_end
                     ORDER BY ls.started_at
                 """),
-                {"user_id": user_id, "day_start": day_start, "day_end": day_end}
+                {"user_id": user_id,
+                 "day_start": bounds.aware_start, "day_end": bounds.aware_end}
             ).fetchall()
 
             for row in result:
@@ -685,10 +777,9 @@ class DayReplayBuilder:
         self,
         db: Session,
         user_id: str,
-        day_start: datetime,
-        day_end: datetime
+        bounds: DayBounds
     ) -> List[DayReplayEvent]:
-        """Get timer usage for the day."""
+        """Get timer usage for the day. timer.start_time is naive UTC."""
         events = []
         try:
             result = db.execute(
@@ -699,12 +790,13 @@ class DayReplayBuilder:
                       AND start_time BETWEEN :day_start AND :day_end
                     ORDER BY start_time
                 """),
-                {"user_id": user_id, "day_start": day_start, "day_end": day_end}
+                {"user_id": user_id,
+                 "day_start": bounds.utc_naive_start, "day_end": bounds.utc_naive_end}
             ).fetchall()
 
             if result:
                 events.append(DayReplayEvent(
-                    timestamp=day_end,
+                    timestamp=bounds.et_naive_end,
                     source=DataSource.TIMERS,
                     event_type="timers_summary",
                     summary=f"Timers: {len(result)} used",
@@ -725,10 +817,13 @@ class DayReplayBuilder:
         self,
         db: Session,
         user_id: str,
-        day_start: datetime,
-        day_end: datetime
+        bounds: DayBounds
     ) -> List[DayReplayEvent]:
-        """Get reminder completions for the day."""
+        """Get reminder completions for the day.
+
+        reminder.reminder_time is naive UTC — the create tool coerces an aware
+        UTC datetime into the naive column (app/tools/reminders.py).
+        """
         events = []
         try:
             result = db.execute(
@@ -739,14 +834,15 @@ class DayReplayBuilder:
                       AND reminder_time BETWEEN :day_start AND :day_end
                     ORDER BY reminder_time
                 """),
-                {"user_id": user_id, "day_start": day_start, "day_end": day_end}
+                {"user_id": user_id,
+                 "day_start": bounds.utc_naive_start, "day_end": bounds.utc_naive_end}
             ).fetchall()
 
             completed = [r for r in result if r.is_completed]
 
             if result:
                 events.append(DayReplayEvent(
-                    timestamp=day_end,
+                    timestamp=bounds.et_naive_end,
                     source=DataSource.REMINDERS,
                     event_type="reminders_summary",
                     summary=f"Reminders: {len(completed)}/{len(result)} completed",
@@ -767,8 +863,7 @@ class DayReplayBuilder:
     async def _get_home_events(
         self,
         db: Session,
-        day_start: datetime,
-        day_end: datetime
+        bounds: DayBounds
     ) -> List[DayReplayEvent]:
         """Get Home Assistant activity for the day, summarized per entity
         PER TRANSITION STATE (to_state) — not just "was active this hour".
@@ -801,7 +896,7 @@ class DayReplayBuilder:
                     GROUP BY entity_id, to_state
                     ORDER BY change_count DESC
                 """),
-                {"day_start": day_start, "day_end": day_end}
+                {"day_start": bounds.et_naive_start, "day_end": bounds.et_naive_end}
             ).fetchall()
 
             for row in result:
@@ -869,8 +964,8 @@ class DayReplayBuilder:
         db: Session,
         replay: DayReplay,
         summary_text: Optional[str] = None
-    ) -> None:
-        """Cache the replay for later use."""
+    ) -> bool:
+        """Cache the replay for later use. Returns True if the row was written."""
         try:
             # Convert events to serializable format
             events_data = []
@@ -908,7 +1003,7 @@ class DayReplayBuilder:
                 {
                     "user_id": replay.user_id,
                     "replay_date": replay.replay_date,
-                    "replay_data": json.dumps(replay_data),
+                    "replay_data": json.dumps(replay_data, default=_json_default),
                     "summary": summary_text,
                     "data_sources": replay.data_sources_included,
                     "episode_count": replay.summary.get("by_source", {}).get("episodes", 0),
@@ -918,10 +1013,12 @@ class DayReplayBuilder:
             db.commit()
 
             logger.info(f"Cached day replay for {replay.user_id} on {replay.replay_date}")
+            return True
 
         except Exception as e:
             logger.error(f"Failed to cache replay: {e}")
             db.rollback()
+            return False
 
 
 # Singleton instance

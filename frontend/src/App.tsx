@@ -492,6 +492,7 @@ function App() {
     // inside Memory/Life/Work/Interior — kept here, unchanged, so nothing
     // that used to be a direct link becomes harder to reach.
     { view: 'notes', label: 'Notes', icon: 'edit_note' },
+    { view: 'daily-log', label: 'Daily Log', icon: 'auto_stories' },
     { view: 'calendar', label: 'Calendar', icon: 'calendar_today' },
     { view: 'email', label: 'Email', icon: 'email' },
     { view: 'documents', label: 'Documents', icon: 'description' },

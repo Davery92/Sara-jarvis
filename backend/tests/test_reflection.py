@@ -303,12 +303,36 @@ class TestReflectionCycle:
         """Arc 4.5: the reflection cycle must call write_theory_of_david and
         carry its result on the cycle result — this test overrides the
         class-level autouse mock to assert the real wiring, same pattern as
-        self-story's would if it had an equivalent override test."""
-        with patch("app.services.sara_journal_service.sara_journal.write_theory_of_david",
+        self-story's would if it had an equivalent override test.
+
+        Ground-truth plan, Phase 5 §5/§6: both fold-forward documents now run
+        once nightly (01:00–04:59 ET), so the clock has to be inside that window
+        for the wiring to fire at all.
+        """
+        with patch("app.services.reflection.agent._is_nightly_window", return_value=True), \
+             patch("app.services.sara_journal_service.sara_journal.write_theory_of_david",
                     new=AsyncMock(return_value="David trains around 1pm and is stressed this week.")):
             result = await reflection_agent.run_reflection_cycle()
 
         assert result.theory_of_david == "David trains around 1pm and is stressed this week."
+
+    @pytest.mark.asyncio
+    async def test_fold_forward_documents_are_nightly_only(self, reflection_agent):
+        """Ground-truth plan, Phase 5 §5: regenerating these every four hours is
+        what let one day's mood compound six times over and stick — both
+        documents feed themselves back in as their own input. Outside the
+        nightly window the cycle still runs; it just doesn't rewrite them."""
+        write_story = AsyncMock(return_value="a story")
+        write_theory = AsyncMock(return_value="a theory")
+        with patch("app.services.reflection.agent._is_nightly_window", return_value=False), \
+             patch("app.services.sara_journal_service.sara_journal.write_self_story", new=write_story), \
+             patch("app.services.sara_journal_service.sara_journal.write_theory_of_david", new=write_theory):
+            result = await reflection_agent.run_reflection_cycle()
+
+        write_story.assert_not_awaited()
+        write_theory.assert_not_awaited()
+        assert result.theory_of_david is None
+        assert result.cycle_start is not None  # the rest of the cycle still ran
 
     @pytest.mark.asyncio
     async def test_theory_of_david_failure_does_not_break_the_cycle(self, reflection_agent):

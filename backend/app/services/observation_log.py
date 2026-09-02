@@ -63,12 +63,13 @@ async def log_observation(
     salience: float,
     source: str = "system",
     category: str = "general",
+    observation_id: Optional[str] = None,
 ) -> str:
     """
     Log an observation with a salience score.
     Returns the observation ID.
     """
-    obs_id = f"obs_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}"
+    obs_id = observation_id or f"obs_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}"
     obs = Observation(
         id=obs_id,
         timestamp=datetime.now(timezone.utc).isoformat(),
@@ -180,6 +181,14 @@ async def consume_observations(user_id: str, observation_ids: List[str]) -> int:
         await _sync_stats(user_id)
 
         consumed_count = results[0] if results else 0
+        if consumed_count:
+            try:
+                from app.services.world_state.cognition import resolve_attention_observations
+                await resolve_attention_observations(user_id, observation_ids)
+            except Exception as e:
+                # Recovery is safe: the durable row stays queued and will be
+                # mirrored back into Redis on the next attention drain.
+                logger.warning("[ObservationLog] durable attention resolution failed: %s", e)
         logger.debug(f"[ObservationLog] Consumed {consumed_count} observations")
         return consumed_count
     except Exception as e:

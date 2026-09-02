@@ -8,6 +8,7 @@ Separate from BackgroundLLMClient to avoid contention with Sara's ACS sessions.
 import logging
 from typing import Dict, List, Optional, Any
 
+import asyncio
 import httpx
 
 from app.core.config import settings
@@ -18,6 +19,34 @@ RESEARCH_LLM_URL = settings.research_llm_url
 RESEARCH_LLM_MODEL = settings.research_llm_model
 RESEARCH_LLM_TIMEOUT = settings.research_llm_timeout
 RESEARCH_LLM_MAX_TOKENS = settings.research_llm_max_tokens
+
+# Statuses worth retrying: 503 is llama-server still loading the model, 502/504 are
+# a proxy in front of it, 429 is slot contention on the 2-slot bg lane.
+_TRANSIENT_STATUS = {429, 502, 503, 504}
+RESEARCH_LLM_MAX_RETRIES = 5
+RESEARCH_LLM_RETRY_BASE_DELAY = 5.0  # 5s, 10s, 20s, 40s, 80s -> ~2.5 min of cover
+
+# Any other 5xx — 507 Insufficient Storage above all — means the lane could not
+# allocate its KV cache: it is out of memory, not momentarily busy. Hammering it
+# makes that worse, so these get a slow ladder, and when it doesn't clear the
+# caller gets a typed exception it can park the whole plan on. Without this a
+# 507 fell straight through to raise_for_status, the step was marked failed, the
+# loop advanced, and six steps burned in 1.3 seconds (2026-09-01).
+_OVERLOAD_RETRY_DELAYS = (30.0, 120.0, 300.0)
+
+
+class ResearchLLMOverloaded(Exception):
+    """The research lane is unavailable after its full retry ladder.
+
+    Callers should stall the plan (resumable) rather than fail its steps.
+    """
+
+    def __init__(self, status_code: int, body: str = ""):
+        self.status_code = status_code
+        self.body = body or ""
+        super().__init__(
+            f"research LLM lane unavailable: HTTP {status_code}: {self.body[:300]}"
+        )
 
 
 class ResearchLLMClient:
@@ -53,7 +82,7 @@ class ResearchLLMClient:
             return self._resolved_model
         try:
             client = await self._get_client()
-            resp = await client.get("/v1/models", timeout=5.0)
+            resp = await client.get("/models", timeout=5.0)
             resp.raise_for_status()
             data = resp.json()
             models = data.get("data") or data.get("models") or []
@@ -81,7 +110,7 @@ class ResearchLLMClient:
         """Check if the research LLM is reachable."""
         try:
             client = await self._get_client()
-            resp = await client.get("/v1/models", timeout=5.0)
+            resp = await client.get("/models", timeout=5.0)
             return resp.status_code == 200
         except Exception:
             return False
@@ -92,6 +121,7 @@ class ResearchLLMClient:
         tools: Optional[List[Dict[str, Any]]] = None,
         temperature: float = 0.7,
         max_tokens: int = RESEARCH_LLM_MAX_TOKENS,
+        tool_choice: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """
         Call the research LLM with OpenAI-compatible chat completions.
@@ -106,14 +136,73 @@ class ResearchLLMClient:
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
+            # Qwen defaults to thinking mode, which spends the whole max_tokens
+            # budget on `reasoning_content` and returns an EMPTY `content`
+            # (finish_reason "length"). Every research step silently produced
+            # nothing until this was set. Verified against :8081 — without it
+            # "Say OK." returns content='' ; with it, content='OK.' in 3 tokens.
+            "chat_template_kwargs": {"enable_thinking": False},
         }
 
         if tools:
             payload["tools"] = tools
-            payload["tool_choice"] = "auto"
+            # Callers can force a specific tool (used to make the agent file its
+            # findings on the final turn instead of losing the whole step).
+            payload["tool_choice"] = tool_choice or "auto"
+
+        # Transient-failure retry. A llama-server restart answers 503
+        # {"message":"Loading model"} for the ~2 min it takes to mmap the weights;
+        # without this every step of every queued plan fails instantly and the whole
+        # research backlog is destroyed in under a second (observed 2026-08-19).
+        resp = None
+        transient_attempt = 0
+        overload_attempt = 0
+        while True:
+            try:
+                resp = await client.post("/chat/completions", json=payload)
+            except (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError) as e:
+                if transient_attempt >= RESEARCH_LLM_MAX_RETRIES:
+                    raise
+                delay = RESEARCH_LLM_RETRY_BASE_DELAY * (2 ** transient_attempt)
+                transient_attempt += 1
+                logger.warning(
+                    "Research LLM %s — retrying in %.0fs (attempt %d/%d)",
+                    type(e).__name__, delay, transient_attempt, RESEARCH_LLM_MAX_RETRIES,
+                )
+                await asyncio.sleep(delay)
+                continue
+
+            status = resp.status_code
+            if status in _TRANSIENT_STATUS:
+                if transient_attempt < RESEARCH_LLM_MAX_RETRIES:
+                    delay = RESEARCH_LLM_RETRY_BASE_DELAY * (2 ** transient_attempt)
+                    transient_attempt += 1
+                    logger.warning(
+                        "Research LLM %d (%s) — retrying in %.0fs (attempt %d/%d)",
+                        status, resp.text[:120], delay,
+                        transient_attempt, RESEARCH_LLM_MAX_RETRIES,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                raise ResearchLLMOverloaded(status, resp.text[:400])
+
+            if status >= 500:
+                if overload_attempt < len(_OVERLOAD_RETRY_DELAYS):
+                    delay = _OVERLOAD_RETRY_DELAYS[overload_attempt]
+                    overload_attempt += 1
+                    logger.warning(
+                        "Research LLM %d (%s) — lane may be out of memory; backing off "
+                        "%.0fs (attempt %d/%d)",
+                        status, resp.text[:200], delay,
+                        overload_attempt, len(_OVERLOAD_RETRY_DELAYS),
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                raise ResearchLLMOverloaded(status, resp.text[:400])
+
+            break
 
         try:
-            resp = await client.post("/chat/completions", json=payload)
             resp.raise_for_status()
             data = resp.json()
 

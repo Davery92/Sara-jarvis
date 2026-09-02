@@ -8,8 +8,11 @@ from sqlalchemy import text
 from app.db.session import get_db
 from datetime import date, datetime, timedelta
 from app.core.timezone import naive_local_now
+import logging
 import uuid
 import json
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================
@@ -725,7 +728,11 @@ class PhaseCreateTool(BaseTool):
 
         Example phase names: 'Hypertrophy Block', 'Strength Block', 'Peaking Phase', 'Deload Week'
 
-        Can include nutrition targets (calories, protein, carbs, fat) and training parameters."""
+        Can include nutrition targets (calories, protein, carbs, fat) and training parameters.
+        For carb-cycled / training-vs-rest-day plans, set the *_training_day / *_rest_day split
+        fields (e.g. calories_training_day=2800, calories_rest_day=2400) — the flat
+        calories_target/carbs_target/fat_target are used as the weekly-average fallback when a
+        day has no split value."""
 
     @property
     def parameters(self) -> dict:
@@ -762,7 +769,7 @@ class PhaseCreateTool(BaseTool):
                 },
                 "calories_target": {
                     "type": "integer",
-                    "description": "Daily calorie target"
+                    "description": "Daily calorie target (weekly average / fallback)"
                 },
                 "protein_target": {
                     "type": "integer",
@@ -770,11 +777,39 @@ class PhaseCreateTool(BaseTool):
                 },
                 "carbs_target": {
                     "type": "integer",
-                    "description": "Daily carbs target in grams"
+                    "description": "Daily carbs target in grams (weekly average / fallback)"
                 },
                 "fat_target": {
                     "type": "integer",
-                    "description": "Daily fat target in grams"
+                    "description": "Daily fat target in grams (weekly average / fallback)"
+                },
+                "calories_training_day": {
+                    "type": "integer",
+                    "description": "Calorie target on training days (for carb-cycled plans)"
+                },
+                "calories_rest_day": {
+                    "type": "integer",
+                    "description": "Calorie target on rest days (for carb-cycled plans)"
+                },
+                "carbs_training_day": {
+                    "type": "integer",
+                    "description": "Carb target in grams on training days"
+                },
+                "carbs_rest_day": {
+                    "type": "integer",
+                    "description": "Carb target in grams on rest days"
+                },
+                "fat_training_day": {
+                    "type": "integer",
+                    "description": "Fat target in grams on training days"
+                },
+                "fat_rest_day": {
+                    "type": "integer",
+                    "description": "Fat target in grams on rest days"
+                },
+                "daily_steps_target": {
+                    "type": "integer",
+                    "description": "Daily steps target for this phase"
                 },
                 "training_days_per_week": {
                     "type": "integer",
@@ -797,6 +832,10 @@ class PhaseCreateTool(BaseTool):
                       start_date: str = None, end_date: str = None,
                       calories_target: int = None, protein_target: int = None,
                       carbs_target: int = None, fat_target: int = None,
+                      calories_training_day: int = None, calories_rest_day: int = None,
+                      carbs_training_day: int = None, carbs_rest_day: int = None,
+                      fat_training_day: int = None, fat_rest_day: int = None,
+                      daily_steps_target: int = None,
                       training_days_per_week: int = None, deload_week: int = None,
                       notes: str = None, **kwargs) -> ToolResult:
         db: Session = next(get_db())
@@ -807,11 +846,17 @@ class PhaseCreateTool(BaseTool):
                 INSERT INTO fitness_phase (
                     id, user_id, name, goal, program_id, order_index, duration_weeks,
                     start_date, end_date, calories_target, protein_target, carbs_target, fat_target,
+                    calories_training_day, calories_rest_day,
+                    carbs_training_day, carbs_rest_day,
+                    fat_training_day, fat_rest_day, daily_steps_target,
                     training_days_per_week, deload_week, status, notes
                 )
                 VALUES (
                     :id, :user_id, :name, :goal, :program_id, :order_index, :duration_weeks,
                     :start_date, :end_date, :calories_target, :protein_target, :carbs_target, :fat_target,
+                    :calories_training_day, :calories_rest_day,
+                    :carbs_training_day, :carbs_rest_day,
+                    :fat_training_day, :fat_rest_day, :daily_steps_target,
                     :training_days_per_week, :deload_week, 'planned', :notes
                 )
             """)
@@ -830,6 +875,13 @@ class PhaseCreateTool(BaseTool):
                 "protein_target": protein_target,
                 "carbs_target": carbs_target,
                 "fat_target": fat_target,
+                "calories_training_day": calories_training_day,
+                "calories_rest_day": calories_rest_day,
+                "carbs_training_day": carbs_training_day,
+                "carbs_rest_day": carbs_rest_day,
+                "fat_training_day": fat_training_day,
+                "fat_rest_day": fat_rest_day,
+                "daily_steps_target": daily_steps_target,
                 "training_days_per_week": training_days_per_week,
                 "deload_week": deload_week,
                 "notes": notes
@@ -850,6 +902,7 @@ class PhaseCreateTool(BaseTool):
 
         except Exception as e:
             db.rollback()
+            logger.exception(f"phase_create failed: {e}")
             return ToolResult(success=False, message=f"Failed to create phase: {str(e)}", data=None)
         finally:
             db.close()
@@ -864,7 +917,12 @@ class PhaseUpdateTool(BaseTool):
 
     @property
     def description(self) -> str:
-        return "Update an existing training phase. Only provide the fields you want to change."
+        return """Update an existing training phase. Only provide the fields you want to change.
+
+        For carb-cycled / training-vs-rest-day plans, set the *_training_day / *_rest_day split
+        fields (e.g. calories_training_day=2800, calories_rest_day=2400) — the flat
+        calories_target/carbs_target/fat_target are used as the weekly-average fallback when a
+        day has no split value."""
 
     @property
     def parameters(self) -> dict:
@@ -886,10 +944,17 @@ class PhaseUpdateTool(BaseTool):
                 "duration_weeks": {"type": "integer", "description": "New duration"},
                 "start_date": {"type": "string", "description": "New start date"},
                 "end_date": {"type": "string", "description": "New end date"},
-                "calories_target": {"type": "integer", "description": "New calorie target"},
+                "calories_target": {"type": "integer", "description": "New calorie target (weekly average / fallback)"},
                 "protein_target": {"type": "integer", "description": "New protein target"},
-                "carbs_target": {"type": "integer", "description": "New carbs target"},
-                "fat_target": {"type": "integer", "description": "New fat target"},
+                "carbs_target": {"type": "integer", "description": "New carbs target (weekly average / fallback)"},
+                "fat_target": {"type": "integer", "description": "New fat target (weekly average / fallback)"},
+                "calories_training_day": {"type": "integer", "description": "New calorie target on training days"},
+                "calories_rest_day": {"type": "integer", "description": "New calorie target on rest days"},
+                "carbs_training_day": {"type": "integer", "description": "New carb target (g) on training days"},
+                "carbs_rest_day": {"type": "integer", "description": "New carb target (g) on rest days"},
+                "fat_training_day": {"type": "integer", "description": "New fat target (g) on training days"},
+                "fat_rest_day": {"type": "integer", "description": "New fat target (g) on rest days"},
+                "daily_steps_target": {"type": "integer", "description": "New daily steps target"},
                 "training_days_per_week": {"type": "integer", "description": "New training days"},
                 "deload_week": {"type": "integer", "description": "New deload week"},
                 "notes": {"type": "string", "description": "New notes"}
@@ -902,6 +967,10 @@ class PhaseUpdateTool(BaseTool):
                       start_date: str = None, end_date: str = None,
                       calories_target: int = None, protein_target: int = None,
                       carbs_target: int = None, fat_target: int = None,
+                      calories_training_day: int = None, calories_rest_day: int = None,
+                      carbs_training_day: int = None, carbs_rest_day: int = None,
+                      fat_training_day: int = None, fat_rest_day: int = None,
+                      daily_steps_target: int = None,
                       training_days_per_week: int = None, deload_week: int = None,
                       notes: str = None, **kwargs) -> ToolResult:
         db: Session = next(get_db())
@@ -932,6 +1001,10 @@ class PhaseUpdateTool(BaseTool):
                 "start_date": start_date, "end_date": end_date,
                 "calories_target": calories_target, "protein_target": protein_target,
                 "carbs_target": carbs_target, "fat_target": fat_target,
+                "calories_training_day": calories_training_day, "calories_rest_day": calories_rest_day,
+                "carbs_training_day": carbs_training_day, "carbs_rest_day": carbs_rest_day,
+                "fat_training_day": fat_training_day, "fat_rest_day": fat_rest_day,
+                "daily_steps_target": daily_steps_target,
                 "training_days_per_week": training_days_per_week,
                 "deload_week": deload_week, "notes": notes
             }
@@ -957,6 +1030,7 @@ class PhaseUpdateTool(BaseTool):
 
         except Exception as e:
             db.rollback()
+            logger.exception(f"phase_update failed: {e}")
             return ToolResult(success=False, message=f"Failed to update phase: {str(e)}", data=None)
         finally:
             db.close()
@@ -1151,6 +1225,7 @@ class PhaseActivateTool(BaseTool):
 
         except Exception as e:
             db.rollback()
+            logger.exception(f"phase_activate failed: {e}")
             return ToolResult(success=False, message=f"Failed to activate phase: {str(e)}", data=None)
         finally:
             db.close()
@@ -1223,6 +1298,241 @@ class PhaseDeleteTool(BaseTool):
 
         except Exception as e:
             db.rollback()
+            logger.exception(f"phase_delete failed: {e}")
             return ToolResult(success=False, message=f"Failed to delete phase: {str(e)}", data=None)
+        finally:
+            db.close()
+
+
+# ============================================
+# PLAN ADJUST TOOLS (dated block insertion / timeline surgery)
+# ============================================
+
+class PhaseInsertBlockTool(BaseTool):
+    """Insert a dated cut/bulk/maintenance block into the active program"""
+
+    @property
+    def name(self) -> str:
+        return "phase_insert_block"
+
+    @property
+    def description(self) -> str:
+        return """Start a dated nutrition/training block (a cut, bulk, or maintenance stretch) inside
+        the active program — e.g. "I want to cut for the next 3 weeks, 2300 cal on training days,
+        1900 on rest days". Trims/splits whatever phases the block's dates collide with so the
+        active program's timeline never overlaps, copies the current weekly workouts into the new
+        block, and refreshes the Nutrition tab to match. Use daily-average calories_target etc. if
+        the plan doesn't cycle by day; use the *_training_day/*_rest_day pairs if it does."""
+
+    @property
+    def parameters(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Name for the block (e.g. 'Cut', '3-Week Cut'). Defaults to the goal if omitted."
+                },
+                "goal": {
+                    "type": "string",
+                    "description": "Block goal, e.g. 'cut', 'bulk', 'maintenance', 'recomp'"
+                },
+                "start_date": {
+                    "type": "string",
+                    "description": "Start date (YYYY-MM-DD). Defaults to next Monday if omitted."
+                },
+                "duration_weeks": {
+                    "type": "integer",
+                    "description": "Length of the block in weeks (use this or end_date)"
+                },
+                "end_date": {
+                    "type": "string",
+                    "description": "End date (YYYY-MM-DD), if not using duration_weeks"
+                },
+                "calories_target": {"type": "integer", "description": "Daily calorie target (weekly average / fallback)"},
+                "protein_target": {"type": "integer", "description": "Daily protein target in grams"},
+                "carbs_target": {"type": "integer", "description": "Daily carbs target in grams (weekly average / fallback)"},
+                "fat_target": {"type": "integer", "description": "Daily fat target in grams (weekly average / fallback)"},
+                "calories_training_day": {"type": "integer", "description": "Calorie target on training days"},
+                "calories_rest_day": {"type": "integer", "description": "Calorie target on rest days"},
+                "carbs_training_day": {"type": "integer", "description": "Carb target (g) on training days"},
+                "carbs_rest_day": {"type": "integer", "description": "Carb target (g) on rest days"},
+                "fat_training_day": {"type": "integer", "description": "Fat target (g) on training days"},
+                "fat_rest_day": {"type": "integer", "description": "Fat target (g) on rest days"},
+                "daily_steps_target": {"type": "integer", "description": "Daily steps target for the block"},
+                "training_days_per_week": {"type": "integer", "description": "Training days per week (used to compute the weekly average)"},
+                "mode": {
+                    "type": "string",
+                    "enum": ["overlay", "push"],
+                    "description": "'overlay' (default) trims/splits colliding phases so dates never overlap. "
+                                    "'push' instead shifts every later phase back by the block's length."
+                },
+                "notes": {"type": "string", "description": "Optional notes about this block"}
+            }
+        }
+
+    async def execute(self, user_id: str, name: str = None, goal: str = None,
+                      start_date: str = None, end_date: str = None, duration_weeks: int = None,
+                      calories_target: int = None, protein_target: int = None,
+                      carbs_target: int = None, fat_target: int = None,
+                      calories_training_day: int = None, calories_rest_day: int = None,
+                      carbs_training_day: int = None, carbs_rest_day: int = None,
+                      fat_training_day: int = None, fat_rest_day: int = None,
+                      daily_steps_target: int = None, training_days_per_week: int = None,
+                      mode: str = "overlay", notes: str = None, **kwargs) -> ToolResult:
+        from app.services.plan_adjust import insert_phase_block
+
+        db: Session = next(get_db())
+        try:
+            parsed_start = date.fromisoformat(start_date) if start_date else None
+            parsed_end = date.fromisoformat(end_date) if end_date else None
+
+            summary = insert_phase_block(
+                db, user_id,
+                name=name, goal=goal, start_date=parsed_start, end_date=parsed_end,
+                duration_weeks=duration_weeks, mode=mode, notes=notes,
+                nutrition={
+                    "calories_target": calories_target, "protein_target": protein_target,
+                    "carbs_target": carbs_target, "fat_target": fat_target,
+                    "calories_training_day": calories_training_day, "calories_rest_day": calories_rest_day,
+                    "carbs_training_day": carbs_training_day, "carbs_rest_day": carbs_rest_day,
+                    "fat_training_day": fat_training_day, "fat_rest_day": fat_rest_day,
+                    "daily_steps_target": daily_steps_target,
+                    "training_days_per_week": training_days_per_week,
+                },
+            )
+            db.commit()
+
+            msg = f"Started '{summary['name']}' from {summary['start_date']} to {summary['end_date']}"
+            if summary["trimmed_phases"]:
+                msg += f"; trimmed {len(summary['trimmed_phases'])} existing phase(s)"
+            if summary["shifted_phases"]:
+                msg += f"; shifted {len(summary['shifted_phases'])} later phase(s)"
+            if summary["shelved_phases"]:
+                msg += f"; shelved {len(summary['shelved_phases'])} phase(s) fully inside the block"
+
+            return ToolResult(success=True, message=msg, data=summary)
+
+        except ValueError as e:
+            db.rollback()
+            return ToolResult(success=False, message=str(e), data=None)
+        except Exception as e:
+            db.rollback()
+            logger.exception(f"phase_insert_block failed: {e}")
+            return ToolResult(success=False, message=f"Failed to start block: {str(e)}", data=None)
+        finally:
+            db.close()
+
+
+class PhaseEndBlockTool(BaseTool):
+    """End an active block early"""
+
+    @property
+    def name(self) -> str:
+        return "phase_end_block"
+
+    @property
+    def description(self) -> str:
+        return """End a dated block (a cut/bulk/maintenance phase started with phase_insert_block)
+        early. Re-opens whichever phase the block had pushed or trimmed to start right after it,
+        so the timeline continues from the new end date with no gap."""
+
+    @property
+    def parameters(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "phase_id": {"type": "string", "description": "ID of the block phase to end"},
+                "phase_name": {"type": "string", "description": "Alternatively, name of the block phase (partial match)"},
+                "on_date": {
+                    "type": "string",
+                    "description": "Date the block ends (YYYY-MM-DD). Defaults to today if omitted."
+                }
+            }
+        }
+
+    async def execute(self, user_id: str, phase_id: str = None, phase_name: str = None,
+                      on_date: str = None, **kwargs) -> ToolResult:
+        from app.services.plan_adjust import end_phase_block_early
+        from app.core.timezone import today as local_today
+
+        db: Session = next(get_db())
+        try:
+            if not phase_id and phase_name:
+                found = db.execute(text("""
+                    SELECT id FROM fitness_phase WHERE user_id = :uid AND LOWER(name) LIKE LOWER(:pattern)
+                    ORDER BY start_date DESC NULLS LAST LIMIT 1
+                """), {"uid": user_id, "pattern": f"%{phase_name}%"}).fetchone()
+                if not found:
+                    return ToolResult(success=False, message="Phase not found", data=None)
+                phase_id = found.id
+            if not phase_id:
+                return ToolResult(success=False, message="Either phase_id or phase_name required", data=None)
+
+            target_date = date.fromisoformat(on_date) if on_date else local_today()
+            summary = end_phase_block_early(db, user_id, phase_id, target_date)
+            db.commit()
+
+            msg = f"Ended '{summary['name']}' on {summary['end_date']}"
+            if summary["restored_neighbor"]:
+                msg += f"; '{summary['restored_neighbor']['name']}' now starts {summary['restored_neighbor']['start_date']}"
+
+            return ToolResult(success=True, message=msg, data=summary)
+
+        except ValueError as e:
+            db.rollback()
+            return ToolResult(success=False, message=str(e), data=None)
+        except Exception as e:
+            db.rollback()
+            logger.exception(f"phase_end_block failed: {e}")
+            return ToolResult(success=False, message=f"Failed to end block: {str(e)}", data=None)
+        finally:
+            db.close()
+
+
+class NutritionGuideUpdateTool(BaseTool):
+    """Update the structured nutrition guide shown on the Nutrition tab"""
+
+    @property
+    def name(self) -> str:
+        return "nutrition_guide_update"
+
+    @property
+    def description(self) -> str:
+        return """Update the Nutrition tab's structured guide for the active program — e.g. "update
+        the nutrition tab to match" after changing phase macros. Pass the full guide object; fields
+        typically include goal, how_it_works, weekly_average, macros (list of {label, training, rest}),
+        rules (list of {title, body}), carb_timing, staples, self_check. Overwrites the whole guide,
+        so read it first with the fitness app's Nutrition tab or program_get if you only want to
+        change part of it."""
+
+    @property
+    def parameters(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "guide": {
+                    "type": "object",
+                    "description": "The full nutrition guide JSON object to store"
+                }
+            },
+            "required": ["guide"]
+        }
+
+    async def execute(self, user_id: str, guide: dict, **kwargs) -> ToolResult:
+        from app.services.plan_adjust import update_nutrition_guide
+
+        db: Session = next(get_db())
+        try:
+            result = update_nutrition_guide(db, user_id, guide)
+            db.commit()
+            return ToolResult(success=True, message="Updated the nutrition guide", data=result)
+        except ValueError as e:
+            db.rollback()
+            return ToolResult(success=False, message=str(e), data=None)
+        except Exception as e:
+            db.rollback()
+            logger.exception(f"nutrition_guide_update failed: {e}")
+            return ToolResult(success=False, message=f"Failed to update nutrition guide: {str(e)}", data=None)
         finally:
             db.close()

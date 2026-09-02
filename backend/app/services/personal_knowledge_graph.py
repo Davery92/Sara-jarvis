@@ -64,6 +64,92 @@ def is_transient_health_text(metric: str, value: str) -> bool:
     text = f"{metric or ''} {value or ''}".lower()
     return any(kw in text for kw in TRANSIENT_HEALTH_KEYWORDS)
 
+
+# ── Numbers about David's body belong to `health_metric`, not to the PKG ──
+#
+# The 2026-08-31 incident: the nightly extractor read Sara's OWN reply out of
+# the transcript, minted `PKG_Health {metric: "hrv", current_value: "80"}` at
+# confidence 0.99, and re-injected it into the next turn's context — where it
+# looked exactly like evidence. 80 was a number Sara had invented. Nothing
+# ever reconciled that node against the authoritative table (which said 54).
+#
+# So: a Health fact may *contextualise* ("chest historically underdeveloped",
+# "gets migraines from red wine") but may never *assert a measurement*. Any
+# metric the health_metric table owns, and any value that reads as a bare
+# measurement, is refused at mint time.
+MEASURED_HEALTH_METRICS = {
+    "hrv", "heart rate variability",
+    "resting hr", "resting heart rate", "rhr",
+    "heart rate", "hr", "pulse", "bpm",
+    "sleep hours", "sleep duration", "sleep quality", "sleep score",
+    "steps", "step count", "daily steps",
+    "active energy", "active calories", "calories", "kcal",
+    "weight", "body weight", "bodyweight", "body fat", "bmi",
+    "spo2", "blood oxygen", "oxygen saturation",
+    "respiratory rate", "breathing rate",
+    "vo2 max", "vo2max", "blood pressure",
+    "recovery score", "readiness", "readiness score", "soreness level",
+}
+# Bare "sleep" and "recovery" are deliberately absent: "sleep: apnea diagnosed"
+# and "recovery: feels better after rest days" are real qualitative attributes.
+# A numeric value under those metric names is still caught by the value rule.
+
+# A measurement describes a moment, not a person. If one ever reaches the graph
+# anyway, it dies within two days rather than becoming permanent.
+MEASURED_HEALTH_TTL_HOURS = 48
+
+# "80", "7.5 hours", "54 ms", "~62 bpm", "7-8 hrs", "12,431 steps"
+_NUMERIC_HEALTH_VALUE_RE = re.compile(
+    r"^\s*[~<>≈]?\s*\d[\d,]*(?:\.\d+)?"
+    r"(?:\s*[-–—/]\s*\d[\d,]*(?:\.\d+)?)?"
+    r"\s*(?:%|hours?|hrs?|h|minutes?|mins?|bpm|ms|lbs?|pounds?|kgs?|"
+    r"steps?|kcal|cals?|calories|/\s*10|/\s*100)?\s*$",
+    re.IGNORECASE,
+)
+
+
+# A number David *chose* is not a number his body *produced*. "daily calorie
+# target: 2760" and "goal weight: 225" are intentions with no other home and no
+# expiry — they stay. Only readings are refused.
+_INTENTION_METRIC_TOKENS = ("target", "goal", "aim", "plan", "limit", "budget")
+
+
+def _normalize_metric(metric) -> str:
+    return re.sub(r"[\s_\-]+", " ", str(metric or "")).strip().lower()
+
+
+def is_measured_health_metric(metric) -> bool:
+    """True when `health_metric` is the authority for this metric name."""
+    return _normalize_metric(metric) in MEASURED_HEALTH_METRICS
+
+
+def is_numeric_health_value(value) -> bool:
+    """True when a Health `current_value` reads as a bare measurement. Node
+    properties come back from Neo4j with their stored type, so an int is as
+    likely as a string here."""
+    if value is None:
+        return False
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return True
+    return bool(_NUMERIC_HEALTH_VALUE_RE.match(str(value)))
+
+
+def is_intention_metric(metric) -> bool:
+    """True when the metric names something David set rather than something
+    measured off him."""
+    normalized = _normalize_metric(metric)
+    return any(token in normalized for token in _INTENTION_METRIC_TOKENS)
+
+
+def is_authoritative_health_copy(metric, value) -> bool:
+    """True when a Health fact is a *copy of a measurement* rather than a
+    durable attribute — either it names a metric `health_metric` owns, or its
+    value is a bare number. Such facts are refused at mint time; the read path
+    goes to `health_metric`, which carries a `recorded_at` and can be absent."""
+    if is_intention_metric(metric):
+        return False
+    return is_measured_health_metric(metric) or is_numeric_health_value(value)
+
 # Cypher snippet — exclude closed facts and past-target_date goals.
 # Use as: ... AND (n.superseded_by IS NULL) AND ({PKG_FRESH_FILTER})
 # `target_date` is a stored ISO-8601 string, so a lex comparison against
@@ -274,16 +360,39 @@ class PersonalKnowledgeGraph:
                     f"(metric={metric!r}, value={value!r}) — extractor garbage"
                 )
                 return None
+            # Measurements are refused outright (2026-08-31 fabrication loop):
+            # `health_metric` is the only authority for a number about David's
+            # body. A PKG copy has no recorded_at, never expires, and — because
+            # the extractor reads Sara's own replies back out of the transcript
+            # — can be a number she invented last night.
+            if not has_alt_schema and metric and value and is_authoritative_health_copy(metric, value):
+                logger.info(
+                    f"PKG: refusing measured Health fact (metric={metric!r}, "
+                    f"value={value!r}) — health_metric is the authority for this"
+                )
+                return None
             # Transient states (sick/tired/sore/...) mint with a 14-day TTL
             # instead of as durable facts; re-set on every confirmation so
             # a still-ongoing state keeps its rolling window. Durable
             # attributes (resting HR baseline, "chest historically
             # underdeveloped") are untouched.
-            if metric and value and "expires_at" not in properties and is_transient_health_text(metric, value):
-                properties = {
-                    **properties,
-                    "expires_at": (datetime.now(timezone.utc) + timedelta(days=14)).isoformat(),
-                }
+            if metric and value and "expires_at" not in properties:
+                ttl_hours = None
+                if is_authoritative_health_copy(metric, value):
+                    # Belt-and-braces behind the refusal above: if the check is
+                    # ever relaxed, or a caller passes an explicit dedup_key
+                    # path that bypasses it, a measurement still can't outlive
+                    # the day it describes.
+                    ttl_hours = MEASURED_HEALTH_TTL_HOURS
+                elif is_transient_health_text(metric, value):
+                    ttl_hours = 14 * 24
+                if ttl_hours:
+                    properties = {
+                        **properties,
+                        "expires_at": (
+                            datetime.now(timezone.utc) + timedelta(hours=ttl_hours)
+                        ).isoformat(),
+                    }
 
         label = f"PKG_{fact_type}"
         if label not in PKG_LABELS:

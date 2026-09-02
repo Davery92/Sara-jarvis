@@ -27,15 +27,30 @@ logger = logging.getLogger(__name__)
     # acks_late / reject_on_worker_lost are global; a mid-run worker loss requeues.
 )
 def execute_dispatch(self, task_id, mission_id, user_id, task_description,
-                     skill_context="", fallback_categories=None):
+                     skill_context="", fallback_categories=None, mode="vm_claude"):
     from app.services.agent_dispatch import agent_dispatch_service
     attempt = self.request.retries + 1
-    logger.info(f"[dispatch] execute_dispatch starting task {task_id} (attempt {attempt})")
+    logger.info(
+        f"[dispatch] execute_dispatch starting task {task_id} "
+        f"(attempt {attempt}, mode={mode})"
+    )
     try:
-        asyncio.run(agent_dispatch_service._run_vm_claude_mode(
-            task_id, mission_id, user_id, task_description,
-            skill_context=skill_context, fallback_categories=fallback_categories or [],
-        ))
+        if mode == "internal":
+            # Sara's own data (email, notes, reminders, calendar) is reachable
+            # only through the internal tool registry — never from the VM shell.
+            prompt = task_description
+            if skill_context:
+                prompt += f"\n\n{skill_context}"
+            asyncio.run(agent_dispatch_service._run_internal_mode(
+                task_id, mission_id, user_id, prompt,
+                categories=fallback_categories or [],
+            ))
+        else:
+            asyncio.run(agent_dispatch_service._run_vm_claude_mode(
+                task_id, mission_id, user_id, task_description,
+                skill_context=skill_context,
+                fallback_categories=fallback_categories or [],
+            ))
         return {"task_id": task_id, "status": "executed"}
     except Exception as e:
         logger.error(f"[dispatch] execute_dispatch task {task_id} failed: {e}", exc_info=True)

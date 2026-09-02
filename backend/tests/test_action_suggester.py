@@ -59,23 +59,23 @@ class TestNoToolSuggestions:
         # Short response, no tool → minimal/no suggestions
         assert len(results) <= 1
 
-    def test_long_response_gets_summarize(self):
+    def test_long_response_gets_no_length_fallback(self):
+        # The length-triggered "Summarize" fallback was removed 2026-08-25:
+        # it fired on nearly every plain answer, so the suggestion row was
+        # almost always on screen with nothing useful in it.
         long_response = "x " * 300  # > 500 chars
         results = suggest([], long_response)
-        labels = [s["label"] for s in results]
-        assert "Summarize" in labels
+        assert results == []
 
-    def test_medium_response_gets_tell_more(self):
+    def test_medium_response_gets_no_length_fallback(self):
         medium = "x " * 120  # > 200 chars, < 500 chars
         results = suggest([], medium)
-        labels = [s["label"] for s in results]
-        assert "Tell me more" in labels
+        assert results == []
 
     def test_sara_question_no_suggestions(self):
-        # Sara asked a question → don't suggest, let user answer
+        # Sara asked a question → nothing to suggest, let the user answer
         results = suggest([], "That sounds interesting! What kind of food do you want?")
-        labels = [s["label"] for s in results]
-        assert "Summarize" not in labels
+        assert results == []
 
 
 class TestContextAwareSuggestions:
@@ -107,7 +107,8 @@ class TestSuggestionLimits:
             "reviews_due": 5,
         }
         results = suggest(["calendar_list"], "Your schedule.", unified_context=ctx)
-        assert len(results) <= 4
+        # Capped at 3 — this renders as one chip row on iOS.
+        assert len(results) <= 3
 
     def test_no_duplicate_labels(self):
         # Multiple tools that produce same suggestions

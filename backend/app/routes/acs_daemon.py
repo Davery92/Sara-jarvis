@@ -299,7 +299,16 @@ async def daemon_ambient_turn(payload: AmbientTurnIn) -> AmbientTurnOut:
     """
     from app.services.kernel import DEFAULT_USER_ID, WakeReason, ambient_turn
 
-    result = await ambient_turn(DEFAULT_USER_ID, wake_reason=WakeReason.DAEMON_PROXY, force=True)
+    # Ground-truth plan, Phase 8 §1: the daemon proxy does NOT force.
+    #
+    # `force=True` skips `should_deliberate` — the rate limit and salience
+    # threshold — so every daemon tick became a deliberation regardless of
+    # whether anything had happened. That is the largest single contributor to
+    # ~140 deliberations a day, including through the 1–5 AM window. The daemon
+    # keeps its own cadence; whether there is anything worth thinking about is
+    # the kernel's call, not the tick's. Only the 30-minute
+    # `periodic_deliberation_fallback` still forces, and only in waking hours.
+    result = await ambient_turn(DEFAULT_USER_ID, wake_reason=WakeReason.DAEMON_PROXY, force=False)
 
     # A successful/proposed kernel-hands tool call counts as "did something"
     # for backoff purposes too (work-order item 11) — an "error"/"no_lane"/

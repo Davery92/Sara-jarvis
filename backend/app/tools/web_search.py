@@ -1,5 +1,4 @@
 from typing import Any, Dict
-import json
 import uuid
 from app.tools.base import BaseTool, ToolResult
 from app.services.search_service import search_service
@@ -68,14 +67,12 @@ class WebSearchTool(BaseTool):
             # Generate reference ID for storage
             reference_id = str(uuid.uuid4())
 
-            # Store full results in Redis with 5 minute TTL
-            if search_service.redis:
-                cache_key = f"websearch_details:{reference_id}"
-                await search_service.redis.set(
-                    cache_key,
-                    json.dumps(result),
-                    ex=300  # 5 minutes
-                )
+            # Best-effort storage: a cache outage must not turn a successful
+            # provider search into a failed tool call.
+            cache_key = f"websearch_details:{reference_id}"
+            details_cached = await search_service.cache_set_json(
+                cache_key, result, ttl_seconds=300
+            )
 
             # Create compact summary with top 3-5 results
             results = result.get("results", [])
@@ -95,13 +92,21 @@ class WebSearchTool(BaseTool):
                     }
                     for r in top_results
                 ],
-                "note": "Full details available via get_web_search_details tool with reference_id"
+                "note": (
+                    "Full details available via get_web_search_details tool with reference_id"
+                    if details_cached
+                    else "Full-detail cache unavailable; summaries remain valid"
+                )
             }
 
             return ToolResult(
                 success=True,
                 data=compact_data,
-                message=f"Found {len(results)} results for '{query}' (showing top {len(top_results)} summaries, full details stored: {reference_id})",
+                message=(
+                    f"Found {len(results)} results for '{query}' "
+                    f"(showing top {len(top_results)} summaries"
+                    + (f", full details stored: {reference_id})" if details_cached else ")")
+                ),
                 citations=[r.get("url") for r in top_results if r.get("url")],
             )
         except Exception as e:

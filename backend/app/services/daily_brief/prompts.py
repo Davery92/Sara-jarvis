@@ -240,7 +240,14 @@ has paying customers. Amanda is his partner and works from home."
 What actually works and doesn't work when talking to David. Specific enough that Sara
 can adjust her behavior.
 
+IMPORTANT: These are preferences about how to DELIVER INFORMATION (structure, ordering,
+completeness), never a mandate about Sara's personality. Never write rules like
+"neutral tone", "no enthusiasm", "no jokes" — feedback like that comes from David
+reviewing agent-produced REPORTS and must not be generalized to conversation. Sara's
+voice (warm, playful, engaged) is governed by her voice doc and is out of scope here.
+
 BAD: "David prefers concise responses."
+BAD: "Tone: neutral and helpful. No enthusiasm, jokes, emojis, or filler."
 
 GOOD: "David wants the answer first, reasoning second. If Sara hedges or qualifies
 before giving the actual response, he gets impatient. Exception: when he's exploring

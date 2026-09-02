@@ -107,6 +107,98 @@ async def drop_commitment(db, user_id: str, commitment_id: str, reason: str) -> 
     return True
 
 
+# ── Promises about background work ─────────────────────────────────────────
+#
+# Invariant 3, applied to Sara's own mouth. "I'll ping you when it's ready" was
+# never recorded anywhere: the Salem report finished at 21:28 on 2026-09-01,
+# batched itself to the 08:00–12:00 morning window, and David — who leaves at
+# 07:00 — never heard about it. A promise that isn't a row is not a promise.
+
+DELIVERY_COMMITMENT_SOURCE = "task_promise"
+
+
+async def create_delivery_commitment(
+    user_id: str, task_id: str, title: str, origin: str = "david_chat",
+) -> Optional[str]:
+    """Record "tell David when <title> is ready". Idempotent per task id."""
+    from app.db.session import get_async_session_factory
+
+    try:
+        factory = get_async_session_factory()
+        async with factory() as db:
+            existing = (await db.execute(text("""
+                SELECT id FROM sara_commitment
+                 WHERE user_id = :uid AND status = 'open'
+                   AND created_from = :src AND trigger_description = :task
+                 LIMIT 1
+            """), {"uid": user_id, "src": DELIVERY_COMMITMENT_SOURCE, "task": str(task_id)})).first()
+            if existing:
+                return str(existing.id)
+            commitment_id = await create_commitment(
+                db, user_id,
+                text_=f"tell David when {title} is ready",
+                created_from=DELIVERY_COMMITMENT_SOURCE,
+                trigger_description=str(task_id),
+            )
+        logger.info(f"[commitment_service] promised delivery of {title!r} (task {task_id})")
+        return str(commitment_id)
+    except Exception as e:
+        logger.warning(f"[commitment_service] delivery commitment failed for {task_id}: {e}")
+        return None
+
+
+async def close_delivery_commitment(
+    user_id: str, task_id: str, closure_note: str, origin: str = "david_chat",
+    make_candidate: bool = True,
+) -> bool:
+    """The work finished, so the promise comes due.
+
+    Closure raises an `alert` candidate rather than an `inform` one, and a
+    david_chat-origin result never batches: he asked for it, so it goes out on the
+    urgent lane while he is awake and leads the wake digest if he is not.
+    """
+    from app.db.session import get_async_session_factory
+
+    try:
+        factory = get_async_session_factory()
+        async with factory() as db:
+            row = (await db.execute(text("""
+                UPDATE sara_commitment
+                   SET status = 'done', closure_note = :note, closed_at = NOW()
+                 WHERE user_id = :uid AND status = 'open'
+                   AND created_from = :src AND trigger_description = :task
+                RETURNING id, text
+            """), {"uid": user_id, "src": DELIVERY_COMMITMENT_SOURCE,
+                   "task": str(task_id), "note": closure_note})).first()
+            await db.commit()
+            if not row:
+                return False
+
+            await _close_brief_entry(db, user_id, str(row.id))
+            if not make_candidate:
+                return True
+            from datetime import timedelta
+            from app.core.timezone import now as local_now
+            from app.services.say_candidate import create_candidate
+            await create_candidate(
+                db, user_id, source="task_result_delivery",
+                kind="alert" if origin == "david_chat" else "inform",
+                summary=closure_note,
+                evidence=[{"task_id": str(task_id), "origin": origin}],
+                value_guess=0.9 if origin == "david_chat" else 0.6,
+                # An `alert` expires in 30 minutes by default, which is right for
+                # "the door is open" and wrong for a report David asked for: the
+                # Salem result finished at 21:28 and had to survive the night to
+                # reach him. Something he requested stays live for a day.
+                valid_until=local_now() + timedelta(hours=24),
+                dedupe_key=f"task:{task_id}",
+            )
+        return True
+    except Exception as e:
+        logger.warning(f"[commitment_service] delivery closure failed for {task_id}: {e}")
+        return False
+
+
 async def _close_brief_entry(db, user_id: str, commitment_id: str) -> None:
     """The sweep only upserts CURRENTLY open commitments — it never learns
     a commitment just closed, so without this the stale "Sara commitment:

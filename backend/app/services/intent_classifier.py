@@ -378,8 +378,17 @@ class ToolIntentClassifier:
     # fleet_diag and would wrongly claim she can't check his servers.
     BASE_TOOLS = ['memory', 'notes', 'time', 'agents', 'fleet']
 
-    # Extended default tools for general/unclear intent
-    DEFAULT_TOOLS = ['memory', 'notes', 'time', 'web', 'fitness', 'learning', 'home', 'fleet']
+    # Extended default tools for general/unclear intent.
+    # 'fitness' and 'learning' were dropped 2026-08-18: they are the two most
+    # expensive categories in the registry (fitness alone is 38 tools / ~7.5k
+    # tokens of schema, learning ~2.5k) and GENERAL is the catch-all, so every
+    # unclassified message paid ~10k prompt tokens — ~37s of prompt eval at the
+    # ~270 tok/s this box does — to carry food-log and course tools it never
+    # called. Both still load when they're actually relevant: FITNESS/HEALTH/
+    # PATTERNS/RECIPES intents map to 'fitness', LEARNING to 'learning', and
+    # screen-aware loading in chat_stream adds them on the Fitness/Health/
+    # Recipes/Learning screens.
+    DEFAULT_TOOLS = ['memory', 'notes', 'time', 'web', 'home', 'fleet']
 
     # Intent patterns - more specific patterns checked first
     INTENT_PATTERNS = {

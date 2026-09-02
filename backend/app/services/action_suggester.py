@@ -128,16 +128,15 @@ def suggest(
                 suggestions.append(s)
                 seen_labels.add(s["label"])
 
-    # 2. Response-type suggestions (if no tool was used)
-    if not tool_history and response_content:
-        # Question was answered - offer follow-ups
-        if '?' in response_content[-200:]:
-            # Sara asked a question - no suggestions needed (let user answer)
-            pass
-        elif len(response_content) > 500:
-            suggestions.append({"label": "Summarize", "message": "Can you summarize that?"})
-        elif len(response_content) > 200:
-            suggestions.append({"label": "Tell me more", "message": "Tell me more about that"})
+    # 2. Response-type suggestions: intentionally none.
+    #
+    # There used to be length-triggered "Summarize" (>500 chars) and "Tell me
+    # more" (>200 chars) fallbacks here, which fired on almost every plain
+    # answer — so nearly every turn came back with a suggestion row whether or
+    # not there was anything worth suggesting, and on iOS that row was a
+    # ~150pt card. A suggestion should come from something Sara actually did
+    # (a tool) or from real context below, never from her having typed a few
+    # sentences. Removed 2026-08-25.
 
     # 3. Context-aware suggestions
     if unified_context and isinstance(unified_context, dict):
@@ -160,5 +159,6 @@ def suggest(
 
         # Learning reviews due — disabled
 
-    # Cap at 4 suggestions
-    return suggestions[:4]
+    # Cap at 3 — this renders as a single chip row on iOS, and a fourth chip
+    # is off-screen more often than not.
+    return suggestions[:3]

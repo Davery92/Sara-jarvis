@@ -12,8 +12,8 @@ class Settings(BaseSettings):
 
     # LLM Configuration
     ai_provider: str = "local"  # Options: local, gemini, openai, claude, codex, custom
-    openai_base_url: str = "http://100.104.68.115:8081/v1"
-    openai_model: str = "qwen3.6-27b"
+    openai_base_url: str = "http://100.104.68.115:8082/v1"  # chat lane; bg lane is :8081
+    openai_model: str = "qwen3.8-27b"
     openai_api_key: str = ""
     anthropic_api_key: str = ""
     gemini_api_key: str = ""
@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     # LLM Failover Configuration
     llm_primary_url: str = "http://100.104.68.115:8081/v1"
     llm_fallback_url: str = "http://100.104.68.115:8081/v1"
-    llm_fallback_model: str = "qwen3.6-27b"
+    llm_fallback_model: str = "qwen3.8-27b"
     llm_request_timeout: float = 60.0  # Timeout for LLM requests (120B model needs time)
     llm_health_check_interval: int = 30  # seconds between health checks
     llm_health_check_timeout: float = 5.0  # timeout for health check requests
@@ -32,7 +32,7 @@ class Settings(BaseSettings):
 
     # Background LLM Configuration (separate from chat - always uses local models)
     bg_llm_primary_url: str = "http://100.104.68.115:8081/v1"
-    bg_llm_primary_model: str = "qwen3.6-27b"
+    bg_llm_primary_model: str = "qwen3.8-27b"
     # Emergency backup ONLY (Phase 5): the 35B-A3B on the GPU host. Used strictly
     # when the primary endpoint is unreachable (connection refused / DNS / route
     # failure), NOT on a slow or 5xx-but-reachable primary.
@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     bg_llm_fallback_model: str = "qwen3.6-35b-a3b"
     bg_llm_request_timeout: float = 600.0  # 10min — 27B reasoning model on ~10k-token ACS payloads needs the headroom
     bg_llm_connect_timeout: float = 6.0
-    bg_llm_num_ctx: int = 32768
+    bg_llm_num_ctx: int = 131072
     bg_llm_fallback_max_tokens: int = 24000  # Max input tokens for fallback model (leave headroom from 32k window)
 
     # Phase 5 — reflex/ponder split. A fast 2-3s triage on the A3B decides whether a
@@ -63,7 +63,7 @@ class Settings(BaseSettings):
     # The actual model name is discovered via /v1/models at plan-create time, so
     # `research_llm_model` here is only a fallback if discovery fails.
     research_llm_url: str = "http://100.104.68.115:8081/v1"
-    research_llm_model: str = "qwen3.6-27b"
+    research_llm_model: str = "qwen3.8-27b"
     research_llm_timeout: float = 300.0
     research_llm_max_tokens: int = 4096
     learning_lesson_num_ctx: int = 49152

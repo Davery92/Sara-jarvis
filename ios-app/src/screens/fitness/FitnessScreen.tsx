@@ -69,6 +69,9 @@ export default function FitnessScreen({ navigation }: Props) {
   const [showFoodModal, setShowFoodModal] = useState(false);
   const [selectedMealType, setSelectedMealType] = useState('snack');
   const [editingFoodLog, setEditingFoodLog] = useState<FoodLog | null>(null);
+  // The other detailed_items in editingFoodLog's meal, so FoodLogModal's save
+  // can send the whole meal back instead of silently dropping siblings.
+  const [editingFoodSiblings, setEditingFoodSiblings] = useState<any[]>([]);
   const [showTemplatePicker, setShowTemplatePicker] = useState(false);
   const [selectedDate, setSelectedDate] = useState(() => {
     const now = new Date();
@@ -77,6 +80,12 @@ export default function FitnessScreen({ navigation }: Props) {
 
   // Data states
   const [foodLogs, setFoodLogs] = useState<FoodLog[]>([]);
+  // Earliest date loadData/loadOlderFoodLogs has actually fetched food logs
+  // for. selectedDate can be navigated further back than this (Prev has no
+  // lower bound) - when it does, foodLogs legitimately has zero rows for
+  // that day because it was never fetched, not because nothing was logged.
+  const [loadedFoodRangeStart, setLoadedFoodRangeStart] = useState<string | null>(null);
+  const [loadingHistoricalDate, setLoadingHistoricalDate] = useState(false);
   const [workoutLogs, setWorkoutLogs] = useState<WorkoutSession[]>([]);
   const [recoveryLogs, setRecoveryLogs] = useState<RecoveryLog[]>([]);
   const [dailySummary, setDailySummary] = useState<any>(null);
@@ -239,6 +248,7 @@ export default function FitnessScreen({ navigation }: Props) {
       const todayTemplatesData = await fitnessService.getTodaysTemplates().catch(() => ({ templates: [] }));
 
       setFoodLogs(food);
+      setLoadedFoodRangeStart(weekAgo);
       setWorkoutLogs(workouts);
       setRecoveryLogs(recovery);
       setDailySummary(summary);
@@ -258,6 +268,44 @@ export default function FitnessScreen({ navigation }: Props) {
     setRefreshing(false);
   };
 
+  // After creating/editing/deleting a phase or starting a block from PhaseForm.
+  const refreshPhasesAndProgram = async () => {
+    await Promise.all([loadData(), loadNutritionGoalsWithPhase()]);
+  };
+
+  // Prev/Next in the nutrition diary can navigate selectedDate arbitrarily
+  // far back, past the week loadData fetched. Extend the loaded window
+  // backward to cover it instead of letting the diary render 0 entries for
+  // a day that was simply never fetched.
+  useEffect(() => {
+    if (!loadedFoodRangeStart || selectedDate >= loadedFoodRangeStart) return;
+
+    let cancelled = false;
+    setLoadingHistoricalDate(true);
+    const rangeEnd = (() => {
+      // Fetch up to (but not overlapping) the currently loaded start.
+      const [y, m, d] = loadedFoodRangeStart.split('-').map(Number);
+      const dayBefore = new Date(y, m - 1, d - 1);
+      return `${dayBefore.getFullYear()}-${String(dayBefore.getMonth() + 1).padStart(2, '0')}-${String(dayBefore.getDate()).padStart(2, '0')}`;
+    })();
+
+    fitnessService.getFoodLogs(selectedDate, rangeEnd)
+      .then((older) => {
+        if (cancelled) return;
+        setFoodLogs((prev) => [...older, ...prev]);
+        setLoadedFoodRangeStart(selectedDate);
+      })
+      .catch((error) => {
+        console.error('Failed to load older food logs:', error);
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingHistoricalDate(false);
+      });
+
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedDate, loadedFoodRangeStart]);
+
   // Food logging
   const handleLogFood = (mealType: string = 'snack') => {
     setSelectedMealType(mealType);
@@ -273,12 +321,21 @@ export default function FitnessScreen({ navigation }: Props) {
   };
 
   const handleEditFood = (log: FoodLog) => {
-    // Full edit (quantity/serving/macros) only works for single-item entries
-    // that carry a rehydratable detailed_item snapshot. Multi-item and recipe
-    // entries fall back to the meal-type-only alert (acceptable v1 - see
-    // FOOD_AND_RECIPES_EDITING_FIX_PLAN_2026_08_03.md Phase 4.3).
-    if (log.detailed_item) {
+    // Full edit (quantity/serving/macros) needs this item's own rehydratable
+    // detailed_item snapshot. For a multi-item meal it ALSO needs every
+    // sibling item in that meal to carry one, since saving replaces the
+    // whole row's items — an unreconstructable sibling would otherwise be
+    // silently dropped. Recipe entries collapse to a single FoodLog row (see
+    // fitness.ts isRecipe branch) so they never reach the sibling check.
+    const siblings = foodLogs.filter(
+      (l) => l.meal_log_id === log.meal_log_id && l.id !== log.id
+    );
+    const canFullyEdit = !!log.detailed_item
+      && siblings.every((s) => !!s.detailed_item);
+
+    if (canFullyEdit) {
       setEditingFoodLog(log);
+      setEditingFoodSiblings(siblings.map((s) => s.detailed_item));
       return;
     }
 
@@ -1325,9 +1382,20 @@ export default function FitnessScreen({ navigation }: Props) {
         )}
 
         {/* Phases accordion */}
-        <Text style={[styles.sectionTitle, { marginTop: spacing.md }]}>
-          Phases ({visiblePhases.length})
-        </Text>
+        <View style={styles.phasesSectionHeader}>
+          <Text style={[styles.sectionTitle, { paddingHorizontal: 0, marginBottom: 0 }]}>
+            Phases ({visiblePhases.length})
+          </Text>
+          {activeProgram ? (
+            <TouchableOpacity
+              style={styles.startBlockButton}
+              onPress={() => navigation.navigate('PhaseForm', { mode: 'block', onSave: refreshPhasesAndProgram })}
+            >
+              <Ionicons name="cut-outline" size={14} color={colors.warning} />
+              <Text style={styles.startBlockButtonText}>Start a block…</Text>
+            </TouchableOpacity>
+          ) : null}
+        </View>
         {sortedPhases.map((phase) => {
           const isOpen = expandedPhases.has(phase.id);
           const isActive = phase.status === 'active';
@@ -1339,34 +1407,43 @@ export default function FitnessScreen({ navigation }: Props) {
               key={phase.id}
               style={[styles.phaseCard, isActive && styles.phaseCardActive]}
             >
-              <TouchableOpacity
-                style={styles.phaseHeader}
-                onPress={() => togglePhase(phase.id)}
-                activeOpacity={0.7}
-              >
-                <Ionicons
-                  name={isOpen ? 'chevron-down' : 'chevron-forward'}
-                  size={18}
-                  color={colors.textSecondary}
-                />
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.phaseTitle}>
-                    {isActive ? '🔥 ' : ''}{phase.name}
-                  </Text>
-                  <Text style={styles.phaseSubtitle}>
-                    {phase.status}
-                    {prog.currentWeek && prog.totalWeeks
-                      ? ` · wk ${Math.min(prog.currentWeek, prog.totalWeeks)}/${prog.totalWeeks}`
-                      : ''}
-                    {phaseTemplates.length ? ` · ${phaseTemplates.length} workouts` : ''}
-                  </Text>
-                </View>
+              <View style={styles.phaseHeader}>
+                <TouchableOpacity
+                  style={styles.phaseHeaderToggle}
+                  onPress={() => togglePhase(phase.id)}
+                  activeOpacity={0.7}
+                >
+                  <Ionicons
+                    name={isOpen ? 'chevron-down' : 'chevron-forward'}
+                    size={18}
+                    color={colors.textSecondary}
+                  />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.phaseTitle}>
+                      {isActive ? '🔥 ' : ''}{phase.name}
+                    </Text>
+                    <Text style={styles.phaseSubtitle}>
+                      {phase.status}
+                      {prog.currentWeek && prog.totalWeeks
+                        ? ` · wk ${Math.min(prog.currentWeek, prog.totalWeeks)}/${prog.totalWeeks}`
+                        : ''}
+                      {phaseTemplates.length ? ` · ${phaseTemplates.length} workouts` : ''}
+                    </Text>
+                  </View>
+                </TouchableOpacity>
                 {phase.deload_week ? (
                   <View style={styles.deloadBadge}>
                     <Text style={styles.deloadBadgeText}>DELOAD</Text>
                   </View>
                 ) : null}
-              </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.phaseEditButton}
+                  onPress={() => navigation.navigate('PhaseForm', { phase, mode: 'edit', onSave: refreshPhasesAndProgram })}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                >
+                  <Ionicons name="pencil" size={16} color={colors.textSecondary} />
+                </TouchableOpacity>
+              </View>
 
               {isOpen ? (
                 <View style={styles.phaseBody}>
@@ -1608,6 +1685,16 @@ export default function FitnessScreen({ navigation }: Props) {
           </TouchableOpacity>
         </View>
 
+        {/* Prev navigated past the loaded week — fetching that date's real
+            data now, so meal sections below don't render a false "nothing
+            logged" for a day that just hasn't loaded yet. */}
+        {loadingHistoricalDate && (
+          <View style={styles.historicalLoadingBanner}>
+            <ActivityIndicator size="small" color={colors.accent} />
+            <Text style={styles.historicalLoadingText}>Loading {selectedDate}…</Text>
+          </View>
+        )}
+
         {/* Training/rest day context — only for today, only if phase cycles macros */}
         {selectedDate === (() => {
           const d = new Date();
@@ -1800,10 +1887,12 @@ export default function FitnessScreen({ navigation }: Props) {
         onClose={() => {
           setShowFoodModal(false);
           setEditingFoodLog(null);
+          setEditingFoodSiblings([]);
         }}
         onComplete={() => {
           setShowFoodModal(false);
           setEditingFoodLog(null);
+          setEditingFoodSiblings([]);
           loadData();
         }}
         initialMealType={selectedMealType}
@@ -1813,6 +1902,7 @@ export default function FitnessScreen({ navigation }: Props) {
           logged_at: editingFoodLog.logged_at,
           notes: editingFoodLog.notes,
           item: editingFoodLog.detailed_item,
+          siblingItems: editingFoodSiblings,
         } : null}
       />
 
@@ -2490,6 +2580,17 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.md,
     fontStyle: 'italic',
   },
+  historicalLoadingBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.sm,
+    paddingVertical: spacing.sm,
+  },
+  historicalLoadingText: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+  },
   dateNavigator: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -3112,6 +3213,39 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: spacing.sm,
     padding: spacing.md,
+  },
+  phaseHeaderToggle: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  phaseEditButton: {
+    padding: spacing.xs,
+  },
+  phasesSectionHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: spacing.md,
+    marginTop: spacing.md,
+    marginBottom: spacing.sm,
+  },
+  startBlockButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    paddingVertical: spacing.xs,
+    paddingHorizontal: spacing.sm,
+    borderRadius: borderRadius.sm,
+    borderWidth: 1,
+    borderColor: colors.warning,
+    backgroundColor: 'rgba(251, 191, 36, 0.1)',
+  },
+  startBlockButtonText: {
+    color: colors.warning,
+    fontSize: fontSizes.xs,
+    fontWeight: '600',
   },
   phaseTitle: {
     color: colors.text,

@@ -511,7 +511,9 @@ class MemoryService:
             user_id: User identifier
             query: Search query
             scopes: List of scopes to search (episodes, notes, docs, summaries)
-            limit: Maximum results per scope
+            limit: Maximum number of results returned in TOTAL across all scopes
+                (each scope is queried with this limit, then merged, scored and
+                truncated to `limit`)
 
         Returns:
             List of search results with type, text, score, etc.
@@ -572,31 +574,51 @@ class MemoryService:
             if "episodes" in scopes:
                 _t_ep_start = _time.monotonic()
                 from app.main_simple import Episode, PGVECTOR_AVAILABLE, DATABASE_URL
+                from app.services.memory_scoring import recency_sql, MIN_SIMILARITY_FLOOR, CANDIDATE_POOL_SIZE
 
                 if PGVECTOR_AVAILABLE and DATABASE_URL.startswith("postgresql"):
-                    # Parameterized pgvector similarity with composite scoring.
-                    # Mirrors main_simple.py retrieve_episodes_with_window so memory
-                    # search and context retrieval rank consistently.
-                    episode_results = db.execute(sql_text("""
+                    # Similarity-led composite, re-ranked over a raw-similarity
+                    # candidate pool (not the whole table) — MORNING_NOTIFICATIONS_
+                    # PLAN_2026_08_18 Phase 6. The old 0.55/0.25/0.10/0.05/0.05 split
+                    # (no recency term, no floor) let old, much-accessed, high-
+                    # importance episodes structurally outrank fresh relevant ones —
+                    # bge-m3 similarity only spreads ~0.25 across the corpus, so its
+                    # weighted advantage lost to what the other terms could stack.
+                    # access_count is dropped entirely: it's a popularity feedback
+                    # loop (every retrieval makes the same episodes easier to
+                    # retrieve next time). The inner query orders by raw similarity
+                    # (HNSW-indexable) to build the candidate pool cheaply; the outer
+                    # query composite-ranks and applies the floor.
+                    episode_results = db.execute(sql_text(f"""
+                        WITH candidates AS (
+                            SELECT
+                                e.id, e.content, e.role, e.source, e.created_at,
+                                e.importance, e.rating_boost,
+                                1 - (e.embedding <=> CAST(:qvec AS vector)) as similarity
+                            FROM episode e
+                            WHERE e.user_id = :user_id
+                              AND e.embedding IS NOT NULL
+                            ORDER BY e.embedding <=> CAST(:qvec AS vector)
+                            LIMIT :pool_size
+                        )
                         SELECT
-                            e.id, e.content, e.role, e.source, e.created_at,
-                            1 - (e.embedding <=> CAST(:qvec AS vector)) as similarity,
+                            id, content, role, source, created_at, similarity,
+                            COALESCE(importance, 0.5) as importance,
                             (
-                                (1 - (e.embedding <=> CAST(:qvec AS vector))) * 0.55 +
-                                COALESCE(e.importance, 0.5) * 0.25 +
-                                LEAST(LN(COALESCE(e.access_count, 0) + 1) / 4.6, 1.0) * 0.10 +
-                                COALESCE(e.rating_boost, 0.0) * 0.05 +
-                                COALESCE(e.exploration_bonus, 0.0) * 0.05
-                            ) as composite_score,
-                            COALESCE(e.importance, 0.5) as importance
-                        FROM episode e
-                        WHERE e.user_id = :user_id
-                          AND e.embedding IS NOT NULL
+                                similarity * 0.70 +
+                                {recency_sql("created_at")} * 0.15 +
+                                COALESCE(importance, 0.5) * 0.10 +
+                                COALESCE(rating_boost, 0.0) * 0.05
+                            ) as composite_score
+                        FROM candidates
+                        WHERE similarity >= :min_similarity
                         ORDER BY composite_score DESC
                         LIMIT :limit
                     """), {
                         "user_id": user_id,
                         "qvec": str(query_embedding),
+                        "pool_size": CANDIDATE_POOL_SIZE,
+                        "min_similarity": MIN_SIMILARITY_FLOOR,
                         "limit": limit,
                     }).fetchall()
 
@@ -609,11 +631,11 @@ class MemoryService:
                             "source": row[3] or "chat",
                             "created_at": row[4].isoformat() if row[4] else "",
                             "similarity": float(row[5]),
-                            "score": float(row[6]),
+                            "score": float(row[7]),
                             # Arc 5.2: exposed so callers (memory_recall) can
                             # derive a real graduated confidence tier instead
                             # of a hardcoded per-kind label.
-                            "importance": float(row[7]),
+                            "importance": float(row[6]),
                         })
                 _t_episodes = _time.monotonic() - _t_ep_start
 
@@ -649,7 +671,12 @@ class MemoryService:
             # Sort all results by score
             results.sort(key=lambda x: x.get("score", 0), reverse=True)
 
-            top = results[:limit * 2]
+            # `limit` is the TOTAL number of results the caller gets back, matching
+            # what MemorySearchTool advertises to the model. This used to return
+            # `limit * 2`, which silently handed the model 2x what it asked for and
+            # was a primary cause of the follow-up prompt overflowing the chat lane's
+            # 32k context (see docstring).
+            top = results[:limit]
             logger.info(
                 f"⏱️ [search-memory-timing] embedding={_t_embed:.2f}s "
                 f"episodes={_t_episodes:.2f}s notes={_t_notes:.2f}s "

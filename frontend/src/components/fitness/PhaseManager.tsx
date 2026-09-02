@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { Calendar, Plus, X, Edit2, Trash2, Play, Pause, CheckCircle, Rocket } from 'lucide-react'
+import { Calendar, Plus, X, Edit2, Trash2, Play, Pause, CheckCircle, Rocket, Scissors } from 'lucide-react'
 import { APP_CONFIG } from '../../config'
 
 interface Phase {
@@ -38,11 +38,40 @@ const numOrNull = (s: string): number | null => {
   return isNaN(n) ? null : n
 }
 
+interface BlockSummary {
+  name: string
+  start_date: string
+  end_date: string
+  mode: string
+  trimmed_phases: { id: string; name: string }[]
+  shifted_phases: { id: string; name: string }[]
+  shelved_phases: { id: string; name: string }[]
+  templates_copied: number
+}
+
 export default function PhaseManager() {
   const [phases, setPhases] = useState<Phase[]>([])
   const [showModal, setShowModal] = useState(false)
   const [editingPhase, setEditingPhase] = useState<Phase | null>(null)
   const [isLoading, setIsLoading] = useState(false)
+
+  // Insert-block modal state
+  const [showBlockModal, setShowBlockModal] = useState(false)
+  const [blockLoading, setBlockLoading] = useState(false)
+  const [blockName, setBlockName] = useState('')
+  const [blockGoal, setBlockGoal] = useState('cut')
+  const [blockStartDate, setBlockStartDate] = useState('')
+  const [blockDurationWeeks, setBlockDurationWeeks] = useState('3')
+  const [blockMode, setBlockMode] = useState<'overlay' | 'push'>('overlay')
+  const [blockCaloriesTrainingDay, setBlockCaloriesTrainingDay] = useState('')
+  const [blockCaloriesRestDay, setBlockCaloriesRestDay] = useState('')
+  const [blockCarbsTrainingDay, setBlockCarbsTrainingDay] = useState('')
+  const [blockCarbsRestDay, setBlockCarbsRestDay] = useState('')
+  const [blockFatTrainingDay, setBlockFatTrainingDay] = useState('')
+  const [blockFatRestDay, setBlockFatRestDay] = useState('')
+  const [blockProteinTarget, setBlockProteinTarget] = useState('')
+  const [blockNotes, setBlockNotes] = useState('')
+  const [toast, setToast] = useState<{ message: string; error?: boolean } | null>(null)
 
   // Form state
   const [name, setName] = useState('')
@@ -80,6 +109,12 @@ export default function PhaseManager() {
   useEffect(() => {
     fetchPhases()
   }, [])
+
+  useEffect(() => {
+    if (!toast) return
+    const t = setTimeout(() => setToast(null), 8000)
+    return () => clearTimeout(t)
+  }, [toast])
 
   const fetchPhases = async () => {
     try {
@@ -250,6 +285,76 @@ export default function PhaseManager() {
     }
   }
 
+  const openBlockModal = () => {
+    setBlockName('')
+    setBlockGoal('cut')
+    setBlockStartDate('')
+    setBlockDurationWeeks('3')
+    setBlockMode('overlay')
+    setBlockCaloriesTrainingDay('')
+    setBlockCaloriesRestDay('')
+    setBlockCarbsTrainingDay('')
+    setBlockCarbsRestDay('')
+    setBlockFatTrainingDay('')
+    setBlockFatRestDay('')
+    setBlockProteinTarget('')
+    setBlockNotes('')
+    setShowBlockModal(true)
+  }
+
+  const closeBlockModal = () => setShowBlockModal(false)
+
+  const handleInsertBlock = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!blockName.trim()) return
+
+    setBlockLoading(true)
+    try {
+      const payload = {
+        name: blockName,
+        goal: blockGoal,
+        start_date: blockStartDate || null,
+        duration_weeks: numOrNull(blockDurationWeeks),
+        mode: blockMode,
+        protein_target: numOrNull(blockProteinTarget),
+        calories_training_day: numOrNull(blockCaloriesTrainingDay),
+        calories_rest_day: numOrNull(blockCaloriesRestDay),
+        carbs_training_day: numOrNull(blockCarbsTrainingDay),
+        carbs_rest_day: numOrNull(blockCarbsRestDay),
+        fat_training_day: numOrNull(blockFatTrainingDay),
+        fat_rest_day: numOrNull(blockFatRestDay),
+        notes: blockNotes || null,
+      }
+
+      const response = await fetch(`${APP_CONFIG.apiUrl}/api/fitness/phases/insert-block`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify(payload),
+      })
+
+      if (response.ok) {
+        const data: BlockSummary = await response.json()
+        const parts = [`"${data.name}" runs ${data.start_date} → ${data.end_date}.`]
+        if (data.trimmed_phases?.length) parts.push(`Trimmed ${data.trimmed_phases.length} phase(s).`)
+        if (data.shifted_phases?.length) parts.push(`Shifted ${data.shifted_phases.length} phase(s).`)
+        if (data.shelved_phases?.length) parts.push(`Shelved ${data.shelved_phases.length} phase(s).`)
+        if (data.templates_copied) parts.push(`Copied ${data.templates_copied} workout(s).`)
+        setToast({ message: parts.join(' ') })
+        await fetchPhases()
+        closeBlockModal()
+      } else {
+        const err = await response.json().catch(() => null)
+        setToast({ message: `Failed to start block: ${err?.detail || 'Unknown error'}`, error: true })
+      }
+    } catch (error) {
+      console.error('Failed to insert phase block:', error)
+      setToast({ message: 'Failed to start block. Check console for details.', error: true })
+    } finally {
+      setBlockLoading(false)
+    }
+  }
+
   const getStatusColor = (status: string) => {
     switch (status) {
       case 'active': return 'bg-green-600/20 text-green-400 border-green-600'
@@ -275,14 +380,41 @@ export default function PhaseManager() {
           <h2 className="text-2xl font-bold">Training Phases</h2>
           <p className="text-gray-400 text-sm mt-1">Organize your training into structured phases</p>
         </div>
-        <button
-          onClick={openNewPhaseModal}
-          className="px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded-lg flex items-center gap-2 transition-colors"
-        >
-          <Plus className="w-4 h-4" />
-          New Phase
-        </button>
+        <div className="flex gap-2">
+          <button
+            onClick={openBlockModal}
+            className="px-4 py-2 bg-amber-600 hover:bg-amber-700 rounded-lg flex items-center gap-2 transition-colors"
+            title="Insert a dated cut/bulk/maintenance block into the active program"
+          >
+            <Scissors className="w-4 h-4" />
+            Insert Block
+          </button>
+          <button
+            onClick={openNewPhaseModal}
+            className="px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded-lg flex items-center gap-2 transition-colors"
+          >
+            <Plus className="w-4 h-4" />
+            New Phase
+          </button>
+        </div>
       </div>
+
+      {toast && (
+        <div
+          className={`fixed bottom-6 right-6 z-[60] max-w-sm px-4 py-3 rounded-lg shadow-lg border text-sm ${
+            toast.error
+              ? 'bg-red-900/90 border-red-600 text-red-100'
+              : 'bg-emerald-900/90 border-emerald-600 text-emerald-100'
+          }`}
+        >
+          <div className="flex justify-between items-start gap-3">
+            <span>{toast.message}</span>
+            <button onClick={() => setToast(null)} className="opacity-70 hover:opacity-100">
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
 
       {phases.length === 0 ? (
         <div className="text-center py-12 text-gray-400">
@@ -622,6 +754,190 @@ export default function PhaseManager() {
                 <button
                   type="button"
                   onClick={closeModal}
+                  className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg font-medium"
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Insert Block modal */}
+      {showBlockModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-gray-800 rounded-lg max-w-2xl w-full p-6">
+            <div className="flex justify-between items-center mb-4">
+              <div>
+                <h3 className="text-xl font-bold">Insert Block</h3>
+                <p className="text-xs text-gray-400 mt-1">
+                  Drops a dated cut/bulk/maintenance block into the active program — surrounding
+                  phases are trimmed or shifted automatically.
+                </p>
+              </div>
+              <button onClick={closeBlockModal} className="p-2 hover:bg-gray-700 rounded-lg">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleInsertBlock}>
+              <div className="space-y-4">
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium mb-2">Block Name</label>
+                    <input
+                      type="text"
+                      value={blockName}
+                      onChange={(e) => setBlockName(e.target.value)}
+                      className="w-full px-4 py-2 bg-gray-900 rounded-lg border border-gray-700 focus:border-amber-500 focus:outline-none"
+                      placeholder="e.g., Cut, 3-Week Cut"
+                      required
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium mb-2">Goal</label>
+                    <select
+                      value={blockGoal}
+                      onChange={(e) => setBlockGoal(e.target.value)}
+                      className="w-full px-4 py-2 bg-gray-900 rounded-lg border border-gray-700 focus:border-amber-500 focus:outline-none"
+                    >
+                      <option value="cut">Cut (Fat Loss)</option>
+                      <option value="bulk">Bulk</option>
+                      <option value="maintenance">Maintenance</option>
+                      <option value="recomp">Recomp</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-3 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium mb-2">Start Date</label>
+                    <input
+                      type="date"
+                      value={blockStartDate}
+                      onChange={(e) => setBlockStartDate(e.target.value)}
+                      className="w-full px-4 py-2 bg-gray-900 rounded-lg border border-gray-700 focus:border-amber-500 focus:outline-none"
+                    />
+                    <p className="text-xs text-gray-500 mt-1">Defaults to next Monday</p>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium mb-2">Duration (weeks)</label>
+                    <input
+                      type="number"
+                      value={blockDurationWeeks}
+                      onChange={(e) => setBlockDurationWeeks(e.target.value)}
+                      className="w-full px-4 py-2 bg-gray-900 rounded-lg border border-gray-700 focus:border-amber-500 focus:outline-none"
+                      min="1"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium mb-2">Collision mode</label>
+                    <select
+                      value={blockMode}
+                      onChange={(e) => setBlockMode(e.target.value as 'overlay' | 'push')}
+                      className="w-full px-4 py-2 bg-gray-900 rounded-lg border border-gray-700 focus:border-amber-500 focus:outline-none"
+                    >
+                      <option value="overlay">Overlay (trim/split)</option>
+                      <option value="push">Push (shift later phases)</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className="border border-gray-700 rounded-lg p-4 space-y-3">
+                  <div>
+                    <label className="block text-xs text-gray-400 mb-1">Protein (g/day, constant)</label>
+                    <input
+                      type="number"
+                      value={blockProteinTarget}
+                      onChange={(e) => setBlockProteinTarget(e.target.value)}
+                      className="w-full px-3 py-2 bg-gray-900 rounded border border-gray-700 focus:border-amber-500 focus:outline-none"
+                      placeholder="230"
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs text-amber-400 mb-1">Training day kcal</label>
+                      <input
+                        type="number"
+                        value={blockCaloriesTrainingDay}
+                        onChange={(e) => setBlockCaloriesTrainingDay(e.target.value)}
+                        className="w-full px-3 py-2 bg-gray-900 rounded border border-gray-700 focus:border-amber-500 focus:outline-none"
+                        placeholder="2300"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-blue-400 mb-1">Rest day kcal</label>
+                      <input
+                        type="number"
+                        value={blockCaloriesRestDay}
+                        onChange={(e) => setBlockCaloriesRestDay(e.target.value)}
+                        className="w-full px-3 py-2 bg-gray-900 rounded border border-gray-700 focus:border-amber-500 focus:outline-none"
+                        placeholder="1900"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-amber-400 mb-1">Training day carbs (g)</label>
+                      <input
+                        type="number"
+                        value={blockCarbsTrainingDay}
+                        onChange={(e) => setBlockCarbsTrainingDay(e.target.value)}
+                        className="w-full px-3 py-2 bg-gray-900 rounded border border-gray-700 focus:border-amber-500 focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-blue-400 mb-1">Rest day carbs (g)</label>
+                      <input
+                        type="number"
+                        value={blockCarbsRestDay}
+                        onChange={(e) => setBlockCarbsRestDay(e.target.value)}
+                        className="w-full px-3 py-2 bg-gray-900 rounded border border-gray-700 focus:border-amber-500 focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-amber-400 mb-1">Training day fat (g)</label>
+                      <input
+                        type="number"
+                        value={blockFatTrainingDay}
+                        onChange={(e) => setBlockFatTrainingDay(e.target.value)}
+                        className="w-full px-3 py-2 bg-gray-900 rounded border border-gray-700 focus:border-amber-500 focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-blue-400 mb-1">Rest day fat (g)</label>
+                      <input
+                        type="number"
+                        value={blockFatRestDay}
+                        onChange={(e) => setBlockFatRestDay(e.target.value)}
+                        className="w-full px-3 py-2 bg-gray-900 rounded border border-gray-700 focus:border-amber-500 focus:outline-none"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium mb-2">Notes</label>
+                  <textarea
+                    value={blockNotes}
+                    onChange={(e) => setBlockNotes(e.target.value)}
+                    className="w-full px-4 py-2 bg-gray-900 rounded-lg border border-gray-700 focus:border-amber-500 focus:outline-none"
+                    rows={2}
+                    placeholder="Optional notes about this block..."
+                  />
+                </div>
+              </div>
+
+              <div className="flex gap-3 mt-6">
+                <button
+                  type="submit"
+                  disabled={blockLoading}
+                  className="flex-1 px-4 py-2 bg-amber-600 hover:bg-amber-700 rounded-lg font-medium disabled:opacity-50"
+                >
+                  {blockLoading ? 'Starting...' : 'Start Block'}
+                </button>
+                <button
+                  type="button"
+                  onClick={closeBlockModal}
                   className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg font-medium"
                 >
                   Cancel
