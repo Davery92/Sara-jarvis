@@ -440,9 +440,16 @@ def sync_sent_items(self):
 async def _link_meeting_to_calendar(db, user_id: str, email) -> bool:
     """Link a meeting-bearing email to the real calendar event, if one exists.
 
-    Matches on distinctive subject words within a week of the mail. Returns True
-    when a link was made. Deliberately does NOT create events: the calendar is
-    owned by the iOS sync, and auto-creating from mail was removed on purpose.
+    Matches on distinctive subject words within a fortnight of the mail. Returns
+    True when a link was made. Deliberately does NOT create events: the calendar
+    is owned by the iOS sync, and auto-creating from mail was removed on purpose.
+
+    TWO matching words, not one. `LIKE ANY` over the subject's words means a mail
+    titled "Re: Hours Worked" links to any event whose title happens to contain
+    "hours" — and a wrong link is worse than none, because it makes a rumour
+    meeting look verified. The identical single-word rule in `thread_resolution`
+    matched "Laura Weippert" against two open threads about DEREK Weippert and
+    closed them (2026-09-02); this is the same rule in a quieter place.
     """
     import re as _re
     from sqlalchemy import text as sa_text
@@ -458,13 +465,15 @@ async def _link_meeting_to_calendar(db, user_id: str, email) -> bool:
             SELECT id, title FROM calendar_event
              WHERE user_id = :uid
                AND start_time BETWEEN :lo AND :hi
-               AND lower(title) LIKE ANY(:pats)
+               AND (SELECT count(*) FROM unnest(CAST(:pats AS text[])) AS p
+                     WHERE lower(title) LIKE p) >= :need
              ORDER BY start_time ASC LIMIT 1
         """), {
             "uid": user_id,
             "lo": to_naive_local(email.received_at or local_now()) - timedelta(days=1),
             "hi": to_naive_local(email.received_at or local_now()) + timedelta(days=14),
             "pats": [f"%{w}%" for w in words],
+            "need": min(2, len(words)),
         })).first()
         if not row:
             return False

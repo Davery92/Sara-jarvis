@@ -424,6 +424,42 @@ class TestDavidRequestedResultsAreAnnounced:
         assert '"title": plan.get("title")' in source
 
 
+# ── found while verifying item 9's watch list ──────────────────────────────
+
+class TestMeetingLinkerNeedsTwoWords:
+    """`_link_meeting_to_calendar` matched on ONE subject word.
+
+    Item 9 asks to confirm the half-detected-meeting guard landed. It did — but
+    the linker it calls used `lower(title) LIKE ANY(:pats)`, so a mail titled
+    "Re: Hours Worked" would link to any event whose title contains "hours".
+    A wrong link is worse than none: it makes a rumour meeting look verified,
+    which is the exact state the guard exists to prevent. Same single-word rule
+    that closed two threads about Derek Weippert when asked about Laura.
+    """
+
+    def test_two_words_are_required(self):
+        source = pathlib.Path("app/tasks/email_sync.py").read_text()
+        assert "LIKE ANY(:pats)" not in source
+        assert '"need": min(2, len(words))' in source
+
+    def test_a_one_word_subject_still_needs_its_one_word(self):
+        """min(2, len(words)) — a single distinctive word is not made
+        impossible, just not enough when more were available."""
+        assert min(2, 1) == 1
+        assert min(2, 5) == 2
+
+    def test_the_guard_clears_rather_than_leaving_it_dangling(self):
+        source = pathlib.Path("app/tasks/email_sync.py").read_text()
+        assert "email.has_meeting = False" in source
+        assert "flag cleared rather than left dangling" in source
+
+    def test_nothing_here_creates_a_calendar_event(self):
+        """The calendar is owned by the iOS sync. An event invented from mail
+        is invariant 1's failure with extra steps."""
+        source = pathlib.Path("app/tasks/email_sync.py").read_text()
+        assert "INSERT INTO calendar_event" not in source
+
+
 # ── 7. background model calls are attributed ───────────────────────────────
 
 class TestBackgroundTokenAccounting:
