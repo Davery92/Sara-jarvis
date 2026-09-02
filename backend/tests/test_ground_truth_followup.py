@@ -460,6 +460,37 @@ class TestMeetingLinkerNeedsTwoWords:
         assert "INSERT INTO calendar_event" not in source
 
 
+class TestTheContradictionAuditAppliesItsOwnBar:
+    """Item 9 expected the six rhythm-vs-fact conflicts to disappear once item 2
+    landed. They didn't: item 2 fixed what gets RENDERED, while the audit still
+    compared every `daily_rhythm` row regardless of confidence. So it reported a
+    0.10-confidence 07:10 wake against a stated 05:28 as "two live values",
+    nightly, and closed each line with "resolve_predicate prefers the stated
+    fact" — the audit stating that it had found no ambiguity."""
+
+    def test_a_rhythm_row_below_the_bar_is_not_a_second_value(self):
+        import inspect
+        from app.tasks import truth_maintenance
+
+        source = inspect.getsource(truth_maintenance._audit_contradictions)
+        assert "RHYTHM_MIN_CONFIDENCE" in source
+        assert "RHYTHM_MIN_SAMPLES" in source
+
+    def test_the_flag_no_longer_announces_its_own_irrelevance(self):
+        import inspect
+        from app.tasks import truth_maintenance
+
+        source = inspect.getsource(truth_maintenance._audit_contradictions)
+        assert "resolve_predicate prefers the stated fact." not in source
+        assert "both clear the bar to be stated" in source
+
+    def test_it_uses_the_same_bar_as_the_resolver_and_the_renderer(self):
+        """Three places decide 'is this rhythm row worth believing'. One answer."""
+        from app.services.life_facts import RHYTHM_MIN_CONFIDENCE, RHYTHM_MIN_SAMPLES
+
+        assert (RHYTHM_MIN_CONFIDENCE, RHYTHM_MIN_SAMPLES) == (0.5, 10)
+
+
 # ── 7. background model calls are attributed ───────────────────────────────
 
 class TestBackgroundTokenAccounting:

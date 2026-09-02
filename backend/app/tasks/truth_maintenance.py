@@ -170,7 +170,22 @@ def _audit_life_facts(db, user_id: str) -> List[str]:
 
 
 def _audit_contradictions(db, user_id: str) -> List[str]:
-    """Predicates with two live values — the three-departure-times failure."""
+    """Predicates with two LIVE values — the three-departure-times failure.
+
+    "Live" means something might actually state it. A `daily_rhythm` row below
+    `resolve_predicate`'s bar (≥0.5 confidence AND ≥10 samples) is not a second
+    value competing with the fact; it is a row nothing will ever read out. The
+    first version of this audit compared every rhythm row and so reported six
+    standing conflicts — including a 0.10-confidence 07:10 wake against a stated
+    05:28 — every night, forever, each one ending "resolve_predicate prefers the
+    stated fact", which is the audit saying out loud that it found no ambiguity.
+
+    A report line that can never change is the nagging this plan exists to stop.
+    Now it flags only what `resolve_predicate` could genuinely have to choose
+    between.
+    """
+    from app.services.life_facts import RHYTHM_MIN_CONFIDENCE, RHYTHM_MIN_SAMPLES
+
     flags: List[str] = []
     rows = db.execute(text("""
         SELECT lf.predicate, lf.value_text AS fact_value, dr.median_time AS rhythm_value,
@@ -192,12 +207,16 @@ def _audit_contradictions(db, user_id: str) -> List[str]:
     """), {"uid": user_id}).fetchall()
 
     for row in rows:
+        if (row.rhythm_confidence or 0) < RHYTHM_MIN_CONFIDENCE:
+            continue
+        if (row.sample_count or 0) < RHYTHM_MIN_SAMPLES:
+            continue
         rhythm = row.rhythm_value.strftime("%H:%M")
         if abs(_minutes(row.fact_value) - _minutes(rhythm)) > 30:
             flags.append(
                 f"{row.predicate} has two live values: life_fact says {row.fact_value}, "
                 f"daily_rhythm says {rhythm} ({row.sample_count} samples, "
-                f"conf {row.rhythm_confidence:.2f}). resolve_predicate prefers the stated fact."
+                f"conf {row.rhythm_confidence:.2f}) — both clear the bar to be stated."
             )
     return flags
 
