@@ -116,8 +116,8 @@ services:
       - REDIS_URL=redis://redis:6379/0
       # AI Provider - defaults to local Qwen via llama-server
       - AI_PROVIDER=${AI_PROVIDER-openai}
-      - OPENAI_BASE_URL=${OPENAI_BASE_URL-http://100.104.68.115:8081/v1}
-      - OPENAI_MODEL=${OPENAI_MODEL-qwen3.6-27b}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL-http://100.104.68.115:8082/v1}  # chat lane; celery services stay on the :8081 bg lane
+      - OPENAI_MODEL=${OPENAI_MODEL-qwen3.8-27b}
       - OPENAI_API_KEY=${OPENAI_API_KEY-}
       - GEMINI_API_KEY=${GEMINI_API_KEY-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY-}
@@ -172,6 +172,13 @@ services:
       - /home/david/.ssh:/root/.ssh:ro
       # Mount desktop app release dir for OTA updates
       - ./sara-desktop/release:/updates:ro
+      # Sara's self-model documents. tools/self_knowledge.py resolves
+      # SELF_MODEL_DIR to /docs inside the container; without this mount the
+      # directory does not exist, so `get_self_knowledge` has returned an error
+      # for every call ever made in Docker and the nightly self-model
+      # regeneration in tasks/truth_maintenance.py silently no-ops. Read-write:
+      # the truth job rewrites the two generated sections.
+      - ./docs:/docs
       # Exclude Python cache
       - /app/__pycache__
       - /app/app/__pycache__
@@ -283,7 +290,7 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - AI_PROVIDER=${AI_PROVIDER-openai}
       - OPENAI_BASE_URL=${OPENAI_BASE_URL-http://100.104.68.115:8081/v1}
-      - OPENAI_MODEL=${OPENAI_MODEL-qwen3.6-27b}
+      - OPENAI_MODEL=${OPENAI_MODEL-qwen3.8-27b}
       - OPENAI_API_KEY=${OPENAI_API_KEY-}
       - FAST_MODEL_URL=${FAST_MODEL_URL-http://10.185.1.8:8686/v1}
       - FAST_MODEL=${FAST_MODEL-Qwen3.5-35B-A3B}
@@ -308,6 +315,9 @@ services:
       # Shared with backend so generated artifacts (morning brief audio,
       # briefing TTS, etc.) are visible to the API that serves them.
       - ./data:/home/david/jarvis/data
+      # Self-model docs — the nightly truth-maintenance job rewrites two of
+      # them, and it runs on this worker's `maintenance` queue.
+      - ./docs:/docs
     depends_on:
       redis:
         condition: service_healthy
@@ -343,7 +353,7 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - AI_PROVIDER=${AI_PROVIDER-openai}
       - OPENAI_BASE_URL=${OPENAI_BASE_URL-http://100.104.68.115:8081/v1}
-      - OPENAI_MODEL=${OPENAI_MODEL-qwen3.6-27b}
+      - OPENAI_MODEL=${OPENAI_MODEL-qwen3.8-27b}
       - OPENAI_API_KEY=${OPENAI_API_KEY-}
       - FAST_MODEL_URL=${FAST_MODEL_URL-http://10.185.1.8:8686/v1}
       - FAST_MODEL=${FAST_MODEL-Qwen3.5-35B-A3B}
@@ -404,7 +414,7 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - AI_PROVIDER=${AI_PROVIDER-openai}
       - OPENAI_BASE_URL=${OPENAI_BASE_URL-http://100.104.68.115:8081/v1}
-      - OPENAI_MODEL=${OPENAI_MODEL-qwen3.6-27b}
+      - OPENAI_MODEL=${OPENAI_MODEL-qwen3.8-27b}
       - OPENAI_API_KEY=${OPENAI_API_KEY-}
       - FAST_MODEL_URL=${FAST_MODEL_URL-http://10.185.1.8:8686/v1}
       - FAST_MODEL=${FAST_MODEL-Qwen3.5-35B-A3B}
@@ -432,13 +442,18 @@ services:
 
   # Celery David-Priority Worker — chat-initiated research from David
   # Isolated so a long research run never starves ACS or vice versa.
+  #
+  # --concurrency=1 is load-bearing, not a resource tweak: only run_research_plan
+  # routes to this queue, and two research agents hitting the Mac Studio bg lane
+  # at once is what OOM'd it into 507s on 2026-09-01 and destroyed three plans.
+  # Queued plans wait their turn instead of running in parallel.
   celery-david-priority:
     build:
       context: ./backend
       dockerfile: Dockerfile.dev
     user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
     restart: unless-stopped
-    command: celery -A app.celery_app worker --loglevel=info --concurrency=2 -Q david_priority -n david_priority@%h
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=1 -Q david_priority -n david_priority@%h
     deploy:
       resources:
         limits:
@@ -455,7 +470,7 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - AI_PROVIDER=${AI_PROVIDER-openai}
       - OPENAI_BASE_URL=${OPENAI_BASE_URL-http://100.104.68.115:8081/v1}
-      - OPENAI_MODEL=${OPENAI_MODEL-qwen3.6-27b}
+      - OPENAI_MODEL=${OPENAI_MODEL-qwen3.8-27b}
       - OPENAI_API_KEY=${OPENAI_API_KEY-}
       - FAST_MODEL_URL=${FAST_MODEL_URL-http://10.185.1.8:8686/v1}
       - FAST_MODEL=${FAST_MODEL-Qwen3.5-35B-A3B}
@@ -519,6 +534,7 @@ services:
       - ./backend:/app
       - /app/__pycache__
       - /app/app/__pycache__
+      - ./docs:/docs
     depends_on:
       - redis
       - celery-worker

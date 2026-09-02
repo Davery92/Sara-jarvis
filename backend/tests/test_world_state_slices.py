@@ -62,9 +62,14 @@ class TestGetWorldStateSliceIsolation:
         fetchone_result.title = "Risk Ninja call"
         import datetime
         fetchone_result.start_time = datetime.datetime(2026, 7, 29, 14, 30)
+        # Follow-up plan §5: the slice now reads a window of upcoming events and
+        # picks the first non-all-day one, so an all-day trip stops being
+        # announced as a meeting at midnight.
+        fetchone_result.all_day = False
         exec_result = MagicMock()
         exec_result.scalar.return_value = 1
         exec_result.fetchone.return_value = fetchone_result
+        exec_result.fetchall.return_value = [fetchone_result]
         db.execute.side_effect = lambda *a, **k: exec_result
 
         with patch("app.services.unified_context.read_snapshot", new=AsyncMock(

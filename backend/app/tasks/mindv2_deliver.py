@@ -61,11 +61,18 @@ async def _run_async():
     async with factory() as db:
         rows = (await db.execute(text("""
             SELECT cu.id, cu.candidate_id, cu.final_text, cu.text, cu.urgency, cu.created_at,
-                   sc.kind, sc.source
+                   sc.kind, sc.source, sc.topic_entities
             FROM composed_utterance cu
             JOIN say_candidate sc ON sc.id = cu.candidate_id
             WHERE cu.user_id = :uid AND cu.delivered_at IS NULL
-              AND cu.review_verdict IN ('approve', 'edit')
+              -- `final_text` is the decision about what goes out; the verdict is
+              -- the reviewer's opinion about the prose. They agree everywhere
+              -- except one case (follow-up plan §6): a result David asked for,
+              -- killed by review, that falls back to the plain announcement so a
+              -- completed request is never answered with silence. Selecting on
+              -- the verdict alone left that row composed, correct, and
+              -- undelivered — the Salem failure one step further down the pipe.
+              AND (cu.review_verdict IN ('approve', 'edit') OR cu.final_text IS NOT NULL)
             ORDER BY cu.created_at ASC LIMIT 10
         """), {"uid": user_id})).fetchall()
 
@@ -103,7 +110,14 @@ async def _run_async():
 
         message = (r.final_text or r.text or "").strip()
         category = _KIND_TO_CATEGORY.get(r.kind, "general")
-        topic = f"mindv2:{r.id}"  # unique per row — inherently tell-once
+        # Invariant 5: the topic IS the entity. A per-row unique topic is
+        # "inherently tell-once" only for that row — it let the same thread be
+        # announced again tomorrow under a fresh id, which is exactly what the
+        # Laura Weippert paraphrases did. create_candidate reads this column back
+        # to refuse a second candidate about something already said today, so the
+        # candidate's dedupe key (topic_entities[0]) has to survive to here.
+        entity_key = (list(r.topic_entities or []) or [None])[0]
+        topic = entity_key or f"mindv2:{r.id}"
 
         try:
             async with factory() as db:

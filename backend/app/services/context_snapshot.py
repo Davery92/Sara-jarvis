@@ -25,8 +25,9 @@ own careful rollout, not a side effect of this module existing).
 """
 
 import logging
+import re
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
@@ -34,6 +35,7 @@ from sqlalchemy.orm import Session
 
 from app.schemas.contracts import RelationshipStateV1, SelfStateV1, WorldStateV1
 from app.core.config import get_owner_id
+from app.core.timezone import render_when
 
 logger = logging.getLogger(__name__)
 
@@ -42,9 +44,26 @@ _TZ = ZoneInfo("America/New_York")
 
 
 def _today_bounds_naive(now_utc: datetime) -> tuple:
-    local_now = now_utc.astimezone(_TZ)
-    start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
-    return start.replace(tzinfo=None), (start + timedelta(days=1)).replace(tzinfo=None)
+    """Naive ET midnight bounds — for the legacy `timestamp without time zone`
+    columns that store ET wall-clock (calendar_event.start_time). NOT valid for
+    a timestamptz column; use `_today_bounds_aware` there."""
+    from app.core.timezone import naive_local_day_bounds
+    return naive_local_day_bounds(now_utc.astimezone(_TZ).date())
+
+
+def _today_bounds_aware(now_utc: datetime) -> tuple:
+    """Aware ET midnight bounds — for `timestamptz` columns (health_metric)."""
+    from app.core.timezone import local_day_bounds
+    return local_day_bounds(now_utc.astimezone(_TZ).date())
+
+
+# The metrics `health_today` is expected to carry. A metric missing from
+# health_metric is reported as "unavailable", never omitted: an omitted metric
+# reads to the model as "nothing worth mentioning", while the truth is "we do
+# not know" — and a model handed a gap where a number should be will fill it
+# (2026-08-31: seven days of invented HRV). Absence has to be as visible as
+# presence.
+EXPECTED_HEALTH_METRICS = ("hrv", "resting_hr", "sleep_hours", "steps")
 
 
 def _slice(now, source: str, confidence: float, **data) -> "WorldStateSliceV1":
@@ -74,17 +93,69 @@ async def get_world_state(db: Session, user_id: str = DEFAULT_USER_ID) -> WorldS
         confidence = min(confidence, 0.5)
 
     try:
+        # `world_thread`, not `followup_thread`. These were two separate thread
+        # tables and this count read the empty one: on 2026-09-02 the chat context
+        # said "open_threads=0" in the same prompt that listed eight active
+        # threads, three of them the Laura Weippert ones. world_thread is the one
+        # with closers and expiries (ground-truth Phase 2), so it is the one that
+        # can be counted honestly.
         open_threads = db.execute(text("""
-            SELECT COUNT(*) FROM followup_thread WHERE user_id = :uid AND status = 'open'
+            SELECT COUNT(*) FROM world_thread
+             WHERE user_id = :uid
+               AND status IN ('proposed', 'open', 'waiting', 'blocked', 'overdue')
         """), {"uid": user_id}).scalar() or 0
     except Exception as e:
-        logger.debug(f"[context_snapshot] followup_thread query failed: {e}")
+        logger.debug(f"[context_snapshot] world_thread query failed: {e}")
+        confidence = min(confidence, 0.5)
+
+    # Titled upcoming events, ALL-DAY INCLUDED. Before 2026-09-01 chat context
+    # carried only the count above — no titles, no horizon — so Sara invented
+    # upcoming plans from episodic memory (moved the Sept 30 Redstone dinner to
+    # "Labor Day weekend", knew nothing of a vacation starting in 2 days: the
+    # Salem block is all-day, which the world_brief calendar sweep also skips).
+    # start_time/end_time are naive ET wall-clock — compare against naive ET,
+    # never NOW() (session TZ is UTC).
+    upcoming_events: list = []
+    later_events: list = []
+    try:
+        from app.core.timezone import naive_local_now
+        _win_start = naive_local_now()
+        _near_end = _win_start + timedelta(days=14)
+        _rows = db.execute(text("""
+            SELECT title, start_time, end_time, COALESCE(all_day, FALSE) AS all_day
+            FROM calendar_event
+            WHERE user_id = :uid
+              AND COALESCE(end_time, start_time) >= :win_start
+              AND start_time < :win_far
+            ORDER BY start_time ASC LIMIT 40
+        """), {"uid": user_id, "win_start": _win_start,
+               "win_far": _win_start + timedelta(days=90)}).fetchall()
+        for r in _rows:
+            # calendar_event.start_time/end_time are NAIVE ET wall clock — say so
+            # rather than letting the renderer guess (invariant 4, one clock).
+            if r.all_day:
+                if r.end_time is not None and r.end_time.date() != r.start_time.date():
+                    _when = (f"{render_when(r.start_time.date())}–"
+                             f"{render_when(r.end_time.date())}")
+                else:
+                    _when = render_when(r.start_time.date())
+            else:
+                _when = render_when(r.start_time, source_convention="et")
+            _entry = f"{_when}: {(r.title or '').strip()}"
+            if r.start_time < _near_end:
+                if len(upcoming_events) < 12:
+                    upcoming_events.append(_entry)
+            elif len(later_events) < 5:
+                later_events.append(_entry)
+    except Exception as e:
+        logger.debug(f"[context_snapshot] upcoming calendar query failed: {e}")
         confidence = min(confidence, 0.5)
 
     summary = f"{active_calendar_events} calendar event(s) today, {open_threads} open thread(s)."
     calendar_horizon = _slice(
-        now, "calendar_event+followup_thread", confidence,
+        now, "calendar_event+world_thread", confidence,
         active_calendar_events=active_calendar_events, open_threads=open_threads,
+        upcoming=upcoming_events, later=later_events,
     )
 
     # david + home — both already live in unified_context's Redis snapshot;
@@ -120,22 +191,76 @@ async def get_world_state(db: Session, user_id: str = DEFAULT_USER_ID) -> WorldS
     except Exception as e:
         logger.debug(f"[context_snapshot] unified_context read failed: {e}")
 
-    # health_today — most recent daily recovery snapshot, if any. updated_at
-    # is the newest reading's own recorded_at (source truth), not read time.
+    # health_today — today's readings, each stamped with when it was taken.
+    # updated_at is the newest reading's own recorded_at (source truth), not
+    # read time. Every metric in EXPECTED_HEALTH_METRICS appears, present or
+    # not: a present one renders as "54 (as of 06:12)", a missing one as
+    # "unavailable". Confidence is per-metric coverage, not "a row exists" —
+    # a slice with sleep but no HRV is half-known, and must not claim 1.0.
     health_slice = None
     try:
-        row = db.execute(text("""
-            SELECT metric_type, value, recorded_at FROM health_metric
-            WHERE user_id = :uid AND recorded_at >= :day_start
-            ORDER BY recorded_at DESC LIMIT 20
-        """), {"uid": user_id, "day_start": day_start}).fetchall()
-        by_metric = {}
+        # Ground-truth plan, Phase 5 §7: the LATEST reading in the last 36 hours,
+        # not "today's". HealthKit syncs when the phone feels like it — on
+        # 2026-09-02 the night's sleep and HRV existed but landed at 07:22 ET,
+        # stamped 06:00, so the 6 AM brief and every chat turn before the sync
+        # reported "unavailable" for readings that were about to arrive. A 36-hour
+        # window with an explicit measured-at and synced-at is honest about both
+        # what was measured and when Sara learned it.
+        rows = db.execute(text("""
+            SELECT metric_type, value, recorded_at, created_at FROM health_metric
+            WHERE user_id = :uid AND recorded_at >= :since
+            ORDER BY recorded_at DESC LIMIT 100
+        """), {"uid": user_id, "since": now - timedelta(hours=36)}).fetchall()
+
+        by_metric: Dict[str, Any] = {}
         newest = None
-        for r in row:
-            by_metric.setdefault(r.metric_type, float(r.value))
-            if newest is None or (r.recorded_at and r.recorded_at > newest):
+        for r in rows:
+            if r.metric_type in by_metric:
+                continue
+            stamp = ""
+            if r.recorded_at:
+                measured = render_when(r.recorded_at, source_convention="utc")
+                stamp = f" (measured {measured}"
+                # When the two differ by more than an hour, say so — that gap is
+                # the difference between "no reading" and "no sync yet".
+                #
+                # Guarded on its own: the sync annotation is a nicety, and losing
+                # the whole health slice to a malformed created_at would hide
+                # every reading behind an empty section. Absence has to be
+                # visible (see EXPECTED_HEALTH_METRICS), which means the slice
+                # itself must survive anything one column can do to it.
+                try:
+                    synced_at = getattr(r, "created_at", None)
+                    if synced_at and (synced_at - r.recorded_at) > timedelta(hours=1):
+                        stamp += f", synced {render_when(synced_at, source_convention='utc')}"
+                except TypeError:
+                    pass
+                stamp += ")"
+            by_metric[r.metric_type] = f"{float(r.value):g}{stamp}"
+            if r.recorded_at and (newest is None or r.recorded_at > newest):
                 newest = r.recorded_at
-        health_slice = _slice(newest or now, "health_metric", 1.0 if row else 0.4, **by_metric)
+
+        # Resolve logical metrics onto whichever stream carries them today —
+        # today's HRV arrives as `hrv_morning`, and without this the slice
+        # reports "hrv unavailable" while the reading sits one key away.
+        from app.services.health_insight_service import METRIC_ALIASES
+        for canonical, chain in METRIC_ALIASES.items():
+            if canonical in by_metric:
+                continue
+            for alt in chain:
+                if alt in by_metric:
+                    by_metric[canonical] = by_metric[alt]
+                    break
+
+        present = sum(1 for m in EXPECTED_HEALTH_METRICS if m in by_metric)
+        for metric in EXPECTED_HEALTH_METRICS:
+            by_metric.setdefault(metric, "unavailable (nothing recorded in the last 36h)")
+
+        health_slice = _slice(
+            newest or now, "health_metric",
+            round(present / len(EXPECTED_HEALTH_METRICS), 2),
+            **by_metric,
+        )
     except Exception as e:
         logger.debug(f"[context_snapshot] health_metric query failed: {e}")
 
@@ -198,18 +323,34 @@ async def get_world_state(db: Session, user_id: str = DEFAULT_USER_ID) -> WorldS
     # not staleness (daily_rhythm itself decays its own confidence).
     expectations_slice = None
     try:
-        from app.services.daily_rhythm import build_rhythm_summary, get_upcoming_rhythm_window
+        from app.services.daily_rhythm import (
+            build_rhythm_summary, get_upcoming_rhythm_window, stated_rhythm_keys,
+        )
         from app.services.training_day import is_training_day
 
-        rhythm_summary = build_rhythm_summary(db, user_id)
+        # Follow-up plan §2: a learned median is not printed next to a stated
+        # fact that answers the same question. On 2026-09-02 this slice rendered
+        # "leave ~6:24" one line below "leaves for work 7am".
+        rhythm_summary = build_rhythm_summary(
+            db, user_id, exclude_keys=await stated_rhythm_keys(user_id))
         upcoming = get_upcoming_rhythm_window(db, user_id, within_minutes=180)
         training = is_training_day(db, user_id, now.astimezone(_TZ).date())
 
-        next_meeting_row = db.execute(text("""
-            SELECT title, start_time FROM calendar_event
+        # Follow-up plan §5: an all-day event has no start time. Its
+        # `start_time` is midnight because a date has to be stored in a
+        # timestamp column, and reading that as a clock time is how the
+        # expectations slice announced "next_meeting_at=Thu Sep 3, 12:00 AM ET"
+        # for a whole-day trip to Salem. All-day rows are excluded from
+        # `next_meeting` entirely and reported separately, without a time.
+        upcoming_rows = db.execute(text("""
+            SELECT title, start_time, COALESCE(all_day, FALSE) AS all_day
+            FROM calendar_event
             WHERE user_id = :uid AND start_time > :now_naive
-            ORDER BY start_time ASC LIMIT 1
-        """), {"uid": user_id, "now_naive": now.astimezone(_TZ).replace(tzinfo=None)}).fetchone()
+            ORDER BY start_time ASC LIMIT 10
+        """), {"uid": user_id, "now_naive": now.astimezone(_TZ).replace(tzinfo=None)}).fetchall()
+
+        next_meeting_row = next((r for r in upcoming_rows if not r.all_day), None)
+        next_all_day_row = next((r for r in upcoming_rows if r.all_day), None)
 
         exp_data = {}
         if rhythm_summary:
@@ -221,14 +362,20 @@ async def get_world_state(db: Session, user_id: str = DEFAULT_USER_ID) -> WorldS
         exp_data["is_training_day"] = bool(training.get("is_training_day"))
         if next_meeting_row:
             exp_data["next_meeting"] = next_meeting_row.title
-            exp_data["next_meeting_at"] = next_meeting_row.start_time.isoformat()
+            exp_data["next_meeting_at"] = render_when(
+                next_meeting_row.start_time, source_convention="et")
+        if next_all_day_row:
+            exp_data["next_event"] = (
+                f"{(next_all_day_row.title or '').strip()} — "
+                f"{render_when(next_all_day_row.start_time, source_convention='et', all_day=True)}"
+            )
 
         # Confidence: 0 with nothing predictable yet (cold start — no learned
         # rhythm, no training-day signal, no calendar), scaling up with how
         # many of the expected-day components actually resolved.
         signal_count = sum([
             bool(rhythm_summary), bool(upcoming), training.get("is_training_day") is not None,
-            bool(next_meeting_row),
+            bool(next_meeting_row or next_all_day_row),
         ])
         exp_confidence = min(1.0, signal_count / 3.0) if signal_count else 0.0
 
@@ -609,6 +756,136 @@ async def get_extended_signals(
     }
 
 
+_PKG_HEALTH_LINE_RE = re.compile(r"^\s*-\s*David's ([^:]+):", re.IGNORECASE)
+
+
+def suppress_pkg_health_conflicts(pkg_text: str, health_data: Dict[str, Any]) -> str:
+    """Drop PKG health lines about a metric `health_metric` already answered
+    for today. Raw wins, always — a graph fact is at best a paraphrase of a
+    measurement and at worst (pre-Phase-0) a number Sara invented, and two
+    numbers for the same metric side by side is how the model ends up choosing
+    the wrong one. Only genuinely conflicting lines go; everything else stays.
+    """
+    if not pkg_text or not health_data:
+        return pkg_text
+
+    from app.services.personal_knowledge_graph import _normalize_metric
+
+    # Metric names we have a real reading for today (not "unavailable").
+    answered = {
+        _normalize_metric(k) for k, v in health_data.items()
+        if not (isinstance(v, str) and v.startswith("unavailable"))
+    }
+    # health_metric's own naming vs. what the extractor tends to write.
+    aliases = {
+        "hrv": {"hrv", "heart rate variability"},
+        "resting hr": {"resting hr", "resting heart rate", "rhr"},
+        "sleep hours": {"sleep hours", "sleep duration", "sleep quality", "sleep"},
+        "steps": {"steps", "step count", "daily steps"},
+        "weight": {"weight", "body weight", "bodyweight"},
+        "heart rate": {"heart rate", "hr", "pulse"},
+    }
+    blocked = set()
+    for metric in answered:
+        blocked |= aliases.get(metric, {metric})
+
+    kept = []
+    for line in pkg_text.split("\n"):
+        m = _PKG_HEALTH_LINE_RE.match(line)
+        if m and _normalize_metric(m.group(1)) in blocked:
+            logger.debug(f"[context_snapshot] suppressed PKG health line (raw wins): {line.strip()[:80]}")
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
+def _clip_to_paragraph(text_: str, limit: int) -> str:
+    """Cut at a paragraph boundary, never mid-word.
+
+    `[:1500]` on the stable layer sliced a sentence in half; a model reading a
+    truncated clause completes it, and what it completes with is invention.
+    """
+    text_ = (text_ or "").strip()
+    if len(text_) <= limit:
+        return text_
+    head = text_[:limit]
+    for boundary in ("\n\n", "\n", ". "):
+        cut = head.rfind(boundary)
+        if cut > limit // 2:
+            return head[:cut].rstrip() + ("." if boundary == ". " else "")
+    return head.rsplit(" ", 1)[0] + "…"
+
+
+def _slice_is_dead(slice_name: str, data: Dict[str, Any]) -> bool:
+    """True when a slice has nothing worth a line in the prompt."""
+    if slice_name == "fleet":
+        # A host that has NEVER reported in is not an unreachable host; it is a
+        # registry row. When every registered host is in that state — which was
+        # true of all six for weeks — the slice is describing the registry, not
+        # the world, and saying "6 hosts unreachable" every turn is a lie of
+        # emphasis. Only report the fleet when something has actually reported.
+        host_count = int(data.get("host_count") or 0)
+        never_reported = data.get("never_reported") or []
+        return host_count == 0 or len(never_reported) >= host_count
+    return False
+
+
+_NOISE_PATTERN_RE = re.compile(r"(lock|light|door)[\w_]*\s*(cycle|routine)?", re.IGNORECASE)
+
+
+def _patterns_are_noise(patterns: str) -> bool:
+    """True when every learned pattern is a lock/light cycle at ~100%.
+
+    Those are the house behaving normally. Reported as "patterns", they read as
+    insight into David and crowd out the ones that are.
+    """
+    text_ = (patterns or "").strip()
+    if not text_:
+        return True
+    entries = [e.strip() for e in re.split(r"[;\n]", text_) if e.strip()]
+    if not entries:
+        return True
+    return all(
+        _NOISE_PATTERN_RE.search(e) and re.search(r"\b(9\d|100)\s*%", e)
+        for e in entries
+    )
+
+
+
+# Which budget allotment each rendered block draws from. The renderer emits a
+# flat list of lines; this maps a line's leading header back to its section so
+# the budget can charge it correctly.
+_SECTION_HEADERS = (
+    ("### Calendar", "calendar"),
+    ("### Relevant memory", "memory"),
+    ("## Today's Brief", "brief"),
+    ("## Knowledge Graph", "brief"),
+    ("## Recent Journal", "brief"),
+    ("### What you understand about David", "brief"),
+    ("## Lessons", "lessons"),
+    ("## Workspace", "device"),
+)
+
+
+def _split_sections(lines: List[str]) -> List[tuple]:
+    """Group rendered lines into (budget_section, text) blocks, in order."""
+    blocks: List[tuple] = []
+    current_name = "brief"
+    current: List[str] = []
+    for line in lines:
+        stripped = line.strip()
+        matched = next((n for h, n in _SECTION_HEADERS if stripped.startswith(h)), None)
+        if matched:
+            if current:
+                blocks.append((current_name, "\n".join(current)))
+            current_name, current = matched, [line]
+        else:
+            current.append(line)
+    if current:
+        blocks.append((current_name, "\n".join(current)))
+    return blocks
+
+
 def render_engaged_context(
     context: Dict[str, Any], open_intents: int, recall_traces: list,
     extended: Optional[Dict[str, Any]] = None,
@@ -639,20 +916,44 @@ def render_engaged_context(
         s = world.get(slice_name)
         if not s or not s.get("data"):
             continue
-        data_str = ", ".join(f"{k}={v}" for k, v in s["data"].items() if v not in (None, [], ""))
+        if _slice_is_dead(slice_name, s["data"]):
+            # Ground-truth plan, Phase 5 §8. A slice with nothing to say is worse
+            # than absent: the fleet line reported "6 hosts unreachable" on every
+            # turn for weeks when no agents were ever enrolled, and Sara never
+            # mentioned it because it was noise — it just cost tokens and made
+            # everything around it look equally ignorable.
+            continue
+        data_str = ", ".join(
+            f"{k}={v}" for k, v in s["data"].items()
+            if v not in (None, [], "") and k not in ("upcoming", "later")
+        )
         if data_str:
             lines.append(f"- **{slice_name}** ({s.get('source', '?')}, confidence={s.get('confidence', '?')}): {data_str}")
+
+    # Verified calendar block (2026-09-01): the ONLY authoritative source for
+    # upcoming plans in a chat turn. Rendered as explicit dated lines so the
+    # model quotes instead of reconstructing from memory.
+    _cal = (world.get("calendar_horizon") or {}).get("data") or {}
+    lines.append("### Calendar — verified upcoming (next 14 days)")
+    if _cal.get("upcoming"):
+        for _e in _cal["upcoming"]:
+            lines.append(f"  - {_e}")
+    else:
+        lines.append("  - nothing on the calendar in the next 14 days")
+    if _cal.get("later"):
+        lines.append("  further out: " + "; ".join(_cal["later"]))
 
     self_state = context.get("self_state") or {}
     if self_state.get("kernel_state"):
         lines.append(f"- **self**: kernel_state={self_state['kernel_state']}")
     for concern in (self_state.get("open_concerns") or [])[:5]:
         lines.append(f"  - concern: {concern}")
-    if self_state.get("self_story"):
-        # Arc 4.2: "included in every context in every state" — its own
-        # block, not folded into the terse `- **self**:` bullet line, since
-        # this is prose (a paragraph), not a data point.
-        lines.append(f"\n### Your ongoing self-story\n{self_state['self_story']}")
+    # The self-story is deliberately NOT injected (ground-truth plan, Phase 5 §5).
+    # `reflection/agent.py` regenerated it every four hours from the deliberation
+    # journal — ~130 "staying quiet" lines a day — and it drifted into things like
+    # "cowardice wearing a mask… I am terrified…" on a day nothing had happened.
+    # Sara then read that back as fact about herself on every single chat turn.
+    # The row is still written for the UI; it is no longer prompt input.
 
     relationship = context.get("relationship_state") or {}
     if relationship.get("active_conversation_id"):
@@ -672,20 +973,32 @@ def render_engaged_context(
     if extended:
         if extended.get("emotional_tone"):
             lines.append(f"- **sara_feels**: {extended['emotional_tone']}")
-        if extended.get("patterns"):
+        if extended.get("patterns") and not _patterns_are_noise(extended["patterns"]):
             lines.append(f"- **patterns**: {extended['patterns']}")
         if extended.get("device"):
             lines.append(f"\n{extended['device']}")
         if extended.get("daily_brief"):
-            lines.append(f"\n## Today's Brief\n{extended['daily_brief'][:1500]}")
+            lines.append(f"\n## Today's Brief\n{_clip_to_paragraph(extended['daily_brief'], 1500)}")
         if extended.get("pkg"):
-            lines.append(f"\n## Knowledge Graph\n{extended['pkg'][:1000]}")
+            pkg_text = suppress_pkg_health_conflicts(
+                extended["pkg"], (world.get("health_today") or {}).get("data") or {}
+            )
+            if pkg_text.strip():
+                lines.append(f"\n## Knowledge Graph\n{pkg_text[:1000]}")
         if extended.get("journal"):
-            lines.append(f"\n## Recent Journal\n{extended['journal'][:1000]}")
+            lines.append(f"\n## Recent Journal\n{_clip_to_paragraph(extended['journal'], 1000)}")
         if extended.get("lessons"):
             lines.append(f"\n{extended['lessons']}")
 
     if workspace_ctx:
         lines.append(workspace_ctx)
 
-    return "\n".join(lines)
+    # Ground-truth plan, Phase 5 §4: one hard cap, with a stated share per
+    # section. Before this the block was assembled and injected whole — 7-8k
+    # uncacheable tokens a turn, growing with every new slice anyone added.
+    from app.services.context_budget import SectionBudget
+
+    budget = SectionBudget()
+    for name, block in _split_sections(lines):
+        budget.add(name, block)
+    return budget.render()

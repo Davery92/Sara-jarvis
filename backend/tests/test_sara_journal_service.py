@@ -299,6 +299,27 @@ class TestSelfStory:
         mock_store.assert_not_awaited()
 
 
+def _arc(kind, title, next_step):
+    return MagicMock(kind=kind, title=title, next_step=next_step)
+
+
+class _ArcDB:
+    """A Session that answers the open-arc query with fixed `world_thread` rows
+    and records the SQL it was asked, so a test can check the filter itself."""
+
+    def __init__(self, rows):
+        self.rows = rows
+        self.statements = []
+
+    def execute(self, statement, params=None):
+        self.statements.append(statement)
+        return MagicMock(fetchall=lambda: self.rows)
+
+
+def _arc_db(rows):
+    return _ArcDB(rows)
+
+
 class TestTheoryOfDavid:
     """Arc 4.5: 'one versioned document she maintains in dreaming —
     rhythms, preferences, stress signatures, active arcs... grow from
@@ -327,16 +348,13 @@ class TestTheoryOfDavid:
     async def test_write_theory_of_david_nothing_to_consolidate_returns_none(self, journal_service):
         """No previous doc and every substrate source empty — genuinely
         nothing to ground a first document in."""
-        mock_db = MagicMock()
         with patch.object(journal_service, "get_theory_of_david", new=AsyncMock(return_value=None)), \
              patch("app.services.life_facts.get_life_facts_summary", new=AsyncMock(return_value=None)), \
              patch("app.services.behavioral_pattern_service.behavioral_pattern_service.get_active_patterns",
                    new=AsyncMock(return_value=[])), \
              patch("app.services.working_memory.read_memory",
-                   new=AsyncMock(side_effect=Exception("no working memory in test"))), \
-             patch("app.services.intent_graph_projection.get_intent_graph",
-                   return_value={"total": 0, "intents": []}):
-            result = await journal_service.write_theory_of_david(mock_db, "user-1")
+                   new=AsyncMock(side_effect=Exception("no working memory in test"))):
+            result = await journal_service.write_theory_of_david(_arc_db([]), "user-1")
         assert result is None
 
     @pytest.mark.asyncio
@@ -346,13 +364,16 @@ class TestTheoryOfDavid:
              patch("app.services.life_facts.get_life_facts_summary",
                    new=AsyncMock(return_value="David normally: wakes 5:00, trains 13:10.")), \
              patch("app.services.behavioral_pattern_service.behavioral_pattern_service.get_active_patterns",
-                   new=AsyncMock(return_value=[{"description": "Checks calendar before leaving for work."}])), \
+                   new=AsyncMock(return_value=[
+                       {"description": "Checks calendar before leaving for work.", "confidence": 0.82},
+                   ])), \
              patch("app.services.working_memory.read_memory", new=AsyncMock(return_value=stress_snap)), \
-             patch("app.services.intent_graph_projection.get_intent_graph",
-                   return_value={"total": 1, "intents": [{"next_step": "Finish the Risk Ninja deck", "kind": "commitment"}]}), \
              patch.object(journal_service, "_generate_entry", new=AsyncMock(return_value="New consolidated understanding.")) as mock_gen, \
              patch.object(journal_service, "_store_entry", new=AsyncMock()) as mock_store:
-            result = await journal_service.write_theory_of_david(MagicMock(), "user-1")
+            result = await journal_service.write_theory_of_david(
+                _arc_db([_arc("commitment", "Risk Ninja deck", "Finish the Risk Ninja deck")]),
+                "user-1",
+            )
 
         assert result == "New consolidated understanding."
         prompt = mock_gen.call_args[0][0]
@@ -363,7 +384,61 @@ class TestTheoryOfDavid:
         assert "0.65" in prompt
         mock_store.assert_awaited_once()
         assert mock_store.call_args.kwargs["entry_type"] == "theory_of_david"
-        assert mock_store.call_args.kwargs["content"] == "New consolidated understanding."
+
+    @pytest.mark.asyncio
+    async def test_low_confidence_patterns_stay_out_of_the_substrate(self, journal_service):
+        """Ground-truth plan, Phase 5 §6: only patterns confident enough to be
+        worth asserting. This document feeds itself back in every cycle, so a
+        weak pattern narrated into it once becomes an established belief about
+        David forever (gotcha_theory_of_david_self_reinforcing_nag)."""
+        with patch.object(journal_service, "get_theory_of_david", new=AsyncMock(return_value="Old understanding.")), \
+             patch("app.services.life_facts.get_life_facts_summary", new=AsyncMock(return_value=None)), \
+             patch("app.services.behavioral_pattern_service.behavioral_pattern_service.get_active_patterns",
+                   new=AsyncMock(return_value=[
+                       {"description": "Might prefer tea in the afternoon.", "confidence": 0.31},
+                   ])), \
+             patch("app.services.working_memory.read_memory",
+                   new=AsyncMock(side_effect=Exception("no working memory in test"))), \
+             patch.object(journal_service, "_generate_entry", new=AsyncMock(return_value="New.")) as mock_gen, \
+             patch.object(journal_service, "_store_entry", new=AsyncMock()):
+            await journal_service.write_theory_of_david(_arc_db([]), "user-1")
+        prompt = mock_gen.call_args[0][0]
+        assert "Might prefer tea" not in prompt
+
+    @pytest.mark.asyncio
+    async def test_reminders_and_standing_orders_are_not_open_arcs(self, journal_service):
+        """Phase 5 §6: chores and settings are not arcs. Including them is how
+        "eight live items requiring attention" got written on a day whose real
+        content was three standing orders and two cancelled reminders.
+
+        The follow-up plan moved the filter into the query and made it an
+        ALLOWLIST over `world_thread` — a blacklist admitted every kind nobody
+        had thought of. So this checks the SQL actually asks for the three
+        obligation kinds, and that what comes back is what gets narrated.
+        """
+        db = _arc_db([
+            _arc("commitment", "Risk Ninja deck", "Finish the Risk Ninja deck"),
+            _arc("follow_up", "Reply to the vendor", None),
+        ])
+        with patch.object(journal_service, "get_theory_of_david", new=AsyncMock(return_value="Old.")), \
+             patch("app.services.life_facts.get_life_facts_summary", new=AsyncMock(return_value=None)), \
+             patch("app.services.behavioral_pattern_service.behavioral_pattern_service.get_active_patterns",
+                   new=AsyncMock(return_value=[])), \
+             patch("app.services.working_memory.read_memory",
+                   new=AsyncMock(side_effect=Exception("no working memory in test"))), \
+             patch.object(journal_service, "_generate_entry", new=AsyncMock(return_value="New.")) as mock_gen, \
+             patch.object(journal_service, "_store_entry", new=AsyncMock()):
+            await journal_service.write_theory_of_david(db, "user-1")
+
+        sql = str(db.statements[0])
+        assert "'commitment', 'follow_up', 'support_ticket'" in sql
+        assert "reminder" not in sql and "standing_order" not in sql
+
+        prompt = mock_gen.call_args[0][0]
+        assert "Finish the Risk Ninja deck" in prompt
+        # Falls back to the title when a thread has no next step.
+        assert "Reply to the vendor" in prompt
+        assert "Open arcs (2 total)" in prompt
 
     @pytest.mark.asyncio
     async def test_write_theory_of_david_first_ever_entry_has_no_prior_placeholder(self, journal_service):
@@ -374,15 +449,78 @@ class TestTheoryOfDavid:
                    new=AsyncMock(return_value=[])), \
              patch("app.services.working_memory.read_memory",
                    new=AsyncMock(return_value=MagicMock(stress_load=0.3, alertness=0.5, circadian_phase="normal"))), \
-             patch("app.services.intent_graph_projection.get_intent_graph",
-                   return_value={"total": 0, "intents": []}), \
              patch.object(journal_service, "_generate_entry", new=AsyncMock(return_value="My first understanding.")) as mock_gen, \
              patch.object(journal_service, "_store_entry", new=AsyncMock()):
-            result = await journal_service.write_theory_of_david(MagicMock(), "user-1")
+            result = await journal_service.write_theory_of_david(_arc_db([]), "user-1")
 
         assert result == "My first understanding."
         prompt = mock_gen.call_args[0][0]
         assert "there is no prior understanding yet" in prompt
+
+    @pytest.mark.asyncio
+    async def test_a_draft_restating_a_routine_time_is_rejected(self, journal_service):
+        """Follow-up plan §3. The prompt has banned clock times since the
+        ground-truth plan landed and the model wrote "lunch at 2 AM" anyway —
+        a value from a life_fact that had already been deleted, surviving
+        because this document is its own next input. A prompt instruction is a
+        request; this is the check."""
+        drafts = [
+            "He is out the door by 7am and gets terse before a deploy.",
+            "He is out the door early and gets terse before a deploy.",
+        ]
+        with patch.object(journal_service, "get_theory_of_david", new=AsyncMock(return_value="Old.")), \
+             patch("app.services.life_facts.get_life_facts_summary",
+                   new=AsyncMock(return_value="David normally: leaves for work 7:00.")), \
+             patch("app.services.behavioral_pattern_service.behavioral_pattern_service.get_active_patterns",
+                   new=AsyncMock(return_value=[])), \
+             patch("app.services.working_memory.read_memory",
+                   new=AsyncMock(side_effect=Exception("no working memory in test"))), \
+             patch.object(journal_service, "_generate_entry",
+                          new=AsyncMock(side_effect=drafts)) as mock_gen, \
+             patch.object(journal_service, "_store_entry", new=AsyncMock()) as mock_store:
+            result = await journal_service.write_theory_of_david(_arc_db([]), "user-1")
+
+        assert mock_gen.await_count == 2, "one corrective retry"
+        assert "NO clock times" in mock_gen.call_args[0][0]
+        assert result == drafts[1]
+        mock_store.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_a_draft_that_keeps_the_time_is_not_stored(self, journal_service):
+        """Keeping yesterday's paragraph beats storing one that contradicts the
+        life-facts line — a stored contradiction is permanent."""
+        with patch.object(journal_service, "get_theory_of_david", new=AsyncMock(return_value="Old.")), \
+             patch("app.services.life_facts.get_life_facts_summary",
+                   new=AsyncMock(return_value="David normally: lunch 12:30.")), \
+             patch("app.services.behavioral_pattern_service.behavioral_pattern_service.get_active_patterns",
+                   new=AsyncMock(return_value=[])), \
+             patch("app.services.working_memory.read_memory",
+                   new=AsyncMock(side_effect=Exception("no working memory in test"))), \
+             patch.object(journal_service, "_generate_entry",
+                          new=AsyncMock(return_value="He eats at 12:30 sharp, every day.")), \
+             patch.object(journal_service, "_store_entry", new=AsyncMock()) as mock_store:
+            result = await journal_service.write_theory_of_david(_arc_db([]), "user-1")
+
+        assert result is None
+        mock_store.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_time_free_draft_is_stored_unchanged(self, journal_service):
+        with patch.object(journal_service, "get_theory_of_david", new=AsyncMock(return_value="Old.")), \
+             patch("app.services.life_facts.get_life_facts_summary",
+                   new=AsyncMock(return_value="David normally: leaves for work 7:00.")), \
+             patch("app.services.behavioral_pattern_service.behavioral_pattern_service.get_active_patterns",
+                   new=AsyncMock(return_value=[])), \
+             patch("app.services.working_memory.read_memory",
+                   new=AsyncMock(side_effect=Exception("no working memory in test"))), \
+             patch.object(journal_service, "_generate_entry",
+                          new=AsyncMock(return_value="He front-loads the day.")) as mock_gen, \
+             patch.object(journal_service, "_store_entry", new=AsyncMock()) as mock_store:
+            result = await journal_service.write_theory_of_david(_arc_db([]), "user-1")
+
+        assert mock_gen.await_count == 1
+        assert result == "He front-loads the day."
+        mock_store.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_write_theory_of_david_llm_failure_returns_none(self, journal_service):
@@ -392,11 +530,9 @@ class TestTheoryOfDavid:
                    new=AsyncMock(return_value=[])), \
              patch("app.services.working_memory.read_memory",
                    new=AsyncMock(return_value=MagicMock(stress_load=0.3, alertness=0.5, circadian_phase="normal"))), \
-             patch("app.services.intent_graph_projection.get_intent_graph",
-                   return_value={"total": 0, "intents": []}), \
              patch.object(journal_service, "_generate_entry", new=AsyncMock(return_value=None)), \
              patch.object(journal_service, "_store_entry", new=AsyncMock()) as mock_store:
-            result = await journal_service.write_theory_of_david(MagicMock(), "user-1")
+            result = await journal_service.write_theory_of_david(_arc_db([]), "user-1")
 
         assert result is None
         mock_store.assert_not_awaited()

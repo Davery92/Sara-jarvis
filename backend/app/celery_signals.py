@@ -16,9 +16,32 @@ Low overhead: writes happen only on a miss/failure, which is rare.
 """
 import logging
 
-from celery.signals import task_postrun
+from celery.signals import task_postrun, worker_process_init
 
 logger = logging.getLogger(__name__)
+
+
+@worker_process_init.connect
+def _wire_token_accounting(**_kwargs):
+    """Follow-up plan §7: give the worker a token-usage callback.
+
+    `core/llm._record_background_usage` reports every background model call to
+    whatever callback is registered — but the only place that ever registered
+    one was `main_simple.startup_event`, which Celery never runs. Appraisal,
+    judge, deliberation and compose all live here, so every one of their calls
+    was attributed to nobody and `token_usage` held chat rows and nothing else.
+
+    The synchronous writer, not `queue_token_usage`: a prefork child has no
+    long-lived event loop to drain an asyncio queue (see record_token_usage_sync).
+    """
+    try:
+        from app.core.llm import set_token_usage_callback
+        from app.services.token_usage_service import record_token_usage_sync
+
+        set_token_usage_callback(record_token_usage_sync)
+        logger.info("Token usage accounting wired for this worker process")
+    except Exception as e:
+        logger.warning(f"Token usage accounting not wired in worker: {e}")
 
 
 def _is_contract_miss(retval) -> tuple[bool, str | None]:
@@ -26,8 +49,17 @@ def _is_contract_miss(retval) -> tuple[bool, str | None]:
         eff = str(retval.get("effect") or "")
         if eff == "error" or eff.startswith("error"):
             return True, str(retval)[:300]
-        # Explicit failure contracts some tasks use.
-        if retval.get("ok") is False or retval.get("failed"):
+        # Explicit failure contracts some tasks use. `failed` must be a FLAG:
+        # a task that reports how many sub-items failed (`{"failed": 1}` out of
+        # 7 handled) is reporting normal partial progress, not its own failure.
+        failed = retval.get("failed")
+        if isinstance(failed, bool):
+            failed_flag = failed
+        elif isinstance(failed, str):
+            failed_flag = bool(failed)
+        else:
+            failed_flag = False
+        if retval.get("ok") is False or failed_flag:
             return True, str(retval)[:300]
     return False, None
 

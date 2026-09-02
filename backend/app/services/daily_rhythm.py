@@ -437,7 +437,9 @@ _SUMMARY_ORDER = [
     ("bedtime", "bed"),
 ]
 
-_MIN_CONFIDENCE_FOR_SUMMARY = 0.4
+# The summary's own 0.4 bar is gone: `build_rhythm_summary` now uses
+# life_facts.RHYTHM_MIN_CONFIDENCE / RHYTHM_MIN_SAMPLES, so there is one answer
+# to "is this rhythm row good enough to state" rather than a per-caller one.
 _MIN_CONFIDENCE_FOR_DEVIATION = 0.5
 
 
@@ -455,23 +457,68 @@ def _fetch_rhythm_rows(db: Session, user_id: str, day_scope: str) -> Dict[str, A
     return {r.rhythm_key: r for r in rows}
 
 
-def build_rhythm_summary(db: Session, user_id: str, on_date: Optional[date] = None) -> Optional[str]:
+def build_rhythm_summary(
+    db: Session,
+    user_id: str,
+    on_date: Optional[date] = None,
+    exclude_keys: Optional[Any] = None,
+) -> Optional[str]:
     """Compact one-line summary of today's learned rhythm, e.g.:
     'Rhythm: wake ~5:42, gym ~13:10, dinner ~19:28, winddown ~19:00, bed ~21:00 (weekday)'
-    Returns None if nothing is confident enough yet to be worth saying."""
+    Returns None if nothing is confident enough yet to be worth saying.
+
+    `exclude_keys` are rhythm keys a *stated* life fact already answers. A
+    learned median is a guess about a question David has already answered in
+    words; printing both is how one prompt carried "leave ~6:24" from an 8-sample
+    0.48-confidence row and "leaves for work 7am" from a stated fact, three lines
+    apart, with nothing to say which was true.
+
+    The confidence/sample bar is `life_facts`' bar, deliberately — one threshold
+    for "is this rhythm row good enough to say out loud", not one per caller.
+    """
+    from app.services.life_facts import RHYTHM_MIN_CONFIDENCE, RHYTHM_MIN_SAMPLES
+
     scope = _current_day_scope(on_date)
     by_key = _fetch_rhythm_rows(db, user_id, scope)
+    excluded = set(exclude_keys or ())
 
     parts = []
     for key, label in _SUMMARY_ORDER:
         row = by_key.get(key)
-        if not row or row.confidence < _MIN_CONFIDENCE_FOR_SUMMARY or not row.median_time:
+        if not row or not row.median_time or key in excluded:
+            continue
+        if (row.confidence or 0) < RHYTHM_MIN_CONFIDENCE:
+            continue
+        if (getattr(row, "sample_count", 0) or 0) < RHYTHM_MIN_SAMPLES:
             continue
         parts.append(f"{label} ~{row.median_time.strftime('%-H:%M')}")
 
     if not parts:
         return None
     return f"Rhythm: {', '.join(parts)} ({scope})"
+
+
+async def stated_rhythm_keys(user_id: str) -> set:
+    """Rhythm keys whose predicate already has a stated life fact.
+
+    Async because `resolve_predicate` is; callers in sync code should pass
+    `exclude_keys=None` and accept the unfiltered line rather than block.
+    """
+    from app.services.life_facts import LIFE_FACT_PREDICATES, resolve_predicate
+
+    excluded = set()
+    for predicate, spec in LIFE_FACT_PREDICATES.items():
+        rhythm_key = spec.get("rhythm_key")
+        if not rhythm_key:
+            continue
+        try:
+            resolved = await resolve_predicate(user_id, predicate)
+        except Exception as e:
+            logger.debug(f"[daily_rhythm] resolve_predicate({predicate}) failed: {e}")
+            continue
+        if resolved and resolved.get("source") == "stated":
+            excluded.add(rhythm_key)
+    return excluded
 
 
 def get_off_rhythm_flags(

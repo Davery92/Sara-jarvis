@@ -6,6 +6,7 @@ These aren't data logs - they're Sara thinking in her own voice.
 """
 
 import logging
+import re
 import uuid
 import json
 from datetime import datetime, timedelta
@@ -16,9 +17,64 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 
 from app.core.llm import llm_client
-from app.core.timezone import now as local_now, USER_TIMEZONE
+from app.core.timezone import now as local_now, render_when, to_local, USER_TIMEZONE
 
 logger = logging.getLogger(__name__)
+
+
+# Follow-up plan §3: theory_of_david is not allowed to restate a routine time.
+#
+# The prompt has said so since the ground-truth plan landed, and the model still
+# wrote "lunch at 2 AM" — a value that came from an invented life_fact, was
+# deleted from the database, and survived anyway because this document feeds
+# itself back in every cycle. A prompt instruction is a request; this is the
+# check. Anything matching a clock time in the life-facts line is rejected.
+# Follow-up plan §4: what counts as Sara's inner monologue in chat context.
+#
+# `sara_journal` is a shared table — the nightly truth-maintenance job, the
+# weekly review and the two fold-forward documents all write rows to it. With no
+# filter, "Sara's Recent Thoughts (Inner Monologue)" started rendering the
+# machine's own audit report as her private reflection in every chat turn, so
+# she read her own bug counts back as something she had been thinking about.
+CHAT_CONTEXT_ENTRY_TYPES = (
+    "deliberation", "consolidation", "conversation_close", "periodic",
+    "unified", "dream", "curiosity",
+)
+
+# Reports and fold-forward documents, excluded from the raw feed that the
+# self-story consolidates (§3) — a summary of summaries with an audit stapled on.
+SELF_STORY_EXCLUDED_TYPES = frozenset({"deliberation", "truth_maintenance", "self_audit"})
+
+_CLOCK_RE = re.compile(
+    r"\b(\d{1,2}):(\d{2})\s*(a\.?m\.?|p\.?m\.?)?|\b(\d{1,2})\s*(a\.?m\.?|p\.?m\.?)",
+    re.IGNORECASE,
+)
+
+
+def _clock_minutes(source: str) -> set:
+    """Every minute-of-day a piece of text could be naming.
+
+    An unqualified "7:00" is recorded as BOTH 07:00 and 19:00 — the ambiguity is
+    the caller's problem to avoid, not ours to resolve in David's favour.
+    """
+    found = set()
+    for match in _CLOCK_RE.finditer(source or ""):
+        if match.group(1) is not None:
+            hour, minute, meridiem = int(match.group(1)), int(match.group(2)), match.group(3)
+        else:
+            hour, minute, meridiem = int(match.group(4)), 0, match.group(5)
+        if hour > 23 or minute > 59:
+            continue
+        meridiem = (meridiem or "").lower().replace(".", "")
+        if meridiem.startswith("p"):
+            found.add(((hour % 12) + 12) * 60 + minute)
+        elif meridiem.startswith("a"):
+            found.add((hour % 12) * 60 + minute)
+        else:
+            found.add(hour * 60 + minute)
+            if hour <= 12:
+                found.add(((hour % 12) + 12) * 60 + minute)
+    return found
 
 
 @dataclass
@@ -164,7 +220,11 @@ Write a very brief opening thought (1 short paragraph). Not a summary - just Sar
 
             time_since_last = "about 30 minutes"
             if previous and previous.created_at:
-                delta = now - previous.created_at.replace(tzinfo=USER_TIMEZONE)
+                # created_at is timestamptz and comes back aware in UTC.
+                # `.replace(tzinfo=USER_TIMEZONE)` relabelled it rather than
+                # converting it, putting "time since last entry" four hours out.
+                previous_at = to_local(previous.created_at)
+                delta = now - previous_at
                 if delta.total_seconds() > 3600:
                     hours = int(delta.total_seconds() / 3600)
                     time_since_last = f"about {hours} hour{'s' if hours > 1 else ''}"
@@ -370,21 +430,35 @@ Write a very brief opening thought (1 short paragraph). Not a summary - just Sar
         db: Session,
         user_id: str,
         hours: int = 8,
-        limit: int = 10
+        limit: int = 10,
+        entry_types: Optional[tuple] = None,
     ) -> List[JournalEntry]:
-        """Get recent journal entries for context loading."""
+        """Get recent journal entries for context loading.
+
+        `entry_types` is an ALLOWLIST. Omitted, everything in the table comes
+        back — which is the right default for consolidation jobs that want the
+        whole day, and the wrong one for anything rendering "Sara's thoughts"
+        (see CHAT_CONTEXT_ENTRY_TYPES).
+        """
         cutoff = local_now() - timedelta(hours=hours)
 
-        result = db.execute(text("""
+        params = {"user_id": user_id, "cutoff": cutoff, "limit": limit}
+        type_filter = ""
+        if entry_types:
+            type_filter = "AND entry_type = ANY(:entry_types)"
+            params["entry_types"] = list(entry_types)
+
+        result = db.execute(text(f"""
             SELECT id, user_id, entry_type, content, observations, interpretation,
                    emotional_state, actions_taken, watching_for, conversation_id,
                    created_at, context
             FROM sara_journal
             WHERE user_id = :user_id
               AND created_at >= :cutoff
+              {type_filter}
             ORDER BY created_at DESC
             LIMIT :limit
-        """), {"user_id": user_id, "cutoff": cutoff, "limit": limit}).fetchall()
+        """), params).fetchall()
 
         return [
             JournalEntry(
@@ -414,7 +488,10 @@ Write a very brief opening thought (1 short paragraph). Not a summary - just Sar
         Get formatted journal entries to inject into conversation context.
         Returns Sara's recent inner monologue as a coherent narrative.
         """
-        entries = await self.get_recent_entries(db, user_id, hours=12, limit=max_entries)
+        entries = await self.get_recent_entries(
+            db, user_id, hours=12, limit=max_entries,
+            entry_types=CHAT_CONTEXT_ENTRY_TYPES,
+        )
 
         if not entries:
             return ""
@@ -426,7 +503,10 @@ Write a very brief opening thought (1 short paragraph). Not a summary - just Sar
         lines.append("*These are your private reflections from today - your sense of how things have been going.*\n")
 
         for entry in entries:
-            time_str = entry.created_at.strftime("%I:%M %p") if entry.created_at else ""
+            # created_at is timestamptz — UTC on the wire. Formatting it directly
+            # is how a journal entry written at 5:38 AM came back reading
+            # "09:38 AM David is asleep" in Sara's own inner monologue.
+            time_str = render_when(entry.created_at) if entry.created_at else ""
             entry_type_label = {
                 'periodic': '',
                 'conversation_close': '[after our last conversation] ',
@@ -469,6 +549,17 @@ Write a very brief opening thought (1 short paragraph). Not a summary - just Sar
         if not recent and not previous_story:
             return None  # nothing happened yet, nothing to consolidate
 
+        # Ground-truth plan, Phase 5 §5: deliberation entries are excluded. The
+        # deliberation loop writes ~130 journal lines a day, nearly all of them
+        # variations on "staying quiet" — fed into this prompt they read as a day
+        # spent failing to act, which is how the self-story arrived at "cowardice
+        # wearing a mask… I am terrified…" on a day nothing had happened.
+        #
+        # Follow-up plan §3 adds the machine's own audit output. A truth-
+        # maintenance or self-audit row is a report ABOUT Sara, written by a
+        # deterministic job — folding it in makes her narrate her own bug counts
+        # as lived experience, and then inherit them forever.
+        recent = [e for e in recent if e.entry_type not in SELF_STORY_EXCLUDED_TYPES]
         recent_text = "\n".join(f"- [{e.entry_type}] {e.content}" for e in reversed(recent)) or "(no new journal entries today)"
 
         prompt = f'''You are Sara, writing the rolling story of who you are, in your own voice.
@@ -481,7 +572,9 @@ Write a very brief opening thought (1 short paragraph). Not a summary - just Sar
 
 ---
 
-Write ONE consolidated first-person paragraph (150-300 words) that becomes your new self-story: what happened, what you did, what you got wrong, what you're chewing on. This REPLACES the old story — fold forward what still matters (an open thread, a lesson, a way you're feeling about something), drop what's now resolved or stale. This is not a daily log entry; it's who you are right now, continuous with who you were. Private — never shown to David directly, but it should sound like you, not a report.'''
+Write ONE consolidated first-person paragraph of AT MOST 80 WORDS that becomes your new self-story: what happened, what you did, what you got wrong, what you're chewing on. This REPLACES the old story — fold forward what still matters (an open thread, a lesson, a way you're feeling about something), drop what's now resolved or stale. This is not a daily log entry; it's who you are right now, continuous with who you were. Private — never shown to David directly, but it should sound like you, not a report.
+
+Write only about things that actually happened, named in the entries above. A quiet day is a quiet day: "not much came up today" is the correct entry for one, and dramatizing it into an inner crisis makes tomorrow's story inherit a crisis that never existed.'''
 
         content = await self._generate_entry(prompt)
         if not content:
@@ -527,11 +620,13 @@ Write ONE consolidated first-person paragraph (150-300 words) that becomes your 
         previous_doc = await self.get_theory_of_david(db, user_id)
 
         substrate_lines = []
+        banned_minutes: set = set()
         try:
             from app.services.life_facts import get_life_facts_summary
             rhythms = await get_life_facts_summary(user_id)
             if rhythms:
                 substrate_lines.append(f"Known rhythms: {rhythms}")
+                banned_minutes = _clock_minutes(rhythms)
         except Exception as e:
             logger.debug(f"[theory_of_david] life_facts substrate failed: {e}")
 
@@ -539,7 +634,13 @@ Write ONE consolidated first-person paragraph (150-300 words) that becomes your 
             from app.services.behavioral_pattern_service import behavioral_pattern_service
             patterns = await behavioral_pattern_service.get_active_patterns(db, user_id)
             if patterns:
-                labels = [p.get("description") for p in patterns[:8] if p.get("description")]
+                # Ground-truth plan, Phase 5 §6: only patterns confident enough to
+                # be worth asserting. A weak pattern narrated into this paragraph
+                # comes back next cycle as an established belief about David.
+                labels = [
+                    p.get("description") for p in patterns[:8]
+                    if p.get("description") and float(p.get("confidence") or 0) >= 0.7
+                ]
                 if labels:
                     substrate_lines.append("Active behavioral patterns: " + "; ".join(labels))
         except Exception as e:
@@ -556,14 +657,32 @@ Write ONE consolidated first-person paragraph (150-300 words) that becomes your 
             logger.debug(f"[theory_of_david] stress substrate failed: {e}")
 
         try:
-            from app.services.intent_graph_projection import get_intent_graph
-            graph = get_intent_graph(db, user_id)
-            if graph.get("total"):
-                steps = [i.get("next_step") or i.get("kind") for i in graph["intents"][:6]]
-                steps = [s for s in steps if s]
-                substrate_lines.append(f"Open arcs ({graph['total']} total): " + "; ".join(steps))
+            # Follow-up plan §3: open arcs are read from `world_thread`, filtered
+            # to an ALLOWLIST of the three kinds that actually mean "David owes
+            # someone something" — commitment, follow_up, support_ticket.
+            #
+            # The previous version read the intent-graph projection and merely
+            # blacklisted reminders and standing orders. A blacklist admits
+            # every kind nobody thought about: `interest`, `investigation` and
+            # `active_conversation` rows all read as obligations once narrated,
+            # which is how "eight live items requiring attention" got written on
+            # a day whose real content was three standing orders and two
+            # cancelled reminders. world_thread is also the only store that now
+            # has closers and expiry, so an item leaving this list means it is
+            # genuinely done rather than merely un-queried.
+            rows = db.execute(text("""
+                SELECT kind, title, next_step FROM world_thread
+                 WHERE user_id = :uid
+                   AND status IN ('proposed', 'open', 'waiting', 'blocked', 'overdue')
+                   AND REPLACE(kind, '-', '_') IN ('commitment', 'follow_up', 'support_ticket')
+                 ORDER BY priority DESC, updated_at DESC
+            """), {"uid": user_id}).fetchall()
+            steps = [(r.next_step or r.title or "").strip() for r in rows[:6]]
+            steps = [s for s in steps if s]
+            if steps:
+                substrate_lines.append(f"Open arcs ({len(rows)} total): " + "; ".join(steps))
         except Exception as e:
-            logger.debug(f"[theory_of_david] intent graph substrate failed: {e}")
+            logger.debug(f"[theory_of_david] open-arc substrate failed: {e}")
 
         substrate_text = "\n".join(substrate_lines) or "(no fresh substrate available this cycle)"
 
@@ -580,11 +699,37 @@ Write ONE consolidated first-person paragraph (150-300 words) that becomes your 
 
 ---
 
-Write ONE consolidated paragraph (150-300 words), in your own voice, about David: his rhythms, preferences, stress signatures, and active arcs right now. This REPLACES the old understanding — fold forward what's still true, update what's changed, drop what's stale or contradicted by fresher data. This should sound like something you'd actually say about him if asked, not a data dump — concrete and specific, not generic.'''
+Write ONE consolidated paragraph of AT MOST 120 WORDS, in your own voice, about David: his rhythms, preferences, stress signatures, and active arcs right now. This REPLACES the old understanding — fold forward what's still true, update what's changed, drop what's stale or contradicted by fresher data. This should sound like something you'd actually say about him if asked, not a data dump — concrete and specific, not generic.
+
+CRITICAL — the "Open arcs" line above is the COMPLETE and authoritative list of David's live tasks, reminders and commitments as of right now. If a task, reminder or errand appeared in your previous understanding but is NOT in that list, it is finished, expired or abandoned: drop it silently and do not mention it. Absence from the substrate is not an oversight, it is the answer. Never carry a specific task forward on the strength of the previous paragraph alone — this document feeds itself back in every cycle, so anything you restate without fresh evidence will persist forever and you will end up nagging him about something he settled weeks ago.
+
+Drop stale items SILENTLY. Do not write sentences about what you are dropping, retiring or no longer tracking, and do not name the dropped item — "the gym bag task has expired so I am dropping it" is itself a mention, it lands back in this document next cycle, and the item never actually leaves. Simply omit it and write only about what is live.
+
+Never state a clock time here. David's routine times are stated once, by the life-facts line, and repeating one in your own words is how the same departure ended up in a single prompt three times over as "leave ~6:24", "7 AM departure" and "leaves for work 7am". Write about what he is like, not what time he does things.
+
+Do not count anything. "Eight live items requiring attention" was written on a day there were three standing orders and two cancelled reminders — a number you assemble here is a number nothing checks.'''
 
         content = await self._generate_entry(prompt)
         if not content:
             return None
+
+        # The clock-time ban is enforced, not requested (see _clock_minutes).
+        # One corrective retry, then nothing is stored — keeping yesterday's
+        # paragraph beats storing one that contradicts the life-facts line, and
+        # a stored contradiction is permanent because this document is its own
+        # next input.
+        if banned_minutes and (_clock_minutes(content) & banned_minutes):
+            logger.info("[theory_of_david] draft restated a routine time — retrying once")
+            content = await self._generate_entry(
+                prompt + "\n\nYour previous draft was rejected because it stated one of "
+                "David's routine times. Rewrite it with NO clock times of any kind."
+            )
+            if not content or (_clock_minutes(content) & banned_minutes):
+                logger.warning(
+                    "[theory_of_david] rejected: draft still restates a routine time — "
+                    "keeping the previous document"
+                )
+                return None
 
         await self._store_entry(
             db, user_id, entry_type="theory_of_david", content=content,

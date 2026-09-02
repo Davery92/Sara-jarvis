@@ -66,8 +66,11 @@ async def _run_async():
     from sqlalchemy import text
     from app.db.session import get_async_session_factory
     from app.services.candidate_states import CandidateStatus
-    from app.services.compose import compose_utterance, compose_digest_utterance, ComposeDeclined
-    from app.services.review import review_utterance
+    from app.services.compose import (
+        compose_utterance, compose_digest_utterance, fallback_utterance, ComposeDeclined,
+    )
+    from app.services.judge import is_david_requested
+    from app.services.review import gather_entity_history, review_utterance
     from app.services.world_brief import get_rendered_brief
     from app.services.judge import _gather_utterance_history, _gather_recent_chat
 
@@ -76,7 +79,8 @@ async def _run_async():
 
     async with factory() as db:
         rows = (await db.execute(text("""
-            SELECT sc.id, sc.kind, sc.summary, sc.evidence, sc.judge_reason
+            SELECT sc.id, sc.kind, sc.source, sc.summary, sc.evidence, sc.judge_reason,
+                   sc.topic_entities
             FROM say_candidate sc
             WHERE sc.user_id = :uid AND sc.status = :status
               AND NOT EXISTS (SELECT 1 FROM composed_utterance cu WHERE cu.candidate_id = sc.id)
@@ -226,33 +230,51 @@ async def _run_async():
 
     for r in individual_rows:
         candidate = {
-            "id": str(r.id), "kind": r.kind, "summary": r.summary,
+            "id": str(r.id), "kind": r.kind, "source": r.source, "summary": r.summary,
             "evidence": r.evidence, "judge_reason": r.judge_reason,
+            "topic_entities": list(r.topic_entities or []),
         }
+        # Follow-up plan §6: a result David asked for is announced, whatever the
+        # compose and review models think of the prose.
+        david_waiting = is_david_requested(candidate)
 
         try:
             composed = await compose_utterance(candidate, brief_text, recent_chat, user_id=user_id)
         except ComposeDeclined as e:
-            # Deterministic — the payload is too thin no matter how many
-            # times we retry. Advance past judged_send so it stops being
-            # picked up by every future cycle (unlike a real transient
-            # error below, which we deliberately leave to retry).
-            logger.info(f"[compose] declined for {candidate['id']}: {e}")
-            async with factory() as db:
-                await db.execute(text("""
-                    UPDATE say_candidate SET status = :status
-                    WHERE id = :cid AND user_id = :uid
-                """), {"status": CandidateStatus.DECLINED.value, "cid": candidate["id"], "uid": user_id})
-                await db.commit()
-            stats["declined"] = stats.get("declined", 0) + 1
-            continue
+            if david_waiting:
+                logger.info(
+                    f"[compose] declined for {candidate['id']} but David asked for it — "
+                    f"falling back to the plain announcement: {e}"
+                )
+                composed = fallback_utterance(candidate)
+            else:
+                # Deterministic — the payload is too thin no matter how many
+                # times we retry. Advance past judged_send so it stops being
+                # picked up by every future cycle (unlike a real transient
+                # error below, which we deliberately leave to retry).
+                logger.info(f"[compose] declined for {candidate['id']}: {e}")
+                async with factory() as db:
+                    await db.execute(text("""
+                        UPDATE say_candidate SET status = :status
+                        WHERE id = :cid AND user_id = :uid
+                    """), {"status": CandidateStatus.DECLINED.value, "cid": candidate["id"], "uid": user_id})
+                    await db.commit()
+                stats["declined"] = stats.get("declined", 0) + 1
+                continue
         except Exception as e:
             logger.warning(f"[compose] compose failed for {candidate['id']}: {e}")
             stats["errors"] += 1
             continue
 
         try:
-            review = await review_utterance(composed["text"], candidate, brief_text, utterance_history)
+            # Invariant 5: the said-before check needs what was already said about
+            # THIS entity, not just recent notification titles across all topics.
+            entity_key = (list(candidate.get("topic_entities") or []) or [None])[0]
+            async with factory() as hdb:
+                entity_history = await gather_entity_history(hdb, user_id, entity_key)
+            review = await review_utterance(
+                composed["text"], candidate, brief_text, utterance_history, entity_history,
+            )
         except Exception as e:
             logger.warning(f"[compose] review raised unexpectedly for {candidate['id']}: {e}")
             review = {"verdict": "kill", "reason": f"review_exception: {e}", "edited_text": None}
@@ -286,6 +308,19 @@ async def _run_async():
                     "edited_text": None,
                 }
                 final_text = None
+
+        # Follow-up plan §6, the other half: review and the hedging linter are
+        # the two remaining ways a finished request could end in silence. Both
+        # judge the PROSE, and the plain announcement has no prose to object to
+        # — so a killed david_chat result falls back rather than vanishing. The
+        # kill verdict and its reason are still recorded honestly below; what
+        # changes is that David hears the report exists.
+        if final_text is None and david_waiting:
+            logger.info(
+                f"[compose] review verdict {review['verdict']!r} on a result David asked for "
+                f"({candidate['id']}) — sending the plain announcement instead of nothing"
+            )
+            final_text = fallback_utterance(candidate)["text"]
 
         async with factory() as db:
             await db.execute(text("""

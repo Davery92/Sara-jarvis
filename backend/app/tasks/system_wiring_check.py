@@ -214,6 +214,127 @@ def _check_deployed_code_freshness() -> list:
     return []
 
 
+# Ground-truth invariant 3: "everything open has a closer and an expiry." A thread
+# kind that nothing can close is a nag generator — the three Laura Weippert
+# threads were `commitment` and `follow_up`, and no code path in the system could
+# resolve either. Each kind here names how it gets closed; a new kind with no
+# entry fails the check rather than quietly joining them.
+THREAD_KIND_CLOSERS = {
+    "active_conversation": "conversation.closed",
+    "follow_up": "thread.resolved (sent reply / David / ack / expiry)",
+    "commitment": "thread.resolved (commitment_service / David / expiry)",
+    "plan": "task.completed / task.cancelled",
+    "decision": "thread.resolved (David / expiry)",
+    "dependency": "thread.resolved (David / expiry)",
+    "prep": "calendar.ended",
+    "meeting": "calendar.ended",
+    "support_ticket": "thread.resolved (sent reply / David)",
+}
+
+
+def _check_one_task_world() -> list:
+    """The tool, the API and the status tool must read the same task world.
+
+    On 2026-09-01 David asked "is it running?" fifteen minutes after starting a
+    research plan. `get_background_tasks` read `background_task` only — blind to
+    `research_plan` — so Sara told him, with total confidence, that the plan did
+    not exist. He asked three more times and got three more plans, all four of
+    which then ran to completion. One function, or this fails.
+    """
+    import inspect
+
+    problems: list = []
+    try:
+        from app.services import agent_activity
+        from app.tools import agents as agents_tool
+        from app.routes import background_tasks as tasks_route
+
+        if not hasattr(agent_activity, "get_agent_activity"):
+            return ["agent_activity.get_agent_activity is missing"]
+
+        tool_source = inspect.getsource(agents_tool)
+        if "get_agent_activity" not in tool_source:
+            problems.append(
+                "get_background_tasks does not call agent_activity.get_agent_activity "
+                "— the tool and the app see different task worlds"
+            )
+        if "get_agent_activity" not in inspect.getsource(tasks_route):
+            problems.append("/api/agent-activity does not use agent_activity.get_agent_activity")
+        # research_plan_status must agree on what "running" means.
+        if not hasattr(agent_activity, "RESEARCH_STATUS_MAP"):
+            problems.append("agent_activity.RESEARCH_STATUS_MAP is missing — status vocabulary is unshared")
+    except Exception as e:
+        problems.append(f"task-world check failed to run: {e}")
+    return problems
+
+
+def _check_thread_closer_coverage() -> list:
+    """Every live thread kind must have a way to end."""
+    from sqlalchemy import text as sa_text
+    from app.db.base import SessionLocal
+
+    problems: list = []
+    try:
+        with SessionLocal() as db:
+            rows = db.execute(sa_text("""
+                SELECT kind, COUNT(*) AS n FROM world_thread
+                 WHERE status IN ('proposed','open','waiting','blocked','overdue')
+                 GROUP BY kind
+            """)).fetchall()
+            for row in rows:
+                kind = (row.kind or "").strip()
+                # Normalize the hyphen/underscore drift the interpreter produces
+                # ("follow-up" vs "follow_up") before deciding it's unknown.
+                if kind.replace("-", "_") not in THREAD_KIND_CLOSERS:
+                    problems.append(
+                        f"thread kind {kind!r} ({row.n} open) has no registered closer"
+                    )
+
+            orphans = db.execute(sa_text("""
+                SELECT COUNT(*) FROM world_thread
+                 WHERE status IN ('proposed','open','waiting','blocked')
+                   AND due_at IS NULL AND next_review_at IS NULL
+            """)).scalar() or 0
+            if orphans:
+                problems.append(f"{orphans} open thread(s) with neither a due date nor a review date")
+
+            unverified = db.execute(sa_text("""
+                SELECT COUNT(*) FROM world_thread
+                 WHERE status IN ('proposed','open','waiting','blocked','overdue')
+                   AND due_at IS NOT NULL
+                   AND (due_provenance IS NULL OR due_provenance = 'legacy:unverified')
+            """)).scalar() or 0
+            if unverified:
+                problems.append(f"{unverified} open thread(s) with a deadline nothing vouches for")
+    except Exception as e:
+        logger.debug(f"Thread closer check skipped: {e}")
+    return problems
+
+
+def _check_self_model_docs() -> list:
+    """Sara can read her own documentation.
+
+    `tools/self_knowledge.py` resolves SELF_MODEL_DIR to `/docs` inside the
+    container. Nothing mounted it there until 2026-09-02, so every
+    `get_self_knowledge` call in Docker returned a file-not-found error and the
+    nightly self-model regeneration wrote nothing — for as long as she has run
+    in Docker, and silently, because a missing directory looks the same as a
+    tool David never happened to trigger.
+    """
+    from app.tools.self_knowledge import SELF_KNOWLEDGE_SECTIONS, SELF_MODEL_DIR
+
+    problems: list = []
+    if not SELF_MODEL_DIR.is_dir():
+        return [f"SELF_MODEL_DIR {SELF_MODEL_DIR} does not exist — self-knowledge is dark"]
+    missing = [
+        name for name in SELF_KNOWLEDGE_SECTIONS.values()
+        if not (SELF_MODEL_DIR / name).is_file()
+    ]
+    if missing:
+        problems.append(f"self-model docs missing from {SELF_MODEL_DIR}: {', '.join(missing)}")
+    return problems
+
+
 @celery_app.task(name="app.tasks.system_wiring_check.run_check", queue="low_priority")
 def run_check():
     """Weekly self-audit. Green -> quiet digest line. Red -> Needs-You inbox item."""
@@ -223,12 +344,18 @@ def run_check():
     job_problems = _check_scheduled_job_health()
     stale_tables = _check_learning_freshness()
     stale_code = _check_deployed_code_freshness()
+    closer_gaps = _check_thread_closer_coverage()
+    task_world_gaps = _check_one_task_world()
+    self_model_gaps = _check_self_model_docs()
 
     all_problems = (
         [f"Unscheduled task: {t}" for t in unscheduled]
         + [f"Job unhealthy: {p}" for p in job_problems]
         + [f"Learning table stale: {s}" for s in stale_tables]
         + stale_code
+        + [f"Closer coverage: {c}" for c in closer_gaps]
+        + [f"Task world: {t}" for t in task_world_gaps]
+        + [f"Self-knowledge: {s}" for s in self_model_gaps]
     )
 
     async def _report():
@@ -267,4 +394,7 @@ def run_check():
         "job_problems": job_problems,
         "stale_tables": stale_tables,
         "stale_code": stale_code,
+        "closer_gaps": closer_gaps,
+        "task_world_gaps": task_world_gaps,
+        "self_model_gaps": self_model_gaps,
     }

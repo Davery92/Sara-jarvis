@@ -256,6 +256,7 @@ async def _call_compose_llm(system_msg: str, user_msg: str) -> Dict[str, Any]:
         temperature=0.5,
         max_tokens=400,
         extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        caller="compose",
     )
     raw = response["choices"][0]["message"].get("content", "") if isinstance(response, dict) else str(response)
     parsed = _parse_response(raw)
@@ -269,6 +270,34 @@ async def _call_compose_llm(system_msg: str, user_msg: str) -> Dict[str, Any]:
         "refs": [str(r)[:200] for r in (parsed.get("refs") or [])][:10],
         "urgency": parsed.get("urgency") if parsed.get("urgency") in
                    ("normal", "high", "urgent", "critical") else "normal",
+    }
+
+
+def fallback_utterance(candidate: Dict[str, Any]) -> Dict[str, Any]:
+    """The message a finished request gets when the model won't write one.
+
+    Follow-up plan §6. Judge already refuses to batch a `david_chat` result, but
+    compose could still decline it and review could still kill it, and both are
+    LLM judgement calls made without any knowledge that David is sitting there
+    waiting. That is what happened to the Salem guide on 2026-09-01: he asked
+    for it, it ran, it finished, it was written to Agent Workspace, and he was
+    never told — the report existed and the silence was total.
+
+    Something David asked for is announced. If the interesting version can't be
+    written, the boring version goes out.
+    """
+    title = ""
+    for entry in (candidate.get("evidence") or []):
+        if isinstance(entry, dict) and entry.get("title"):
+            title = str(entry["title"]).strip()
+            break
+    if not title:
+        title = (candidate.get("summary") or "").strip().split("\n", 1)[0][:80] or "research"
+
+    return {
+        "text": f"Your {title} report is ready in Agent Workspace.",
+        "refs": [f"fallback:{candidate.get('id')}"],
+        "urgency": "normal",
     }
 
 

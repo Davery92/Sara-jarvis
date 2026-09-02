@@ -64,6 +64,51 @@ async def _token_worker():
             logger.error(f"Token worker error: {e}")
 
 
+def record_token_usage_sync(
+    prompt_tokens: int,
+    completion_tokens: int,
+    total_tokens: int,
+    model: str,
+    operation_type: str,
+):
+    """Write one usage row immediately, with no event loop involved.
+
+    Follow-up plan §7. `queue_token_usage` is the FastAPI path: it hands work to
+    an asyncio queue drained by a worker task created once at startup. A Celery
+    prefork child has no such loop — each task runs its own `asyncio.run(...)`
+    and throws the loop away — so a queue created at fork time would be drained
+    by a worker task that dies with the first task's loop, and every background
+    model call would report into a void.
+
+    That is why `token_usage` held nothing but chat rows: appraisal, judge,
+    deliberation and compose all run in Celery, so ~140 deliberations a day plus
+    every other background call were invisible while chat was measured to the
+    token.
+
+    One small INSERT inside a call that just waited seconds on a model is not
+    worth an async hop.
+    """
+    from app.db.base import SessionLocal
+
+    try:
+        with SessionLocal() as db:
+            usage = TokenUsage(
+                id=str(uuid.uuid4()),
+                user_id=None,
+                endpoint="celery",
+                model=model,
+                operation_type=operation_type,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+            )
+            db.add(usage)
+            _apply_aggregate(db, None, prompt_tokens, completion_tokens, total_tokens)
+            db.commit()
+    except Exception as e:
+        logger.warning(f"Failed to record background token usage for {operation_type}: {e}")
+
+
 def queue_token_usage(
     prompt_tokens: int,
     completion_tokens: int,
@@ -169,14 +214,14 @@ async def log_token_usage(
         db.rollback()
 
 
-async def update_aggregate(
+def _apply_aggregate(
     db: Session,
     user_id: Optional[str],
     prompt_tokens: int,
     completion_tokens: int,
     total_tokens: int
 ):
-    """Update the aggregate token counts"""
+    """Update the aggregate token counts. Caller commits."""
     try:
         # Find or create aggregate record
         aggregate = db.query(TokenUsageAggregate).filter(
@@ -202,6 +247,17 @@ async def update_aggregate(
 
     except Exception as e:
         logger.error(f"Failed to update token aggregate: {e}")
+
+
+async def update_aggregate(
+    db: Session,
+    user_id: Optional[str],
+    prompt_tokens: int,
+    completion_tokens: int,
+    total_tokens: int
+):
+    """Async-signature wrapper kept for existing callers."""
+    _apply_aggregate(db, user_id, prompt_tokens, completion_tokens, total_tokens)
 
 
 def get_token_stats(db: Session, user_id: Optional[str] = None) -> Dict[str, Any]:

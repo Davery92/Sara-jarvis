@@ -9,6 +9,7 @@ so check-ins and re-entry context know what happened while David was away.
 import json
 import logging
 import os
+import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -199,8 +200,12 @@ async def rebuild_snapshot(user_id: str, db: Session) -> UnifiedContextSnapshot:
         today_start = now_tz.replace(hour=0, minute=0, second=0, microsecond=0)
         today_end = today_start.replace(hour=23, minute=59, second=59)
 
+        # Follow-up plan §5: an all-day event's midnight `start_time` is a
+        # storage artifact, not a time David is due anywhere. Counting minutes
+        # to it produced "in 13h" for a day-long trip, and every consumer of
+        # next_event_minutes_away treated that as an appointment approaching.
         next_event = db.execute(text("""
-            SELECT title, start_time, ios_calendar_name
+            SELECT title, start_time, ios_calendar_name, COALESCE(all_day, FALSE) AS all_day
             FROM calendar_event
             WHERE user_id = :uid AND start_time > :now
             ORDER BY start_time ASC LIMIT 1
@@ -210,9 +215,15 @@ async def rebuild_snapshot(user_id: str, db: Session) -> UnifiedContextSnapshot:
             from app.services.calendar_ownership import classify_event, ownership_prefix
             ownership = classify_event(next_event.title, next_event.ios_calendar_name)
             cal_label = f" [{next_event.ios_calendar_name}]" if next_event.ios_calendar_name else ""
-            snapshot.next_event_title = f"{ownership_prefix(ownership)}{next_event.title}{cal_label}"
-            delta_min = (next_event.start_time - now_tz).total_seconds() / 60
-            snapshot.next_event_minutes_away = int(delta_min)
+            all_day_label = " (all day)" if next_event.all_day else ""
+            snapshot.next_event_title = (
+                f"{ownership_prefix(ownership)}{next_event.title}{cal_label}{all_day_label}"
+            )
+            if next_event.all_day:
+                snapshot.next_event_minutes_away = None
+            else:
+                delta_min = (next_event.start_time - now_tz).total_seconds() / 60
+                snapshot.next_event_minutes_away = int(delta_min)
 
         event_count = db.execute(text("""
             SELECT COUNT(*) FROM calendar_event
@@ -222,8 +233,12 @@ async def rebuild_snapshot(user_id: str, db: Session) -> UnifiedContextSnapshot:
 
         # ── Daily rhythm summary ──
         try:
-            from app.services.daily_rhythm import build_rhythm_summary
-            snapshot.rhythm_summary = build_rhythm_summary(db, user_id)
+            from app.services.daily_rhythm import build_rhythm_summary, stated_rhythm_keys
+            # Follow-up plan §2: the deliberation whiteboard reads this line, so
+            # it gets the same filtering as chat context — a stated life fact
+            # wins, and a weak rhythm row says nothing at all.
+            snapshot.rhythm_summary = build_rhythm_summary(
+                db, user_id, exclude_keys=await stated_rhythm_keys(user_id))
         except Exception as e:
             logger.warning(f"[ContextWriter] rhythm summary gather failed: {e}")
 
@@ -306,6 +321,23 @@ async def rebuild_snapshot(user_id: str, db: Session) -> UnifiedContextSnapshot:
     except Exception as e:
         logger.error(f"[ContextWriter] Snapshot rebuild failed: {e}")
         return snapshot
+
+
+# Ground-truth plan, Phase 5 §8: a change worth telling David about on re-entry
+# is a change to his email, calendar, tasks or threads — or to where he and his
+# household actually are. The weather service refreshes on its own schedule and
+# fills this buffer with temperature deltas nobody asked for: on 2026-09-02 the
+# entire "what happened while you were away" block was ten outside-temperature
+# lines. The data is still written to the snapshot; it just isn't news.
+_NOISE_CHANGE_RE = re.compile(
+    r"^\[?\d{0,2}:?\d{0,2}\]?\s*(outside temperature|weather)\b",
+    re.IGNORECASE,
+)
+
+
+def is_meaningful_change(change: str) -> bool:
+    """True when a notable-change line is worth showing David on re-entry."""
+    return bool((change or "").strip()) and not _NOISE_CHANGE_RE.search(change.strip())
 
 
 def _describe_change(field_name: str, old_val: Any, new_val: Any, source: str) -> Optional[str]:

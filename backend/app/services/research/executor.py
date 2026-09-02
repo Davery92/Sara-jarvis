@@ -18,7 +18,14 @@ from typing import Any, Dict, List, Optional
 
 from sqlalchemy import text
 
-from app.services.research.llm_client import ResearchLLMClient
+from app.services.note_provenance import SARA_GENERATED_TAG
+from app.services.research.llm_client import ResearchLLMClient, ResearchLLMOverloaded
+from app.services.research.lane_lock import LaneLock
+from app.services.research.compaction import (
+    compact_messages,
+    estimate_tokens,
+    truncate_tool_result,
+)
 from app.services.research.tools import RESEARCH_TOOLS, execute_tool
 from app.services.research.context import (
     build_step_context,
@@ -29,8 +36,46 @@ logger = logging.getLogger(__name__)
 
 # Limits
 MAX_TOOL_TURNS_PER_STEP = 30
+
+# Tool list used on a step's final turn. llama-server IGNORES a named
+# `tool_choice` (verified against :8081 — asked for report_findings, it returned
+# web_search anyway), so the only reliable way to make the agent file its
+# findings is to take every other tool away for that turn.
+_REPORT_ONLY_TOOLS = [
+    t for t in RESEARCH_TOOLS
+    if t.get("function", {}).get("name") == "report_findings"
+]
+
+# Fraction of the lane's context window the transcript may occupy before we compact.
+# The remainder absorbs the RESEARCH_TOOLS schemas, the model's reply, and the slack
+# between our chars/4 estimate and the real tokenizer.
+CONTEXT_BUDGET_FRACTION = 0.55
+
+
+def _context_budget_tokens() -> int:
+    """Token budget for the step transcript, derived from the configured window.
+
+    Read at call time rather than import time so a settings change (or a lane
+    resize) takes effect without a code change.
+    """
+    from app.core.config import settings
+    num_ctx = getattr(settings, "bg_llm_num_ctx", None) or 32768
+    return max(8000, int(num_ctx * CONTEXT_BUDGET_FRACTION))
 SARA_ANSWER_POLL_INTERVAL = 30  # seconds
 SARA_ANSWER_TIMEOUT = 3600  # 1 hour max wait
+
+# How long to wait before retrying a plan parked on a sick LLM lane, and how
+# long to wait for the lane lock when another plan already holds it.
+STALL_RESUME_DELAY = 900   # 15 min
+LANE_BUSY_RETRY_DELAY = 120  # 2 min
+
+# Two consecutive step failures for a reason that isn't the lane means something
+# is structurally wrong with the plan. Stop and report honestly instead of
+# marching through the remaining steps at machine speed and calling it complete.
+MAX_CONSECUTIVE_STEP_ERRORS = 2
+
+# Plan statuses that mean "stop, someone else changed this out from under us".
+_EXTERNAL_STOP_STATUSES = ("paused", "failed", "cancelled")
 
 
 class ResearchExecutor:
@@ -47,12 +92,29 @@ class ResearchExecutor:
         from app.db.session import get_db
 
         db = next(get_db())
+        lock = LaneLock(self.user_id, self.plan_id)
+        last_error: Optional[str] = None
+        consecutive_errors = 0
+        plan: Dict[str, Any] = {}
 
         try:
             # Load the plan
             plan = await self._load_plan(db)
             if not plan:
                 logger.error("Research plan %s not found", self.plan_id)
+                return
+
+            if plan.get("status") in _EXTERNAL_STOP_STATUSES:
+                logger.info(
+                    "Research plan %s is %s — not starting", self.plan_id, plan.get("status")
+                )
+                return
+
+            # One research agent on the lane at a time. A second acquirer waits
+            # its turn rather than executing — two agents against the bg lane is
+            # what OOM'd it into 507s and destroyed three plans (2026-09-01).
+            if not await lock.acquire():
+                self._requeue(LANE_BUSY_RETRY_DELAY, reason="lane busy")
                 return
 
             # Update status to running
@@ -80,9 +142,44 @@ class ResearchExecutor:
                 # Mark step as running
                 step["status"] = "running"
                 await self._update_plan_steps(db, steps, current_index)
+                self._emit_task_event(
+                    db,
+                    "task.started" if current_index == 0 else "task.progressed",
+                    "running",
+                    plan.get("title", "Research"),
+                    status_label=(
+                        f"Step {current_index + 1} of {len(steps)}"
+                        f" — {step.get('title', '')}".rstrip(" —")
+                    ),
+                    step_count=current_index + 1,
+                )
 
                 # Execute the step
                 result = await self._execute_step(db, plan, current_index)
+
+                if result["action"] == "lane_down":
+                    # The LLM lane is sick, not the plan. Park it exactly where
+                    # it is — the current step goes back to pending so the
+                    # resume retries it — and schedule one attempt later.
+                    step["status"] = "pending"
+                    await self._update_plan_steps(db, steps, current_index)
+                    last_error = result.get("error")
+                    db = self._reopen(db)
+                    await self._update_plan_status(db, "stalled", error=last_error)
+                    self._emit_task_event(
+                        db, "task.failed", "stalled", plan.get("title", "Research"),
+                        status_label=f"Paused at step {current_index + 1} — LLM lane unavailable",
+                        step_count=current_index + 1, error=last_error,
+                    )
+                    self._requeue(STALL_RESUME_DELAY, reason="lane down", persist_db=db)
+                    logger.error(
+                        "Research plan %s stalled at step %d: %s",
+                        self.plan_id, current_index + 1, last_error,
+                    )
+                    await self._send_failure_push(
+                        plan, "stalled", current_index + 1, len(steps), last_error
+                    )
+                    return
 
                 if result["action"] == "complete":
                     # Store findings in the step
@@ -112,6 +209,7 @@ class ResearchExecutor:
                         )
 
                     current_index += 1
+                    consecutive_errors = 0
 
                 elif result["action"] == "stuck":
                     # Agent asked Sara — wait for her answer, then retry
@@ -140,45 +238,259 @@ class ResearchExecutor:
                 elif result["action"] == "error":
                     step["status"] = "failed"
                     step["error"] = result.get("error", "Unknown error")
+                    last_error = result.get("error", "Unknown error")
                     await self._update_plan_steps(db, steps, current_index)
-                    logger.error("Step failed: %s", result.get("error"))
-                    # Continue to next step on error
+                    logger.error("Step failed: %s", last_error)
+                    consecutive_errors += 1
                     current_index += 1
+                    if consecutive_errors >= MAX_CONSECUTIVE_STEP_ERRORS:
+                        logger.error(
+                            "Research plan %s: %d consecutive step failures — stopping "
+                            "instead of burning the remaining steps",
+                            self.plan_id, consecutive_errors,
+                        )
+                        break
 
-                # Reload plan in case it was modified externally (e.g., paused)
+                # Reload plan in case it was modified externally (paused,
+                # cancelled from the phone, or hard-failed by the Celery task).
                 plan = await self._load_plan(db)
-                if not plan or plan["status"] in ("paused", "failed"):
-                    logger.info("Plan was externally paused/stopped")
+                if not plan or plan["status"] in _EXTERNAL_STOP_STATUSES:
+                    logger.info(
+                        "Plan %s externally %s — stopping",
+                        self.plan_id, (plan or {}).get("status", "removed"),
+                    )
                     return
 
                 steps = plan.get("steps", [])
 
-            # All steps complete — synthesize findings. _synthesize_findings
-            # reopens its own fresh session for its writes; refresh here too so
-            # the final status update doesn't ride a connection the long step
-            # loop already let go stale.
-            await self._synthesize_findings(db, plan)
+            # Step loop is over — report what actually happened. This used to
+            # unconditionally write 'complete', which is how a plan that burned
+            # all six steps on instant 507s in 1.3 seconds was filed as a
+            # success with zero output and no notification (2026-09-01).
+            done = [s for s in steps if s.get("status") == "complete"]
+            synthesis_ok = False
+            if done:
+                synthesis_ok = await self._synthesize_findings(db, plan)
+
             db = self._reopen(db)
+
+            if steps and len(done) == len(steps) and synthesis_ok:
+                terminal = "complete"
+            elif done:
+                terminal = "partial"
+            else:
+                terminal = "failed"
+
             await self._update_plan_status(
-                db, "complete", completed_at=datetime.now(timezone.utc)
+                db,
+                terminal,
+                completed_at=datetime.now(timezone.utc),
+                error=(last_error if terminal != "complete" else None),
             )
-            logger.info("Research plan complete: %s", plan["title"])
+            logger.info(
+                "Research plan %s finished as '%s' (%d/%d steps complete%s)",
+                plan.get("title"), terminal, len(done), len(steps),
+                "" if synthesis_ok else ", synthesis failed",
+            )
+
+            self._emit_task_event(
+                db,
+                "task.completed" if terminal != "failed" else "task.failed",
+                terminal,
+                plan.get("title", "Research"),
+                status_label=f"{len(done)} of {len(steps)} steps complete",
+                step_count=len(steps) + 1,
+                error=last_error if terminal == "failed" else None,
+            )
+
+            if terminal == "failed":
+                await self._send_failure_push(
+                    plan, "failed", len(done), len(steps), last_error
+                )
 
         except Exception as e:
-            logger.error("Research executor error: %s", e, exc_info=True)
+            logger.error(
+                "Research executor error: %s: %s", type(e).__name__, e, exc_info=True
+            )
             # Persist the failure on a guaranteed-fresh session — the working
             # one may be the very thing that broke.
             try:
                 db = self._reopen(db)
-                await self._update_plan_status(db, "failed", error=str(e))
+                await self._update_plan_status(
+                    db, "failed", error=f"{type(e).__name__}: {e}"
+                )
+                self._emit_task_event(
+                    db, "task.failed", "failed", plan.get("title", "Research"),
+                    status_label="Research failed",
+                    step_count=0, error=f"{type(e).__name__}: {e}",
+                )
             except Exception as e2:
                 logger.error("Could not persist failed status: %s", e2)
+            await self._send_failure_push(
+                plan, "failed", 0, 0, f"{type(e).__name__}: {e}"
+            )
         finally:
+            await lock.release()
             await self.llm.close()
             try:
                 db.close()
             except Exception:
                 pass
+
+    def _emit_task_event(
+        self,
+        db,
+        kind: str,
+        status: str,
+        title: str,
+        status_label: str = "",
+        step_count: int = 0,
+        error: Optional[str] = None,
+    ) -> None:
+        """Publish a `task.*` world event for this plan.
+
+        This is what makes a research plan drive the lock-screen Live Activity:
+        the world reducer turns task.started/progressed into Sara's presence and
+        presence_delivery pushes it to ActivityKit, ending the activity on
+        task.completed / task.failed. agent_dispatch already emits exactly these
+        for background_task rows — research plans were the one dispatch path
+        that stayed dark when the app wasn't foregrounded.
+        """
+        try:
+            from app.services.world_state.writer import append_world_event
+
+            append_world_event(
+                db,
+                user_id=str(self.user_id),
+                kind=kind,
+                source="research_executor",
+                source_ref=f"research_plan:{self.plan_id}",
+                aggregate_type="research_plan",
+                aggregate_id=str(self.plan_id),
+                actor_type="assistant",
+                actor_id="sara",
+                correlation_id=str(self.plan_id),
+                dedupe_key=f"research-progress:{self.plan_id}:{step_count}:{status}",
+                payload={
+                    "task_id": str(self.plan_id),
+                    "status": status,
+                    "status_label": status_label[:300],
+                    "title": (title or "")[:500],
+                    "original_query": (title or "")[:1000],
+                    "task_type": "research_plan",
+                    "step_count": step_count,
+                    "error": (error or "")[:500] if error else None,
+                },
+            )
+            db.commit()
+        except Exception as e:
+            # Presence is a nicety; never let it take down a research run.
+            logger.warning(
+                "Could not emit %s world event for plan %s: %s: %s",
+                kind, self.plan_id, type(e).__name__, e,
+            )
+            try:
+                db.rollback()
+            except Exception:
+                pass
+
+    def _requeue(self, countdown: int, reason: str, persist_db=None) -> None:
+        """Re-dispatch this plan after `countdown` seconds and remember the task id.
+
+        Used both when the lane is busy and when a stalled plan gets its one
+        scheduled resume attempt.
+        """
+        try:
+            from app.tasks.research import run_research_plan
+            async_result = run_research_plan.apply_async(
+                args=[self.plan_id, self.user_id],
+                queue="david_priority",
+                countdown=countdown,
+            )
+            logger.info(
+                "Requeued research plan %s in %ds (%s) as celery task %s",
+                self.plan_id, countdown, reason, async_result.id,
+            )
+            db = persist_db
+            owned = False
+            if db is None:
+                from app.db.session import get_db
+                db = next(get_db())
+                owned = True
+            try:
+                db.execute(
+                    text("UPDATE research_plan SET celery_task_id = :tid WHERE id = :id"),
+                    {"tid": async_result.id, "id": self.plan_id},
+                )
+                db.commit()
+            finally:
+                if owned:
+                    db.close()
+        except Exception as e:
+            logger.error(
+                "Could not requeue research plan %s (%s): %s: %s",
+                self.plan_id, reason, type(e).__name__, e,
+            )
+
+    async def _send_failure_push(
+        self,
+        plan: Dict[str, Any],
+        outcome: str,
+        step_no: int,
+        total_steps: int,
+        error: Optional[str],
+    ) -> None:
+        """Tell David when research dies. Silence is what burned us: three plans
+        were marked complete with no output and no notification, so 'completed'
+        and 'failed' both have to be loud.
+
+        Only for chat-initiated plans — autonomous research reports through its
+        own flow and must not push.
+        """
+        if (plan or {}).get("origin") != "david_chat":
+            return
+        try:
+            from app.services.unified_notification import send_notification
+
+            title = (plan or {}).get("title") or "Research plan"
+            if outcome == "stalled":
+                headline = "Research paused"
+                body = (
+                    f"'{title}' stopped at step {step_no} of {total_steps} — the LLM "
+                    f"lane is unavailable. I'll retry in "
+                    f"{STALL_RESUME_DELAY // 60} minutes."
+                )
+            else:
+                headline = "Research failed"
+                progress = (
+                    f"after {step_no} of {total_steps} steps"
+                    if total_steps else "before it got anywhere"
+                )
+                body = f"'{title}' failed {progress}."
+            if error:
+                body += f" ({str(error)[:120]})"
+
+            # 'high' or above is what actually reaches the phone — the attention
+            # queue swallows normal-priority pushes.
+            await send_notification(
+                user_id=self.user_id,
+                title=headline,
+                message=body,
+                priority="high",
+                topic=f"research_failure:{self.plan_id}:{outcome}",
+                category="general",
+                source="research_executor",
+                extra_push_data={
+                    "type": "task_failed",
+                    "plan_id": self.plan_id,
+                    "outcome": outcome,
+                },
+            )
+            logger.info("Sent research %s push for plan %s", outcome, self.plan_id)
+        except Exception as e:
+            logger.warning(
+                "Could not send research %s push: %s: %s", outcome, type(e).__name__, e
+            )
 
     @staticmethod
     def _reopen(db):
@@ -208,6 +520,8 @@ class ResearchExecutor:
             {"action": "complete", "findings": {...}}
             {"action": "stuck", "question": "...", "message_id": "..."}
             {"action": "error", "error": "..."}
+            {"action": "lane_down", "error": "..."}  — LLM lane unavailable;
+                the caller stalls the whole plan rather than failing steps.
         """
         # Gather prior findings
         steps = plan.get("steps", [])
@@ -226,16 +540,105 @@ class ResearchExecutor:
         # Build fresh context
         messages = build_step_context(plan, step_index, prior_findings, sara_answers)
 
-        # Tool-calling loop
+        # Tool-calling loop.
+        # The cap is a runaway guard, but running into it silently used to throw
+        # away every turn of real research and persist a confidence-0.3
+        # placeholder. Warn before the end and force the agent to file findings
+        # on the last turn, the same way InternalToolAgent does.
+        warn_turn = max(0, MAX_TOOL_TURNS_PER_STEP - 3)
+        final_turn = MAX_TOOL_TURNS_PER_STEP - 1
+        query_counts: Dict[str, int] = {}
+        consecutive_blocked_turns = 0
+
         for turn in range(MAX_TOOL_TURNS_PER_STEP):
+            # Fold older turns into a digest before they push us over the window.
+            # Without this the transcript grows unboundedly (10 search hits and whole
+            # files per turn) and the step dies on a 400 part-way through.
+            messages, did_compact = await compact_messages(
+                messages, self.llm, _context_budget_tokens()
+            )
+            if did_compact:
+                logger.info(
+                    "Step %d: compacted context to ~%d tokens",
+                    step_index + 1, estimate_tokens(messages),
+                )
+
+            if turn == warn_turn:
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        f"You have {MAX_TOOL_TURNS_PER_STEP - turn} turns left on this "
+                        "step. Stop searching and call report_findings NOW with what you "
+                        "already have. A negative result is a valid finding: if the thing "
+                        "you were asked to research does not appear to exist, report that "
+                        "conclusion and cite what you found instead."
+                    ),
+                })
+
+            # A model that keeps re-issuing queries the guard already blocked will
+            # never break out on its own (observed live: 5 straight turns of the
+            # same two blocked queries). Jump to the endgame instead of burning
+            # the remaining turns.
+            stuck_on_repeats = consecutive_blocked_turns >= 3
+            if stuck_on_repeats:
+                logger.warning(
+                    "Step %d: %d consecutive fully-blocked turns — going to endgame early",
+                    step_index + 1, consecutive_blocked_turns,
+                )
+            force_report = turn == final_turn or stuck_on_repeats
+            turn_tools = RESEARCH_TOOLS
+            if force_report and _REPORT_ONLY_TOOLS:
+                turn_tools = _REPORT_ONLY_TOOLS
+                logger.warning(
+                    "Step %d: final turn — restricting tools to report_findings",
+                    step_index + 1,
+                )
+                # Without this the model, seeing only one tool, reports "I don't
+                # have web search capability" instead of summarizing the searches
+                # it already ran.
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "This is your FINAL turn for this step. Call report_findings "
+                        "now and summarize everything your earlier searches in this "
+                        "step already returned. Do not claim you lack tools — you have "
+                        "the results above. If the subject does not appear to exist, "
+                        "that conclusion IS the finding; report it with the sources "
+                        "that led you there."
+                    ),
+                })
+
             try:
                 response = await self.llm.chat_completion(
                     messages=messages,
-                    tools=RESEARCH_TOOLS,
+                    tools=turn_tools,
                     temperature=0.7,
+                    tool_choice=(
+                        {"type": "function", "function": {"name": "report_findings"}}
+                        if force_report else None
+                    ),
                 )
+            except ResearchLLMOverloaded as e:
+                # The lane is out of memory / down, not the plan's fault. Bubble
+                # up so the whole plan parks and resumes later with its
+                # completed steps intact.
+                logger.error(
+                    "Step %d: research lane unavailable (%s)", step_index + 1, e
+                )
+                return {"action": "lane_down", "error": str(e)}
             except Exception as e:
-                return {"action": "error", "error": f"LLM error: {e}"}
+                # Keep the class and the response body — a bare str(e) on an empty
+                # exception used to persist as the useless literal "LLM error: ".
+                detail = ""
+                resp = getattr(e, "response", None)
+                if resp is not None:
+                    try:
+                        detail = f" | body: {resp.text[:400]}"
+                    except Exception:
+                        pass
+                err = f"LLM error: {type(e).__name__}: {e}{detail}"
+                logger.error("Step %d failed: %s", step_index + 1, err)
+                return {"action": "error", "error": err}
 
             # Track tokens
             usage = self.llm.get_token_usage(response)
@@ -272,14 +675,20 @@ class ResearchExecutor:
                 continue
 
             # Process tool calls
+            calls_this_turn = 0
+            blocked_this_turn = 0
             for tc in tool_calls:
+                calls_this_turn += 1
                 func_name = tc["function"]["name"]
                 try:
                     func_args = json.loads(tc["function"]["arguments"])
                 except json.JSONDecodeError:
                     func_args = {}
 
-                logger.info("Tool call: %s(%s)", func_name, json.dumps(func_args)[:200])
+                logger.info(
+                    "Step %d turn %d: %s(%s)",
+                    step_index + 1, turn, func_name, json.dumps(func_args)[:200],
+                )
 
                 # Handle special sentinel tools
                 if func_name == "ask_sara":
@@ -305,22 +714,107 @@ class ResearchExecutor:
                         },
                     }
 
-                # Execute the tool
-                result = await execute_tool(func_name, func_args, self.plan_id)
+                # Repetition guard. Steps that research something non-existent
+                # (e.g. "FST-2") otherwise re-issue the same query verbatim until
+                # the turn cap — 6+ identical searches in one step, observed.
+                repeat_query = None
+                if func_name == "web_search":
+                    q = (func_args.get("query") or "").strip().lower()
+                    if q:
+                        query_counts[q] = query_counts.get(q, 0) + 1
+                        if query_counts[q] >= 3:
+                            repeat_query = func_args.get("query")
 
-                # Append tool result to conversation
+                if repeat_query is not None:
+                    result = (
+                        f'You have already searched "{repeat_query}" '
+                        f"{query_counts[repeat_query.strip().lower()]} times in this step "
+                        "and it returns the same results. Do not repeat it. Either change "
+                        "your approach materially, or call report_findings now with what "
+                        "you have — including a negative result if the subject does not "
+                        "appear to exist."
+                    )
+                    blocked_this_turn += 1
+                    logger.warning(
+                        "Step %d turn %d: blocked repeated query %r",
+                        step_index + 1, turn, repeat_query,
+                    )
+                else:
+                    # Execute the tool
+                    result = await execute_tool(func_name, func_args, self.plan_id)
+                    logger.info(
+                        "Step %d turn %d: %s -> %d chars | %s",
+                        step_index + 1, turn, func_name, len(result or ""),
+                        (result or "")[:160].replace("\n", " "),
+                    )
+
+                # Append tool result to conversation, capped — a single
+                # web_search (10 hits) or read_file (whole file) is otherwise
+                # large enough to blow the window on its own.
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc["id"],
-                    "content": result,
+                    "content": truncate_tool_result(result),
                 })
 
-        # Exhausted turns
+            if calls_this_turn and blocked_this_turn == calls_this_turn:
+                consecutive_blocked_turns += 1
+            else:
+                consecutive_blocked_turns = 0
+
+        # Exhausted turns. With the forced report_findings on the final turn this
+        # should now be unreachable in practice; keep it as a genuine last resort
+        # (e.g. the model returns something other than the forced call).
+        logger.error(
+            "Step %d: exhausted all %d turns AND the forced report_findings did not "
+            "produce a result", step_index + 1, MAX_TOOL_TURNS_PER_STEP,
+        )
+
+        # Last resort: ask for a plain-text summary of the transcript rather than
+        # discarding 30 turns of real research behind a placeholder.
+        try:
+            salvage = await self.llm.chat_completion(
+                messages=messages + [{
+                    "role": "user",
+                    "content": (
+                        "Summarize what you established in this step: the key findings "
+                        "and the sources they came from. If the subject does not appear "
+                        "to exist, say so plainly. Plain prose, no tool calls."
+                    ),
+                }],
+                tools=None,
+                temperature=0.3,
+            )
+            salvaged_text = (self.llm.get_message(salvage).get("content") or "").strip()
+        except ResearchLLMOverloaded as e:
+            logger.error("Step %d: lane unavailable during salvage (%s)", step_index + 1, e)
+            return {"action": "lane_down", "error": str(e)}
+        except Exception as e:
+            logger.warning(
+                "Step %d: salvage summary failed: %s: %s",
+                step_index + 1, type(e).__name__, e,
+            )
+            salvaged_text = ""
+
+        if salvaged_text:
+            return {
+                "action": "complete",
+                "findings": {
+                    "summary": salvaged_text[:500],
+                    "details": salvaged_text,
+                    "sources": [],
+                    "confidence": 0.4,
+                },
+            }
+
         return {
             "action": "complete",
             "findings": {
                 "summary": "Step reached maximum turns without explicit findings report",
-                "details": "The agent used all available turns. Review files in the working directory for partial results.",
+                "details": (
+                    "The agent used all available turns and did not file findings even "
+                    "when forced. Check the step's tool-call log for what it gathered."
+                ),
                 "sources": [],
                 "confidence": 0.3,
             },
@@ -397,18 +891,23 @@ class ResearchExecutor:
 
             # Also check if plan was paused/cancelled
             plan = await self._load_plan(db)
-            if plan and plan["status"] in ("paused", "failed"):
+            if plan and plan["status"] in _EXTERNAL_STOP_STATUSES:
                 return None
 
         return None
 
-    async def _synthesize_findings(self, db, plan: Dict[str, Any]):
-        """Use the research LLM to create a final synthesis of all findings."""
+    async def _synthesize_findings(self, db, plan: Dict[str, Any]) -> bool:
+        """Use the research LLM to create a final synthesis of all findings.
+
+        Returns True only if the synthesis was written. A swallowed failure here
+        used to leave a plan marked `complete` with no report anywhere — the
+        caller now downgrades it to `partial` instead.
+        """
         steps = plan.get("steps", [])
         completed = [s for s in steps if s.get("status") == "complete" and s.get("findings")]
 
         if not completed:
-            return
+            return False
 
         synthesis_prompt = f"""You just completed a research plan titled "{plan['title']}".
 
@@ -471,9 +970,16 @@ Write in clean markdown format."""
 
             # Save as a note in the Research > Agent Reports folder
             await self._save_as_note(db, plan, synthesis, completed)
+            return True
 
+        except ResearchLLMOverloaded as e:
+            logger.error("Synthesis skipped — research lane unavailable: %s", e)
+            return False
         except Exception as e:
-            logger.error("Failed to synthesize findings: %s", e)
+            logger.error(
+                "Failed to synthesize findings: %s: %s", type(e).__name__, e, exc_info=True
+            )
+            return False
 
     async def _save_as_note(
         self, db, plan: Dict[str, Any], synthesis: str, completed_steps: list
@@ -512,12 +1018,47 @@ Write in clean markdown format."""
                         content += f"- {src}\n"
                     content += "\n"
 
-            note_id = str(uuid.uuid4())
             note_title = f"Research: {plan['title']}"
+
+            # Ground-truth plan, Phase 6 §4: one note per plan title per day.
+            # Four identical Salem plans on 2026-09-01 produced three "Salem MA
+            # Historical Guide - Completed" notes, and those duplicates then took
+            # four of the top five slots in her own memory recall. A later run
+            # appends to the existing note instead of creating a rival copy.
+            existing = db.execute(
+                text("""
+                    SELECT id, content FROM note
+                     WHERE user_id = :user_id AND title = :title
+                       AND created_at >= NOW() - INTERVAL '24 hours'
+                     ORDER BY created_at DESC LIMIT 1
+                """),
+                {"user_id": self.user_id, "title": note_title},
+            ).fetchone()
+
+            if existing:
+                run_number = (existing.content or "").count("## Run ") + 2
+                db.execute(
+                    text("""
+                        UPDATE note
+                           SET content = content || :addition, updated_at = NOW()
+                         WHERE id = :id
+                    """),
+                    {
+                        "id": existing.id,
+                        "addition": f"\n\n---\n\n## Run {run_number}\n\n{content}",
+                    },
+                )
+                db.commit()
+                note_id = str(existing.id)
+                logger.info("Appended run %d to existing note %s", run_number, note_id)
+                return note_id
+
+            note_id = str(uuid.uuid4())
             db.execute(
                 text("""
-                    INSERT INTO note (id, user_id, folder_id, title, content, created_at, updated_at)
-                    VALUES (:id, :user_id, :folder_id, :title, :content, NOW(), NOW())
+                    INSERT INTO note (id, user_id, folder_id, title, content, tags, created_at, updated_at)
+                    VALUES (:id, :user_id, :folder_id, :title, :content,
+                            CAST(:tags AS jsonb), NOW(), NOW())
                 """),
                 {
                     "id": note_id,
@@ -525,6 +1066,9 @@ Write in clean markdown format."""
                     "folder_id": folder_id,
                     "title": note_title,
                     "content": content,
+                    # Invariant 2: Sara's own output is tagged, so memory_recall
+                    # and the PKG extractor never mistake it for evidence.
+                    "tags": json.dumps([SARA_GENERATED_TAG]),
                 },
             )
             db.commit()
@@ -557,6 +1101,16 @@ Write in clean markdown format."""
             # retired now that Arc 1.4's real delivery path is live — this
             # source speaks through the say_candidate queue only.
             await self._dual_write_candidate(plan, note_id, body, synthesis)
+            # The promise made when the plan was created comes due here. The
+            # candidate above is the message; this closes the obligation so the
+            # World Brief's OPEN LOOPS stops listing it as outstanding.
+            from app.services.commitment_service import close_delivery_commitment
+            await close_delivery_commitment(
+                self.user_id, self.plan_id,
+                closure_note=f"{plan.get('title', 'Research')} is ready.",
+                origin=plan.get("origin") or "david_chat",
+                make_candidate=False,
+            )
             logger.info("Queued research_complete candidate for plan %s → note %s", self.plan_id, note_id)
         except Exception as e:
             logger.warning("Failed to queue research completion candidate: %s", e)
@@ -573,6 +1127,8 @@ Write in clean markdown format."""
         default 24h TTL. Wrapped so a candidate-queue failure never breaks
         the legacy push while it's still the delivery path."""
         try:
+            from datetime import timedelta
+            from app.core.timezone import now as local_now
             from app.services.say_candidate import create_candidate
             from app.db.session import get_async_session_factory
 
@@ -597,12 +1153,24 @@ Write in clean markdown format."""
                             valid_until = to_utc(r.start_time)
                             break
 
+                # Something David asked for in chat is an alert, not an inform:
+                # the judge is not allowed to batch it into a window he may have
+                # already left the house before (Salem, 2026-09-01).
+                origin = plan.get("origin") or ""
                 await create_candidate(
-                    db, user_id=self.user_id, source="research_executor", kind="inform",
+                    db, user_id=self.user_id, source="research_executor",
+                    kind="alert" if origin == "david_chat" else "inform",
                     summary=summary[:2000],
-                    evidence=[{"note_id": note_id, "plan_id": self.plan_id}],
+                    # `title` is what the compose fallback names when the model
+                    # declines to write about a finished report (follow-up plan
+                    # §6) — `summary` here is the whole report body.
+                    evidence=[{"note_id": note_id, "plan_id": self.plan_id,
+                               "origin": origin, "title": plan.get("title")}],
                     topic_entities=[f"research:{self.plan_id}"],
-                    valid_until=valid_until,
+                    # An alert's 30-minute default TTL would expire a report
+                    # finished at 21:28 long before David saw it.
+                    valid_until=valid_until or (local_now() + timedelta(hours=24)),
+                    value_guess=0.9 if origin == "david_chat" else None,
                     dedupe_key=f"research:{self.plan_id}",
                 )
         except Exception as e:

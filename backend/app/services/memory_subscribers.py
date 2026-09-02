@@ -237,7 +237,15 @@ async def _handle_calendar_event(event: Event):
                 start = start.replace(tzinfo=USER_TZ)
             now = datetime.now(USER_TZ)
             minutes_away = int((start - now).total_seconds() / 60)
-            if 0 < minutes_away < 1440:  # within 24 hours
+            if payload.get("all_day"):
+                # Follow-up plan §5 — no clock, no countdown.
+                await update_memory(
+                    event.user_id,
+                    source="calendar",
+                    next_event_title=f"{title} (all day)",
+                    next_event_minutes_away=None,
+                )
+            elif 0 < minutes_away < 1440:  # within 24 hours
                 await update_memory(
                     event.user_id,
                     source="calendar",
@@ -514,8 +522,12 @@ async def refresh_derived_signals(user_id: str = DAVID_USER_ID) -> dict:
                 now_naive = now_tz.replace(tzinfo=None)
                 today_end = now_naive.replace(hour=23, minute=59, second=59)
 
+                # Follow-up plan §5: this writes the same working-memory field
+                # context_writer does, so it needs the same all-day rule — an
+                # all-day row's midnight start_time is storage, not a time.
                 result = await db.execute(text("""
-                    SELECT title, start_time FROM calendar_event
+                    SELECT title, start_time, COALESCE(all_day, FALSE) AS all_day
+                    FROM calendar_event
                     WHERE user_id = :uid AND start_time > :now AND start_time <= :end
                     ORDER BY start_time ASC LIMIT 1
                 """), {"uid": user_id, "now": now_naive, "end": today_end})
@@ -528,8 +540,8 @@ async def refresh_derived_signals(user_id: str = DAVID_USER_ID) -> dict:
                     await update_memory(
                         user_id,
                         source="derived_refresh",
-                        next_event_title=row.title,
-                        next_event_minutes_away=max(0, minutes_away),
+                        next_event_title=f"{row.title} (all day)" if row.all_day else row.title,
+                        next_event_minutes_away=None if row.all_day else max(0, minutes_away),
                     )
                     updated["next_event"] = row.title
                 else:

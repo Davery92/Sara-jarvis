@@ -19,11 +19,11 @@ criteria, not a silent side effect of building this file.
 import json
 import logging
 from datetime import timedelta
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import text
 
-from app.core.timezone import now as local_now
+from app.core.timezone import now as local_now, render_when
 from app.core.config import get_owner_id
 
 logger = logging.getLogger(__name__)
@@ -48,7 +48,7 @@ async def _gather_utterance_history(db, user_id: str, days: int = 14) -> List[Di
     return [
         {
             "title": r.title, "category": r.category,
-            "at": r.sent_at.isoformat() if r.sent_at else None,
+            "at": render_when(r.sent_at, source_convention="utc"),
             "engaged": bool(r.engaged),
         }
         for r in rows
@@ -79,7 +79,7 @@ async def _gather_recent_chat(db, user_id: str, hours: int = 6, limit: int = 30)
         {
             "role": r.role,
             "content": (r.content or "")[:200],
-            "at": r.created_at.isoformat() if r.created_at else None,
+            "at": render_when(r.created_at, source_convention="utc"),
         }
         for r in rows
     ]
@@ -150,7 +150,7 @@ def _build_prompt(
     utterance_history: List[Dict[str, Any]],
     context: Dict[str, Any],
 ) -> Tuple[str, str]:
-    now_str = local_now().strftime("%A, %B %-d, %Y, %-I:%M %p ET")
+    now_str = local_now().strftime("%A, %B %-d, %Y, %-I:%M %p ET")  # time-ok: the "now" line itself
 
     cand_lines = []
     for c in candidates:
@@ -270,6 +270,32 @@ def _parse_response(raw: str) -> dict:
     raise json.JSONDecodeError("No valid JSON found in judge response", text_, 0)
 
 
+# Sources that carry a result David is actively waiting on.
+_DAVID_REQUESTED_SOURCES = {"research_executor", "task_result_delivery"}
+
+
+def is_david_requested(candidate: Optional[dict]) -> bool:
+    """True when this candidate is the answer to something David asked for.
+
+    Public because compose needs the same test: a result David is waiting on may
+    not be batched (here) and may not be silently declined (tasks/compose.py).
+    """
+    if not candidate or candidate.get("source") not in _DAVID_REQUESTED_SOURCES:
+        return False
+    if candidate.get("kind") == "alert":
+        return True
+    evidence = candidate.get("evidence")
+    if isinstance(evidence, list):
+        return any(
+            isinstance(e, dict) and e.get("origin") == "david_chat" for e in evidence
+        )
+    return False
+
+
+def _is_david_chat_result(candidates: list, candidate_id: str) -> bool:
+    return is_david_requested(next((c for c in candidates if c["id"] == candidate_id), None))
+
+
 async def _apply_decision(db, user_id: str, candidate_id: str, decision: str, reason: str, batch_slot: str = None) -> None:
     from app.services.candidate_states import JUDGE_DECISION_TO_STATUS
 
@@ -368,6 +394,7 @@ async def run_judge(user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]:
             temperature=0.3,
             max_tokens=1500,
             extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+            caller="judge",
         )
         raw = response["choices"][0]["message"].get("content", "") if isinstance(response, dict) else str(response)
     except Exception as e:
@@ -390,6 +417,16 @@ async def run_judge(user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]:
             if cid not in known_ids:
                 stats["unknown_id"] += 1
                 continue
+            if decision == "batch" and _is_david_chat_result(candidates, cid):
+                # Ground-truth plan, Phase 6 §3: something David asked for in
+                # chat is never batched. The Salem report finished at 21:28 on
+                # 2026-09-01 and the judge filed it into the morning slot
+                # (08:00–12:00 ET). David leaves for work at 07:00. He never
+                # heard about it, and "I'll ping you when it's ready" had already
+                # been said out loud.
+                decision = "send_now"
+                d["reason"] = (d.get("reason") or "") + " [override: David asked for this]"
+                logger.info(f"[judge] david_chat result {cid} — send_now, not batched")
             try:
                 await _apply_decision(db, user_id, cid, decision, d.get("reason", ""), d.get("batch_slot"))
                 stats[decision] = stats.get(decision, 0) + 1

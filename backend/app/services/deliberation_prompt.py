@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 
 from app.services.observation_log import Observation
 from app.services.unified_context import UnifiedContextSnapshot
+from app.core.timezone import render_when
 
 logger = logging.getLogger(__name__)
 
@@ -68,12 +69,74 @@ def _read_heartbeat_rules() -> str:
         return "(HEARTBEAT.md not found — use conservative defaults)"
 
 
+_LEDGER_LIMIT = 12
+
+
+def _format_entity_ledger() -> str:
+    """What Sara has already said about each thing, and to what.
+
+    Invariant 5: one entity, one message, one mouth. The deliberation loop had no
+    idea what it had already sent — dedup was a hash of title+message, so five
+    re-wordings of the same concern all looked new and all went out. This puts
+    the answer in front of the model as a table it can read: for every open
+    thread, unhandled email and upcoming event, whether a candidate is already
+    live and when David was last told.
+
+    Best-effort — a failure here degrades the prompt, it does not break the turn.
+    """
+    from sqlalchemy import text as sa_text
+    from app.core.config import get_owner_id
+    from app.db.base import SessionLocal
+
+    try:
+        user_id = get_owner_id()
+        now = datetime.now(timezone.utc)
+        with SessionLocal() as db:
+            rows = db.execute(sa_text("""
+                SELECT t.id, t.title, t.status, t.due_at, t.thread_key,
+                       (SELECT MAX(n.sent_at) FROM notification_log n
+                         WHERE n.user_id = t.user_id AND n.sent = TRUE
+                           AND n.topic IN ('entity:' || t.id, t.thread_key)) AS last_told,
+                       EXISTS (SELECT 1 FROM say_candidate c
+                                WHERE c.user_id = t.user_id
+                                  AND c.status IN ('pending','judged_send','judged_batch')
+                                  AND c.valid_until >= NOW()
+                                  AND ('entity:' || t.id = ANY(c.topic_entities)
+                                       OR t.thread_key = ANY(c.topic_entities))) AS candidate_live
+                  FROM world_thread t
+                 WHERE t.user_id = :uid
+                   AND t.status IN ('proposed','open','waiting','blocked','overdue')
+                 ORDER BY t.priority DESC, t.updated_at DESC
+                 LIMIT :lim
+            """), {"uid": user_id, "lim": _LEDGER_LIMIT}).fetchall()
+    except Exception as e:
+        logger.debug(f"[deliberation_prompt] entity ledger unavailable: {e}")
+        return ""
+
+    if not rows:
+        return ""
+
+    lines = [
+        "\n## Entity Ledger",
+        "Copy `entity_ref` from here into any proposal. Do not propose about an entity "
+        "whose candidate_live is yes, or that was told about today.",
+    ]
+    for r in rows:
+        told = f"last_told: {render_when(r.last_told, now=now)}" if r.last_told else "last_told: never"
+        due = f" | due: {render_when(r.due_at, now=now)}" if r.due_at else ""
+        lines.append(
+            f"- entity:{r.id} | {(r.title or '')[:80]} | status: {r.status}{due} | "
+            f"{told} | candidate_live: {'yes' if r.candidate_live else 'no'}"
+        )
+    return "\n".join(lines)
+
+
 def _format_memory_whiteboard(memory: UnifiedContextSnapshot, off_rhythm_flags: Optional[List[dict]] = None) -> str:
     """Format working memory as a concise whiteboard for the LLM."""
     now = datetime.now(USER_TZ)
     lines = []
 
-    lines.append(f"Current time: {now.strftime('%A %B %d, %I:%M %p %Z')}")
+    lines.append(f"Current time: {now.strftime('%A %B %d, %I:%M %p %Z')}")  # time-ok: the "now" line itself
     if memory.rhythm_summary:
         lines.append(memory.rhythm_summary)
     if off_rhythm_flags:
@@ -93,7 +156,8 @@ def _format_memory_whiteboard(memory: UnifiedContextSnapshot, off_rhythm_flags: 
                 since = datetime.fromisoformat(memory.at_place_since)
                 mins = int((datetime.now(since.tzinfo) - since).total_seconds() / 60)
                 if mins >= 1:
-                    loc += f", arrived {mins}m ago" if mins < 120 else f", there since {since.strftime('%-I:%M %p')}"
+                    loc += (f", arrived {mins}m ago" if mins < 120
+                            else f", there since {render_when(since)}")
             except Exception:
                 pass
         lines.append(loc)
@@ -144,7 +208,12 @@ def _format_memory_whiteboard(memory: UnifiedContextSnapshot, off_rhythm_flags: 
     # Schedule
     lines.append(f"\n## Schedule")
     if memory.next_event_title:
-        lines.append(f"Next event: {memory.next_event_title} in {memory.next_event_minutes_away} min")
+        # An all-day event has no minutes-away (follow-up plan §5) — say the
+        # event, not "in None min".
+        if memory.next_event_minutes_away is None:
+            lines.append(f"Next event: {memory.next_event_title}")
+        else:
+            lines.append(f"Next event: {memory.next_event_title} in {memory.next_event_minutes_away} min")
     lines.append(f"Events today: {memory.events_today_count}")
     try:
         from app.services.tunables import get_tunable_int
@@ -229,6 +298,10 @@ def _format_memory_whiteboard(memory: UnifiedContextSnapshot, off_rhythm_flags: 
         lines.append(f"\n## Open Threads: {memory.open_thread_count}")
         if memory.ripe_thread_topics:
             lines.append(f"Ripe topics: {', '.join(memory.ripe_thread_topics)}")
+
+    ledger = _format_entity_ledger()
+    if ledger:
+        lines.append(ledger)
 
     # Comms — unhandled important email (backlog, not a full inbox dump)
     comms_n = getattr(memory, 'comms_unhandled_count', 0)
@@ -426,7 +499,8 @@ Respond with ONLY valid JSON in this exact format:
       "title": "Short notification title",
       "message": "Notification body in Sara's warm, specific voice",
       "priority": "normal|high|critical",
-      "category": "schedule|security|social|health|checkin|home"
+      "category": "schedule|security|social|health|checkin|home",
+      "entity_ref": "REQUIRED — the id from the Entity Ledger this is about, copied exactly (e.g. 'entity:a1b2...', 'email:AAQk...'). Empty string ONLY when this is about nothing on the ledger."
     }}
   ],
   "home_actions": [
@@ -457,10 +531,10 @@ Respond with ONLY valid JSON in this exact format:
 ```
 
 ## Rules for notification_proposals
-- A cycle where working memory shows an unhandled important email, a stalled goal, a due
-  commitment, or a genuinely notable observation and you propose nothing is a FAILURE, not
-  restraint. Silence is only correct when there is truly nothing worth saying — not as a
-  default posture.
+- Propose only about an entity that has no live candidate and no delivered message today.
+  The Entity Ledger below tells you which those are. An entity already told about today is
+  finished for today, however differently you would phrase it now — five re-wordings of one
+  concern is five interruptions, not one.
 - Max 2 proposals per deliberation
 - NEVER notify about nutrition, blood sugar, meals, eating habits
 - NEVER notify about physiological states (alertness, stress, fatigue)
@@ -496,9 +570,9 @@ Respond with ONLY valid JSON in this exact format:
   This is a legitimate outcome when the day genuinely has nothing new to flag, not a default.
 
 ## Rules for task_proposals
-- A cycle with an unhandled important email, a stalled goal, or a due commitment and zero
-  task_proposals is a FAILURE unless a matching proposal was already made recently — check
-  before assuming "most deliberations produce 0" is the safe default.
+- Propose a task only for an entity with no live candidate and no delivered message today
+  (see the Entity Ledger). A matching proposal made recently means the work is already in
+  hand; proposing it again does not make it happen twice.
 - Max {task_cap} proposals per deliberation
 - Categories determine autonomy level:
   - research, pkg_update, note_organization, home_control → auto-executed silently
@@ -553,6 +627,6 @@ Respond with ONLY valid JSON in this exact format:
 
 **This deliberation's thought lens:** {lens}
 
-Review the observations and working memory. Decide whether to notify David, take home actions, or just update your internal state. A cycle with a real signal sitting unhandled (unread important email, stalled goal, due commitment, genuinely notable observation) and zero action taken is a failure to catch, not caution — but if nothing here is actually new or actionable, say so honestly and act on nothing."""
+Review the observations and working memory. Decide whether to notify David, take home actions, or just update your internal state. Act on a real signal that nothing has yet handled — but check the Entity Ledger first: an entity already told about today needs nothing more from you, and most cycles rightly end with no action at all."""
 
     return system_msg, user_msg

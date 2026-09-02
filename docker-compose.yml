@@ -94,6 +94,10 @@ services:
       - ./data:/home/david/jarvis/data
       # Fleet-agent deploy files so /api/fleet/install.sh can serve them
       - ./deploy:/app/deploy:ro
+      # Sara's self-model documents. The build context is ./backend, so docs/
+      # is not in the image and SELF_MODEL_DIR (/docs) does not exist without
+      # this — get_self_knowledge errors and the nightly regeneration no-ops.
+      - ./docs:/docs
     depends_on:
       db:
         condition: service_started
@@ -183,6 +187,10 @@ services:
       - TIMEZONE=America/New_York
       - TZ=America/New_York
       - CELERY_WORKER_QUEUES=cognitive,health,input,maintenance,low_priority,reflection
+    volumes:
+      # The nightly truth-maintenance job rewrites the generated sections of
+      # the self-model docs, and it runs on this worker's `maintenance` queue.
+      - ./docs:/docs
     depends_on:
       - redis
       - db
@@ -198,6 +206,8 @@ services:
       - SOLO_USER_ID=64f37c56-85cb-4590-8de9-adfc17d343ed
       - TIMEZONE=America/New_York
       - TZ=America/New_York
+    volumes:
+      - ./docs:/docs
     depends_on:
       - redis
       - celery-worker
