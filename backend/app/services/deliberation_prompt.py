@@ -161,6 +161,14 @@ def _format_memory_whiteboard(memory: UnifiedContextSnapshot, off_rhythm_flags: 
             except Exception:
                 pass
         lines.append(loc)
+    # gotcha_chat_amnesia_brief_clip_2026_09_06 Phase 2/4: the 6:23 AM
+    # deliberation that invented "David is a WFH day" from the No-School
+    # calendar event had no fact to contradict it with — this is that fact.
+    if memory.away_since and memory.distance_from_home_km is not None:
+        lines.append(
+            f"David is AWAY FROM HOME — {memory.distance_from_home_km:.0f} km, "
+            f"do not assume the home routine (leaving for work, home gym, etc)."
+        )
     lines.append(f"Interruptibility: {memory.interruptibility:.0%}")
     lines.append(f"Hours since last chat: {memory.hours_since_last_chat:.1f}")
     if memory.last_chat_topic:

@@ -8218,10 +8218,19 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     # Session across coroutines isn't safe); memory_recall
                     # opens its own sessions, so it runs concurrently with
                     # that trio instead of after it.
+                    # gotcha_chat_amnesia_brief_clip_2026_09_06 Phase 7 §2: a bare
+                    # "Good morning!" vector-recalled two prior "good morning"
+                    # episodes — noise, not memory. A greeting has nothing for
+                    # embedding similarity to match against except its own
+                    # boilerplate, so skip recall rather than surface that.
+                    async def _no_recall():
+                        return {"traces": []}
+
+                    _is_short_greeting = len((last_user_message or "").split()) <= 5
                     _kctx_t0 = _kctx_time.monotonic()
                     (_new_context, _new_open_intents, _extended), _new_recalled = await _kctx_asyncio.gather(
                         _sync_db_trio(),
-                        _memory_recall(
+                        _no_recall() if _is_short_greeting else _memory_recall(
                             user_id=str(current_user.id), query=last_user_message or "", k=5,
                             # "fact" excluded: extended_signals' _pkg() already
                             # does a dedicated fact-kind lookup (kept separate
@@ -8544,6 +8553,11 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                         if not summary:
                             return
                         await llm_client.store_session_summary(uid, summary, s_end)
+                        try:
+                            from app.services.unified_context import write_last_conversation_digest
+                            await write_last_conversation_digest(str(uid), summary, s_end)
+                        except Exception as e:
+                            logger.debug(f"[last-conversation] digest write skipped: {e}")
                         if DAILY_BRIEF_AVAILABLE:
                             await daily_brief_service.append_to_day_layer(uid, summary, s_end)
                             logger.info("📅 Appended session summary to day layer")
@@ -8583,7 +8597,22 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                         if _last_msg.tzinfo is None:
                             _last_msg = _last_msg.replace(tzinfo=timezone.utc)
                         hours_away = (datetime.now(timezone.utc) - _last_msg).total_seconds() / 3600
-                        reentry_context = f"\n\n## Re-Entry Context\nDavid just returned after {hours_away:.1f} hours away.\n"
+                        # gotcha_chat_amnesia_brief_clip_2026_09_06 Phase 3: "returned
+                        # ... away" reads as "physically came home" to the model even
+                        # though hours_away is chat-absence, not location — "you're
+                        # back after a solid 15 hours away" was said to David while he
+                        # was still in Salem. This header only ever meant chat gap.
+                        reentry_context = f"\n\n## Since you last talked ({hours_away:.1f} h ago)\n"
+                        try:
+                            from app.services.unified_context import read_snapshot as _read_uctx
+                            _uctx = await asyncio.wait_for(_read_uctx(str(current_user.id)), timeout=1.0)
+                            if getattr(_uctx, "away_since", None):
+                                _place = getattr(_uctx, "current_place", None) or "away from home"
+                                reentry_context += (
+                                    f"David is away from home ({_place}) — do not assume the home routine.\n"
+                                )
+                        except Exception as e:
+                            logger.debug(f"[reentry] away_mode check skipped: {e}")
 
                         # Read changes_since_last_chat from unified context snapshot
                         try:
@@ -8662,6 +8691,22 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                                 reentry_context += f"\nRelevant knowledge about David:\n{pkg_brief}\n"
                         except Exception:
                             pass
+
+                        # gotcha_chat_amnesia_brief_clip_2026_09_06 Phase 7 §1:
+                        # written when the PREVIOUS conversation closed (see
+                        # write_last_conversation_digest above) — this is the
+                        # first turn of a new one reading it back, instead of
+                        # "Good morning!" pulling two vector-recalled prior
+                        # "good morning" episodes and nothing else.
+                        try:
+                            from app.services.unified_context import read_last_conversation_digest
+                            from app.core.timezone import render_when as _render_when
+                            digest = await read_last_conversation_digest(str(current_user.id))
+                            if digest and digest.get("summary"):
+                                when_str = _render_when(datetime.fromisoformat(digest["ended_at"]))
+                                reentry_context += f"\n## Last conversation ({when_str})\n{digest['summary']}\n"
+                        except Exception as e:
+                            logger.debug(f"[last-conversation] digest render skipped: {e}")
 
                         current_content = system_message.content
                         system_message = ChatMessage(role="system", content=current_content + reentry_context)

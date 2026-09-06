@@ -18,6 +18,13 @@ logger = logging.getLogger(__name__)
 
 SNAPSHOT_KEY = "sara:unified_context:{user_id}"
 CHANGES_KEY = "sara:context_changes:{user_id}"
+# gotcha_chat_amnesia_brief_clip_2026_09_06 Phase 7: "Good morning!" got two
+# vector-recalled prior "good morning" episodes and nothing about the actual
+# previous conversation (walking tour + magic show, Saturday). Written when
+# a session closes, read on the first turn of the next one.
+LAST_CONVERSATION_DIGEST_KEY = "chat:last_conversation_digest:{user_id}"
+_LAST_CONVERSATION_DIGEST_MAX_CHARS = 600
+_LAST_CONVERSATION_DIGEST_TTL_SECONDS = 60 * 60 * 24 * 3  # 3 days — stale after that, not wrong
 
 
 @dataclass
@@ -56,10 +63,17 @@ class UnifiedContextSnapshot:
     # ── Location ──
     current_place: Optional[str] = None  # classified place name, or "unknown"
     current_place_type: Optional[str] = None  # home/work/gym/client_site/store/other
+    current_place_confirmed: bool = True  # False when matched against a 'suggested' (unreviewed) known_place
     at_place_since: Optional[str] = None  # ISO timestamp of arrival at current_place
     last_location_at: Optional[str] = None  # ISO timestamp of last location report
     location_latitude: Optional[float] = None
     location_longitude: Optional[float] = None
+    # gotcha_chat_amnesia_brief_clip_2026_09_06 Phase 2: with no place_type='home'
+    # anchor there was no way to tell "away" from "unknown" — 3,233 Marblehead
+    # location_event rows never moved current_place off "unknown" because the
+    # trip's known_place row sat at status='suggested'.
+    distance_from_home_km: Optional[float] = None
+    away_since: Optional[str] = None  # ISO timestamp; set on first sample >5km from home, cleared on return
 
     # ── Environment ──
     home_occupied: bool = True
@@ -237,6 +251,95 @@ async def write_snapshot(user_id: str, snapshot: UnifiedContextSnapshot) -> None
         await r.hset(key, mapping=snapshot.to_dict())
     except Exception as e:
         logger.warning(f"Failed to write snapshot to Redis: {e}")
+
+
+def describe_location(snapshot: "UnifiedContextSnapshot") -> Optional[str]:
+    """Human-readable 'how far from home, since when, near what' line.
+
+    gotcha_chat_amnesia_brief_clip_2026_09_06 Phase 2: the single rendering
+    of distance_from_home_km/away_since/current_place so the chat "Right
+    now" header and the device-presence block say the same thing instead of
+    each independently deciding how to phrase "away" (or, before this,
+    each independently rendering "unknown").
+    """
+    if not snapshot.away_since or snapshot.distance_from_home_km is None:
+        return None
+    try:
+        since_str = datetime.fromisoformat(snapshot.away_since).strftime("%a %b %-d %H:%M")
+    except Exception:
+        since_str = snapshot.away_since
+    base = f"{snapshot.distance_from_home_km:.0f} km from home since {since_str}"
+    place = snapshot.current_place if snapshot.current_place and snapshot.current_place != "unknown" else None
+    return f"{base} ({place})." if place else f"{base}."
+
+
+def away_mode(snapshot: "UnifiedContextSnapshot", verified_upcoming: Optional[List[str]] = None) -> bool:
+    """True when David is away from home — gates the home-routine content
+    that recited itself unconditionally through the whole Salem trip
+    (gotcha_chat_amnesia_brief_clip_2026_09_06 Phase 4).
+
+    Two independent signals, either one is enough:
+      - distance_from_home_km > 30 for >= 6h (away_since set long enough ago)
+      - a verified-upcoming calendar line naming an away trip spanning today
+        (the "Thu Sep 3 – Mon Sep 7: Salem" line context_snapshot already
+        renders) — catches the trip on day 1, before enough location samples
+        have accumulated to trip the distance signal.
+    """
+    if snapshot.distance_from_home_km is not None and snapshot.distance_from_home_km > 30 and snapshot.away_since:
+        try:
+            since_dt = datetime.fromisoformat(snapshot.away_since)
+            if since_dt.tzinfo is None:
+                from datetime import timezone as _tz
+                since_dt = since_dt.replace(tzinfo=_tz.utc)
+            from datetime import timezone as _tz2
+            hours_away = (datetime.now(_tz2.utc) - since_dt).total_seconds() / 3600
+            if hours_away >= 6:
+                return True
+        except Exception:
+            pass
+    if verified_upcoming:
+        import re as _re
+        today = local_now().date()
+        for line in verified_upcoming:
+            m = _re.search(r"([A-Z][a-z]{2} [A-Z][a-z]{2} \d{1,2}).*?[–-]\s*([A-Z][a-z]{2} [A-Z][a-z]{2} \d{1,2})", line)
+            if not m:
+                continue
+            try:
+                start = datetime.strptime(f"{m.group(1)} {today.year}", "%a %b %d %Y").date()
+                end = datetime.strptime(f"{m.group(2)} {today.year}", "%a %b %d %Y").date()
+                if start <= today <= end:
+                    return True
+            except Exception:
+                continue
+    return False
+
+
+async def write_last_conversation_digest(user_id: str, summary: str, ended_at: datetime) -> None:
+    """Store the just-closed conversation's summary for the next one's first
+    turn to read (gotcha_chat_amnesia_brief_clip_2026_09_06 Phase 7)."""
+    try:
+        r = await _get_redis()
+        payload = json.dumps({
+            "summary": (summary or "").strip()[:_LAST_CONVERSATION_DIGEST_MAX_CHARS],
+            "ended_at": ended_at.isoformat(),
+        })
+        await r.set(LAST_CONVERSATION_DIGEST_KEY.format(user_id=user_id), payload,
+                     ex=_LAST_CONVERSATION_DIGEST_TTL_SECONDS)
+    except Exception as e:
+        logger.warning(f"Failed to write last-conversation digest: {e}")
+
+
+async def read_last_conversation_digest(user_id: str) -> Optional[Dict[str, str]]:
+    """Returns {"summary": ..., "ended_at": ...} or None."""
+    try:
+        r = await _get_redis()
+        raw = await r.get(LAST_CONVERSATION_DIGEST_KEY.format(user_id=user_id))
+        if not raw:
+            return None
+        return json.loads(raw)
+    except Exception as e:
+        logger.warning(f"Failed to read last-conversation digest: {e}")
+        return None
 
 
 async def read_changes(user_id: str) -> List[str]:

@@ -113,16 +113,17 @@ class TestExtendedSignalsRendering:
         assert "sara_feels" not in text
 
     def test_none_values_in_extended_are_skipped(self):
-        extended = {"pkg": None, "daily_brief": None, "journal": None,
+        extended = {"pkg": None, "daily_brief_layers": None, "journal": None,
                     "patterns": None, "device": None, "emotional_tone": None}
         text = render_engaged_context(_context(), open_intents=0, recall_traces=[], extended=extended)
         assert "sara_feels" not in text
-        assert "Today's Brief" not in text
+        assert "Right now / today / this week" not in text
+        assert "Who David is (stable)" not in text
 
     def test_each_present_category_renders(self):
         extended = {
             "pkg": "David co-founded Risk Ninja.",
-            "daily_brief": "Meeting at 2pm.",
+            "daily_brief_layers": {"moment": "Meeting at 2pm.", "stable": "David has a kitten named Vesper."},
             "journal": "Quiet morning, nothing urgent.",
             "patterns": "David trains around 1pm on weekdays (82%)",
             "device": "[Device awareness] iPhone online.",
@@ -135,6 +136,10 @@ class TestExtendedSignalsRendering:
         assert "Meeting at 2pm." in text
         assert "David co-founded Risk Ninja." in text
         assert "Quiet morning" in text
+        assert "David has a kitten named Vesper." in text
+        # Volatile (moment/day/context) must render before stable — the bug
+        # this guards against clipped stable-first, eating the trip context.
+        assert text.index("Meeting at 2pm.") < text.index("kitten named Vesper")
 
     def test_lock_and_light_cycles_are_dropped_as_noise(self):
         """Ground-truth plan, Phase 5 §8: a "patterns" line that is only the
@@ -146,8 +151,12 @@ class TestExtendedSignalsRendering:
         assert "patterns" not in text
 
     def test_long_extended_values_are_truncated(self):
-        extended = {"daily_brief": "x" * 5000, "pkg": "y" * 5000, "journal": "z" * 5000}
+        extended = {
+            "daily_brief_layers": {"context": "x" * 5000, "stable": "w" * 5000},
+            "pkg": "y" * 5000, "journal": "z" * 5000,
+        }
         text = render_engaged_context(_context(), open_intents=0, recall_traces=[], extended=extended)
-        assert text.count("x") <= 1600  # 1500 cap + a little header slack
+        assert text.count("x") <= 1900  # 1800-char volatile cap + a little slack
+        assert text.count("w") <= 1000  # 900-char stable cap + slack
         assert text.count("y") <= 1100  # 1000 cap
         assert text.count("z") <= 1100  # 1000 cap

@@ -30,7 +30,12 @@ class BriefCompiler:
     Uses lazy compilation with hash-based cache invalidation.
     """
 
-    LAYER_NAMES = ["stable", "context", "day", "moment"]
+    # Volatile-first (gotcha_chat_amnesia_brief_clip_2026_09_06): moment/day/
+    # context are what changed today; stable is the same paragraph every
+    # morning. Any consumer that truncates the compiled string — or the
+    # layers dict below — now loses the stable "who David is" summary
+    # before it loses today's trip/plans, not the other way around.
+    LAYER_NAMES = ["moment", "day", "context", "stable"]
 
     def __init__(self):
         self.briefs_dir = BRIEFS_DIR

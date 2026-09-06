@@ -485,7 +485,12 @@ Return ONLY valid JSON in this exact format, no other text:
                         "model": llm_model,
                         "messages": [{"role": "user", "content": prompt}],
                         "temperature": 0.3,
-                        "max_tokens": 500
+                        "max_tokens": 400,
+                        # Flash-Next thinks by default (--reasoning-effort xhigh); without
+                        # this every call burned its whole max_tokens on reasoning prose
+                        # and the JSON never arrived (gotcha_chat_amnesia_brief_clip_2026_09_06
+                        # Phase 6 — feedback_qwen_thinking).
+                        "chat_template_kwargs": {"enable_thinking": False},
                     }
                 )
                 response.raise_for_status()

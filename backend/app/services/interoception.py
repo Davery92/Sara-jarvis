@@ -42,8 +42,10 @@ async def build_interoception_header(user_id: str) -> Optional[str]:
     tone = None
     intensity = None
     notifs = None
+    location_line = None
     try:
         from app.services.working_memory import read_memory
+        from app.services.unified_context import describe_location
         snap = await read_memory(user_id)
         if snap:
             activity = (snap.activity_state or "unknown").lower()
@@ -51,6 +53,7 @@ async def build_interoception_header(user_id: str) -> Optional[str]:
             tone = snap.sara_emotional_tone
             intensity = snap.sara_emotional_intensity
             notifs = snap.notifications_sent_today
+            location_line = describe_location(snap)
     except Exception as e:
         logger.debug(f"interoception snapshot read failed: {e}")
 
@@ -63,5 +66,10 @@ async def build_interoception_header(user_id: str) -> Optional[str]:
         parts.append(f"You feel: {tone} ({(intensity or 0.0):.2f}).")
     if notifs is not None:
         parts.append(f"Notifications sent today: {notifs}/{_notif_cap()}.")
+    # gotcha_chat_amnesia_brief_clip_2026_09_06 Phase 2: this line only
+    # appears once David is actually away (distance_from_home_km/away_since
+    # both set) — at home it stays silent rather than adding noise.
+    if location_line:
+        parts.append(f"Location: {location_line}")
 
     return "## Right now (your internal clock & state)\n" + " ".join(parts)

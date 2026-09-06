@@ -21,6 +21,19 @@ from app.core.timezone import now as local_now, render_when, to_local, USER_TIME
 
 logger = logging.getLogger(__name__)
 
+# gotcha_chat_amnesia_brief_clip_2026_09_06 Phase 4 §3: phrases that assert
+# the at-home routine as if it applies today. A journal entry matching one
+# of these, written before David left, is stale the moment away_mode flips
+# true — it should stop being read back into chat as current fact.
+_HOME_ROUTINE_RE = re.compile(
+    r"working from home|home gym|leaves? for work|WFH day|the rhythm is yours to set",
+    re.IGNORECASE,
+)
+
+
+def _asserts_home_routine(content: Optional[str]) -> bool:
+    return bool(content and _HOME_ROUTINE_RE.search(content))
+
 
 # Follow-up plan §3: theory_of_david is not allowed to restate a routine time.
 #
@@ -492,6 +505,24 @@ Write a very brief opening thought (1 short paragraph). Not a summary - just Sar
             db, user_id, hours=12, limit=max_entries,
             entry_types=CHAT_CONTEXT_ENTRY_TYPES,
         )
+
+        if not entries:
+            return ""
+
+        # gotcha_chat_amnesia_brief_clip_2026_09_06 Phase 4 §3: a 6:23 AM
+        # deliberation wrote "You're working from home today" into the
+        # journal, and chat read it back as established fact for the rest
+        # of the trip — a wrong morning guess becoming its own "memory".
+        # Journal entries don't carry a stored location/away snapshot to
+        # compare against, so this is a content-level staleness check
+        # rather than a stored-state one: drop an entry that asserts the
+        # home routine if David is currently away.
+        try:
+            from app.services.unified_context import read_snapshot, away_mode
+            if away_mode(await read_snapshot(user_id)):
+                entries = [e for e in entries if not _asserts_home_routine(e.content)]
+        except Exception as e:
+            logger.debug(f"[journal] away_mode filter skipped: {e}")
 
         if not entries:
             return ""

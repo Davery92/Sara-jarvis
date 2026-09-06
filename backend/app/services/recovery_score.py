@@ -40,13 +40,20 @@ def compute_readiness(recovery: Dict, baseline: Optional[Dict] = None) -> Dict:
     hrv = recovery.get("hrv")
     avg_hrv = baseline.get("avg_hrv")
     if hrv and avg_hrv:
-        diff = hrv - avg_hrv
-        if diff < -15:
-            score -= 25
-            factors.append(f"HRV {abs(diff):.0f}ms below baseline")
-        elif diff < -8:
-            score -= 12
-            factors.append("HRV slightly below baseline")
+        # gotcha_chat_amnesia_brief_clip_2026_09_06 Phase 5 §2: a 2-sample HRV
+        # morning reading of 153 (prior days 48-75) scored as "recovery looks
+        # solid" instead of what it was — a sensor blip too far outside the
+        # baseline to trust. Outside [0.4x, 2x] of baseline, don't score it.
+        if hrv > avg_hrv * 2 or hrv < avg_hrv * 0.4:
+            factors.append(f"HRV {hrv:.0f} far outside baseline {avg_hrv:.0f} (unverified, ignored)")
+        else:
+            diff = hrv - avg_hrv
+            if diff < -15:
+                score -= 25
+                factors.append(f"HRV {abs(diff):.0f}ms below baseline")
+            elif diff < -8:
+                score -= 12
+                factors.append("HRV slightly below baseline")
 
     # Resting HR vs baseline (elevated = poorer recovery)
     hr = recovery.get("heart_rate")

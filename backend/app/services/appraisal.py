@@ -186,6 +186,18 @@ async def _apply_brief_patch(db, user_id: str, patch: Dict[str, Any]) -> None:
         )
         if existing is not None and existing.get("text") == content.get("text"):
             return
+        # gotcha_chat_amnesia_brief_clip_2026_09_06 Phase 5 §1: the same-key
+        # check above only catches a re-fired patch for the SAME item_key —
+        # 15 near-identical "Weight 240 / RHR / sleep" lines piled up under
+        # 15 DIFFERENT keys instead, one per appraisal cycle. Drop the patch
+        # if any existing item (any key) already has this exact text.
+        new_text = (content.get("text") or "").strip()
+        if new_text and any(
+            (i.get("text") or "").strip() == new_text
+            for i in state["sections"].get("health_deltas", [])
+            if i.get("key") != item_key
+        ):
+            return
 
     await brief_patch(
         db, user_id, op=op, section=section, item_key=str(item_key)[:200],

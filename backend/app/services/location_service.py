@@ -76,16 +76,23 @@ def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 
 def classify(db: Session, user_id: str, lat: float, lon: float) -> Optional[Dict[str, Any]]:
-    """Find the nearest active known_place within its radius. Postgres haversine — cheap, no PostGIS needed."""
+    """Find the nearest known_place within its radius. Postgres haversine — cheap, no PostGIS needed.
+
+    gotcha_chat_amnesia_brief_clip_2026_09_06 Phase 2: matches 'suggested'
+    (auto-learned, not-yet-reviewed) places too, not just 'active' ones — a
+    place David visits often enough to get auto-learned (23 visits over a
+    week-long trip) is a real place, not "unknown". Returns `confirmed` so
+    callers can say so honestly instead of stating it as fact.
+    """
     row = db.execute(text("""
-        SELECT id, name, place_type, latitude, longitude, radius_m,
+        SELECT id, name, place_type, latitude, longitude, radius_m, status,
                2 * 6371000 * asin(sqrt(
                    sin(radians((:lat - latitude) / 2)) ^ 2 +
                    cos(radians(latitude)) * cos(radians(:lat)) *
                    sin(radians((:lon - longitude) / 2)) ^ 2
                )) AS dist_m
         FROM known_place
-        WHERE user_id = :user_id AND is_active = TRUE
+        WHERE user_id = :user_id AND status IN ('active', 'suggested')
         ORDER BY dist_m ASC
         LIMIT 1
     """), {"user_id": user_id, "lat": lat, "lon": lon}).fetchone()
@@ -98,6 +105,7 @@ def classify(db: Session, user_id: str, lat: float, lon: float) -> Optional[Dict
             "latitude": row.latitude,
             "longitude": row.longitude,
             "radius_m": row.radius_m,
+            "confirmed": row.status == "active",
         }
 
     # Fallback: classify against PKG_Place nodes in Neo4j (pre-existing behavior)
@@ -127,11 +135,49 @@ def classify(db: Session, user_id: str, lat: float, lon: float) -> Optional[Dict
                         "latitude": lat,
                         "longitude": lon,
                         "radius_m": 500,
+                        "confirmed": True,
                     }
     except Exception as e:
         logger.debug(f"PKG place classification failed: {e}")
 
     return None
+
+
+def _get_home_place(db: Session, user_id: str) -> Optional[Dict[str, Any]]:
+    row = db.execute(text("""
+        SELECT latitude, longitude FROM known_place
+        WHERE user_id = :user_id AND place_type = 'home' AND status = 'active'
+        LIMIT 1
+    """), {"user_id": user_id}).fetchone()
+    if not row:
+        return None
+    return {"latitude": row.latitude, "longitude": row.longitude}
+
+
+_PROMOTE_MIN_VISITS = 10
+_PROMOTE_MIN_DISTINCT_DAYS = 2
+
+
+async def _maybe_promote_suggested_place(db: Session, user_id: str, place_id: str) -> None:
+    """A 'suggested' place visited often enough, across enough distinct days,
+    graduates to 'active' without waiting on the review UI (routes/location.py)
+    — the Marblehead trip row hit 23 visits and was still 'suggested' on day 4."""
+    row = db.execute(text("""
+        SELECT visit_count, status FROM known_place WHERE id = :id AND user_id = :user_id
+    """), {"id": place_id, "user_id": user_id}).fetchone()
+    if not row or row.status != "suggested" or row.visit_count < _PROMOTE_MIN_VISITS:
+        return
+    distinct_days = db.execute(text("""
+        SELECT count(DISTINCT created_at::date) FROM location_event
+        WHERE user_id = :user_id AND place_id = :place_id
+    """), {"user_id": user_id, "place_id": place_id}).scalar() or 0
+    if distinct_days < _PROMOTE_MIN_DISTINCT_DAYS:
+        return
+    db.execute(text("""
+        UPDATE known_place SET status = 'active', is_active = TRUE WHERE id = :id
+    """), {"id": place_id})
+    logger.info(f"Location: auto-promoted suggested place {place_id} to active "
+                f"({row.visit_count} visits, {distinct_days} distinct days)")
 
 
 async def process_report(db: Session, user_id: str, lat: float, lon: float,
@@ -179,11 +225,13 @@ async def process_report(db: Session, user_id: str, lat: float, lon: float,
             UPDATE known_place SET visit_count = visit_count + 1, last_seen_at = NOW()
             WHERE id = :id
         """), {"id": place["id"]})
+        if not place.get("confirmed", True):
+            await _maybe_promote_suggested_place(db, user_id, place["id"])
 
     db.commit()
 
     await _check_adhoc_geofences(db, user_id, lat, lon)
-    await _update_context(user_id, place, lat, lon, observed_at=report_time)
+    await _update_context(db, user_id, place, lat, lon, observed_at=report_time)
 
     return {"classified_place": place["name"] if place else None}
 
@@ -254,7 +302,7 @@ async def handle_geofence_event(db: Session, user_id: str, region_id: str,
             await r.delete(_LAST_PLACE_KEY.format(user_id=user_id))
         db.commit()
         await _handle_transition(db, user_id, event_type, place, lat, lon)
-        await _update_context(user_id, place if event_type == "enter" else None, lat, lon)
+        await _update_context(db, user_id, place if event_type == "enter" else None, lat, lon)
         return {"handled": True, "kind": "place"}
 
     trigger = db.execute(text("""
@@ -420,7 +468,10 @@ async def _fire_trigger(db: Session, trigger_row) -> None:
     logger.info(f"Location trigger #{trigger_row.id} fired: '{trigger_row.reminder_title}' ({trigger_row.trigger_on} {trigger_row.label})")
 
 
-async def _update_context(user_id: str, place: Optional[Dict[str, Any]], lat: float, lon: float,
+_AWAY_THRESHOLD_KM = 5.0
+
+
+async def _update_context(db: Session, user_id: str, place: Optional[Dict[str, Any]], lat: float, lon: float,
                           observed_at: Optional[datetime] = None) -> None:
     from app.services.context_writer import update_fields
     from app.services.unified_context import read_snapshot
@@ -430,19 +481,41 @@ async def _update_context(user_id: str, place: Optional[Dict[str, Any]], lat: fl
         "location_longitude": lon,
         "last_location_at": (observed_at or local_now()).isoformat(),
     }
+    snap = None
+    try:
+        snap = await read_snapshot(user_id)
+    except Exception:
+        pass
+
     if place:
-        try:
-            snap = await read_snapshot(user_id)
-            if snap.current_place != place["name"]:
-                fields["at_place_since"] = local_now().isoformat()
-        except Exception:
+        confirmed = place.get("confirmed", True)
+        display_name = place["name"] if confirmed else f"near {place['name']} (unconfirmed)"
+        if snap is None or snap.current_place != display_name:
             fields["at_place_since"] = local_now().isoformat()
-        fields["current_place"] = place["name"]
+        fields["current_place"] = display_name
         fields["current_place_type"] = place.get("place_type") or "other"
+        fields["current_place_confirmed"] = confirmed
     else:
         fields["current_place"] = "unknown"
         fields["current_place_type"] = ""
+        fields["current_place_confirmed"] = True
         fields["at_place_since"] = local_now().isoformat()
+
+    # gotcha_chat_amnesia_brief_clip_2026_09_06 Phase 2: distance-from-home is
+    # what actually answers "is David away" — current_place alone stayed
+    # "unknown" for the whole Marblehead trip because that known_place row
+    # was still 'suggested'.
+    try:
+        home = _get_home_place(db, user_id)
+        if home:
+            distance_km = haversine_m(lat, lon, home["latitude"], home["longitude"]) / 1000.0
+            fields["distance_from_home_km"] = round(distance_km, 1)
+            if distance_km > _AWAY_THRESHOLD_KM:
+                fields["away_since"] = (snap.away_since if snap and snap.away_since else local_now().isoformat())
+            else:
+                fields["away_since"] = None
+    except Exception as e:
+        logger.debug(f"[location] distance-from-home computation failed: {e}")
 
     await update_fields(user_id, source="location", **fields)
 

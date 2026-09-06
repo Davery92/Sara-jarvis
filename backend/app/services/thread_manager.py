@@ -202,6 +202,32 @@ async def expire_stale_threads(user_id: str, db: AsyncSession) -> int:
     count = result.rowcount
     if count > 0:
         logger.info(f"Expired {count} stale conversation threads")
+
+    # gotcha_chat_amnesia_brief_clip_2026_09_06 Phase 5 §3: "[thread:...] 1 PM
+    # gym session", "working on the app (aging 3 days ago)", "deciding on
+    # dinner recipe" were still in OPEN LOOPS on the trip — thread:* items are
+    # exempt from world_brief.expire_stale_items by design (their own
+    # follow_up_before lifecycle is supposed to own this), but that lifecycle
+    # doesn't know David is away and none of these are relevant until he's
+    # back. Only while away, and only for threads no `follow_up_before` will
+    # ever catch (it's set far out, or None).
+    try:
+        from app.services.unified_context import read_snapshot, away_mode
+        if away_mode(await read_snapshot(user_id)):
+            away_result = await db.execute(text("""
+                UPDATE followup_thread
+                SET status = 'expired', updated_at = NOW()
+                WHERE user_id = :user_id
+                  AND status = 'open'
+                  AND COALESCE(last_mentioned_at, opened_at, created_at) < NOW() - INTERVAL '72 hours'
+            """), {"user_id": user_id})
+            away_count = away_result.rowcount
+            if away_count:
+                logger.info(f"Expired {away_count} thread(s) untouched >72h while David is away")
+            count += away_count
+    except Exception as e:
+        logger.debug(f"[thread_manager] away_mode thread expiry skipped: {e}")
+
     return count
 
 

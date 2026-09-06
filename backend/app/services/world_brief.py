@@ -324,6 +324,10 @@ async def expire_stale_items(db, user_id: str = DEFAULT_USER_ID) -> int:
         ("happened", timedelta(days=7)),
         ("open_loops", timedelta(hours=72)),
         ("comms_needing_action", timedelta(hours=72)),
+        # gotcha_chat_amnesia_brief_clip_2026_09_06 Phase 5 §1: 15
+        # near-identical "Weight 240 / RHR / sleep" items dated Aug 31–Sep 2
+        # were still in the brief on Sept 4 — this section had no expiry at all.
+        ("health_deltas", timedelta(hours=36)),
     ):
         for item in list(state["sections"].get(section, [])):
             if section in ("open_loops", "comms_needing_action") and str(item.get("key", "")).startswith("thread:"):
@@ -539,7 +543,7 @@ async def _now_today_live(db, user_id: str) -> Dict[str, Any]:
     return out
 
 
-def _body_training_live(user_id: str) -> str:
+def _body_training_live(user_id: str, away: bool = False) -> str:
     """BODY & TRAINING, computed fresh on every render — never cached,
     never hardcoded (§3.10). Reads the same canonical services the app
     itself uses (training_day, progressive_overload, fitness_context) so
@@ -557,12 +561,19 @@ def _body_training_live(user_id: str) -> str:
     try:
         with SessionLocal() as db:
             today = local_today()
-            td = is_training_day(db, user_id, today)
-            if td["is_training_day"]:
-                label = td.get("template_name") or "training day"
-                lines.append(f"- Today: {label} ({td['reason']}).")
+            if away:
+                # gotcha_chat_amnesia_brief_clip_2026_09_06 Phase 4: "Today:
+                # Day 5 — Friday (Home Gym)" rendered unconditionally the
+                # whole Salem trip — the scheduled-plan day only makes sense
+                # at home.
+                lines.append("- Away from home — no scheduled session; log only if David reports one.")
             else:
-                lines.append("- Today: rest day.")
+                td = is_training_day(db, user_id, today)
+                if td["is_training_day"]:
+                    label = td.get("template_name") or "training day"
+                    lines.append(f"- Today: {label} ({td['reason']}).")
+                else:
+                    lines.append("- Today: rest day.")
 
             recovery = get_morning_recovery(db, user_id, today)
             if any(v is not None for v in recovery.values()):
@@ -601,7 +612,13 @@ def _body_training_live(user_id: str) -> str:
 async def _body_training_live_async(user_id: str) -> str:
     """Async wrapper: adds the nutrition line (get_fitness_context is a
     coroutine) on top of the sync `_body_training_live` summary."""
-    lines_str = _body_training_live(user_id)
+    away = False
+    try:
+        from app.services.unified_context import read_snapshot, away_mode
+        away = away_mode(await read_snapshot(user_id))
+    except Exception as e:
+        logger.debug(f"[world_brief] away_mode check failed: {e}")
+    lines_str = _body_training_live(user_id, away=away)
     try:
         from app.db.session import SessionLocal
         from app.services.fitness_context import get_fitness_context

@@ -45,6 +45,15 @@ VOLATILE_BLOCK_MAX_TOKENS = 6000
 
 SECTION_ALLOTMENTS = {
     "brief": 1500,
+    # Split from "brief" (gotcha_chat_amnesia_brief_clip_2026_09_06) so the
+    # stable "who David is" paragraph has its own share and can no longer
+    # crowd the volatile moment/day/context layers out of this second,
+    # coarser cap the way the single 1500-char clip in context_snapshot
+    # used to. Sized off the render-time char caps there (1800/900 chars
+    # / CHARS_PER_TOKEN=4), with headroom since this budget operates on
+    # already-clipped text.
+    "brief_volatile": 500,
+    "brief_stable": 250,
     "calendar": 400,
     "memory": 600,
     "unacked": 300,

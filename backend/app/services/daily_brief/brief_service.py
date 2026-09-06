@@ -85,6 +85,18 @@ class DailyBriefService:
             logger.error(f"LLM call failed: {e}")
             raise
 
+    def get_layers(self, user_id: str) -> Dict[str, str]:
+        """Individual layer contents, keyed by layer name.
+
+        gotcha_chat_amnesia_brief_clip_2026_09_06: the compiled brief string
+        put `stable.md` (~3.7 KB) ahead of `context.md`/`day.md`/`moment.md`,
+        so any downstream clip (context_snapshot's 1500-char cap) always cut
+        the volatile layers first — the ones that actually change day to
+        day. Callers that need to render volatile-first now read layers
+        individually instead of the pre-joined compiled string.
+        """
+        return {name: self._read_layer(user_id, name) for name in self.compiler.LAYER_NAMES}
+
     async def get_compiled_brief(self, user_id: str) -> str:
         """
         Get the compiled brief for injection into context.

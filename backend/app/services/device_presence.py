@@ -40,6 +40,11 @@ class DevicePresence:
     location_context: str  # "home" | "work" | "away" | "unknown"
     confidence: float
     since: str  # ISO timestamp of when this answer was last (re)computed
+    # gotcha_chat_amnesia_brief_clip_2026_09_06 Phase 2: "location: unknown" was
+    # rendered for 3,233 Marblehead reports because current_place never left
+    # "unknown" — this is the same detail context_snapshot renders under
+    # "## Right now", so the device block stops repeating the flatter fact.
+    location_detail: Optional[str] = None
 
 
 async def _get_redis():
@@ -48,7 +53,7 @@ async def _get_redis():
 
 async def _resolve_uncached(db, user_id: str) -> DevicePresence:
     from app.services.device_orchestrator import device_orchestrator
-    from app.services.unified_context import read_snapshot
+    from app.services.unified_context import read_snapshot, describe_location
     from app.routes.presence import is_user_in_chat, get_active_clients
 
     now = datetime.now(timezone.utc).isoformat()
@@ -56,6 +61,7 @@ async def _resolve_uncached(db, user_id: str) -> DevicePresence:
     location_context = snapshot.current_place_type or "unknown"
     if location_context not in ("home", "work"):
         location_context = "away" if snapshot.current_place and snapshot.current_place != "unknown" else "unknown"
+    location_detail = describe_location(snapshot)
 
     profiles = await device_orchestrator.get_device_profiles(db, user_id)
 
@@ -73,6 +79,7 @@ async def _resolve_uncached(db, user_id: str) -> DevicePresence:
             platform=best.platform,
             activity_level=best.activity_level,
             location_context=location_context,
+            location_detail=location_detail,
             confidence=0.9,
             since=now,
         )
@@ -87,6 +94,7 @@ async def _resolve_uncached(db, user_id: str) -> DevicePresence:
             platform=chat_platform,
             activity_level="high",
             location_context=location_context,
+            location_detail=location_detail,
             confidence=0.75,
             since=now,
         )
@@ -100,6 +108,7 @@ async def _resolve_uncached(db, user_id: str) -> DevicePresence:
             platform="jetson",
             activity_level="medium",
             location_context=location_context,
+            location_detail=location_detail,
             confidence=0.6,
             since=now,
         )
@@ -114,6 +123,7 @@ async def _resolve_uncached(db, user_id: str) -> DevicePresence:
             platform=best.platform,
             activity_level=best.activity_level,
             location_context=location_context,
+            location_detail=location_detail,
             confidence=0.3,
             since=now,
         )
@@ -129,6 +139,7 @@ async def _resolve_uncached(db, user_id: str) -> DevicePresence:
             platform=c.get("platform"),
             activity_level="low",
             location_context=location_context,
+            location_detail=location_detail,
             confidence=0.2,
             since=now,
         )
@@ -139,6 +150,7 @@ async def _resolve_uncached(db, user_id: str) -> DevicePresence:
         platform=None,
         activity_level=None,
         location_context=location_context,
+        location_detail=location_detail,
         confidence=0.0,
         since=now,
     )
@@ -202,11 +214,18 @@ async def _publish_if_changed(r, user_id: str, result: DevicePresence) -> None:
 
 def format_context_line(presence: DevicePresence) -> Optional[str]:
     """One line for chat/voice system-prompt injection (A7)."""
+    # gotcha_chat_amnesia_brief_clip_2026_09_06 Phase 2: "location: unknown"
+    # rendered on every one of 3,233 Marblehead reports because current_place
+    # never left "unknown" — location_detail is the same distance/away_since
+    # string context_snapshot renders, so this line says the same true thing
+    # instead of the flatter (and here, wrong) location_context word.
+    # describe_location() already ends its string with a period.
+    loc_desc = (presence.location_detail or presence.location_context).rstrip(".")
     if not presence.active_device_name:
-        return f"David's location: {presence.location_context}."
+        return f"David's location: {loc_desc}."
     if presence.platform and presence.activity_level:
         return (
             f"David is currently active on {presence.active_device_name} "
-            f"({presence.platform}, {presence.activity_level}); location: {presence.location_context}."
+            f"({presence.platform}, {presence.activity_level}); location: {loc_desc}."
         )
-    return f"David is currently active on {presence.active_device_name}; location: {presence.location_context}."
+    return f"David is currently active on {presence.active_device_name}; location: {loc_desc}."

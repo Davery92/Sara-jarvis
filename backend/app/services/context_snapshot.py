@@ -252,6 +252,29 @@ async def get_world_state(db: Session, user_id: str = DEFAULT_USER_ID) -> WorldS
                     by_metric[canonical] = by_metric[alt]
                     break
 
+        # gotcha_chat_amnesia_brief_clip_2026_09_06 Phase 5 §2: Sunday's "HRV
+        # 153 — recovery looks solid" was a 2-sample reading against a
+        # 48-75 14-day range — a sensor blip, reported as fact. Flag (don't
+        # silently drop — David can still see the raw number) any HRV
+        # reading outside [0.4x, 2x] of the 14-day median.
+        if "hrv" in by_metric and not by_metric["hrv"].startswith("unavailable"):
+            try:
+                hrv_row = next((r for r in rows if r.metric_type in ("hrv", "hrv_morning")), None)
+                if hrv_row is not None:
+                    median = db.execute(text("""
+                        SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY value)
+                        FROM health_metric
+                        WHERE user_id = :uid AND metric_type = :mt
+                              AND recorded_at >= :since AND recorded_at < :until
+                    """), {
+                        "uid": user_id, "mt": hrv_row.metric_type,
+                        "since": now - timedelta(days=14), "until": now - timedelta(hours=36),
+                    }).scalar()
+                    if median and (hrv_row.value > median * 2 or hrv_row.value < median * 0.4):
+                        by_metric["hrv"] += " (single-sample, unverified — outside 14-day range)"
+            except Exception as e:
+                logger.debug(f"[context_snapshot] hrv outlier check failed: {e}")
+
         present = sum(1 for m in EXPECTED_HEALTH_METRICS if m in by_metric)
         for metric in EXPECTED_HEALTH_METRICS:
             by_metric.setdefault(metric, "unavailable (nothing recorded in the last 36h)")
@@ -654,10 +677,17 @@ async def get_extended_signals(
             logger.debug(f"[extended_signals] pkg failed: {e}")
             return None
 
-    async def _daily_brief() -> Optional[str]:
+    async def _daily_brief() -> Optional[Dict[str, str]]:
+        """Returns the raw layers (gotcha_chat_amnesia_brief_clip_2026_09_06)
+        instead of the pre-joined compiled string, so the renderer can put
+        moment/day/context ahead of stable and clip each independently."""
         try:
             from app.services.daily_brief import daily_brief_service
-            return await daily_brief_service.get_compiled_brief(user_id)
+            if not daily_brief_service.has_stable_layer(user_id):
+                # First-ever turn for this user: trigger the same bootstrap
+                # get_compiled_brief() used to do as a side effect.
+                await daily_brief_service.get_compiled_brief(user_id)
+            return daily_brief_service.get_layers(user_id)
         except Exception as e:
             logger.debug(f"[extended_signals] daily_brief failed: {e}")
             return None
@@ -749,8 +779,10 @@ async def get_extended_signals(
     def _s(v: Any) -> Optional[str]:
         return v if isinstance(v, str) and v.strip() else None
 
+    brief_layers = brief if isinstance(brief, dict) else None
+
     return {
-        "pkg": _s(pkg), "daily_brief": _s(brief), "journal": _s(journal),
+        "pkg": _s(pkg), "daily_brief_layers": brief_layers, "journal": _s(journal),
         "patterns": _s(patterns), "device": _s(device), "emotional_tone": _s(tone),
         "lessons": _s(lessons_text), "lesson_ids": lesson_ids or [],
     }
@@ -858,7 +890,8 @@ def _patterns_are_noise(patterns: str) -> bool:
 _SECTION_HEADERS = (
     ("### Calendar", "calendar"),
     ("### Relevant memory", "memory"),
-    ("## Today's Brief", "brief"),
+    ("## Right now / today / this week", "brief_volatile"),
+    ("## Who David is (stable)", "brief_stable"),
     ("## Knowledge Graph", "brief"),
     ("## Recent Journal", "brief"),
     ("### What you understand about David", "brief"),
@@ -977,8 +1010,21 @@ def render_engaged_context(
             lines.append(f"- **patterns**: {extended['patterns']}")
         if extended.get("device"):
             lines.append(f"\n{extended['device']}")
-        if extended.get("daily_brief"):
-            lines.append(f"\n## Today's Brief\n{_clip_to_paragraph(extended['daily_brief'], 1500)}")
+        brief_layers = extended.get("daily_brief_layers") or {}
+        # Volatile-first, and its own headers/budget (gotcha_chat_amnesia_
+        # brief_clip_2026_09_06): the single "## Today's Brief" clip put
+        # stable.md ahead of moment/day/context, so a 1500-char cap always
+        # ate the layers that actually change day to day — "in Salem" was
+        # sitting in context.md the whole trip, past where the cap cut.
+        volatile_text = "\n\n".join(
+            t.strip() for t in (brief_layers.get(name) for name in ("moment", "day", "context"))
+            if t and t.strip()
+        )
+        if volatile_text:
+            lines.append(f"\n## Right now / today / this week\n{_clip_to_paragraph(volatile_text, 1800)}")
+        stable_text = (brief_layers.get("stable") or "").strip()
+        if stable_text:
+            lines.append(f"\n## Who David is (stable)\n{_clip_to_paragraph(stable_text, 900)}")
         if extended.get("pkg"):
             pkg_text = suppress_pkg_health_conflicts(
                 extended["pkg"], (world.get("health_today") or {}).get("data") or {}

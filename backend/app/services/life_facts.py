@@ -148,6 +148,19 @@ async def get_life_facts_summary(user_id: str) -> Optional[str]:
         parts.append(f"works from {works_from['value']}")
     if not parts:
         return None
+
+    # gotcha_chat_amnesia_brief_clip_2026_09_06 Phase 4: "David normally:
+    # leaves for work 7am..." was recited unconditionally the entire Salem
+    # trip — gated once here rather than at each of this function's three
+    # call sites (deliberation.py, sara_journal_service.py, main_simple.py).
+    try:
+        from app.services.unified_context import read_snapshot, away_mode
+        snap = await read_snapshot(user_id)
+        if away_mode(snap):
+            return None
+    except Exception as e:
+        logger.debug(f"life_facts: away_mode check skipped: {e}")
+
     return "David normally: " + ", ".join(parts) + "."
 
 

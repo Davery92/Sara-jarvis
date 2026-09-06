@@ -24,7 +24,8 @@ class TestGetExtendedSignals:
         mock_recall_prose = AsyncMock(return_value="David co-founded Risk Ninja.")
 
         mock_brief_service = MagicMock()
-        mock_brief_service.get_compiled_brief = AsyncMock(return_value="Meeting at 2pm.")
+        mock_brief_service.has_stable_layer = MagicMock(return_value=True)
+        mock_brief_service.get_layers = MagicMock(return_value={"moment": "Meeting at 2pm."})
 
         mock_journal = MagicMock()
         mock_journal.get_entries_for_conversation_context = AsyncMock(return_value="Quiet morning.")
@@ -43,7 +44,7 @@ class TestGetExtendedSignals:
             result = await get_extended_signals(mock_db, "user-1", "how's my day")
 
         assert result["pkg"] == "David co-founded Risk Ninja."
-        assert result["daily_brief"] == "Meeting at 2pm."
+        assert result["daily_brief_layers"] == {"moment": "Meeting at 2pm."}
         assert result["journal"] == "Quiet morning."
         assert "side door locks at midnight" in result["patterns"]
         assert result["device"] == "[Device awareness] iPhone."
@@ -61,7 +62,7 @@ class TestGetExtendedSignals:
              patch("app.services.sara_journal_service.sara_journal") as mock_journal, \
              patch("app.services.device_orchestrator.device_orchestrator") as mock_device, \
              patch("app.services.working_memory.read_memory", new=AsyncMock(side_effect=RuntimeError("boom"))):
-            mock_brief.get_compiled_brief = AsyncMock(side_effect=RuntimeError("boom"))
+            mock_brief.has_stable_layer = MagicMock(side_effect=RuntimeError("boom"))
             mock_journal.get_entries_for_conversation_context = AsyncMock(side_effect=RuntimeError("boom"))
             mock_device.get_device_context_for_chat = AsyncMock(side_effect=RuntimeError("boom"))
 
@@ -69,7 +70,7 @@ class TestGetExtendedSignals:
 
         assert result["pkg"] == "still works"
         assert result["patterns"] is None
-        assert result["daily_brief"] is None
+        assert result["daily_brief_layers"] is None
         assert result["journal"] is None
         assert result["device"] is None
         assert result["emotional_tone"] is None
@@ -86,13 +87,15 @@ class TestGetExtendedSignals:
              patch("app.services.sara_journal_service.sara_journal") as mock_journal, \
              patch("app.services.device_orchestrator.device_orchestrator") as mock_device, \
              patch("app.services.working_memory.read_memory", new=AsyncMock(return_value=None)):
-            mock_brief.get_compiled_brief = AsyncMock(return_value="")
+            mock_brief.has_stable_layer = MagicMock(return_value=True)
+            mock_brief.get_layers = MagicMock(return_value={})
             mock_journal.get_entries_for_conversation_context = AsyncMock(return_value="   ")
             mock_device.get_device_context_for_chat = AsyncMock(return_value=None)
 
             result = await get_extended_signals(mock_db, "user-1", "test")
 
         assert result == {
-            "pkg": None, "daily_brief": None, "journal": None,
+            "pkg": None, "daily_brief_layers": {}, "journal": None,
             "patterns": None, "device": None, "emotional_tone": None,
+            "lessons": None, "lesson_ids": [],
         }
