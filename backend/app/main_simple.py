@@ -7738,6 +7738,14 @@ def format_prompt_datetime_line(user_now: Optional[datetime] = None) -> str:
 def get_system_prompt(assistant_name: str, user_email: str, user_now: Optional[datetime] = None, soul_content: Optional[str] = None, include_datetime: bool = True) -> str:
     """Generate Sara's system prompt - single unified personality.
 
+    NOT USED BY THE CHAT LANE any more. /chat/stream builds its persona with
+    app.prompts.chat_system_prompt.build_chat_system_prompt(), which is ≤6.5k
+    chars and generates its tool section from the tools actually loaded this
+    turn. This 14k-char version — a hardcoded manual for tools that may not be
+    present, containing two rules that fight each other — still serves the
+    voice lane and the startup capability-manifest check. Do not wire it back
+    into chat; see SARA_CHAT_HARNESS_REBUILD_PLAN_2026_09_11 Phase 5.
+
     include_datetime=False yields a *stable* prompt (no clock) so llama-server's
     prompt cache can reuse the persona + tool-schema prefix across turns; the
     caller then puts the datetime line into a separate, volatile system message
@@ -8314,15 +8322,6 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
             # Create system message
             user_now = _resolve_prompt_datetime_for_user(db, current_user.id)
             soul_content = load_soul_for_prompt(db)
-            # Stable prefix (persona/soul/rules, NO clock). The clock and every
-            # per-turn context block get split into a separate volatile system
-            # message at assembly time (see "prompt-cache split" below) so the
-            # persona + tool schemas stay a cache hit on the chat lane.
-            _stable_system_prompt = get_system_prompt(
-                ASSISTANT_NAME, current_user.email, user_now=user_now, soul_content=soul_content, include_datetime=False
-            )
-            _datetime_line = format_prompt_datetime_line(user_now)
-            system_message = ChatMessage(role="system", content=_stable_system_prompt)
 
             # INTENT CLASSIFICATION for lazy context injection
             # Extract text from user message (content may be a list for multimodal messages with images)
@@ -8392,6 +8391,131 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     is_work_mode = _get_canvas_mode(str(current_user.id))
                     if is_work_mode:
                         logger.info("💼 Work mode active (Redis flag)")
+
+            # === TOOL SELECTION — before the system prompt is built ===
+            # Harness rebuild Phase 5: the persona prompt NAMES the tools in
+            # hand this turn, so selection has to happen before assembly, not
+            # inside process_chat() after it.
+            # WORK MODE-AWARE TOOL LOADING
+            # Work mode always includes workspace and maps tools for canvas control
+
+            if is_work_mode:
+                # Work mode: always include workspace + maps + vm_agents tools regardless of intent
+                effective_categories = list(tool_categories) if tool_categories else []
+                capability_core_categories = ["devices", "vm_agents", "personal_knowledge", "inbox", "lists"]
+                # Always add workspace tools for canvas control
+                if 'workspace' not in effective_categories:
+                    effective_categories.append('workspace')
+                if 'maps' not in effective_categories:
+                    effective_categories.append('maps')
+                for category in capability_core_categories:
+                    if category not in effective_categories:
+                        effective_categories.append(category)
+                tools = tool_registry.get_tools_by_categories(effective_categories)
+                logger.info(f"💼 Work mode: Loaded {len(tools)} tools from categories: {effective_categories}")
+            else:
+                # Standard chat. The diet branch no longer depends on the
+                # classifier producing categories at all — retrieval reads
+                # David's sentence directly — so it is reached even when
+                # classification returns nothing.
+                from app.core.feature_flags import Flag as _PFlag, is_enabled as _presence_flag_enabled
+                if _presence_flag_enabled(_PFlag.PRESENCE_TOOL_DIET):
+                    # Harness rebuild Phase 2: retrieval, not keyword
+                    # routing. `tool_categories` came from
+                    # ToolIntentClassifier's first-match keyword table —
+                    # "put them in a folder" matched NOTES and never
+                    # reached the tool that files attachments. Sticky
+                    # *categories* then grew the payload to 94 schemas.
+                    #
+                    # Now: a fixed core, plus the tools whose
+                    # descriptions are semantically nearest what David
+                    # actually said, plus whatever `find_tools` loaded
+                    # earlier in this conversation. Hard cap 35.
+                    # The intent classifier still runs — ContextRouter
+                    # uses it for context sections — but it no longer
+                    # picks tools.
+                    from app.services.tool_retrieval import (
+                        CORE_TOOLS as _CORE,
+                        MAX_TOOLS_PER_CALL as _MAX_TOOLS,
+                        ToolIndex as _tool_index,
+                        select_chat_tools as _select_chat_tools,
+                        tools_sha as _tools_sha_of,
+                    )
+                    _sticky = _CHAT_STICKY_TOOL_NAMES.setdefault(session_id, [])
+                    if len(_CHAT_STICKY_TOOL_NAMES) > 500:
+                        _CHAT_STICKY_TOOL_NAMES.pop(next(iter(_CHAT_STICKY_TOOL_NAMES)))
+                    try:
+                        _retrieved = await _tool_index.retrieve(
+                            last_user_message, k=6,
+                            exclude=set(_CORE) | set(_sticky),
+                        )
+                    except Exception as _ret_err:
+                        logger.warning(f"⚠️ Tool retrieval failed: {_ret_err}")
+                        _retrieved = []
+                    # Reserve two slots: _apply_background_dispatch_policy
+                    # below may append dispatch_and_monitor /
+                    # dispatch_agent_task, and the cap is on what
+                    # actually goes on the wire.
+                    tools = _select_chat_tools(
+                        _CORE, _retrieved, _sticky,
+                        max_tools=_MAX_TOOLS - len(_BACKGROUND_DISPATCH_TOOL_NAMES),
+                    )
+                    assert len(tools) <= _MAX_TOOLS, f"tool cap breached: {len(tools)}"
+                    _tools_sha = _tools_sha_of(tools)
+                    logger.info(
+                        f"🍽️ Tools — {len(tools)} [sha {_tools_sha}] "
+                        f"core={len(_CORE)} retrieved={_retrieved} sticky={list(_sticky)} "
+                        f"(intent={user_intent}, tools-per-call cap {_MAX_TOOLS})"
+                    )
+                elif tool_categories:
+                    # Legacy path, flag off: intent categories + an
+                    # awareness/action core.
+                    effective_categories = list(tool_categories)
+                    capability_core_categories = ["devices", "vm_agents", "personal_knowledge", "inbox", "lists"]
+                    for category in capability_core_categories:
+                        if category not in effective_categories:
+                            effective_categories.append(category)
+                    tools = tool_registry.get_tools_by_categories(effective_categories)
+                    logger.info(f"🔧 Intent={user_intent}: Loaded {len(tools)} tools from categories: {effective_categories}")
+                else:
+                    # Conservative capability fallback when intent routing fails.
+                    fallback_categories = ['memory', 'notes', 'time', 'devices', 'vm_agents', 'personal_knowledge', 'inbox']
+                    tools = tool_registry.get_tools_by_categories(fallback_categories)
+                    logger.info(f"🔧 Intent={user_intent}: Capability fallback ({len(tools)} tools)")
+
+            tools = _apply_background_dispatch_policy(tools, last_user_message)
+            logger.info(
+                f"🧭 Background dispatch {'available' if _chat_requests_background_dispatch(last_user_message) else 'withheld'} "
+                f"for this turn ({len(tools)} total tools)"
+            )
+
+            # Process chat with loaded tools
+            _mark_stage("tools_loaded")
+            # Where find_tools should park names it loads mid-turn, so
+            # the next turn in THIS conversation starts with them.
+            streaming_client._sticky_key = session_id
+
+            # Stable prefix (persona/soul/rules, NO clock). The clock and every
+            # per-turn context block get split into a separate volatile system
+            # message at assembly time (see "prompt-cache split" below) so the
+            # persona + tool schemas stay a cache hit on the chat lane.
+            #
+            # Harness rebuild Phase 5: this used to be get_system_prompt(), a
+            # ~14,000-char hardcoded manual for tools that might not even be
+            # loaded, carrying two rules that fought each other — "Never say 'I
+            # can't do that' if it's something that could be done on a computer.
+            # Pick the right path and dispatch" against "Do NOT reach for a tool
+            # when this awareness already holds the answer". On 2026-09-11 that
+            # produced a ten-round flail and then a refusal anyway. The builder
+            # below is ≤3,500 chars and NAMES the tools actually in hand.
+            from app.prompts.chat_system_prompt import build_chat_system_prompt
+            from app.services.tool_retrieval import tool_names as _names_of_tools
+
+            _stable_system_prompt = build_chat_system_prompt(
+                ASSISTANT_NAME, soul_content, _names_of_tools(tools)
+            )
+            _datetime_line = format_prompt_datetime_line(user_now)
+            system_message = ChatMessage(role="system", content=_stable_system_prompt)
 
             context_decision = context_router.decide(
                 intent=user_intent,
@@ -9256,107 +9380,10 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                 except Exception:
                     pass
 
+
             # Start the LLM processing in a background task
             async def process_chat():
                 try:
-                    # WORK MODE-AWARE TOOL LOADING
-                    # Work mode always includes workspace and maps tools for canvas control
-
-                    if is_work_mode:
-                        # Work mode: always include workspace + maps + vm_agents tools regardless of intent
-                        effective_categories = list(tool_categories) if tool_categories else []
-                        capability_core_categories = ["devices", "vm_agents", "personal_knowledge", "inbox", "lists"]
-                        # Always add workspace tools for canvas control
-                        if 'workspace' not in effective_categories:
-                            effective_categories.append('workspace')
-                        if 'maps' not in effective_categories:
-                            effective_categories.append('maps')
-                        for category in capability_core_categories:
-                            if category not in effective_categories:
-                                effective_categories.append(category)
-                        tools = tool_registry.get_tools_by_categories(effective_categories)
-                        logger.info(f"💼 Work mode: Loaded {len(tools)} tools from categories: {effective_categories}")
-                    else:
-                        # Standard chat. The diet branch no longer depends on the
-                        # classifier producing categories at all — retrieval reads
-                        # David's sentence directly — so it is reached even when
-                        # classification returns nothing.
-                        from app.core.feature_flags import Flag as _PFlag, is_enabled as _presence_flag_enabled
-                        if _presence_flag_enabled(_PFlag.PRESENCE_TOOL_DIET):
-                            # Harness rebuild Phase 2: retrieval, not keyword
-                            # routing. `tool_categories` came from
-                            # ToolIntentClassifier's first-match keyword table —
-                            # "put them in a folder" matched NOTES and never
-                            # reached the tool that files attachments. Sticky
-                            # *categories* then grew the payload to 94 schemas.
-                            #
-                            # Now: a fixed core, plus the tools whose
-                            # descriptions are semantically nearest what David
-                            # actually said, plus whatever `find_tools` loaded
-                            # earlier in this conversation. Hard cap 35.
-                            # The intent classifier still runs — ContextRouter
-                            # uses it for context sections — but it no longer
-                            # picks tools.
-                            from app.services.tool_retrieval import (
-                                CORE_TOOLS as _CORE,
-                                MAX_TOOLS_PER_CALL as _MAX_TOOLS,
-                                ToolIndex as _tool_index,
-                                select_chat_tools as _select_chat_tools,
-                                tools_sha as _tools_sha_of,
-                            )
-                            _sticky = _CHAT_STICKY_TOOL_NAMES.setdefault(session_id, [])
-                            if len(_CHAT_STICKY_TOOL_NAMES) > 500:
-                                _CHAT_STICKY_TOOL_NAMES.pop(next(iter(_CHAT_STICKY_TOOL_NAMES)))
-                            try:
-                                _retrieved = await _tool_index.retrieve(
-                                    last_user_message, k=6,
-                                    exclude=set(_CORE) | set(_sticky),
-                                )
-                            except Exception as _ret_err:
-                                logger.warning(f"⚠️ Tool retrieval failed: {_ret_err}")
-                                _retrieved = []
-                            # Reserve two slots: _apply_background_dispatch_policy
-                            # below may append dispatch_and_monitor /
-                            # dispatch_agent_task, and the cap is on what
-                            # actually goes on the wire.
-                            tools = _select_chat_tools(
-                                _CORE, _retrieved, _sticky,
-                                max_tools=_MAX_TOOLS - len(_BACKGROUND_DISPATCH_TOOL_NAMES),
-                            )
-                            assert len(tools) <= _MAX_TOOLS, f"tool cap breached: {len(tools)}"
-                            _tools_sha = _tools_sha_of(tools)
-                            logger.info(
-                                f"🍽️ Tools — {len(tools)} [sha {_tools_sha}] "
-                                f"core={len(_CORE)} retrieved={_retrieved} sticky={list(_sticky)} "
-                                f"(intent={user_intent}, tools-per-call cap {_MAX_TOOLS})"
-                            )
-                        elif tool_categories:
-                            # Legacy path, flag off: intent categories + an
-                            # awareness/action core.
-                            effective_categories = list(tool_categories)
-                            capability_core_categories = ["devices", "vm_agents", "personal_knowledge", "inbox", "lists"]
-                            for category in capability_core_categories:
-                                if category not in effective_categories:
-                                    effective_categories.append(category)
-                            tools = tool_registry.get_tools_by_categories(effective_categories)
-                            logger.info(f"🔧 Intent={user_intent}: Loaded {len(tools)} tools from categories: {effective_categories}")
-                        else:
-                            # Conservative capability fallback when intent routing fails.
-                            fallback_categories = ['memory', 'notes', 'time', 'devices', 'vm_agents', 'personal_knowledge', 'inbox']
-                            tools = tool_registry.get_tools_by_categories(fallback_categories)
-                            logger.info(f"🔧 Intent={user_intent}: Capability fallback ({len(tools)} tools)")
-
-                    tools = _apply_background_dispatch_policy(tools, last_user_message)
-                    logger.info(
-                        f"🧭 Background dispatch {'available' if _chat_requests_background_dispatch(last_user_message) else 'withheld'} "
-                        f"for this turn ({len(tools)} total tools)"
-                    )
-
-                    # Process chat with loaded tools
-                    _mark_stage("tools_loaded")
-                    # Where find_tools should park names it loads mid-turn, so
-                    # the next turn in THIS conversation starts with them.
-                    streaming_client._sticky_key = session_id
                     logger.info(f"⏳ Starting chat_with_tools... ({len(tools)} tools)")
                     await streaming_client.emit_activity("thinking")
                     _mark_stage("llm_dispatched")
@@ -9372,7 +9399,7 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                         if _t0:
                             _line = " ".join(
                                 f"{k}=+{(_s[k]-_t0):.2f}s" for k in
-                                ("context_assembled", "tools_loaded", "llm_dispatched", "turn_complete")
+                                ("tools_loaded", "context_assembled", "llm_dispatched", "turn_complete")
                                 if k in _s
                             )
                             logger.info(f"⏱️ [stage-timing] {_line}")
@@ -9629,7 +9656,10 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                             if _t0:
                                 _line = " ".join(
                                     f"{k}=+{(_stage_marks[k]-_t0):.2f}s" for k in
-                                    ("context_assembled", "tools_loaded", "llm_dispatched", "first_token")
+                                    # tools_loaded now precedes context_assembled:
+                                    # Phase 5 moved selection ahead of the prompt
+                                    # build, because the prompt names the tools.
+                                    ("tools_loaded", "context_assembled", "llm_dispatched", "first_token")
                                     if k in _stage_marks
                                 )
                                 logger.info(f"⏱️ [stage-timing] {_line}")
