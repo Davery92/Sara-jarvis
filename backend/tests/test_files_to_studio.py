@@ -241,3 +241,35 @@ class TestRegistration:
         # Same guard as workspace_job_run: the autonomous loop must not file
         # things into David's Studio on its own initiative.
         assert FilesToStudioTool().requires_user_origin is True
+
+
+@pytest.mark.asyncio
+class TestTheStatusLineStaysSmall:
+    """A tool's message is re-read by the model on every subsequent round of
+    the turn. Filing Jim's back catalogue produced a message listing fifty
+    filenames on the Phase 8 replay — the full list belongs in `data`."""
+
+    async def test_a_large_filing_summarises_the_names(self, seeded, monkeypatch):
+        from app.tools import email as email_tools
+
+        monkeypatch.setattr(email_tools, "_MESSAGE_FILENAME_LIMIT", 1)
+        r = await FilesToStudioTool().execute(
+            seeded["user_id"], email_ids=[seeded["email_id"]], title="Jim's tools"
+        )
+        assert r.success
+        assert "(+1 more)" in r.message
+        # Nothing is actually lost — data still carries every file.
+        assert len(r.data["files"]) == 2
+
+    async def test_an_all_duplicates_message_summarises_too(self, seeded, monkeypatch):
+        from app.tools import email as email_tools
+
+        await FilesToStudioTool().execute(
+            seeded["user_id"], email_ids=[seeded["email_id"]]
+        )
+        monkeypatch.setattr(email_tools, "_MESSAGE_FILENAME_LIMIT", 1)
+        again = await FilesToStudioTool().execute(
+            seeded["user_id"], email_ids=[seeded["email_id"]]
+        )
+        assert "(+1 more)" in again.message
+        assert "do not call this again" in again.message

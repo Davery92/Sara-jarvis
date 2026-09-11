@@ -584,6 +584,11 @@ class EmailAttachmentReadTool(BaseTool):
             db.close()
 
 
+# How many filenames a files_to_studio status line names before it summarises.
+# The full list is always in `data`.
+_MESSAGE_FILENAME_LIMIT = 8
+
+
 class FilesToStudioTool(BaseTool):
     """File email attachments into the Studio as downloadable artifacts.
 
@@ -794,14 +799,25 @@ class FilesToStudioTool(BaseTool):
 
             db.commit()
 
+            # A status line is read by the model on every subsequent round, so
+            # it has to stay small. Filing Jim's back catalogue produced a
+            # message listing fifty filenames on the Phase 8 replay; the full
+            # list is in `data`, where it belongs.
+            def _name_list(names: list) -> str:
+                shown = ", ".join(names[:_MESSAGE_FILENAME_LIMIT])
+                extra = len(names) - _MESSAGE_FILENAME_LIMIT
+                return f"{shown} (+{extra} more)" if extra > 0 else shown
+
             if not filed:
                 if skipped:
                     return ToolResult(
                         success=True,
                         data={"files": [], "skipped": skipped},
                         message=(
-                            f"Already in the Studio, nothing new to file: "
-                            f"{', '.join(skipped)}."
+                            f"Already in the Studio — {len(skipped)} file(s) are there now "
+                            f"and downloadable: {_name_list(skipped)}. Nothing new to file. "
+                            "Tell David they're in the Studio tab; do not call this again "
+                            "with different arguments hoping for a different answer."
                         ),
                     )
                 reasons = "; ".join(f"{f['filename']} ({f['reason']})" for f in failed)
@@ -811,11 +827,12 @@ class FilesToStudioTool(BaseTool):
                     message=f"Couldn't file any of them: {reasons}",
                 )
 
-            names = ", ".join(f["filename"] for f in filed)
+            names = _name_list([f["filename"] for f in filed])
             tail = f" ({len(skipped)} already there)" if skipped else ""
             if failed:
                 tail += f"; {len(failed)} failed: " + "; ".join(
-                    f"{f['filename']} ({f['reason']})" for f in failed
+                    f"{f['filename']} ({f['reason']})"
+                    for f in failed[:_MESSAGE_FILENAME_LIMIT]
                 )
             return ToolResult(
                 success=True,

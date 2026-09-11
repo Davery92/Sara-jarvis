@@ -1738,7 +1738,7 @@ class SimpleLLMClient:
                 "model": effective_model,
                 "messages": formatted_messages,
                 "temperature": 0.7,
-                "max_tokens": 8000,
+                "max_tokens": CHAT_MAX_OUTPUT_TOKENS,
                 "stream": True
             }
 
@@ -1777,6 +1777,9 @@ class SimpleLLMClient:
             self._turn_tools_called = []
             self._turn_first_token_ms = None
             self._turn_prompt_tokens_first = None
+            # (tool name, exact arguments) -> the result it returned, for this
+            # turn only. See _repeat_tool_note.
+            self._turn_tool_results: Dict[str, str] = {}
 
             message = await self._stream_response(payload)
 
@@ -1788,8 +1791,30 @@ class SimpleLLMClient:
 
             for round_num in range(max_tool_rounds):
                 if message.get("tool_calls"):
+                    # Check the clock BEFORE running this round's tools, not
+                    # only before the next model call. A round costs the tools
+                    # AND the call that follows; deciding after the tools have
+                    # run is how a 75s deadline produced a 134-second turn.
+                    _pre_elapsed = time.monotonic() - self._turn_started_at
+                    if _pre_elapsed > CHAT_TURN_DEADLINE_S:
+                        self._turn_ended_by = "deadline"
+                        logger.warning(
+                            f"⏱️ {_pre_elapsed:.1f}s elapsed before round {round_num + 1}'s "
+                            f"tools — skipping them and forcing a final answer"
+                        )
+                        response_content = await self._force_final_answer(current_messages)
+                        await self.emit_event("response_ready", {
+                            "rounds": round_num, "content_length": len(response_content or ""),
+                        })
+                        episode_id = await self._store_conversation_with_timeout(
+                            messages, response_content, user_id, conversation_id
+                        )
+                        self.current_episode_id = episode_id
+                        return response_content
+
                     logger.info(f"🔧 Tool calling round {round_num + 1}")
-                    
+
+
                     # Emit tool usage event
                     tool_names = [tc.get("function", {}).get("name", "unknown") for tc in message["tool_calls"]]
                     await self.emit_event("tool_calls_start", {
@@ -1799,6 +1824,7 @@ class SimpleLLMClient:
                     })
                     
                     tool_responses = []
+                    _out_of_tool_budget = False
                     
                     for tool_call in message["tool_calls"]:
                         tool_name = tool_call.get("function", {}).get("name", "unknown")
@@ -1811,7 +1837,26 @@ class SimpleLLMClient:
                         )
                         
                         _tool_t0 = time.monotonic()
-                        tool_response = await self.execute_tool(tool_call, user_id, conversation_id, session_cache)
+                        # Identical call, same turn, seconds apart: re-running
+                        # it cannot tell the model anything new, and for a
+                        # write tool it does the work twice. Three of six
+                        # replayed turns hit the round cap this way — calling
+                        # files_to_studio and email_search over and over, then
+                        # running out of rounds before writing a reply.
+                        _repeat = self._repeat_tool_note(tool_call)
+                        if _repeat is not None:
+                            tool_response = _repeat
+                            # A refused call still costs a round and a full LLM
+                            # call to tell the model "no". Measured: turn 4 of
+                            # the replay spent five rounds and 134 seconds
+                            # asking for email_search after its budget was
+                            # spent. Once the model is reaching for something it
+                            # cannot have, the turn has nothing left to learn —
+                            # answer with what it already found.
+                            _out_of_tool_budget = True
+                        else:
+                            tool_response = await self.execute_tool(tool_call, user_id, conversation_id, session_cache)
+                            self._remember_tool_result(tool_call, tool_response)
                         try:
                             response_payload = json.loads(tool_response.get("content") or "{}")
                         except (TypeError, json.JSONDecodeError):
@@ -1906,8 +1951,11 @@ class SimpleLLMClient:
                     _elapsed = time.monotonic() - self._turn_started_at
                     _over_time = _elapsed > CHAT_TURN_DEADLINE_S
                     _out_of_rounds = (round_num + 1) >= max_tool_rounds
-                    if _over_time or _out_of_rounds:
-                        self._turn_ended_by = "deadline" if _over_time else "rounds"
+                    if _over_time or _out_of_rounds or _out_of_tool_budget:
+                        self._turn_ended_by = (
+                            "deadline" if _over_time
+                            else ("rounds" if _out_of_rounds else "tool_budget")
+                        )
                         logger.warning(
                             f"⏱️ Turn budget exhausted after {_elapsed:.1f}s / "
                             f"{round_num + 1} rounds ({self._turn_ended_by}) — forcing a final answer"
@@ -1933,7 +1981,7 @@ class SimpleLLMClient:
                         "model": self._current_model,  # Use user-selected model, not default
                         "messages": current_messages,
                         "temperature": 0.7,
-                        "max_tokens": 8000,
+                        "max_tokens": CHAT_MAX_OUTPUT_TOKENS,
                         "tools": follow_up_tools,
                         "stream": True
                     }
@@ -2456,6 +2504,94 @@ class SimpleLLMClient:
             "tool_call_id": tool_call["id"],
             "content": str(result)
         }
+
+    # Tools whose whole purpose is to be called repeatedly with different
+    # arguments, or whose arguments are the state (paging, searching for a
+    # different capability). A repeat of these is never a loop.
+    _REPEATABLE_TOOLS = {"get_tool_result_details", "find_tools"}
+
+    # How many times one tool may run in a single turn, whatever its arguments.
+    # Measured on the Phase 8 replay: the model called `files_to_studio` four
+    # times and `email_search` four times in one turn, each with slightly
+    # different arguments, burned the round budget and never wrote a reply.
+    # Three attempts at one capability is already more than the answer needs.
+    _TOOL_CALLS_PER_TURN_MAX = int(os.getenv("CHAT_TOOL_CALLS_PER_TURN_MAX", "3"))
+
+    @staticmethod
+    def _tool_call_key(tool_call: dict) -> str:
+        fn = tool_call.get("function") or {}
+        args = (fn.get("arguments") or "").strip()
+        try:  # normalize key order so {"a":1,"b":2} and {"b":2,"a":1} match
+            args = json.dumps(json.loads(args or "{}"), sort_keys=True)
+        except (TypeError, json.JSONDecodeError):
+            pass
+        return f"{fn.get('name')}::{args}"
+
+    def _repeat_tool_note(self, tool_call: dict) -> Optional[dict]:
+        """The tool message to return instead of re-running an identical call.
+
+        None means "go ahead and run it". Same turn, same tool, same arguments:
+        the answer cannot have changed in the seconds since, and for a write
+        tool like `files_to_studio` running it again does the work twice.
+        """
+        fn = tool_call.get("function") or {}
+        name = fn.get("name")
+        if name in self._REPEATABLE_TOOLS:
+            return None
+
+        # Budget per tool NAME, regardless of arguments: nudging one argument
+        # and trying again is the shape the thrash actually took.
+        used = sum(1 for t in getattr(self, "_turn_tools_called", []) if t.get("name") == name)
+        if used >= self._TOOL_CALLS_PER_TURN_MAX:
+            logger.warning(
+                f"🛑 {name} has run {used} times this turn — refusing a further call"
+            )
+            return {
+                "role": "tool",
+                "tool_call_id": tool_call.get("id"),
+                "name": name,
+                "content": json.dumps({
+                    "success": False,
+                    "message": (
+                        f"You have already called {name} {used} times on this turn with "
+                        "different arguments. It is not going to say something different. "
+                        "Answer David now with what the earlier results actually showed, "
+                        "including what did not work."
+                    ),
+                }),
+            }
+
+        key = self._tool_call_key(tool_call)
+        prior = getattr(self, "_turn_tool_results", {}).get(key)
+        if prior is None:
+            return None
+        logger.warning(
+            f"🔁 {name} called again with identical arguments this turn — "
+            "returning the earlier result instead of re-running it"
+        )
+        try:
+            payload = json.loads(prior)
+        except (TypeError, json.JSONDecodeError):
+            payload = {"success": True, "message": str(prior)[:500]}
+        payload["repeat_of_earlier_call"] = (
+            f"You already called {name} with these exact arguments on this turn. "
+            "This is that same result, not a new one. Use it and answer David — "
+            "do not call it a third time."
+        )
+        return {
+            "role": "tool",
+            "tool_call_id": tool_call.get("id"),
+            "name": name,
+            "content": json.dumps(payload),
+        }
+
+    def _remember_tool_result(self, tool_call: dict, tool_response: dict) -> None:
+        store = getattr(self, "_turn_tool_results", None)
+        if store is None:
+            return
+        content = tool_response.get("content")
+        if isinstance(content, str):
+            store[self._tool_call_key(tool_call)] = content
 
     def _write_turn_trace(self, user_id, conversation_id, reply_chars: int) -> None:
         """One `chat_turn_trace` row per turn (harness rebuild Phase 9).
@@ -6287,16 +6423,34 @@ def _build_activity_context(
 # the iOS client's 180s xhr timeout fired, Postgres killed the connection at
 # six minutes, and the tool loop kept going as a zombie before storing a canned
 # string as Sara's reply. These two bound the turn instead.
-CHAT_TURN_DEADLINE_S = int(os.getenv("CHAT_TURN_DEADLINE_S", "75"))
+# 60, not 75: the deadline stops the turn from starting ANOTHER round, but the
+# forced final that follows is itself a model call (measured 10-25s on this
+# lane). At 75 the worst replayed turn landed at 102s; 60 leaves room for the
+# answer inside the 90s a turn is allowed to take.
+CHAT_TURN_DEADLINE_S = int(os.getenv("CHAT_TURN_DEADLINE_S", "60"))
 CHAT_TOOL_ROUNDS_MAX = int(os.getenv("CHAT_TOOL_ROUNDS_MAX", "6"))
+
+# Every chat call used to reserve 8,000 output tokens for a reply that measures
+# 67-412 (the longest in a six-turn replay was 1,706). MTPLX's memory guard
+# projects `active + prompt + max_tokens` against its limit and sheds the whole
+# prefill cache when that projection is over — on 2026-09-11 it was logging
+# `"reusable_prefix_tokens": 0, "cache_cleared": true` with 86 GB active
+# against a 94 GB limit on nearly every request, which is why prompt-cache
+# reuse was zero no matter how stable the prefix was. A reservation we do not
+# use is the one part of that projection we control.
+CHAT_MAX_OUTPUT_TOKENS = int(os.getenv("CHAT_MAX_OUTPUT_TOKENS", "2500"))
 
 # Any single tool result longer than this is parked in Redis and the model gets
 # a preview plus a reference_id it can page with get_tool_result_details. The
 # old behaviour truncated in place with no way to ask for the rest, which is
 # how get_self_knowledge(capabilities) became 1,403 of its 23,430 chars and
 # the model went to web_search to find out what it could do.
-TOOL_RESULT_INLINE_MAX = int(os.getenv("TOOL_RESULT_INLINE_MAX", "6000"))
-TOOL_RESULT_PREVIEW_CHARS = int(os.getenv("TOOL_RESULT_PREVIEW_CHARS", "2000"))
+# Raised from 6,000/2,000 after the Phase 8 replay: the model spent three of
+# six rounds paging a result back in with get_tool_result_details and then ran
+# out of rounds before writing a reply. A result that fits is cheaper than the
+# round it takes to fetch.
+TOOL_RESULT_INLINE_MAX = int(os.getenv("TOOL_RESULT_INLINE_MAX", "9000"))
+TOOL_RESULT_PREVIEW_CHARS = int(os.getenv("TOOL_RESULT_PREVIEW_CHARS", "3000"))
 
 # MTPLX serves Qwen3.8-Flash-Next at 49,152 context. Never send a payload the
 # server will refuse: llama.cpp answers an overflow with a 400 whose body is
@@ -8688,6 +8842,15 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     except Exception as _ret_err:
                         logger.warning(f"⚠️ Tool retrieval failed: {_ret_err}")
                         _retrieved = []
+                    # Retrieved names are deliberately NOT made sticky. Tried
+                    # and measured on the Phase 8 replay: carrying them forward
+                    # does stabilise the tool-schema prefix (the sha stops
+                    # changing between turns), but the six-turn replay got worse
+                    # on every axis — prompt 8.7-9.8k tokens → 8.9-12.1k, the
+                    # payload at the 33-tool ceiling every turn, totals 12-77s →
+                    # 15-102s. A bigger menu invites more tool calls, and that
+                    # costs more than the cache saves. Only `find_tools` — where
+                    # the model explicitly asked for a capability — sticks.
                     # Reserve two slots: _apply_background_dispatch_policy
                     # below may append dispatch_and_monitor /
                     # dispatch_agent_task, and the cap is on what

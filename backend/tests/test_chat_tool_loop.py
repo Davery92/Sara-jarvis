@@ -312,7 +312,8 @@ class TestLargeResultsBecomeReferences:
         out = await ms._reference_large_tool_results(responses)
         seen = json.loads(out[0]["content"])
 
-        assert len(out[0]["content"]) <= 2100 + 400  # preview + envelope
+        # preview + envelope, and nowhere near the 60k the tool returned.
+        assert len(out[0]["content"]) <= ms.TOOL_RESULT_PREVIEW_CHARS + 600
         assert seen["message"] == "Read my capabilities"
         assert len(seen["preview"]) == ms.TOOL_RESULT_PREVIEW_CHARS
         assert seen["total_chars"] == len(full)
@@ -446,3 +447,173 @@ class TestSummarizeToolResultsIsNotUserFacing:
 
         src = inspect.getsource(ms.SimpleLLMClient.chat_with_tools)
         assert "I've searched through your documents" not in src
+
+
+@pytest.mark.asyncio
+class TestIdenticalCallsAreNotRepeated:
+    """Phase 8 replay: three of six turns hit the round cap calling
+    files_to_studio and email_search over and over — and ran out of rounds
+    before writing a reply. An identical call, same turn, seconds apart cannot
+    tell the model anything new, and for a write tool it does the work twice.
+    """
+
+    async def test_the_second_identical_call_does_not_execute(self, monkeypatch):
+        monkeypatch.setattr(ms, "CHAT_TURN_DEADLINE_S", 9999)
+        monkeypatch.setattr(ms, "CHAT_TOOL_ROUNDS_MAX", 5)
+        script = [
+            {"content": "", "tool_calls": [tool_call("files_to_studio", "c1",
+                                                     '{"sender":"jim"}')]},
+            {"content": "", "tool_calls": [tool_call("files_to_studio", "c2",
+                                                     '{"sender":"jim"}')]},
+            {"content": "Filed Jim's nine files to the Studio.", "tool_calls": None},
+        ]
+        client, stream, _ = make_client(monkeypatch, script)
+
+        ran = []
+        original = client.execute_tool
+
+        async def _counting(tc, *a, **kw):
+            ran.append(tc["function"]["name"])
+            return await original(tc, *a, **kw)
+
+        client.execute_tool = _counting
+
+        out = await client.chat_with_tools(MESSAGES, [], "u1", "conv-1")
+        assert ran == ["files_to_studio"]  # executed once, not twice
+        assert "Studio" in out
+
+    async def test_the_repeat_is_told_it_is_a_repeat(self, monkeypatch):
+        monkeypatch.setattr(ms, "CHAT_TURN_DEADLINE_S", 9999)
+        client, _, _ = make_client(monkeypatch, [])
+        client._turn_tool_results = {}
+        tc = tool_call("email_search", "c1", '{"sender":"jim"}')
+
+        assert client._repeat_tool_note(tc) is None
+        client._remember_tool_result(tc, {"content": json.dumps(
+            {"success": True, "message": "3 emails"})})
+
+        note = client._repeat_tool_note(tool_call("email_search", "c2", '{"sender":"jim"}'))
+        payload = json.loads(note["content"])
+        assert payload["message"] == "3 emails"
+        assert "do not call it a third time" in payload["repeat_of_earlier_call"]
+
+    async def test_argument_order_does_not_defeat_it(self, monkeypatch):
+        client, _, _ = make_client(monkeypatch, [])
+        client._turn_tool_results = {}
+        a = tool_call("email_search", "c1", '{"sender":"jim","days":30}')
+        b = tool_call("email_search", "c2", '{"days":30,"sender":"jim"}')
+        client._remember_tool_result(a, {"content": '{"success":true}'})
+        assert client._repeat_tool_note(b) is not None
+
+    async def test_different_arguments_still_run(self, monkeypatch):
+        client, _, _ = make_client(monkeypatch, [])
+        client._turn_tool_results = {}
+        a = tool_call("email_search", "c1", '{"sender":"jim"}')
+        client._remember_tool_result(a, {"content": '{"success":true}'})
+        assert client._repeat_tool_note(
+            tool_call("email_search", "c2", '{"sender":"beth"}')) is None
+
+    async def test_paging_and_tool_discovery_are_always_repeatable(self, monkeypatch):
+        """get_tool_result_details with the same offset, or find_tools asking
+        the same thing, are not loops the guard should break."""
+        client, _, _ = make_client(monkeypatch, [])
+        client._turn_tool_results = {}
+        for name in ("get_tool_result_details", "find_tools"):
+            tc = tool_call(name, "c1", '{"x":1}')
+            client._remember_tool_result(tc, {"content": '{"success":true}'})
+            assert client._repeat_tool_note(tc) is None, name
+
+    async def test_one_tool_cannot_run_more_than_three_times_a_turn(self, monkeypatch):
+        """The Phase 8 replay's actual shape: files_to_studio four times and
+        email_search four times in one turn, each with slightly different
+        arguments, burning the round budget without ever writing a reply."""
+        client, _, _ = make_client(monkeypatch, [])
+        client._turn_tool_results = {}
+        client._turn_tools_called = [
+            {"name": "files_to_studio"}, {"name": "files_to_studio"},
+            {"name": "files_to_studio"},
+        ]
+        note = client._repeat_tool_note(
+            tool_call("files_to_studio", "c4", '{"sender":"someone-else"}')
+        )
+        assert note is not None
+        payload = json.loads(note["content"])
+        assert payload["success"] is False
+        assert "Answer David now" in payload["message"]
+
+    async def test_the_budget_is_per_tool_not_per_turn(self, monkeypatch):
+        client, _, _ = make_client(monkeypatch, [])
+        client._turn_tool_results = {}
+        client._turn_tools_called = [{"name": "email_search"}] * 3
+        # A different tool is unaffected by email_search's exhausted budget.
+        assert client._repeat_tool_note(tool_call("files_to_studio", "c1")) is None
+
+    async def test_paging_is_exempt_from_the_budget(self, monkeypatch):
+        client, _, _ = make_client(monkeypatch, [])
+        client._turn_tool_results = {}
+        client._turn_tools_called = [{"name": "get_tool_result_details"}] * 5
+        assert client._repeat_tool_note(
+            tool_call("get_tool_result_details", "c6", '{"offset":9000}')) is None
+
+
+class TestRetrievedToolsAreNotSticky:
+    def test_the_chat_path_only_makes_find_tools_results_sticky(self):
+        """Measured on the Phase 8 replay: carrying retrieved names forward
+        does stabilise the prompt prefix, but made the six-turn replay worse on
+        every axis (prompt 8.7-9.8k → 8.9-12.1k tokens, totals 12-77s →
+        15-102s). A bigger menu invites more tool calls than the cache saves."""
+        import inspect
+
+        src = inspect.getsource(ms)
+        idx = src.index("_CHAT_STICKY_TOOL_NAMES.setdefault(session_id")
+        window = src[idx: idx + 3000]
+        assert "deliberately NOT made sticky" in window
+
+
+@pytest.mark.asyncio
+class TestTheDeadlineIsCheckedBeforeToolsRun:
+    async def test_an_expired_clock_skips_the_round_entirely(self, monkeypatch):
+        """A round costs its tools AND the model call that follows. Deciding
+        after the tools have run is how a 75s deadline produced a 134-second
+        turn on the Phase 8 replay."""
+        monkeypatch.setattr(ms, "CHAT_TURN_DEADLINE_S", 0)
+        client, stream, _ = make_client(monkeypatch, [
+            {"content": "", "tool_calls": [tool_call("email_search")]},
+            {"content": "Jim's three threads, none of them filed yet.", "tool_calls": None},
+        ])
+        ran = []
+        original = client.execute_tool
+
+        async def _counting(tc, *a, **kw):
+            ran.append(tc["function"]["name"])
+            return await original(tc, *a, **kw)
+
+        client.execute_tool = _counting
+
+        out = await client.chat_with_tools(MESSAGES, [], "u1", "conv-1")
+        assert ran == []  # the round's tools never ran
+        assert client._turn_ended_by == "deadline"
+        assert "Jim's three threads" in out
+
+    async def test_an_exhausted_tool_budget_ends_the_turn(self, monkeypatch):
+        """Telling the model 'no' costs a full round and a full model call.
+        Once it is reaching for something it cannot have, the turn has nothing
+        left to learn."""
+        monkeypatch.setattr(ms, "CHAT_TURN_DEADLINE_S", 9999)
+        monkeypatch.setattr(ms, "CHAT_TOOL_ROUNDS_MAX", 6)
+        script = [
+            {"content": "", "tool_calls": [tool_call("email_search", "c1", '{"q":1}')]},
+            {"content": "", "tool_calls": [tool_call("email_search", "c2", '{"q":2}')]},
+            {"content": "", "tool_calls": [tool_call("email_search", "c3", '{"q":3}')]},
+            {"content": "", "tool_calls": [tool_call("email_search", "c4", '{"q":4}')]},
+            {"content": "Three searches in; here is what they actually showed.",
+             "tool_calls": None},
+        ]
+        client, stream, _ = make_client(monkeypatch, script)
+
+        out = await client.chat_with_tools(MESSAGES, [], "u1", "conv-1")
+
+        assert client._turn_ended_by == "tool_budget"
+        assert "Three searches in" in out
+        # Four rounds at most, not the full six.
+        assert client._turn_rounds <= 4

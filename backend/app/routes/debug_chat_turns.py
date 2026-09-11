@@ -34,7 +34,10 @@ async def chat_turns(
     limit: int = Query(default=20, ge=1, le=200),
     ended_by: Optional[str] = Query(
         default=None,
-        description="Filter to one outcome: model | deadline | rounds | cancelled | error",
+        description=(
+            "Filter to one outcome: model | deadline | rounds | tool_budget | "
+            "cancelled | error"
+        ),
     ),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
