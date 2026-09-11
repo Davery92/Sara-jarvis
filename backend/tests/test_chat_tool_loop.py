@@ -548,12 +548,26 @@ class TestIdenticalCallsAreNotRepeated:
         # A different tool is unaffected by email_search's exhausted budget.
         assert client._repeat_tool_note(tool_call("files_to_studio", "c1")) is None
 
-    async def test_paging_is_exempt_from_the_budget(self, monkeypatch):
+    async def test_paging_may_repeat_identical_arguments(self, monkeypatch):
+        """Paging and tool discovery are exempt from the identical-arguments
+        guard — different arguments genuinely mean different work there."""
+        client, _, _ = make_client(monkeypatch, [])
+        client._turn_tool_results = {}
+        client._turn_tools_called = []
+        for name in ("get_tool_result_details", "find_tools"):
+            tc = tool_call(name, "c1", '{"x":1}')
+            client._remember_tool_result(tc, {"content": '{"success":true}'})
+            assert client._repeat_tool_note(tc) is None, name
+
+    async def test_paging_still_has_a_ceiling(self, monkeypatch):
+        """Exempt from the identical-args guard is not unlimited: four
+        get_tool_result_details calls were most of a 149-second turn on the
+        final replay."""
         client, _, _ = make_client(monkeypatch, [])
         client._turn_tool_results = {}
         client._turn_tools_called = [{"name": "get_tool_result_details"}] * 5
         assert client._repeat_tool_note(
-            tool_call("get_tool_result_details", "c6", '{"offset":9000}')) is None
+            tool_call("get_tool_result_details", "c6", '{"offset":9000}')) is not None
 
 
 class TestRetrievedToolsAreNotSticky:
@@ -617,3 +631,132 @@ class TestTheDeadlineIsCheckedBeforeToolsRun:
         assert "Three searches in" in out
         # Four rounds at most, not the full six.
         assert client._turn_rounds <= 4
+
+
+class TestIntentNarrationIsNotAnAnswer:
+    """On the final Phase 10 replay a deadline-forced turn ended with
+    "Confirmed real attachments. Let me get the remaining Jim tool threads'
+    IDs." — a promise to go do something, on the one turn where there is no
+    more doing. That was the whole answer David got."""
+
+    @pytest.mark.parametrize("text", [
+        "Confirmed real attachments. Let me get the remaining Jim tool threads' IDs.",
+        "I'll go check the Studio and report back.",
+        "One moment — pulling those up.",
+        "Hang on, looking that up now.",
+        "I'm going to run the search again.",
+    ])
+    def test_recognised(self, text):
+        assert ms._is_intent_narration(text) is True
+
+    @pytest.mark.parametrize("text", [
+        "Nine files are in the Studio tab, downloadable. Here's the list.",
+        "No HRV logged since Wednesday — nothing from the watch in 36 hours.",
+        "",
+    ])
+    def test_a_real_answer_is_not_flagged(self, text):
+        assert ms._is_intent_narration(text) is False
+
+    def test_a_long_reply_may_mention_letting_me(self):
+        """A substantial answer that happens to contain the phrase has already
+        said something; only a reply that is nothing BUT the promise counts."""
+        long_answer = (
+            "Nine files are in the Studio under 'Jim's tools', all downloadable: "
+            + ", ".join(f"file_{i}.md" for i in range(30))
+            + ". Let me know if you want them grouped differently."
+        )
+        assert len(long_answer) > ms._INTENT_NARRATION_MAX_CHARS
+        assert ms._is_intent_narration(long_answer) is False
+
+
+@pytest.mark.asyncio
+class TestForcedFinalRetriesOnIntentNarration:
+    async def test_it_asks_again_and_uses_the_second_answer(self, monkeypatch):
+        monkeypatch.setattr(ms, "CHAT_TURN_DEADLINE_S", 0)
+        client, stream, _ = make_client(monkeypatch, [
+            {"content": "", "tool_calls": [tool_call("email_search")]},
+            {"content": "Let me get the remaining thread IDs.", "tool_calls": None},
+            {"content": "Three Jim threads, seven attachments, all in the Studio now.",
+             "tool_calls": None},
+        ])
+
+        out = await client.chat_with_tools(MESSAGES, [], "u1", "conv-1")
+
+        assert "Let me get" not in out
+        assert "seven attachments" in out
+        # The retry has to actually tell the model what was wrong.
+        retry_payload = stream.payloads[-1]
+        assert any(
+            "no next step on this turn" in (m.get("content") or "").lower()
+            for m in retry_payload["messages"]
+        )
+
+    async def test_it_gives_up_honestly_rather_than_looping(self, monkeypatch):
+        monkeypatch.setattr(ms, "CHAT_TURN_DEADLINE_S", 0)
+        client, stream, _ = make_client(monkeypatch, [
+            {"content": "", "tool_calls": [tool_call("email_search")]},
+            {"content": "Let me check that.", "tool_calls": None},
+            {"content": "I'll go look.", "tool_calls": None},
+        ])
+
+        out = await client.chat_with_tools(MESSAGES, [], "u1", "conv-1")
+
+        assert "ran out of room" in out.lower()
+        assert len(stream.payloads) == 3  # one try, one retry, no loop
+
+
+@pytest.mark.asyncio
+class TestForcedFinalLastResort:
+    async def test_a_tool_call_fragment_is_not_an_answer(self, monkeypatch):
+        """A model handed no tools still sometimes emits a tool call. Stripping
+        the markup and the server advisory left 12 characters of preamble on the
+        final replay, and that reached David as "I ran out of room"."""
+        monkeypatch.setattr(ms, "CHAT_TURN_DEADLINE_S", 0)
+        fragment = ('Understood.<tool_call>\n<function=files_to_studio>\n'
+                    '<parameter=sender>\njim\n</parameter>\n</function>\n</tool_call>'
+                    '[MTPLX: no tools are active on this request.]')
+        client, stream, _ = make_client(monkeypatch, [
+            {"content": "", "tool_calls": [tool_call("email_search")]},
+            {"content": fragment, "tool_calls": None},
+            {"content": "Three Jim threads, seven files, all filed to the Studio.",
+             "tool_calls": None},
+        ])
+
+        out = await client.chat_with_tools(MESSAGES, [], "u1", "conv-1")
+        assert "<tool_call>" not in out
+        assert "MTPLX" not in out
+        assert "seven files" in out
+
+    async def test_the_last_resort_names_what_actually_ran(self, monkeypatch):
+        """"Ask me again" on its own tells David nothing about whether anything
+        happened — and something usually did."""
+        # The round cap, not the clock: a deadline of 0 skips the round's
+        # tools entirely, so nothing would have run to name.
+        monkeypatch.setattr(ms, "CHAT_TURN_DEADLINE_S", 9999)
+        monkeypatch.setattr(ms, "CHAT_TOOL_ROUNDS_MAX", 1)
+        client, stream, _ = make_client(monkeypatch, [
+            {"content": "", "tool_calls": [tool_call("email_search")]},
+            {"content": "x", "tool_calls": None},   # unusable
+            {"content": "y", "tool_calls": None},   # unusable on retry too
+        ])
+
+        out = await client.chat_with_tools(MESSAGES, [], "u1", "conv-1")
+        assert "email_search" in out
+        assert "ran out of room" in out
+        # Never a tool's own status line.
+        assert "Found 20 emails" not in out
+
+    async def test_with_no_tools_at_all_it_stays_generic(self, monkeypatch):
+        monkeypatch.setattr(ms, "CHAT_TURN_DEADLINE_S", 9999)
+        client, _, _ = make_client(monkeypatch, [])
+        client._turn_started_at = ms.time.monotonic()
+        client._turn_tools_called = []
+        client._current_model = "m"
+        client._current_model_config = {"provider": "openai"}
+
+        async def _empty(payload):
+            return {"content": "", "tool_calls": None}
+
+        client._stream_response = _empty
+        out = await client._force_final_answer([{"role": "user", "content": "hi"}])
+        assert out.startswith("I ran out of room")

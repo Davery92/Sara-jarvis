@@ -2536,13 +2536,17 @@ class SimpleLLMClient:
         """
         fn = tool_call.get("function") or {}
         name = fn.get("name")
-        if name in self._REPEATABLE_TOOLS:
-            return None
+        _repeatable = name in self._REPEATABLE_TOOLS
 
         # Budget per tool NAME, regardless of arguments: nudging one argument
-        # and trying again is the shape the thrash actually took.
+        # and trying again is the shape the thrash actually took. Paging and
+        # tool discovery get a larger allowance — different arguments genuinely
+        # mean different work there — but not an unlimited one: four
+        # get_tool_result_details calls in one turn was most of a 149-second
+        # turn on the final replay.
+        _cap = (self._TOOL_CALLS_PER_TURN_MAX + 1) if _repeatable else self._TOOL_CALLS_PER_TURN_MAX
         used = sum(1 for t in getattr(self, "_turn_tools_called", []) if t.get("name") == name)
-        if used >= self._TOOL_CALLS_PER_TURN_MAX:
+        if used >= _cap:
             logger.warning(
                 f"🛑 {name} has run {used} times this turn — refusing a further call"
             )
@@ -2560,6 +2564,9 @@ class SimpleLLMClient:
                     ),
                 }),
             }
+
+        if _repeatable:
+            return None
 
         key = self._tool_call_key(tool_call)
         prior = getattr(self, "_turn_tool_results", {}).get(key)
@@ -2647,6 +2654,14 @@ class SimpleLLMClient:
         finally:
             db.close()
 
+    _FORCED_FINAL_RETRY = (
+        "That was a statement of what you are about to do. There is no next step "
+        "on this turn — that reply is the last thing David hears from you here. "
+        "Write it again as the answer itself: what the tool results above "
+        "actually contain, named specifically, and what you could not get to. "
+        "No 'let me', no 'I'll go', no 'one moment'."
+    )
+
     _FORCED_FINAL_INSTRUCTION = (
         "Time or context budget for this turn is exhausted. There are no tools on "
         "this request — a tool call here executes nothing and produces no output, "
@@ -2683,21 +2698,61 @@ class SimpleLLMClient:
         _evict_for_context(msgs, payload, payload["max_tokens"])
 
         self._activity_responding_emitted = False
-        try:
-            message = await self._stream_response(payload)
-            content = _strip_provider_scaffolding((message or {}).get("content"))
-            if len(content) >= 20:
-                return content
-            logger.warning(
-                f"Forced final returned {len(content)} usable chars after stripping "
-                "provider scaffolding"
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            logger.error(f"Forced final answer failed: {type(e).__name__}: {e}")
+        for attempt in (0, 1):
+            try:
+                message = await self._stream_response(payload)
+                # A model handed no tools still sometimes emits a tool call.
+                # Strip the markup AND the server advisory that follows it, or
+                # what is left is a 12-character fragment of preamble — which
+                # is exactly what happened on the final replay.
+                content = _strip_provider_scaffolding(
+                    strip_tool_markup((message or {}).get("content") or "")
+                )
+                if len(content) >= 20 and not _is_intent_narration(content):
+                    return content
+                if _is_intent_narration(content):
+                    # "Confirmed real attachments. Let me get the remaining Jim
+                    # tool threads' IDs." — a promise to go do something, on the
+                    # one turn where there is no more doing. It reached David on
+                    # the final Phase 10 replay.
+                    logger.warning(
+                        f"Forced final narrated intent instead of answering: {content[:120]!r}"
+                    )
+                else:
+                    logger.warning(
+                        f"Forced final returned {len(content)} usable chars after stripping "
+                        "provider scaffolding"
+                    )
+                # The retry is a second model call. On a turn that is already
+                # past its deadline that buys quality with time David has
+                # already spent — take the honest fallback instead.
+                _spent = time.monotonic() - getattr(self, "_turn_started_at", time.monotonic())
+                if attempt == 0 and _spent < CHAT_TURN_DEADLINE_S + 30:
+                    payload = dict(payload)
+                    payload["messages"] = msgs + [
+                        {"role": "assistant", "content": content or ""},
+                        {"role": "system", "content": self._FORCED_FINAL_RETRY},
+                    ]
+                    continue
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"Forced final answer failed: {type(e).__name__}: {e}")
+                break
 
-        # Last resort — honest, short, and clearly not a tool status line.
+        # Last resort. Honest, short, and clearly not a tool status line — but
+        # it names the work that actually happened, because "ask me again" on
+        # its own tells David nothing about whether anything ran.
+        ran = []
+        for t in getattr(self, "_turn_tools_called", []) or []:
+            if t.get("name") and t["name"] not in ran:
+                ran.append(t["name"])
+        if ran:
+            return (
+                "I ran " + ", ".join(ran[:5]) + " and then ran out of room before I "
+                "could put the answer together — so I don't want to tell you what they "
+                "said from memory. Ask me again and I'll go straight at it."
+            )
         return (
             "I ran out of room on that one before I could put an answer together. "
             "Ask me again and I'll go straight at it."
@@ -2717,12 +2772,12 @@ class SimpleLLMClient:
             if isinstance(msg, str) and msg.strip():
                 echoes.add(msg.strip())
 
-        if text and text not in echoes and len(text) >= 20:
+        if text and text not in echoes and len(text) >= 20 and not _is_intent_narration(text):
             return text
 
         logger.warning(
-            f"🔁 Reply after tools was a status echo or too short ({len(text)} chars) — "
-            "forcing a final answer"
+            f"🔁 Reply after tools was a status echo, too short, or only a promise "
+            f"of a next step ({len(text)} chars) — forcing a final answer"
         )
         self._turn_ended_by = "error"
         return await self._force_final_answer(current_messages)
@@ -6486,6 +6541,29 @@ def _strip_provider_scaffolding(text: Optional[str]) -> str:
     if not text:
         return text or ""
     return _PROVIDER_SCAFFOLDING_RE.sub(" ", text).strip()
+
+
+# A short reply that only promises a next step. Fine mid-turn — it is what the
+# model says before calling a tool — and useless as the LAST thing David hears,
+# because there is no next step coming. On the final Phase 10 replay a
+# deadline-forced turn ended with "Confirmed real attachments. Let me get the
+# remaining Jim tool threads' IDs." and that was the whole answer.
+_INTENT_NARRATION_RE = re.compile(
+    r"\b(?:let me|i'?ll (?:go |now )?(?:get|grab|check|look|find|pull|fetch|run|see)|"
+    r"i'?m going to|give me a (?:second|moment|sec)|one (?:moment|sec|second)|"
+    r"hang on|checking now|looking (?:that )?up now)\b",
+    re.IGNORECASE,
+)
+# Long replies are allowed to contain "let me" — they have already said
+# something. This only catches a reply that is nothing BUT the promise.
+_INTENT_NARRATION_MAX_CHARS = 400
+
+
+def _is_intent_narration(text: Optional[str]) -> bool:
+    t = (text or "").strip()
+    if not t or len(t) > _INTENT_NARRATION_MAX_CHARS:
+        return False
+    return bool(_INTENT_NARRATION_RE.search(t))
 
 
 async def _reference_large_tool_results(tool_responses: list) -> list:

@@ -301,25 +301,29 @@ async def get_world_state(db: Session, user_id: str = DEFAULT_USER_ID) -> WorldS
         # right there and read straight past. A metric whose newest reading
         # predates this morning is not last night's sleep, and a key that says
         # `sleep_last_night` cannot be misread as one.
+        # The rename is UNCONDITIONAL so the key is the same whether or not a
+        # row exists — a metric that changes its name depending on the data is
+        # a metric nothing downstream can rely on.
         _row_at = {r.metric_type: r.recorded_at for r in rows if r.recorded_at}
         _sleep_at = next(
             (_row_at[k] for k in ("sleep_hours", "sleep") if k in _row_at), None
         )
-        if "sleep_hours" in by_metric and not str(
-            by_metric["sleep_hours"]
-        ).startswith("unavailable"):
+        if "sleep_hours" in by_metric:
+            _sleep_value = str(by_metric.pop("sleep_hours"))
             _local_now = now.astimezone(ET) if now.tzinfo else now
             _sleep_local = (
                 _sleep_at.astimezone(ET) if _sleep_at and _sleep_at.tzinfo
                 else _sleep_at
             )
-            if _sleep_local is not None and _sleep_local.date() < _local_now.date():
-                by_metric["sleep_last_night"] = (
-                    "unavailable (no row yet); most recent sleep: "
-                    + str(by_metric.pop("sleep_hours"))
-                )
-            else:
-                by_metric["sleep_last_night"] = by_metric.pop("sleep_hours")
+            _is_stale = (
+                not _sleep_value.startswith("unavailable")
+                and _sleep_local is not None
+                and _sleep_local.date() < _local_now.date()
+            )
+            by_metric["sleep_last_night"] = (
+                "unavailable (no row yet); most recent sleep: " + _sleep_value
+                if _is_stale else _sleep_value
+            )
 
         # Same shape for the day-scoped counters: a steps or exercise figure
         # from 22 hours ago is yesterday's, and saying so is the difference

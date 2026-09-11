@@ -212,7 +212,13 @@ class TestHealthTodaySlice:
         data = world.health_today.data
         assert "hrv" in data
         assert str(data["hrv"]).startswith("unavailable")
-        assert "8.3" in str(data["sleep_hours"])
+        # `sleep_last_night`, not `sleep_hours` (harness rebuild Phase 6 §9):
+        # the slice used to say `sleep_hours=7.13 (measured Thu Sep 10)` and
+        # Sara opened the morning with "you slept 7.1 hours" — the date was
+        # right there and got read straight past. The key now carries the
+        # claim, and it carries it whether or not a row exists.
+        assert "8.3" in str(data["sleep_last_night"])
+        assert "sleep_hours" not in data
 
     @pytest.mark.asyncio
     async def test_confidence_reflects_coverage_not_existence(self):
