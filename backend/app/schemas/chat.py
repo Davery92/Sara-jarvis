@@ -26,6 +26,11 @@ class TextContent(BaseModel):
 class ChatMessage(BaseModel):
     role: str
     content: Union[str, List[Dict[str, Any]]]  # Support both text-only and multimodal
+    # Client-generated id for this message (harness rebuild Phase 7). Makes the
+    # episode write idempotent by identity rather than by ordinal position, so
+    # a retry is one row and two overlapping turns are two. The server fills
+    # one in and echoes it on `final_response` when the client sends none.
+    client_message_id: Optional[str] = None
 
 
 class ChatRequest(BaseModel):

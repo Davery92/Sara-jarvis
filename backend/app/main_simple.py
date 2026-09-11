@@ -4,6 +4,7 @@ from fastapi.responses import StreamingResponse, JSONResponse, FileResponse, Red
 from fastapi.routing import APIRoute
 from sqlalchemy import create_engine, Column, String, DateTime, Text, Integer, Float, Boolean, text, and_, or_, desc, ForeignKey
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.sql import func
@@ -2542,68 +2543,47 @@ class SimpleLLMClient:
                 conversation_id = self.current_conversation_id or str(uuid.uuid4())
 
             logger.info(f"✅ Storing conversation with ID: {conversation_id}")
-            # Deduplicate by (conversation_id, role, ordinal) — not by content.
-            # Content-based dedup silently drops legitimate repeated messages.
-            # The ordinal must be counted over STORABLE messages only: `messages`
-            # carries entries that never become episodes (system prompt, empty
-            # tool-call turns), and counting those shifted the index so turn 2
-            # re-stored assistant reply #1 in every conversation (verified in DB
-            # back to 2026-08-22).
-            db = SessionLocal()
-            try:
-                existing_episodes = db.query(Episode).filter(
-                    Episode.conversation_id == conversation_id,
-                    Episode.user_id == user_id
-                ).all()
-                stored_count = len(existing_episodes)
 
-                storable = []
-                for message in messages:
-                    if isinstance(message, dict):
-                        role = message.get("role")
-                        content = _extract_text_content(message.get("content"))
-                        content = _strip_live_context(content)  # keep David's raw words; live ctx is per-turn
-                    else:
-                        role = message.role
-                        content = _extract_text_content(message.content)
-                        content = _strip_live_context(content)
-                    if role in ["user", "assistant"] and content:
-                        storable.append((role, content))
+            # Harness rebuild Phase 7: THIS METHOD NO LONGER WRITES USER
+            # EPISODES. They are written by persist_user_turn() before the model
+            # is dispatched, keyed by the client's message id.
+            #
+            # What used to be here: dedup by ORDINAL — count the episodes
+            # already in the DB for this conversation, skip that many entries of
+            # the incoming message list, store the rest. Correct only if turns
+            # are strictly serialized. On 2026-09-11 turn 4 ran as a zombie for
+            # 500 seconds and stored mid-flight, shifting the count under its
+            # successors: two of David's six messages never became episodes.
+            # The same skew is why every conversation double-stored assistant
+            # reply #1 at turn 2 (gotcha_episode_ordinal_dup_store). Do not
+            # reintroduce a position-based dedup here.
+            _client_message_id = getattr(self, "_current_client_message_id", None)
 
-                # Store only messages beyond what's already persisted
-                for idx, (role, content) in enumerate(storable):
-                    if idx < stored_count:
-                        continue  # Already stored from a previous call
+            # Real-time PKG extraction for the user's turn.
+            _user_text = None
+            for message in reversed(messages):
+                _role = message.get("role") if isinstance(message, dict) else getattr(message, "role", None)
+                if _role != "user":
+                    continue
+                _raw = message.get("content") if isinstance(message, dict) else getattr(message, "content", None)
+                _user_text = _strip_live_context(_extract_text_content(_raw))
+                break
+            if _user_text:
+                try:
+                    from app.services.pkg_realtime_extractor import process_message_for_pkg
+                    await process_message_for_pkg(user_id, _user_text)
+                except Exception:
+                    pass  # Non-critical
+                try:
+                    # SARA_UNLEASHED Phase D.3: bump known-person mentions in
+                    # real time instead of waiting for consolidation.
+                    from app.services.pkg_realtime_extractor import bump_mentioned_people
+                    await bump_mentioned_people(user_id, _user_text)
+                except Exception:
+                    pass  # Non-critical
 
-                    await intelligent_memory_service.store_episode(
-                        user_id=user_id,
-                        role=role,
-                        content=content,
-                        conversation_id=conversation_id,
-                        source="chat",
-                        memory_type="conversation"
-                    )
-                    stored_count += 1
-
-                    # Real-time PKG extraction for user messages
-                    if role == "user":
-                        try:
-                            from app.services.pkg_realtime_extractor import process_message_for_pkg
-                            await process_message_for_pkg(user_id, content)
-                        except Exception:
-                            pass  # Non-critical
-
-                        # SARA_UNLEASHED Phase D.3: bump known-person mentions
-                        # in real time instead of waiting for consolidation.
-                        try:
-                            from app.services.pkg_realtime_extractor import bump_mentioned_people
-                            await bump_mentioned_people(user_id, content)
-                        except Exception:
-                            pass  # Non-critical
-            finally:
-                db.close()
-
-            # Store assistant response as an episode
+            # Store assistant response as an episode, tied to the user turn it
+            # answers rather than to its position in a list.
             if response_content:
                 episode = await intelligent_memory_service.store_episode(
                     user_id=user_id,
@@ -2612,7 +2592,9 @@ class SimpleLLMClient:
                     conversation_id=conversation_id,
                     source="chat",
                     memory_type="conversation",
-                    episode_id=assistant_episode_id
+                    episode_id=assistant_episode_id,
+                    client_message_id=(f"reply-{_client_message_id}" if _client_message_id else None),
+                    reply_to_client_message_id=_client_message_id,
                 )
                 assistant_episode_id = episode.id if episode else assistant_episode_id
                 logger.info(f"🎯 Assistant episode stored with ID: {assistant_episode_id}")
@@ -2634,6 +2616,81 @@ class SimpleLLMClient:
 
         return assistant_episode_id
     
+    async def persist_user_turn(
+        self, user_id: str, conversation_id: str, content: str, client_message_id: str
+    ) -> None:
+        """Store David's turn BEFORE the model is dispatched.
+
+        Harness rebuild Phase 7. The user episode used to be written at the END
+        of the turn, by the same ordinal-dedup pass that wrote the assistant
+        reply — so a turn that died (a 500s zombie, a client disconnect, a
+        context-overflow 400) took David's own message down with it. On
+        2026-09-11 two of his six messages never became episodes at all.
+
+        Idempotent on client_message_id: a retry of the same message is one
+        row, and the write is safe to repeat.
+        """
+        if getattr(self, "_ephemeral", False):
+            return
+        content = _strip_live_context(_extract_text_content(content) or "").strip()
+        if not content or not conversation_id or not client_message_id:
+            return
+
+        try:
+            await intelligent_memory_service.store_episode(
+                user_id=user_id,
+                role="user",
+                content=content,
+                conversation_id=conversation_id,
+                source="chat",
+                memory_type="conversation",
+                client_message_id=client_message_id,
+            )
+        except Exception as e:
+            logger.error(
+                f"Failed to store the user episode up front "
+                f"({type(e).__name__}: {e}) — the turn continues"
+            )
+
+        # conversation_turn mirror, same key, same idempotency.
+        db = SessionLocal()
+        try:
+            existing = db.query(ConversationTurn).filter(
+                ConversationTurn.conversation_id == conversation_id,
+                ConversationTurn.role == "user",
+                ConversationTurn.client_message_id == client_message_id,
+            ).first()
+            if existing:
+                return
+            if not db.query(Conversation).filter(Conversation.id == conversation_id).first():
+                db.add(Conversation(id=conversation_id, user_id=user_id, title="", total_messages=0))
+                db.commit()
+            embedding = await embedding_service.generate_embedding(content)
+            if DATABASE_URL.startswith("postgresql") and PGVECTOR_AVAILABLE:
+                embedding_data = embedding
+            else:
+                embedding_data = json.dumps(embedding) if embedding else None
+            index = db.query(ConversationTurn).filter(
+                ConversationTurn.conversation_id == conversation_id
+            ).count()
+            db.add(ConversationTurn(
+                conversation_id=conversation_id,
+                user_id=user_id,
+                role="user",
+                content=content,
+                message_index=index,
+                embedding=embedding_data,
+                client_message_id=client_message_id,
+            ))
+            db.commit()
+        except IntegrityError:
+            db.rollback()  # lost the race; the row is there
+        except Exception as e:
+            db.rollback()
+            logger.warning(f"conversation_turn pre-store failed (non-critical): {e}")
+        finally:
+            db.close()
+
     async def _store_legacy_conversation(self, messages, response_content, user_id, conversation_id):
         """Store conversation in legacy format for compatibility"""
         try:
@@ -2682,6 +2739,17 @@ class SimpleLLMClient:
                     last_role = None
                     last_content = None
 
+                # Phase 7: persist_user_turn() already wrote this row before the
+                # model was dispatched, keyed by client_message_id. Skip it
+                # rather than racing the content comparison below.
+                _cmid = getattr(self, "_current_client_message_id", None)
+                if _cmid and db.query(ConversationTurn).filter(
+                    ConversationTurn.conversation_id == conversation_id,
+                    ConversationTurn.role == "user",
+                    ConversationTurn.client_message_id == _cmid,
+                ).first():
+                    last_role = None
+
                 if last_role == "user" and last_content:
                     latest_user_turn = db.query(ConversationTurn).filter(
                         ConversationTurn.conversation_id == conversation_id,
@@ -2723,6 +2791,17 @@ class SimpleLLMClient:
                     should_store_assistant_turn = not (
                         latest_assistant_turn and latest_assistant_turn.content == response_content
                     )
+                    # Same key as the episode. Comparing content alone let a
+                    # re-answered turn write a second row whenever the model
+                    # phrased it differently — a retry of one turn showed up as
+                    # two replies in conversation_turn while episode had one.
+                    _reply_key = f"reply-{_cmid}" if _cmid else None
+                    if _reply_key and db.query(ConversationTurn).filter(
+                        ConversationTurn.conversation_id == conversation_id,
+                        ConversationTurn.role == "assistant",
+                        ConversationTurn.client_message_id == _reply_key,
+                    ).first():
+                        should_store_assistant_turn = False
 
                     if should_store_assistant_turn:
                         response_embedding = await embedding_service.generate_embedding(response_content)
@@ -2739,10 +2818,11 @@ class SimpleLLMClient:
                             role="assistant",
                             content=response_content,
                             message_index=current_turn_count,
-                            embedding=embedding_data
+                            embedding=embedding_data,
+                            client_message_id=_reply_key,
                         )
                         db.add(turn)
-                
+
                 db.commit()
                 conversation.total_messages = db.query(ConversationTurn).filter(
                     ConversationTurn.conversation_id == conversation_id
@@ -4178,7 +4258,9 @@ class IntelligentMemoryService:
         conversation_id: str = None,
         source: str = "chat",
         memory_type: str = "conversation",
-        episode_id: str = None
+        episode_id: str = None,
+        client_message_id: str = None,
+        reply_to_client_message_id: str = None,
     ) -> Episode:
         """Store an episode with fast heuristic scoring.
 
@@ -4210,8 +4292,25 @@ class IntelligentMemoryService:
         # Generate embedding (if available)
         embedding = await self._generate_embedding(content)
 
-        # Store episode
+        # Store episode. Harness rebuild Phase 7: when the caller supplies a
+        # client_message_id, this write is idempotent on
+        # (conversation_id, role, client_message_id) — a retry, a reconnect, or
+        # a second call from a turn that overlapped another one all collapse to
+        # the row that is already there.
         db = SessionLocal()
+        if client_message_id and conversation_id:
+            existing = db.query(Episode).filter(
+                Episode.conversation_id == conversation_id,
+                Episode.role == role,
+                Episode.client_message_id == client_message_id,
+            ).first()
+            if existing:
+                logger.info(
+                    f"↩️ Episode for client_message_id={client_message_id} ({role}) "
+                    "already stored — not writing a second one"
+                )
+                db.close()
+                return existing
         try:
             # H4 (Brain Alignment): emotional encoding + novelty. The amygdala
             # tags intense moments and the cortex tags surprising ones for
@@ -4250,6 +4349,8 @@ class IntelligentMemoryService:
                 context_tags=json.dumps([]),
                 memory_type=memory_type,
                 source=source,
+                client_message_id=client_message_id,
+                reply_to_client_message_id=reply_to_client_message_id,
                 meta={"novelty": round(novelty, 4), "emotional_intensity": round(emotional_intensity, 4)},
                 embedding=json.dumps(embedding) if embedding and not PGVECTOR_AVAILABLE else embedding
             )
@@ -4307,7 +4408,24 @@ class IntelligentMemoryService:
                 },
             )
 
-            db.commit()
+            try:
+                db.commit()
+            except IntegrityError:
+                # The unique partial index on (conversation_id, role,
+                # client_message_id) fired — two concurrent turns raced past the
+                # pre-check above. Losing the race is the correct outcome; hand
+                # back the row that won.
+                db.rollback()
+                won = db.query(Episode).filter(
+                    Episode.conversation_id == conversation_id,
+                    Episode.role == role,
+                    Episode.client_message_id == client_message_id,
+                ).first() if client_message_id else None
+                logger.info(
+                    f"↩️ Episode write for client_message_id={client_message_id} lost a "
+                    f"race; using the stored row {getattr(won, 'id', None)}"
+                )
+                return won
             db.refresh(episode)
 
             logger.info(f"🧠 Stored episode {episode.id}: importance={importance:.2f}, emotion={emotional_analysis.get('primary_emotion')} (outbox queued)")
@@ -8331,7 +8449,11 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
 
             # INTENT CLASSIFICATION for lazy context injection
             # Extract text from user message (content may be a list for multimodal messages with images)
-            _raw_content = next((m.content for m in reversed(request.messages) if m.role == "user"), "") if request.messages else ""
+            _last_user_msg = next((m for m in reversed(request.messages) if m.role == "user"), None) if request.messages else None
+            _raw_content = _last_user_msg.content if _last_user_msg is not None else ""
+            # Phase 7: the client's own id for this message, if it sent one.
+            # Filled in with `srv-<uuid>` and echoed on final_response otherwise.
+            _client_message_id = getattr(_last_user_msg, "client_message_id", None)
             last_user_message = _extract_text_content(_raw_content)
             tool_classifier = get_tool_intent_classifier()
             context_router = get_context_router()
@@ -9399,6 +9521,29 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     f"(1 system + {len(conversation_history)} history + {len(merged_request_messages)} new)"
                 )
 
+            # === STORE DAVID'S TURN BEFORE THE MODEL RUNS (Phase 7) ===
+            # The user episode used to be written at the end of the turn, by the
+            # same ordinal pass that wrote the assistant reply — so a turn that
+            # died took his own message down with it. Two of his six messages on
+            # 2026-09-11 never became episodes. Now the turn is durable before
+            # the model is dispatched, keyed by the client's message id so a
+            # retry collapses onto the same row.
+            if not _client_message_id:
+                _client_message_id = f"srv-{uuid.uuid4()}"
+            streaming_client._current_client_message_id = _client_message_id
+            streaming_client._ephemeral = bool(request.ephemeral)
+            _turn_conversation_id = request.conversation_id or str(uuid.uuid4())
+            streaming_client.current_conversation_id = _turn_conversation_id
+            try:
+                await streaming_client.persist_user_turn(
+                    user_id=str(current_user.id),
+                    conversation_id=_turn_conversation_id,
+                    content=_raw_content,
+                    client_message_id=_client_message_id,
+                )
+            except Exception as _pu_err:
+                logger.error(f"persist_user_turn failed (turn continues): {_pu_err}")
+
             # Context assembly is done with the request-scoped session. End its
             # transaction now: the LLM tool loop below can run for many minutes,
             # and an open transaction gets the connection killed by Postgres's
@@ -9421,7 +9566,12 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     await streaming_client.emit_activity("thinking")
                     _mark_stage("llm_dispatched")
                     response_content = await streaming_client.chat_with_tools(
-                        all_messages, tools, current_user.id, request.conversation_id,
+                        # `_turn_conversation_id`, not request.conversation_id:
+                        # on a new conversation the user episode was already
+                        # stored under the id minted above, and letting
+                        # chat_with_tools mint a second one would put David's
+                        # turn and Sara's reply in different conversations.
+                        all_messages, tools, current_user.id, _turn_conversation_id,
                         model=request.model, ephemeral=request.ephemeral or False
                     )
                     _mark_stage("turn_complete")
@@ -9459,7 +9609,11 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                             "citations": streaming_client.get_citations(),
                             "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
                             "conversation_id": final_conv_id,
-                            "episode_id": final_episode_id
+                            "episode_id": final_episode_id,
+                            # Echoed so a client that sent none can reconcile
+                            # its local message with the stored episode, and so
+                            # a retry of this turn is recognised as the same one.
+                            "client_message_id": _client_message_id,
                         }
                     })
                     logger.info("✅ final_response event queued")

@@ -20,6 +20,22 @@ export function createClientConversationId(): string {
   });
 }
 
+/**
+ * A stable id for one message David sends.
+ *
+ * Harness rebuild Phase 7: the backend stores his episode keyed by this BEFORE
+ * dispatching the model, so a turn that dies mid-flight (a 500s zombie, a
+ * disconnect, a context-overflow 400) no longer takes his own message down
+ * with it. Two of six messages vanished that way on 2026-09-11. It also makes
+ * a retry of the same turn idempotent instead of a duplicate episode.
+ *
+ * Same shape as createClientConversationId — crypto.randomUUID is not in the
+ * Hermes runtime and a uuid package is not worth the bundle for two calls.
+ */
+export function newClientMessageId(): string {
+  return createClientConversationId();
+}
+
 export interface SendMessageParams {
   messages: Message[];  // Changed from single message to full conversation history
   conversationId?: string;
@@ -89,6 +105,9 @@ class ChatService {
       return {
         role: msg.role,
         content,
+        // Phase 7: lets the backend store this turn before the model runs, and
+        // recognise a retry as the same message rather than a second one.
+        ...(msg.client_message_id ? { client_message_id: msg.client_message_id } : {}),
       };
     });
 

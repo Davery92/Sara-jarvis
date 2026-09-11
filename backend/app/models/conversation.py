@@ -32,3 +32,5 @@ class ConversationTurn(Base):
     message_index = Column(Integer, nullable=False)
     embedding = Column(Text, nullable=True)  # Vector handled at runtime
     created_at = Column(DateTime, server_default=func.now())
+    # See Episode.client_message_id (harness rebuild Phase 7, migration 152).
+    client_message_id = Column(String(64), nullable=True)

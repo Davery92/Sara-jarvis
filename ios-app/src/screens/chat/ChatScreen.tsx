@@ -24,7 +24,7 @@ import { HealthAlertContext, NudgeContext, QuickReplyContext, HeartbeatContext, 
 import { Message } from '../../types/api';
 import { AssistantActivity, ContentCard as ContentCardType, SuggestedAction } from '../../types/cards';
 import { assistantAnalytics } from '../../services/assistantAnalytics';
-import { chatService, createClientConversationId } from '../../services/chat';
+import { chatService, createClientConversationId, newClientMessageId } from '../../services/chat';
 import { surfacesService } from '../../services/surfaces';
 import { voiceService } from '../../services/voice';
 import { ImageAttachment } from '../../services/imagePicker';
@@ -140,6 +140,37 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
   // when the request started (pendingCards just cleared to []), so reading
   // pendingCards there loses every card that streamed in. Read the ref instead.
   const pendingCardsRef = useRef<ContentCardType[]>([]);
+
+  // A reload replaces the on-screen list with whatever the server stored. When
+  // the server lost a turn, so did David: on 2026-09-11 "Well?" disappeared
+  // from his thread after the turn answering it errored, because the backend's
+  // ordinal dedup had never written that episode and the foreground reload
+  // overwrote the local copy. The backend now stores his turn before the model
+  // runs (Phase 7); this keeps the client from throwing away a message the
+  // server does not have yet regardless.
+  const mergeWithUnsavedLocalTurns = useCallback(
+    (serverMessages: Message[], localMessages: Message[]): Message[] => {
+      const serverText = new Set(
+        serverMessages
+          .filter((m) => m.role === 'user' && typeof m.content === 'string')
+          .map((m) => (m.content as string).trim())
+      );
+      const missing = localMessages.filter(
+        (m) =>
+          m.role === 'user' &&
+          m.id !== 'welcome' &&
+          typeof m.content === 'string' &&
+          (m.content as string).trim().length > 0 &&
+          !serverText.has((m.content as string).trim())
+      );
+      if (!missing.length) return serverMessages;
+      console.warn(
+        `[Chat] Keeping ${missing.length} local message(s) the server does not have`
+      );
+      return [...serverMessages, ...missing];
+    },
+    []
+  );
 
   // Surfaces (interactive checklists / cook-mode) are persistent DB rows, but
   // reloaded chat history comes back without cards. Re-inject any active
@@ -606,7 +637,8 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
             episode_id: ep.id,
           }));
 
-          setMessages(await attachActiveSurfaces(loadedMessages, reloadId));
+          const merged = mergeWithUnsavedLocalTurns(loadedMessages, messagesRef.current);
+          setMessages(await attachActiveSurfaces(merged, reloadId));
           console.log(`[Chat] Reloaded ${loadedMessages.length} messages`);
         }
       } catch (error) {
@@ -782,6 +814,7 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
       role: 'user',
       content: messageText,
       created_at: new Date().toISOString(),
+      client_message_id: newClientMessageId(),
     };
 
     assistantAnalytics.track('assistant.message_sent', {
@@ -1104,6 +1137,7 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
         role: 'user',
         content: transcribedText,
         created_at: new Date().toISOString(),
+        client_message_id: newClientMessageId(),
       };
 
       const inputMode = shouldResumeListening.current ? 'voice_hands_free' : 'voice_hold_to_talk';

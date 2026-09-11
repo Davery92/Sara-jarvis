@@ -53,6 +53,11 @@ export interface Message {
   role: 'user' | 'assistant' | 'system';
   content: MessageContent;
   created_at: string;
+  // Stable id for this message, generated here and sent with the turn. The
+  // backend stores David's episode keyed by it BEFORE the model runs, so a
+  // turn that dies mid-flight no longer takes his own message down with it
+  // (harness rebuild Phase 7 — two of six messages vanished on 2026-09-11).
+  client_message_id?: string;
   episode_id?: string;  // For rating episodes
   metadata?: Record<string, any>;
   attachments?: Attachment[];

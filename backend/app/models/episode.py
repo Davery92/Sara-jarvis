@@ -37,7 +37,17 @@ class Episode(Base):
     rating_boost = Column(Float, nullable=True)
     exploration_bonus = Column(Float, nullable=True)
     recall_relevance_ema = Column(Float, default=0.5)  # EMA of recall usefulness (0=always irrelevant, 1=always used)
-    
+    # Harness rebuild Phase 7 (migration 152). Chat episode writes are keyed by
+    # the client's own message id instead of by ordinal position: the same
+    # message stored twice is one row, and two overlapping turns are two rows.
+    # Ordinal dedup dropped two of David's six messages on 2026-09-11 when a
+    # zombie turn stored mid-flight and shifted the count under its successors.
+    client_message_id = Column(String(64), nullable=True)
+    # For an assistant episode: the client_message_id of the user turn it
+    # answers. This is the link the ordinal was standing in for.
+    reply_to_client_message_id = Column(String(64), nullable=True)
+
+
     # Relationships
     user = relationship("User")
 
