@@ -883,6 +883,11 @@ class SimpleLLMClient:
         self._token_usage_callback = callback
 
     def _log_token_usage(self, prompt_tokens: int, completion_tokens: int, total_tokens: int, model: str, operation_type: str = "chat"):
+        # Phase 9 trace: the FIRST prompt-token count of the turn is the one
+        # that describes the prompt David's message actually produced; later
+        # rounds carry whatever tool results the turn accumulated.
+        if getattr(self, "_turn_prompt_tokens_first", None) is None and prompt_tokens:
+            self._turn_prompt_tokens_first = int(prompt_tokens)
         """Log token usage via callback"""
         logger.info(f"📊 _log_token_usage called: {total_tokens} tokens ({prompt_tokens} prompt, {completion_tokens} completion) for {model}/{operation_type}")
         if self._token_usage_callback:
@@ -929,6 +934,12 @@ class SimpleLLMClient:
 
     async def emit_text_chunk(self, content: str, full_content: str):
         """Mark visible response generation once, then emit the text delta."""
+        # Phase 9 trace: the first visible character is the number that
+        # describes what David experienced (presence latency), not the total.
+        if getattr(self, "_turn_first_token_ms", None) is None:
+            _t0 = getattr(self, "_turn_started_at", None)
+            if _t0 is not None:
+                self._turn_first_token_ms = int((time.monotonic() - _t0) * 1000)
         if not self._activity_responding_emitted:
             self._activity_responding_emitted = True
             await self.emit_activity("responding")
@@ -1550,6 +1561,32 @@ class SimpleLLMClient:
             return f"I'm sorry, I'm having trouble connecting to my AI service. Error: {str(e)}"
 
     async def chat_with_tools(self, messages, tools, user_id, conversation_id=None, model=None, ephemeral=False):
+        """Run one chat turn and record a `chat_turn_trace` row for it.
+
+        The trace is written on EVERY exit — a normal reply, a forced final, an
+        error, a cancellation — because the turns worth seeing are the ones
+        that did not end normally. Phase 9 of the harness rebuild: on
+        2026-09-11 David had no way to see that Sara had spent eight minutes
+        calling fifteen tools, and reconstructing it took a 20-minute docker
+        log window read by hand.
+        """
+        reply = None
+        try:
+            reply = await self._chat_with_tools_inner(
+                messages, tools, user_id, conversation_id, model=model, ephemeral=ephemeral
+            )
+            return reply
+        finally:
+            try:
+                self._write_turn_trace(
+                    user_id,
+                    getattr(self, "current_conversation_id", None) or conversation_id,
+                    len(reply or ""),
+                )
+            except Exception as _trace_err:
+                logger.debug(f"turn trace skipped: {_trace_err}")
+
+    async def _chat_with_tools_inner(self, messages, tools, user_id, conversation_id=None, model=None, ephemeral=False):
         """Enhanced chat with tool calling support
 
         Args:
@@ -1738,6 +1775,8 @@ class SimpleLLMClient:
             self._turn_ended_by = "model"
             self._turn_rounds = 0
             self._turn_tools_called = []
+            self._turn_first_token_ms = None
+            self._turn_prompt_tokens_first = None
 
             message = await self._stream_response(payload)
 
@@ -1771,11 +1810,22 @@ class SimpleLLMClient:
                             "tool_running", tool=tool_name, round_num=round_num + 1
                         )
                         
+                        _tool_t0 = time.monotonic()
                         tool_response = await self.execute_tool(tool_call, user_id, conversation_id, session_cache)
                         try:
                             response_payload = json.loads(tool_response.get("content") or "{}")
                         except (TypeError, json.JSONDecodeError):
                             response_payload = {}
+                        # Phase 9 trace: what was called, how long, how big, and
+                        # whether it worked. This is the record that did not
+                        # exist when Sara spent eight minutes calling fifteen
+                        # tools and David could only see the silence.
+                        self._turn_tools_called.append({
+                            "name": tool_name,
+                            "ms": int((time.monotonic() - _tool_t0) * 1000),
+                            "result_chars": len(tool_response.get("content") or ""),
+                            "success": response_payload.get("success") is not False,
+                        })
                         if response_payload.get("success") is False:
                             failed_tool_counts[tool_name] = failed_tool_counts.get(tool_name, 0) + 1
                             if failed_tool_counts[tool_name] >= 2:
@@ -2406,6 +2456,60 @@ class SimpleLLMClient:
             "tool_call_id": tool_call["id"],
             "content": str(result)
         }
+
+    def _write_turn_trace(self, user_id, conversation_id, reply_chars: int) -> None:
+        """One `chat_turn_trace` row per turn (harness rebuild Phase 9).
+
+        Best-effort and synchronous-at-the-end: a failure to record a turn must
+        never fail the turn. `ended_by` is the field that matters — anything
+        other than `model` means the harness, not Sara, decided when to stop.
+        """
+        started = getattr(self, "_turn_started_at", None)
+        if started is None:
+            return
+        total_ms = int((time.monotonic() - started) * 1000)
+        first_ms = getattr(self, "_turn_first_token_ms", None)
+        tools = getattr(self, "_turn_tools_called", []) or []
+        ended_by = getattr(self, "_turn_ended_by", "model")
+        rounds = getattr(self, "_turn_rounds", 0)
+
+        logger.info(
+            f"🧾 TURN conv={conversation_id} "
+            f"first_token={(first_ms / 1000) if first_ms else '?'}s "
+            f"total={total_ms / 1000:.1f}s "
+            f"tools={[t['name'] for t in tools]} ended_by={ended_by}"
+        )
+        db = SessionLocal()
+        try:
+            db.execute(text("""
+                INSERT INTO chat_turn_trace (
+                    user_id, conversation_id, client_message_id, first_token_ms,
+                    total_ms, prompt_tokens_first, tool_count, rounds,
+                    tools_called, ended_by, context_chars, reply_chars
+                ) VALUES (
+                    :uid, :cid, :cmid, :first_ms, :total_ms, :ptok, :tcount,
+                    :rounds, CAST(:tools AS jsonb), :ended, :ctx, :reply
+                )
+            """), {
+                "uid": str(user_id) if user_id else None,
+                "cid": str(conversation_id) if conversation_id else None,
+                "cmid": getattr(self, "_current_client_message_id", None),
+                "first_ms": first_ms,
+                "total_ms": total_ms,
+                "ptok": getattr(self, "_turn_prompt_tokens_first", None),
+                "tcount": len(getattr(self, "_active_tools", []) or []),
+                "rounds": rounds,
+                "tools": json.dumps(tools),
+                "ended": ended_by,
+                "ctx": getattr(self, "_turn_context_chars", None),
+                "reply": reply_chars,
+            })
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            logger.debug(f"chat_turn_trace write skipped: {e}")
+        finally:
+            db.close()
 
     _FORCED_FINAL_INSTRUCTION = (
         "Time or context budget for this turn is exhausted. There are no tools on "
@@ -5901,6 +6005,10 @@ from app.routes.debug_notifications import router as debug_notifications_router
 app.include_router(debug_notifications_router)
 from app.routes.debug_retrieval import router as debug_retrieval_router
 app.include_router(debug_retrieval_router)
+# Registration stays OUTSIDE any try/except — a route that silently fails to
+# register is a route that does not exist and nobody notices.
+from app.routes.debug_chat_turns import router as debug_chat_turns_router
+app.include_router(debug_chat_turns_router)
 
 # Autonomous Cognition System (ACS) — v2 in-VM daemon
 from app.routes.acs_daemon import router as acs_daemon_router
@@ -9493,6 +9601,7 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     f"📝 Context injected: {_ctx_chars} chars, "
                     f"sections={_ctx_sections}"
                 )
+                streaming_client._turn_context_chars = _ctx_chars
                 if _ctx_chars > LIVE_CONTEXT_CHAR_BUDGET:
                     logger.warning(
                         f"{_ctx_line} — over the {LIVE_CONTEXT_CHAR_BUDGET}-char budget"
