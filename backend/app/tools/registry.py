@@ -374,8 +374,10 @@ class ToolRegistry:
             'tools': ['find_tools', 'get_tool_result_details']
         },
         'email': {
-            'description': 'Search, read, and get summaries of emails from synced mailboxes',
-            'tools': ['email_search', 'email_read', 'email_recent', 'email_attachment_read']
+            'description': ('Search, read, and get summaries of emails from synced mailboxes, '
+                            'and file their attachments into the Studio as downloadable files'),
+            'tools': ['email_search', 'email_read', 'email_recent', 'email_attachment_read',
+                      'files_to_studio']
         },
         'soul': {
             'description': "View and propose changes to Sara's core identity, operating principles, boundaries, and growth areas. The Soul is Sara's persistent self-definition.",

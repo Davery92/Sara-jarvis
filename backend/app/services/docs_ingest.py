@@ -260,15 +260,20 @@ class DocumentProcessor:
             logger.error(f"MinIO storage error: {e}")
             raise RuntimeError(f"Failed to store file: {e}")
     
-    def get_file(self, storage_key: str) -> bytes:
-        """Retrieve file from MinIO"""
-        
+    def get_file(self, storage_key: str, bucket: str = None) -> bytes:
+        """Retrieve file from MinIO.
+
+        `bucket` defaults to the documents bucket. Email attachments record
+        their own bucket (`EmailAttachment.minio_bucket` — sara-docs or
+        riskninja-docs), so files_to_studio must be able to say which one.
+        """
+
         if not self.minio_client:
             raise RuntimeError("MinIO client not available")
-        
+
         try:
             response = self.minio_client.get_object(
-                bucket_name=settings.minio_bucket,
+                bucket_name=bucket or settings.minio_bucket,
                 object_name=storage_key
             )
             

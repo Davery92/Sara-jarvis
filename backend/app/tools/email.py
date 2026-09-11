@@ -584,10 +584,260 @@ class EmailAttachmentReadTool(BaseTool):
             db.close()
 
 
+class FilesToStudioTool(BaseTool):
+    """File email attachments into the Studio as downloadable artifacts.
+
+    Harness rebuild Phase 4. On 2026-09-11 David asked, four times, for the
+    attachments on Jim's emails to end up somewhere he could open them, and
+    got back capability essays: "I can read them into memory", "I can
+    consolidate them into a note", "that's a coding-agent job". Every piece
+    needed already existed — EmailAttachment.minio_bucket/minio_key, the
+    Artifact(artifact_type="file") shape, GET /api/artifacts/{id}/download,
+    and an iOS Studio that lists file artifacts and hands them to the share
+    sheet. Nothing joined them up. This does.
+    """
+
+    requires_user_origin = True
+
+    @property
+    def name(self) -> str:
+        return "files_to_studio"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Put email attachments into the Studio as real, downloadable files. Use this "
+            "whenever David asks to download, save, grab, collect, keep or 'put somewhere' "
+            "the attachments on his email — it is the answer to 'can you download those "
+            "attachments and put them in a folder'. Give it attachment_ids, or email_ids "
+            "(takes every non-inline attachment on those emails), or sender + days + "
+            "filename_contains to find them. Each file becomes a Studio artifact he can "
+            "open and share from the Studio tab of the app. Afterwards, tell him the "
+            "filenames and that they are in the Studio. Do NOT offer to 'read them into "
+            "memory' or 'consolidate them into a note' instead — that is a different thing "
+            "and not what he asked for."
+        )
+
+    @property
+    def parameters(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "attachment_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Specific attachment ids (from email_search / email_read results).",
+                },
+                "email_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Email ids — files every non-inline attachment on each.",
+                },
+                "sender": {
+                    "type": "string",
+                    "description": "Find attachments on emails from this sender (partial match).",
+                },
+                "days": {
+                    "type": "integer",
+                    "description": "How far back to look when using `sender` (default 30).",
+                },
+                "filename_contains": {
+                    "type": "string",
+                    "description": "Only attachments whose filename contains this text.",
+                },
+                "title": {
+                    "type": "string",
+                    "description": "What to call this group in the Studio, e.g. \"Jim's tools\".",
+                },
+                "skip_duplicates": {
+                    "type": "boolean",
+                    "description": "Skip files already in the Studio by (filename, size). Default true.",
+                },
+            },
+            "required": [],
+        }
+
+    async def execute(self, user_id: str, **kwargs) -> ToolResult:
+        import uuid as _uuid
+
+        from app.models.email import Email, EmailAttachment
+        from app.models.artifact import Artifact
+
+        attachment_ids = kwargs.get("attachment_ids") or []
+        email_ids = kwargs.get("email_ids") or []
+        sender = (kwargs.get("sender") or "").strip()
+        filename_contains = (kwargs.get("filename_contains") or "").strip()
+        try:
+            days = int(kwargs.get("days") or 30)
+        except (TypeError, ValueError):
+            days = 30
+        title = (kwargs.get("title") or "").strip()
+        skip_duplicates = kwargs.get("skip_duplicates")
+        skip_duplicates = True if skip_duplicates is None else bool(skip_duplicates)
+
+        if not attachment_ids and not email_ids and not sender and not filename_contains:
+            return ToolResult(
+                success=False,
+                message=(
+                    "Tell me which attachments: attachment_ids, email_ids, or a sender "
+                    "(optionally with filename_contains)."
+                ),
+            )
+
+        db = next(get_db())
+        try:
+            # Ownership is enforced by always joining through Email.user_id —
+            # an attachment id alone must never be enough to read bytes.
+            q = (
+                db.query(EmailAttachment, Email)
+                .join(Email, EmailAttachment.email_id == Email.id)
+                .filter(Email.user_id == user_id)
+                .filter(or_(EmailAttachment.is_inline == False,  # noqa: E712
+                            EmailAttachment.is_inline.is_(None)))
+            )
+            if attachment_ids:
+                q = q.filter(EmailAttachment.id.in_(attachment_ids))
+            elif email_ids:
+                q = q.filter(EmailAttachment.email_id.in_(email_ids))
+            else:
+                if sender:
+                    q = q.filter(Email.sender_email.ilike(f"%{sender}%"))
+                since = datetime.now(timezone.utc) - timedelta(days=days)
+                q = q.filter(Email.received_at >= since)
+            if filename_contains:
+                q = q.filter(EmailAttachment.filename.ilike(f"%{filename_contains}%"))
+
+            rows = q.order_by(desc(Email.received_at)).limit(50).all()
+            if not rows:
+                return ToolResult(
+                    success=True,
+                    data={"files": [], "skipped": []},
+                    message=(
+                        "No attachments matched — nothing was filed. Say what you searched "
+                        "for so David can point you at the right emails."
+                    ),
+                )
+
+            existing_keys = set()
+            if skip_duplicates:
+                for art in db.query(Artifact).filter(
+                    Artifact.user_id == user_id,
+                    Artifact.artifact_type == "file",
+                ).all():
+                    c = art.content or {}
+                    existing_keys.add((c.get("filename"), c.get("size")))
+
+            from app.services.docs_ingest import DocumentProcessor
+
+            processor = DocumentProcessor()
+            group = title or "Email attachments"
+            filed, skipped, failed = [], [], []
+
+            for att, email in rows:
+                if not att.minio_key:
+                    failed.append({"filename": att.filename,
+                                   "reason": "not downloaded to storage yet"})
+                    continue
+                if skip_duplicates and (att.filename, att.size) in existing_keys:
+                    skipped.append(att.filename)
+                    continue
+
+                try:
+                    file_bytes = processor.get_file(att.minio_key, bucket=att.minio_bucket)
+                except Exception as e:
+                    logger.error(
+                        f"files_to_studio: fetch failed for {att.filename} "
+                        f"({att.minio_bucket}/{att.minio_key}): {type(e).__name__}: {e}"
+                    )
+                    failed.append({"filename": att.filename, "reason": str(e)})
+                    continue
+
+                mime = att.content_type or "application/octet-stream"
+                try:
+                    storage_key = await processor.store_file(file_bytes, att.filename, mime)
+                except Exception as e:
+                    logger.error(
+                        f"files_to_studio: store failed for {att.filename}: "
+                        f"{type(e).__name__}: {e}"
+                    )
+                    failed.append({"filename": att.filename, "reason": str(e)})
+                    continue
+
+                artifact = Artifact(
+                    id=str(_uuid.uuid4()),
+                    user_id=user_id,
+                    conversation_id=kwargs.get("_conversation_id"),
+                    artifact_type="file",
+                    title=att.filename,
+                    content={
+                        "storage_key": storage_key,
+                        "filename": att.filename,
+                        "mime": mime,
+                        "size": att.size or len(file_bytes),
+                        "source": {
+                            "email_id": email.id,
+                            "attachment_id": att.id,
+                            "subject": email.subject,
+                            "sender": email.sender_email,
+                        },
+                    },
+                    artifact_metadata={"group": group},
+                )
+                db.add(artifact)
+                existing_keys.add((att.filename, att.size))
+                filed.append({
+                    "artifact_id": artifact.id,
+                    "filename": att.filename,
+                    "size": att.size or len(file_bytes),
+                    "download_url": f"/api/artifacts/{artifact.id}/download",
+                })
+
+            db.commit()
+
+            if not filed:
+                if skipped:
+                    return ToolResult(
+                        success=True,
+                        data={"files": [], "skipped": skipped},
+                        message=(
+                            f"Already in the Studio, nothing new to file: "
+                            f"{', '.join(skipped)}."
+                        ),
+                    )
+                reasons = "; ".join(f"{f['filename']} ({f['reason']})" for f in failed)
+                return ToolResult(
+                    success=False,
+                    data={"files": [], "failed": failed},
+                    message=f"Couldn't file any of them: {reasons}",
+                )
+
+            names = ", ".join(f["filename"] for f in filed)
+            tail = f" ({len(skipped)} already there)" if skipped else ""
+            if failed:
+                tail += f"; {len(failed)} failed: " + "; ".join(
+                    f"{f['filename']} ({f['reason']})" for f in failed
+                )
+            return ToolResult(
+                success=True,
+                data={"files": filed, "skipped": skipped, "failed": failed, "group": group},
+                message=(
+                    f"Filed {len(filed)} file(s) to the Studio under '{group}': {names}{tail}"
+                ),
+            )
+
+        except Exception as e:
+            db.rollback()
+            logger.error(f"files_to_studio failed: {type(e).__name__}: {e}", exc_info=True)
+            return ToolResult(success=False, message=f"Failed to file attachments: {e}")
+        finally:
+            db.close()
+
+
 # Export tools list
 EMAIL_TOOLS = [
     EmailSearchTool(),
     EmailReadTool(),
     EmailRecentTool(),
-    EmailAttachmentReadTool()
+    EmailAttachmentReadTool(),
+    FilesToStudioTool(),
 ]

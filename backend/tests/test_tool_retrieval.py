@@ -106,19 +106,24 @@ async def _retrieve(index, query, k=6, exclude=()):
 
 @pytest.mark.asyncio
 class TestRetrieval:
-    async def test_attachments_into_a_folder_still_has_the_email_family(self, fake_embedder):
-        """The literal Sept 11 turn 3 sentence. Keyword routing sent this to
-        NOTES because of the word 'folder', and the turn ran with zero email
-        tools loaded. The email family is now unconditional core, so the tool
-        list carries it no matter what any classifier thinks the turn is about.
-        (Phase 4 extends this to `files_to_studio`.)"""
-        retrieved = await _retrieve(
-            fake_embedder,
-            "Can you actually download those attachments and put them in a folder for me? "
-            "Do you have the capability?",
-            exclude=set(CORE_TOOLS),
-        )
+    @pytest.mark.parametrize("sentence", [
+        "Can you actually download those attachments and put them in a folder for me? "
+        "Do you have the capability?",
+        "save Jim's files somewhere I can open them",
+        "put the PDFs in the studio",
+        "I was just hoping you could make them downloadable to me through the studio "
+        "section of the app or something",
+    ])
+    async def test_every_way_david_asked_for_his_files_lands_on_the_tool(
+        self, fake_embedder, sentence
+    ):
+        """Four phrasings of the same Sept 11 request. Keyword routing sent the
+        first to NOTES because of the word 'folder', and the turn ran with zero
+        email tools loaded. `files_to_studio` is now unconditional core, so the
+        tool list carries it no matter what any classifier thinks."""
+        retrieved = await _retrieve(fake_embedder, sentence, exclude=set(CORE_TOOLS))
         names = tool_names(select_chat_tools(CORE_TOOLS, retrieved, []))
+        assert "files_to_studio" in names, names
         for expected in ("email_search", "email_read", "email_attachment_read"):
             assert expected in names, names
 

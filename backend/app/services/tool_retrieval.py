@@ -44,7 +44,7 @@ CORE_TOOLS: List[str] = [
     "email_search",
     "email_read",
     "email_attachment_read",
-    # `files_to_studio` joins this list in Phase 4, once the tool exists.
+    "files_to_studio",
     "get_self_knowledge",
     "get_tool_result_details",
     "acknowledge_notifications",
