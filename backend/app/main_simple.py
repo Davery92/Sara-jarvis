@@ -31,6 +31,8 @@ import hashlib
 import secrets
 import aiofiles
 import asyncio
+import re
+import time
 import json
 from fastapi import UploadFile
 from app.tools.registry import tool_registry
@@ -1723,12 +1725,21 @@ class SimpleLLMClient:
             if payload_size > 100000:
                 logger.warning(f"⚠️ Large payload detected! {payload_size} bytes may cause context overflow")
 
+            # The turn clock. Everything after this competes with David's
+            # patience, not with the model's appetite for another tool call.
+            self._turn_started_at = time.monotonic()
+            self._turn_ended_by = "model"
+            self._turn_rounds = 0
+            self._turn_tools_called = []
+
             message = await self._stream_response(payload)
 
-            # Handle tool calls with recursive support (max 10 rounds for complex queries)
-            max_tool_rounds = 10
+            # Handle tool calls. Bounded by BOTH a round count and a wall-clock
+            # deadline (harness rebuild Phase 3) — rounds alone let turn 4 of
+            # the Sept 11 conversation run 500 seconds behind a dead client.
+            max_tool_rounds = CHAT_TOOL_ROUNDS_MAX
             current_messages = formatted_messages
-            
+
             for round_num in range(max_tool_rounds):
                 if message.get("tool_calls"):
                     logger.info(f"🔧 Tool calling round {round_num + 1}")
@@ -1792,7 +1803,7 @@ class SimpleLLMClient:
                         "content": message.get("content", ""),
                         "tool_calls": message["tool_calls"]
                     })
-                    current_messages.extend(_budget_tool_responses(tool_responses))
+                    current_messages.extend(await _reference_large_tool_results(tool_responses))
                     
                     # Truncate messages if conversation is getting too long to prevent 500 errors
                     max_messages = 20  # Keep only recent context to prevent payload bloat
@@ -1829,6 +1840,32 @@ class SimpleLLMClient:
                     self._activity_responding_emitted = False
                     await self.emit_activity("synthesizing", round_num=round_num + 1)
 
+                    self._turn_rounds = round_num + 1
+
+                    # Budget check BEFORE the next LLM call. Whichever runs out
+                    # first — the clock or the rounds — the turn stops calling
+                    # tools and says what it found. This is the whole point of
+                    # Phase 3: a turn that ends in Sara's voice, always.
+                    _elapsed = time.monotonic() - self._turn_started_at
+                    _over_time = _elapsed > CHAT_TURN_DEADLINE_S
+                    _out_of_rounds = (round_num + 1) >= max_tool_rounds
+                    if _over_time or _out_of_rounds:
+                        self._turn_ended_by = "deadline" if _over_time else "rounds"
+                        logger.warning(
+                            f"⏱️ Turn budget exhausted after {_elapsed:.1f}s / "
+                            f"{round_num + 1} rounds ({self._turn_ended_by}) — forcing a final answer"
+                        )
+                        response_content = await self._force_final_answer(current_messages)
+                        await self.emit_event("response_ready", {
+                            "rounds": round_num + 1,
+                            "content_length": len(response_content or ""),
+                        })
+                        episode_id = await self._store_conversation_with_timeout(
+                            messages, response_content, user_id, conversation_id
+                        )
+                        self.current_episode_id = episode_id
+                        return response_content
+
                     follow_up_tools = [
                         tool for tool in self._active_tools
                         if tool.get("function", {}).get("name") not in disabled_tool_names
@@ -1849,6 +1886,15 @@ class SimpleLLMClient:
                         follow_up_payload["num_ctx"] = 131072
                         _apply_local_qwen_chat_sampling(follow_up_payload)
 
+                    # Never send a payload the server will refuse. llama.cpp
+                    # answers an overflow with a 400 ("prompt alone has 52684
+                    # tokens"), and the old code turned that 400 into a string
+                    # that read like Sara talking.
+                    _evict_for_context(
+                        current_messages, follow_up_payload,
+                        follow_up_payload.get("max_tokens") or 8000,
+                    )
+
                     # Debug: Log the assistant message and tool responses being sent
                     if current_messages:
                         for i, msg in enumerate(current_messages[-5:]):  # Last 5 messages
@@ -1862,6 +1908,7 @@ class SimpleLLMClient:
                     max_retries = 2
                     message = None
                     last_error = None
+                    _forced = None
 
                     for retry_attempt in range(max_retries + 1):
                         try:
@@ -1870,6 +1917,8 @@ class SimpleLLMClient:
                             if retry_attempt > 0:
                                 logger.info(f"✅ Retry {retry_attempt} succeeded for follow-up LLM call")
                             break
+                        except asyncio.CancelledError:
+                            raise
                         except json.JSONDecodeError as e:
                             last_error = e
                             logger.warning(f"⚠️ JSONDecodeError on attempt {retry_attempt + 1}/{max_retries + 1}: {e}")
@@ -1877,15 +1926,16 @@ class SimpleLLMClient:
                                 logger.info(f"🔄 Retrying follow-up LLM call (attempt {retry_attempt + 2}/{max_retries + 1})...")
                                 await asyncio.sleep(0.5)  # Brief delay before retry
                             else:
-                                # All retries failed - synthesize a completion response from tool results
-                                logger.warning(f"❌ All {max_retries + 1} attempts failed. Synthesizing completion from tool results.")
-                                completion_msg = _summarize_tool_results(tool_responses)
-                                message = {
-                                    "content": completion_msg,
-                                    "tool_calls": None
-                                }
+                                # All retries failed. Ask the model for a real
+                                # answer with no tools rather than emitting a
+                                # tool status line as Sara's reply — that is how
+                                # "Found 20 emails" reached David on Sept 11.
+                                logger.warning(
+                                    f"❌ All {max_retries + 1} attempts failed — forcing a final answer."
+                                )
+                                self._turn_ended_by = "error"
+                                _forced = await self._force_final_answer(current_messages)
                         except Exception as e:
-                            # Other errors should be caught but not crash - fallback to tool results.
                             # Surface the response body: for a context overflow llama.cpp returns
                             # 400 with the exact token counts, and httpx's own message omits it,
                             # which made this failure look like a generic "400 Bad Request".
@@ -1900,21 +1950,49 @@ class SimpleLLMClient:
                                 f"❌ Unexpected error during LLM call: "
                                 f"{type(e).__name__}: {e}{detail}"
                             )
-                            completion_msg = _summarize_tool_results(tool_responses)
-                            message = {
-                                "content": completion_msg,
-                                "tool_calls": None
-                            }
+                            # A context-overflow 400 is recoverable: evict the
+                            # oldest tool results and try once more. Anything
+                            # else (or a second failure) goes straight to the
+                            # forced final.
+                            _is_overflow = "context" in detail.lower() or "prompt" in detail.lower()
+                            if _is_overflow and retry_attempt < max_retries:
+                                _dropped = _evict_for_context(
+                                    current_messages, follow_up_payload,
+                                    follow_up_payload.get("max_tokens") or 8000,
+                                )
+                                if _dropped:
+                                    logger.info(
+                                        f"🔄 Retrying after evicting {_dropped} tool result(s)"
+                                    )
+                                    continue
+                            self._turn_ended_by = "error"
+                            _forced = await self._force_final_answer(current_messages)
                             break  # Exit retry loop
 
+                    if _forced is not None:
+                        await self.emit_event("response_ready", {
+                            "rounds": round_num + 1,
+                            "content_length": len(_forced or ""),
+                        })
+                        episode_id = await self._store_conversation_with_timeout(
+                            messages, _forced, user_id, conversation_id
+                        )
+                        self.current_episode_id = episode_id
+                        return _forced
+
                     if message is None:
-                        # Fallback if something went wrong
+                        # Nothing came back and nothing raised — treat it the
+                        # same way, with a real answer rather than a placeholder.
                         logger.error("Failed to get message after retries")
-                        message = {
-                            "content": "Tool execution completed successfully.",
-                            "tool_calls": None
-                        }
-                    
+                        self._turn_ended_by = "error"
+                        _forced = await self._force_final_answer(current_messages)
+                        episode_id = await self._store_conversation_with_timeout(
+                            messages, _forced, user_id, conversation_id
+                        )
+                        self.current_episode_id = episode_id
+                        return _forced
+
+
                     # Enhanced debugging
                     logger.info(f"🔍 Round {round_num + 1} - Message keys: {list(message.keys())}")
                     logger.info(f"🔍 Round {round_num + 1} - Content length: {len(message.get('content', '')) if message.get('content') else 0}")
@@ -1928,6 +2006,12 @@ class SimpleLLMClient:
                     # If no more tool calls, we're done
                     if not message.get("tool_calls"):
                         response_content = message["content"]
+                        # A tool's own status line is not an answer. "Found 20
+                        # emails" reached David as Sara's whole reply on
+                        # Sept 11; so did a 12-char "Done!".
+                        response_content = await self._guard_against_tool_echo(
+                            response_content, tool_responses, current_messages
+                        )
                         await self.emit_event("response_ready", {
                             "rounds": round_num + 1,
                             "content_length": len(response_content) if response_content else 0
@@ -1941,7 +2025,7 @@ class SimpleLLMClient:
                         return response_content
                 else:
                     # No tool calls, return the content
-                    response_content = message["content"]
+                    response_content = _strip_provider_scaffolding(message["content"])
                     await self.emit_event("response_ready", {
                         "rounds": 1,
                         "content_length": len(response_content) if response_content else 0
@@ -1954,28 +2038,34 @@ class SimpleLLMClient:
                     logger.info(f"Final LLM response (no tools): {len(response_content) if response_content else 0}")
                     return response_content
 
-            # If we hit max rounds, force a proper response
-            logger.warning(f"Hit max tool rounds with message: {message}")
-
-            # Try to get the reasoning or any available content
-            response_content = message.get("content", "")
-            if not response_content and message.get("reasoning"):
-                response_content = message.get("reasoning", "")
-
-            # If still no content, force a reasonable response
-            if not response_content:
-                response_content = "I've searched through your documents and found some relevant information, but I encountered an issue providing a complete response. Please try asking your question again."
+            # Falling out of the loop means the round budget ran out on a turn
+            # whose last message still wanted tools. Ask for a real answer
+            # instead of shipping whatever half-sentence is in `message`.
+            self._turn_ended_by = "rounds"
+            logger.warning("Round budget exhausted — forcing a final answer")
+            response_content = await self._force_final_answer(current_messages)
 
             # Store conversation and get episode_id for rating
             episode_id = await self._store_conversation_with_timeout(
                 messages, response_content, user_id, conversation_id
             )
             self.current_episode_id = episode_id
-            logger.warning(f"Hit max tool rounds, returning: {len(response_content)} chars")
             return response_content
 
+        except asyncio.CancelledError:
+            # David closed the app or the client timed out. Store nothing for
+            # the assistant side — a reply nobody saw must not become a memory
+            # Sara later believes she sent. (The user turn is stored at request
+            # start, Phase 7.)
+            self._turn_ended_by = "cancelled"
+            logger.warning(
+                f"🛑 turn cancelled by client disconnect after "
+                f"{getattr(self, '_turn_rounds', 0)} rounds"
+            )
+            raise
         except Exception as e:
             import traceback
+            self._turn_ended_by = "error"
             logger.error(f"LLM error in chat_with_tools: {e}")
             logger.error(f"Full traceback:\n{traceback.format_exc()}")
             return f"I'm sorry, I'm having trouble connecting to my AI service. Error: {str(e)}"
@@ -2309,6 +2399,86 @@ class SimpleLLMClient:
             "tool_call_id": tool_call["id"],
             "content": str(result)
         }
+
+    _FORCED_FINAL_INSTRUCTION = (
+        "Time or context budget for this turn is exhausted. There are no tools on "
+        "this request — a tool call here executes nothing and produces no output, "
+        "so do not emit one. Write the reply itself, now, in Sara's voice: what "
+        "the tool results above actually show, what is still blocked, and at most "
+        "one question. If a tool result said 'Found N emails' or similar, "
+        "summarize the actual items, never the status string. Never say you are "
+        "about to go check something — this is the last thing you get to say on "
+        "this turn. No apology for the delay, no menu of options."
+    )
+
+    async def _force_final_answer(self, current_messages: list) -> str:
+        """Get a real reply out of the model with the tools taken away.
+
+        This replaces both old fallbacks — the canned "I've searched through
+        your documents…" string and `_summarize_tool_results`, which emitted a
+        tool's own status line ("Found 20 emails") as Sara's entire reply on
+        2026-09-11. Whatever the turn managed to gather, David hears about it
+        in her voice.
+        """
+        msgs = list(current_messages) + [
+            {"role": "system", "content": self._FORCED_FINAL_INSTRUCTION}
+        ]
+        payload = {
+            "model": self._current_model,
+            "messages": msgs,
+            "temperature": 0.7,
+            "max_tokens": 1200,
+            "stream": True,
+        }
+        if (self._current_model_config or {}).get("provider") == "local":
+            payload["num_ctx"] = 131072
+            _apply_local_qwen_chat_sampling(payload)
+        _evict_for_context(msgs, payload, payload["max_tokens"])
+
+        self._activity_responding_emitted = False
+        try:
+            message = await self._stream_response(payload)
+            content = _strip_provider_scaffolding((message or {}).get("content"))
+            if len(content) >= 20:
+                return content
+            logger.warning(
+                f"Forced final returned {len(content)} usable chars after stripping "
+                "provider scaffolding"
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"Forced final answer failed: {type(e).__name__}: {e}")
+
+        # Last resort — honest, short, and clearly not a tool status line.
+        return (
+            "I ran out of room on that one before I could put an answer together. "
+            "Ask me again and I'll go straight at it."
+        )
+
+    async def _guard_against_tool_echo(
+        self, response_content: Optional[str], tool_responses: list, current_messages: list
+    ) -> str:
+        """Never let a tool's status line stand as Sara's reply."""
+        text = _strip_provider_scaffolding(response_content)
+        echoes = set()
+        for tr in tool_responses or []:
+            try:
+                msg = (json.loads(tr.get("content") or "{}") or {}).get("message")
+            except (TypeError, json.JSONDecodeError):
+                msg = None
+            if isinstance(msg, str) and msg.strip():
+                echoes.add(msg.strip())
+
+        if text and text not in echoes and len(text) >= 20:
+            return text
+
+        logger.warning(
+            f"🔁 Reply after tools was a status echo or too short ({len(text)} chars) — "
+            "forcing a final answer"
+        )
+        self._turn_ended_by = "error"
+        return await self._force_final_answer(current_messages)
 
     def _load_tools_midturn(self, names: List[str], conversation_id: Optional[str]) -> None:
         """Append tool schemas to the live tool list mid-turn (find_tools).
@@ -5880,109 +6050,163 @@ def _build_activity_context(
         return f"[Activity: {activity_state}]\nTone: {tone}"
 
 
-# Tool results are otherwise unbounded — a single memory_search can return full
-# episode and note bodies. Combined with the ~13-14k tokens of fixed overhead
-# (system prompt + live_context + tool schemas) this pushed the post-tool follow-up
-# request past the chat lane's 32k context, which llama.cpp answers with
-# `400 exceed_context_size_error`. The 400 then fell through to
-# _summarize_tool_results() and Sara replied with raw tool scaffolding
-# ("Done! Found 20 relevant memories ...") instead of an actual answer.
-TOOL_RESULT_CHAR_BUDGET = int(os.getenv("TOOL_RESULT_CHAR_BUDGET", "24000"))
-TOOL_RESULT_FIELD_MAX = int(os.getenv("TOOL_RESULT_FIELD_MAX", "1200"))
+# --- Harness rebuild Phase 3 -------------------------------------------------
+# A chat turn is a person waiting. On 2026-09-11 turn 4 ran for 500 seconds:
+# the iOS client's 180s xhr timeout fired, Postgres killed the connection at
+# six minutes, and the tool loop kept going as a zombie before storing a canned
+# string as Sara's reply. These two bound the turn instead.
+CHAT_TURN_DEADLINE_S = int(os.getenv("CHAT_TURN_DEADLINE_S", "75"))
+CHAT_TOOL_ROUNDS_MAX = int(os.getenv("CHAT_TOOL_ROUNDS_MAX", "6"))
+
+# Any single tool result longer than this is parked in Redis and the model gets
+# a preview plus a reference_id it can page with get_tool_result_details. The
+# old behaviour truncated in place with no way to ask for the rest, which is
+# how get_self_knowledge(capabilities) became 1,403 of its 23,430 chars and
+# the model went to web_search to find out what it could do.
+TOOL_RESULT_INLINE_MAX = int(os.getenv("TOOL_RESULT_INLINE_MAX", "6000"))
+TOOL_RESULT_PREVIEW_CHARS = int(os.getenv("TOOL_RESULT_PREVIEW_CHARS", "2000"))
+
+# MTPLX serves Qwen3.8-Flash-Next at 49,152 context. Never send a payload the
+# server will refuse: llama.cpp answers an overflow with a 400 whose body is
+# "prompt alone has N tokens", and the old code turned that into a fallback
+# string that read like Sara's own voice.
+CHAT_CONTEXT_LIMIT = int(os.getenv("CHAT_CONTEXT_LIMIT", "49152"))
+CHAT_CONTEXT_HEADROOM = int(os.getenv("CHAT_CONTEXT_HEADROOM", "1500"))
+# Measured on the 2026-09-11 logs: a 94,123-byte payload reported 25,006 prompt
+# tokens — 3.76 chars/token. 3.4 is the deliberately pessimistic rounding.
+_CHARS_PER_TOKEN = 3.4
 
 
-def _truncate_long_strings(obj, field_max: int):
-    """Recursively cap oversized string fields inside a parsed tool payload."""
-    if isinstance(obj, str):
-        if len(obj) > field_max:
-            return obj[:field_max] + f"... [+{len(obj) - field_max} chars truncated]"
-        return obj
-    if isinstance(obj, list):
-        return [_truncate_long_strings(v, field_max) for v in obj]
-    if isinstance(obj, dict):
-        return {k: _truncate_long_strings(v, field_max) for k, v in obj.items()}
-    return obj
+def _estimate_tokens(payload: dict) -> int:
+    """Pessimistic prompt-token estimate for an OpenAI-shaped chat payload."""
+    try:
+        return int(len(json.dumps(payload, default=str)) / _CHARS_PER_TOKEN)
+    except Exception:
+        return 0
 
 
-def _find_largest_list(node):
-    """Return (container_dict, key) holding the longest list in the payload."""
-    best = None
-    best_len = 0
-    stack = [node]
-    while stack:
-        cur = stack.pop()
-        if isinstance(cur, dict):
-            for k, v in cur.items():
-                if isinstance(v, list) and len(v) > best_len:
-                    best, best_len = (cur, k), len(v)
-                if isinstance(v, (dict, list)):
-                    stack.append(v)
-        elif isinstance(cur, list):
-            stack.extend(x for x in cur if isinstance(x, (dict, list)))
-    return best
+# MTPLX appends an advisory in square brackets when the model emits a tool call
+# on a request that carries no tools — which is exactly what the forced final
+# does. It reached David inside Sara's reply on the first Phase 3 replay:
+# "[MTPLX: this reply tried to call "workspace_job_run", but no tools are
+# active ... connect a coding agent ...]". Server scaffolding is not Sara.
+_PROVIDER_SCAFFOLDING_RE = re.compile(
+    r"\s*\[(?:MTPLX|LLAMA\.CPP|SERVER)\s*:.*?\]\s*", re.IGNORECASE | re.DOTALL
+)
 
 
-def _budget_tool_responses(tool_responses: list) -> list:
-    """Trim tool-result payloads so the follow-up LLM call fits in context.
+def _strip_provider_scaffolding(text: Optional[str]) -> str:
+    """Remove inference-server advisories from anything about to be spoken."""
+    if not text:
+        return text or ""
+    return _PROVIDER_SCAFFOLDING_RE.sub(" ", text).strip()
 
-    Caps individual string fields, then drops trailing items from the largest
-    result list until each response fits its share of the budget. The
-    success/message envelope is always preserved so the model still learns what
-    happened, and a `_truncated` marker tells it the list was shortened.
+
+async def _reference_large_tool_results(tool_responses: list) -> list:
+    """Park oversized tool results in Redis; hand the model a preview + ref.
+
+    Replaces the old truncate-in-place budgeter. Truncation destroyed
+    information the model then had no way to recover: on 2026-09-11
+    `get_self_knowledge(capabilities)` returned 23,430 chars, the model saw
+    1,403 of them, and went to `web_search` to look up its own capabilities.
+    Now the full result stays reachable through `get_tool_result_details`.
+
+    The success/message envelope is always preserved verbatim so the model
+    still learns what happened.
     """
-    budget = TOOL_RESULT_CHAR_BUDGET
-    field_max = TOOL_RESULT_FIELD_MAX
+    from app.services.search_service import search_service
+    from app.tools.get_tool_result_details import CACHE_PREFIX, CACHE_TTL_SECONDS
 
-    total = sum(len(tr.get("content") or "") for tr in tool_responses)
-    if total <= budget:
-        return tool_responses
-
-    logger.warning(
-        f"Tool results total {total} chars, over the {budget} budget - trimming "
-        f"before the follow-up call to avoid a context-overflow 400"
-    )
-
-    share = max(1000, budget // max(1, len(tool_responses)))
-    trimmed = []
+    out = []
     for tr in tool_responses:
         content = tr.get("content")
-        if not isinstance(content, str) or len(content) <= share:
-            trimmed.append(tr)
+        if not isinstance(content, str) or len(content) <= TOOL_RESULT_INLINE_MAX:
+            out.append(tr)
             continue
 
-        new_tr = dict(tr)
         try:
             data = json.loads(content)
         except (json.JSONDecodeError, ValueError):
-            new_tr["content"] = content[:share] + "... [truncated]"
-            trimmed.append(new_tr)
+            data = {"success": True, "message": "", "data": None}
+
+        ref = uuid.uuid4().hex[:12]
+        stored = await search_service.cache_set_json(
+            CACHE_PREFIX + ref, content, ttl_seconds=CACHE_TTL_SECONDS
+        )
+
+        envelope = {
+            "success": data.get("success", True),
+            "message": data.get("message", ""),
+            "preview": content[:TOOL_RESULT_PREVIEW_CHARS],
+            "total_chars": len(content),
+        }
+        if stored:
+            envelope["reference_id"] = ref
+            envelope["hint"] = (
+                "This result was too large to show in full. The preview above is the "
+                f"first {TOOL_RESULT_PREVIEW_CHARS} characters; call "
+                f"get_tool_result_details(reference_id='{ref}', offset={TOOL_RESULT_PREVIEW_CHARS}) "
+                "for more. Do not tell David the result was empty."
+            )
+        else:
+            envelope["hint"] = (
+                "This result was too large to show in full and could not be stored for "
+                "paging. Re-run the tool with a narrower query if you need more."
+            )
+
+        new_tr = dict(tr)
+        new_tr["content"] = json.dumps(envelope)
+        out.append(new_tr)
+        logger.info(
+            f"📎 Tool result {len(content)} chars → preview + ref {ref} "
+            f"({tr.get('name') or 'tool'})"
+        )
+    return out
+
+
+def _evict_for_context(current_messages: list, payload_shell: dict, max_tokens: int) -> int:
+    """Drop the oldest tool results until the payload fits the model's context.
+
+    Mutates `current_messages` in place and returns how many were evicted.
+    An evicted result keeps its reference_id where it has one, so the model
+    can still page it back in if it turns out to matter.
+    """
+    limit = CHAT_CONTEXT_LIMIT - CHAT_CONTEXT_HEADROOM - max_tokens
+    probe = dict(payload_shell)
+    probe["messages"] = current_messages
+
+    evicted = 0
+    for msg in current_messages:  # oldest first
+        if _estimate_tokens(probe) <= limit:
+            break
+        if msg.get("role") != "tool":
             continue
+        content = msg.get("content")
+        if not isinstance(content, str):
+            continue
+        try:
+            parsed = json.loads(content)
+        except (json.JSONDecodeError, ValueError):
+            parsed = {}
+        if parsed.get("_evicted"):
+            continue
+        msg["content"] = json.dumps({
+            "success": True,
+            "_evicted": True,
+            "message": (
+                f"{msg.get('name') or 'This tool'} result evicted for space; re-run with "
+                "a narrower query or use get_tool_result_details"
+            ),
+            "reference_id": parsed.get("reference_id"),
+        })
+        evicted += 1
 
-        data = _truncate_long_strings(data, field_max)
-        dropped = 0
-        for _ in range(500):  # guard against a pathological payload
-            if len(json.dumps(data)) <= share:
-                break
-            spot = _find_largest_list(data)
-            if spot is None:
-                break
-            container, key = spot
-            if not container[key]:
-                break
-            container[key] = container[key][:-1]
-            dropped += 1
-
-        if dropped:
-            if isinstance(data, dict):
-                data["_truncated"] = f"{dropped} result(s) omitted to fit context"
-            logger.info(f"Dropped {dropped} item(s) from {tr.get('name', 'tool')} result")
-
-        new_tr["content"] = json.dumps(data)
-        trimmed.append(new_tr)
-
-    after = sum(len(tr.get("content") or "") for tr in trimmed)
-    logger.info(f"Tool results trimmed {total} -> {after} chars")
-    return trimmed
+    if evicted:
+        logger.warning(
+            f"♻️ Evicted {evicted} oldest tool result(s) to fit the {limit}-token budget "
+            f"(now ~{_estimate_tokens(probe)} tokens)"
+        )
+    return evicted
 
 
 def _normalize_vision_for_provider(messages: list, provider: str, model: str = None) -> list:
@@ -6016,10 +6240,13 @@ def _normalize_vision_for_provider(messages: list, provider: str, model: str = N
 
 
 def _summarize_tool_results(tool_responses: list) -> str:
-    """Convert raw tool responses into a human-readable fallback message.
+    """Join the `message` fields of a set of tool responses. LOGGING ONLY.
 
-    Used when the follow-up LLM call fails and we need to tell the user
-    what happened without dumping JSON.
+    This used to be the chat lane's fallback when a follow-up LLM call failed,
+    which meant a tool's own status line went out as Sara's entire reply — on
+    2026-09-11 David asked for his attachments and got back the literal string
+    "Found 20 emails". `StreamingChatClient._force_final_answer` replaced it.
+    Do not wire this back into a user-facing path.
     """
     actions = []
     for tr in tool_responses:
@@ -8054,6 +8281,13 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
             pass
 
     async def generate_events():
+        # Holder so the finally below can reach the worker task no matter where
+        # the generator is torn down. A client disconnect closes this generator
+        # at its current `yield` (GeneratorExit), which used to leave
+        # process_chat() running: on 2026-09-11 the iOS 180s timeout fired,
+        # Postgres killed the connection at 6 minutes, and the loop kept calling
+        # tools until 500s before storing a canned reply nobody would ever see.
+        _worker: List[asyncio.Task] = []
         try:
             # EARLY INTERCEPT CHAIN — chess, code mode, host inspection, UI
             # commands, and interest-model chat verbs. Each
@@ -9318,6 +9552,12 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     except Exception:
                         pass
 
+                except asyncio.CancelledError:
+                    # The client went away. Nothing to emit — there is nobody
+                    # reading the queue — and nothing stored for the assistant
+                    # side; the user turn was persisted at request start.
+                    logger.warning("🛑 process_chat cancelled (client disconnect)")
+                    raise
                 except Exception as e:
                     logger.error(f"❌ Exception in process_chat: {e}", exc_info=True)
                     await event_queue.put({"type": "error", "data": {"message": str(e)}})
@@ -9325,7 +9565,8 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
             
             # Start processing
             task = asyncio.create_task(process_chat())
-            
+            _worker.append(task)
+
             # Stream events as they come in
             while True:
                 try:
@@ -9351,17 +9592,17 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
                     break
             
-            # Ensure task is cleaned up
-            if not task.done():
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-                    
         except Exception as e:
             logger.error(f"Error in chat stream: {e}")
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+        finally:
+            # Runs on normal completion, on error, AND on GeneratorExit when
+            # the client hangs up. Cancelling here is what makes a disconnect
+            # actually stop the turn instead of orphaning it.
+            for _t in _worker:
+                if not _t.done():
+                    logger.warning("🛑 Chat stream closed before completion — cancelling the turn")
+                    _t.cancel()
 
     async def _timed_generate_events():
         """Arc 6.1 three-speed contract: black-box presence latency —

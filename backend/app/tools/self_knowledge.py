@@ -40,13 +40,16 @@ Use this when you need to:
 - Check what tools or capabilities you have
 - Understand how your memory or architecture works
 - Verify what you can or cannot do
-- Explain your systems to David
 
 Available sections:
 - "architecture": Memory system, databases, processing pipeline, composite scoring
 - "capabilities": Tools organized by category, what actions you can perform
 - "autonomous": Background services, scheduled jobs, nightly dream sequence
-- "limitations": What you can't do, failure modes, system dependencies"""
+- "limitations": What you can't do, failure modes, system dependencies
+
+Call it with just a section to get that section's HEADING INDEX, then call it
+again with `category` set to one heading to read only that part. Reading a
+whole section is 20k+ characters and will crowd out the rest of the turn."""
 
     @property
     def parameters(self) -> Dict[str, Any]:
@@ -57,18 +60,50 @@ Available sections:
                     "type": "string",
                     "enum": ["architecture", "capabilities", "autonomous", "limitations"],
                     "description": "Which knowledge section to retrieve"
+                },
+                "category": {
+                    "type": "string",
+                    "description": (
+                        "One heading from the section's index (case-insensitive, "
+                        "partial match allowed). Returns only that heading's text."
+                    )
                 }
             },
             "required": ["section"]
         }
 
+    @staticmethod
+    def _split_headings(content: str) -> Dict[str, str]:
+        """{heading text: that heading's block} for every `###` in the doc."""
+        blocks: Dict[str, str] = {}
+        current = None
+        buf: list = []
+        for line in content.splitlines():
+            if line.startswith("### "):
+                if current is not None:
+                    blocks[current] = "\n".join(buf).strip()
+                current = line[4:].strip()
+                buf = [line]
+            elif current is not None:
+                buf.append(line)
+        if current is not None:
+            blocks[current] = "\n".join(buf).strip()
+        return blocks
+
     async def execute(
         self,
         user_id: str,
-        section: Literal["architecture", "capabilities", "autonomous", "limitations"],
+        section: Literal["architecture", "capabilities", "autonomous", "limitations"] = "capabilities",
         **kwargs
     ) -> ToolResult:
-        """Retrieve the requested self-knowledge section."""
+        """Retrieve the requested self-knowledge section, or one heading of it.
+
+        Whole-section reads are why this tool used to poison a turn: on
+        2026-09-11 `capabilities` returned 23,430 chars, the budgeter cut it to
+        1,403, and the model — having been handed a fragment with no way to ask
+        for the rest — went to `web_search` to look up its own capabilities.
+        """
+        category = (kwargs.get("category") or "").strip()
         try:
             filename = SELF_KNOWLEDGE_SECTIONS.get(section)
             if not filename:
@@ -89,16 +124,62 @@ Available sections:
             with open(filepath, "r", encoding="utf-8") as f:
                 content = f.read()
 
-            logger.info(f"Retrieved self-knowledge section: {section} ({len(content)} chars)")
+            blocks = self._split_headings(content)
 
+            if category and blocks:
+                wanted = category.lower()
+                match = next(
+                    (h for h in blocks if h.lower() == wanted),
+                    next((h for h in blocks if wanted in h.lower()), None),
+                )
+                if match is None:
+                    return ToolResult(
+                        success=False,
+                        message=(
+                            f"No heading like '{category}' in {section}. Headings: "
+                            + ", ".join(sorted(blocks))
+                        ),
+                        data={"section": section, "headings": sorted(blocks)},
+                    )
+                body = blocks[match]
+                logger.info(
+                    f"Retrieved self-knowledge {section}/{match} ({len(body)} chars)"
+                )
+                return ToolResult(
+                    success=True,
+                    message=body,
+                    data={"section": section, "category": match, "length": len(body)},
+                )
+
+            # No category, and the doc is small enough to hand over whole.
+            if len(content) <= 4000 or not blocks:
+                logger.info(f"Retrieved self-knowledge section: {section} ({len(content)} chars)")
+                return ToolResult(
+                    success=True,
+                    message=content,
+                    data={"section": section, "filename": filename, "length": len(content)},
+                )
+
+            index = "\n".join(f"- {h}" for h in blocks)
+            logger.info(
+                f"Retrieved self-knowledge index for {section} ({len(blocks)} headings)"
+            )
             return ToolResult(
                 success=True,
-                message=content,
+                message=(
+                    f"'{section}' is {len(content):,} characters across {len(blocks)} headings — "
+                    "too much to read at once. Headings:\n"
+                    f"{index}\n\n"
+                    f"Call get_self_knowledge(section='{section}', category='<heading>') "
+                    "for the one you need."
+                ),
                 data={
                     "section": section,
                     "filename": filename,
-                    "length": len(content)
-                }
+                    "headings": list(blocks),
+                    "length": len(content),
+                    "index_only": True,
+                },
             )
 
         except Exception as e:

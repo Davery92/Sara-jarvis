@@ -22,7 +22,7 @@ class EmailSearchTool(BaseTool):
 
     @property
     def description(self) -> str:
-        return """Search through emails. Can filter by:
+        return """Search through emails and list what matches. Filter by:
 - query: Text search in subject, body, and attachment filenames
 - sender: Filter by sender email address
 - category: Filter by category (support, urgent, sales, internal, newsletter, financial, notification, meeting)
@@ -30,7 +30,10 @@ class EmailSearchTool(BaseTool):
 - is_riskninja: Only RiskNinja-relevant emails
 - days_back: How far back to search (default 7 days)
 - unread_only: Only unread emails
-Returns up to 20 most recent matching emails."""
+- limit: How many to return (default 5)
+Returns subject, sender, date and attachment names — NOT the message bodies.
+Use email_read on one id when you need the body. Search results carry each
+attachment's id, which is what files_to_studio and email_attachment_read take."""
 
     @property
     def parameters(self) -> Dict[str, Any]:
@@ -68,7 +71,15 @@ Returns up to 20 most recent matching emails."""
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Maximum number of results (default 20, max 50)"
+                    "description": "Maximum number of results (default 5, max 50)"
+                },
+                "include_body": {
+                    "type": "boolean",
+                    "description": (
+                        "Include each email's summary/preview text. Default false — "
+                        "leave it off unless you actually need the content, or 20 "
+                        "emails at 30k chars each will blow the context budget."
+                    )
                 }
             },
             "required": []
@@ -84,7 +95,11 @@ Returns up to 20 most recent matching emails."""
         is_riskninja = kwargs.get("is_riskninja", False)
         days_back = kwargs.get("days_back", 7)
         unread_only = kwargs.get("unread_only", False)
-        limit = min(kwargs.get("limit", 20), 50)
+        # Default 5, not 20. On 2026-09-11 four email_search calls in one turn
+        # returned 20 emails each at ~30k chars and the follow-up request was
+        # refused with "prompt alone has 52684 tokens".
+        limit = min(kwargs.get("limit") or 5, 50)
+        include_body = bool(kwargs.get("include_body", False))
 
         db = next(get_db())
         try:
@@ -160,24 +175,36 @@ Returns up to 20 most recent matching emails."""
                     for att in atts
                 ] if atts else []
 
-                results.append({
+                row = {
                     "id": email.id,
                     "subject": email.subject,
                     "from": f"{email.sender_name} <{email.sender_email}>" if email.sender_name else email.sender_email,
                     "received_at": email.received_at.isoformat() if email.received_at else None,
                     "category": email.category,
                     "importance": email.importance_score,
-                    "summary": email.summary or email.body_preview[:200] if email.body_preview else None,
                     "is_read": email.is_read,
                     "has_attachments": len(atts) > 0,
                     "attachment_count": len(atts),
                     "attachments": att_list,
                     "action_required": email.action_required
-                })
+                }
+                if include_body:
+                    row["summary"] = (
+                        email.summary or (email.body_preview[:200] if email.body_preview else None)
+                    )
+                results.append(row)
 
+            # The message is a status line, never an answer — name the items so
+            # that even a degraded path has something real to say.
+            _titles = ", ".join(
+                (r["subject"] or "(no subject)")[:60] for r in results[:5]
+            )
             return ToolResult(
                 success=True,
-                message=f"Found {len(results)} emails",
+                message=(
+                    f"{len(results)} email(s): {_titles}" if results
+                    else "No emails matched that search."
+                ),
                 data={"emails": results, "count": len(results)}
             )
 
