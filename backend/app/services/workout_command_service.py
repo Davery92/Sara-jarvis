@@ -1402,6 +1402,20 @@ class WorkoutCommandService:
         started = session.get("started_at")
         duration_minutes = int((now - started).total_seconds() / 60) if started else 0
 
+        hk_ended_raw = payload.get("healthkit_ended_at")
+        if hk_ended_raw:
+            try:
+                hk_ended = datetime.fromisoformat(str(hk_ended_raw).replace("Z", "+00:00"))
+            except ValueError:
+                raise ValueError("healthkit_ended_at is not a valid ISO 8601 timestamp")
+            if hk_ended.tzinfo is None:
+                hk_ended = hk_ended.replace(tzinfo=timezone.utc)
+            if started and hk_ended < started:
+                # A stale replay or a skewed device clock must never save a
+                # workout that appears to end before it started (Watch
+                # HealthKit hygiene plan §Phase 3 step 5).
+                raise ValueError("healthkit_ended_at cannot be earlier than the session's started_at")
+
         hk_uuid = payload.get("healthkit_workout_uuid")
         db.execute(text("""
             UPDATE active_workout_session

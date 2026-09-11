@@ -62,7 +62,58 @@ final class WorkoutCoachingAudioCoordinator: NSObject {
     func setEnabled(_ enabled: Bool, observer: PlaybackObserver?) {
         self.observer = observer
         isEnabled = enabled
-        if !enabled { cancelAll(reason: "disabled") }
+        if enabled {
+            NotificationCenter.default.removeObserver(self, name: AVAudioSession.routeChangeNotification, object: nil)
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(handleRouteChange),
+                name: AVAudioSession.routeChangeNotification,
+                object: nil
+            )
+        } else {
+            NotificationCenter.default.removeObserver(self, name: AVAudioSession.routeChangeNotification, object: nil)
+            cancelAll(reason: "disabled")
+        }
+    }
+
+    /// A prompt queued while headphones were connected must not start playing
+    /// out loud on the phone speaker the instant AirPods drop (Watch HealthKit
+    /// hygiene plan §Phase 3 step 4). Anything already speaking is cancelled;
+    /// nothing new is started until the route guard in `activateSession`
+    /// passes again on the next prompt.
+    @objc private func handleRouteChange(_ notification: Notification) {
+        guard isSpeaking, !hasHeadphonesConnected() else { return }
+        log.notice("Headphones disconnected mid-prompt — cancelling")
+        let eventId = currentEventId
+
+        // Same ordering as `cancelAll`: reset the speaking flag under the
+        // lock first, then stop playback outside it — the delegate callbacks
+        // this triggers may re-enter `finish`, and by then there is nothing
+        // left for them to do.
+        queueLock.lock()
+        isSpeaking = false
+        queueLock.unlock()
+
+        synthesizer.stopSpeaking(at: .immediate)
+        player?.stop()
+        player = nil
+        currentEventId = nil
+        deactivateSession()
+        if let eventId {
+            observer?(eventId, "no_headphones", nil)
+        }
+        pump()
+    }
+
+    /// Whether the current audio route has an output David can actually hear
+    /// privately. The iPhone's built-in speaker is deliberately excluded —
+    /// coaching must never announce a workout to the room.
+    private func hasHeadphonesConnected() -> Bool {
+        let headphoneTypes: Set<AVAudioSession.Port> = [
+            .headphones, .bluetoothA2DP, .bluetoothHFP, .bluetoothLE,
+        ]
+        return AVAudioSession.sharedInstance().currentRoute.outputs
+            .contains { headphoneTypes.contains($0.portType) }
     }
 
     // MARK: - Queueing
@@ -169,7 +220,14 @@ final class WorkoutCoachingAudioCoordinator: NSObject {
             queueLock.lock()
             isSpeaking = false
             queueLock.unlock()
-            observer?(prompt.eventId, "failed", "audio session unavailable")
+            // Distinct from every other failure: the phone UI shows a one-time
+            // "put in headphones" banner for this reason and nothing else
+            // (Watch HealthKit hygiene plan §Phase 3 step 4).
+            if hasHeadphonesConnected() {
+                observer?(prompt.eventId, "failed", "audio session unavailable")
+            } else {
+                observer?(prompt.eventId, "no_headphones", nil)
+            }
             return
         }
 
@@ -226,6 +284,14 @@ final class WorkoutCoachingAudioCoordinator: NSObject {
     // MARK: - AVAudioSession
 
     private func activateSession() -> Bool {
+        // The Watch has no audio path (haptics only) and the iPhone speaker
+        // must never announce a workout to the room — coaching only reaches
+        // David through something in or over his ears (Watch HealthKit
+        // hygiene plan §Phase 3 step 4, David 2026-09-09).
+        guard hasHeadphonesConnected() else {
+            log.notice("coaching audio skipped: no headphones")
+            return false
+        }
         let session = AVAudioSession.sharedInstance()
         do {
             try session.setCategory(

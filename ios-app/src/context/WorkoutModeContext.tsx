@@ -1,14 +1,17 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
+import { Alert } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { fitnessService, ActiveWorkoutSession, LogSetParams, RestTimerStatus } from '../services/fitness';
 import { startEvent, updateEvent, endEvent } from '../services/eventActivity';
 import { watchWorkout } from '../services/watchWorkout';
 import { workoutCoordinator } from '../services/workoutCoordinator';
 import { workoutCoaching } from '../services/workoutCoaching';
+import { newCommandId } from '../services/workoutContracts';
 import type {
   CoachingEvent,
   LiveMetrics,
   PerformedSet,
+  WorkoutProjection,
   WorkoutProposal,
 } from '../services/workoutContracts';
 
@@ -43,6 +46,8 @@ interface WorkoutModeContextType {
   pendingProposal: WorkoutProposal | null;
   /** The coaching sentence currently being said, for the on-screen line (§9.5). */
   coaching: CoachingEvent | null;
+  /** True once this workout has skipped a spoken prompt for lack of headphones. */
+  coachingNeedsHeadphones: boolean;
   approveProposal: (proposalId: string) => Promise<void>;
   rejectProposal: (proposalId: string) => Promise<void>;
   /** Retry bringing the Watch into a phone-started workout (§4.3). */
@@ -84,6 +89,7 @@ interface WorkoutModeContextType {
     coaching_feedback?: string;
     rest_seconds?: number;
     pr?: { is_pr: boolean; estimated_1rm?: number; previous_best?: number | null } | null;
+    workout_complete?: boolean;
   }>;
   skipExercise: () => Promise<void>;
   selectExercise: (exerciseIndex: number) => Promise<void>;
@@ -103,6 +109,10 @@ interface WorkoutModeContextType {
 const WorkoutModeContext = createContext<WorkoutModeContextType | undefined>(undefined);
 
 const STORAGE_KEY = '@active_workout_session_id';
+// Kept until the v2 start is accepted, so a start retried after a dropped
+// response resumes the same session instead of creating a second one
+// (Watch HealthKit hygiene plan §Phase 4 step 1).
+const START_ATTEMPT_KEY = STORAGE_KEY + ':attempt';
 const POLL_INTERVAL = 2000; // Poll every 2 seconds when active
 
 export function WorkoutModeProvider({ children }: { children: React.ReactNode }) {
@@ -123,6 +133,8 @@ export function WorkoutModeProvider({ children }: { children: React.ReactNode })
   });
   const [pendingProposal, setPendingProposal] = useState<WorkoutProposal | null>(null);
   const [coaching, setCoaching] = useState<CoachingEvent | null>(null);
+  /** Once per workout: coaching is silenced because no headphones are connected. */
+  const [coachingNeedsHeadphones, setCoachingNeedsHeadphones] = useState(false);
   const [performedSets, setPerformedSets] = useState<PerformedSet[]>([]);
 
   // Mirror/metrics/queue depth all feed one status object so the UI has a
@@ -168,11 +180,13 @@ export function WorkoutModeProvider({ children }: { children: React.ReactNode })
       setPerformedSets(state.projection?.performed_sets ?? []);
     });
     const unsubCoaching = workoutCoaching.onDisplay(setCoaching);
+    const unsubNoHeadphones = workoutCoaching.onNoHeadphones(() => setCoachingNeedsHeadphones(true));
     return () => {
       unsubMirror();
       unsubMetrics();
       unsubCoordinator();
       unsubCoaching();
+      unsubNoHeadphones();
     };
   }, []);
 
@@ -224,6 +238,7 @@ export function WorkoutModeProvider({ children }: { children: React.ReactNode })
     const active = session?.status === 'active';
     if (active && !coachingActiveRef.current) {
       coachingActiveRef.current = true;
+      setCoachingNeedsHeadphones(false);
       void fitnessService
         .v2Policy()
         .then(({ policy }) => workoutCoaching.start(policy))
@@ -362,22 +377,71 @@ export function WorkoutModeProvider({ children }: { children: React.ReactNode })
     }
   }, [session?.rest_timer_started_at, session?.rest_timer_duration_seconds]);
 
+  /**
+   * Start through v2, with resume-or-end conflict handling (Watch HealthKit
+   * hygiene plan §Phase 4 step 1). The v2 projection is not the legacy
+   * `ActiveWorkoutSession` shape the rest of this context still renders from,
+   * so a successful start reloads the legacy shape via `refreshSession`
+   * rather than rewriting the context around the projection.
+   */
   const startWorkout = async (templateId: string): Promise<ActiveWorkoutSession | null> => {
     try {
       setIsLoading(true);
       setError(null);
-      const result = await fitnessService.startWorkoutSession(templateId);
-      setSession(result.session);
-      if (result.session?.id) {
-        await AsyncStorage.setItem(STORAGE_KEY, result.session.id);
+
+      const startAttemptId = (await AsyncStorage.getItem(START_ATTEMPT_KEY)) || newCommandId();
+      await AsyncStorage.setItem(START_ATTEMPT_KEY, startAttemptId);
+
+      const result = await workoutCoordinator.start(templateId, {
+        originDevice: 'phone',
+        onConflict: 'error',
+        startAttemptId,
+      });
+
+      if ('conflict' in result) {
+        // No conflict UI exists on the phone yet — ask plainly rather than
+        // silently picking one side (§4.3).
+        return await new Promise((resolve) => {
+          Alert.alert(
+            'A workout is already running',
+            'Resume the one already in progress, or end it and start this one?',
+            [
+              {
+                text: 'Resume',
+                onPress: async () => {
+                  await AsyncStorage.removeItem(START_ATTEMPT_KEY);
+                  resolve(await loadActiveSessionShape());
+                },
+              },
+              {
+                text: 'End it',
+                style: 'destructive',
+                onPress: async () => {
+                  const retried = await workoutCoordinator.start(templateId, {
+                    originDevice: 'phone',
+                    onConflict: 'abandon',
+                    startAttemptId,
+                  });
+                  await AsyncStorage.removeItem(START_ATTEMPT_KEY);
+                  if ('conflict' in retried) {
+                    resolve(null);
+                    return;
+                  }
+                  resolve(await finishStartingWorkout(retried.projection));
+                },
+              },
+              {
+                text: 'Cancel',
+                style: 'cancel',
+                onPress: () => resolve(null),
+              },
+            ]
+          );
+        });
       }
-      // Bring the Watch into the same workout so David doesn't have to start
-      // Apple's Workout app by hand (§4.3). Deliberately not awaited and never
-      // fatal: the backend session already exists, so a Watch that won't wake
-      // costs heart rate, not the workout.
-      void watchWorkout.launchWatch('strength');
-      void syncWatch();
-      return result.session;
+
+      await AsyncStorage.removeItem(START_ATTEMPT_KEY);
+      return await finishStartingWorkout(result.projection);
     } catch (err: any) {
       console.error('Failed to start workout:', err);
       setError(err.message);
@@ -385,6 +449,38 @@ export function WorkoutModeProvider({ children }: { children: React.ReactNode })
     } finally {
       setIsLoading(false);
     }
+  };
+
+  /**
+   * Fetch the legacy session shape directly rather than trust the `session`
+   * state variable, which a `setSession` inside `refreshSession` would not
+   * have updated yet in this same closure (React state updates are not
+   * synchronous).
+   */
+  const loadActiveSessionShape = async (): Promise<ActiveWorkoutSession | null> => {
+    const result = await fitnessService.getActiveWorkoutSession();
+    setSession(result.session);
+    if (result.session?.id) {
+      await AsyncStorage.setItem(STORAGE_KEY, result.session.id);
+    }
+    return result.session;
+  };
+
+  /** Load the legacy session shape, then bring the Watch in immediately. */
+  const finishStartingWorkout = async (
+    projection: WorkoutProjection
+  ): Promise<ActiveWorkoutSession | null> => {
+    const legacy = await loadActiveSessionShape();
+    // Bring the Watch into the same workout so David doesn't have to start
+    // Apple's Workout app by hand (§4.3). Launch is fire-and-forget and never
+    // fatal — the backend session already exists, so a Watch that won't wake
+    // costs heart rate, not the workout. The sync + broadcast are awaited so
+    // the Watch has the projection within a few seconds rather than waiting
+    // on a `watch_recovered_session` round trip (§Phase 4 step 2).
+    void watchWorkout.launchWatch('strength');
+    await syncWatch();
+    await watchWorkout.broadcast(projection);
+    return legacy;
   };
 
   const logSet = async (params: LogSetParams) => {
@@ -406,6 +502,7 @@ export function WorkoutModeProvider({ children }: { children: React.ReactNode })
         coaching_feedback: result.coaching_feedback,
         rest_seconds: result.next_set?.rest_seconds,
         pr: result.pr ?? null,
+        workout_complete: result.next_set?.workout_complete ?? false,
       };
     } catch (err: any) {
       console.error('Failed to log set:', err);
@@ -508,18 +605,25 @@ export function WorkoutModeProvider({ children }: { children: React.ReactNode })
       await AsyncStorage.removeItem(STORAGE_KEY);
       // Both devices end together: leaving the Watch's HealthKit session
       // running would keep burning battery and recording a workout that Sara
-      // has already closed (§4.5 step 7).
-      await watchWorkout.endWatchWorkout('completed on phone', { summary: result.summary });
+      // has already closed (§4.5 step 7). The end date is Sara's completion
+      // time, not whenever the Watch happens to reconnect and finalize
+      // (Watch HealthKit hygiene plan §Phase 1 step 2).
+      await watchWorkout.endWatchWorkout('completed on phone', {
+        summary: result.summary,
+        endedAt: result.completed_at,
+      });
       workoutCoordinator.reset();
       return { summary: result.summary };
     } catch (err: any) {
       console.error('Failed to complete workout:', err);
       setError(err.message);
-      // Ending HealthKit is a local safety action and must not depend on the
-      // backend being reachable. The canonical completion remains queued for
-      // reconciliation, but the Watch must stop recording now.
+      // The backend call failed, so there is no confirmed completion time and
+      // no confirmation the session actually closed. Ending the Watch's
+      // HealthKit session here — before the queued `complete` command has a
+      // chance to reconcile — is exactly how an unacknowledged workout gets
+      // saved anyway. Leave the Watch running; the queued command (or the
+      // Watch's own stale-terminal-command handling) reconciles it.
       void workoutCoordinator.complete().catch(() => undefined);
-      await watchWorkout.endWatchWorkout('completion requested on phone');
       // David tried to end the workout — even though the server call failed,
       // the Live Activity must not keep ticking as if it's still in progress
       // (the session-effect's endEvent only fires when `session` clears,
@@ -672,6 +776,7 @@ export function WorkoutModeProvider({ children }: { children: React.ReactNode })
     watch,
     pendingProposal,
     coaching,
+    coachingNeedsHeadphones,
     approveProposal,
     rejectProposal,
     retryWatch,

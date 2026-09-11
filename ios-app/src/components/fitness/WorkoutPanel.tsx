@@ -47,6 +47,7 @@ export default function WorkoutPanel({ onCollapse, isCollapsed = false, onFinish
     startRestTimer,
     stopRestTimer,
     completeWorkout,
+    coachingNeedsHeadphones,
   } = useWorkoutMode();
 
   const [lastFeedback, setLastFeedback] = useState<string | null>(null);
@@ -126,9 +127,15 @@ export default function WorkoutPanel({ onCollapse, isCollapsed = false, onFinish
         setTimeout(() => setLastFeedback(null), 5000);
       }
       if (result.success) {
-        // Rest length is backend-driven now — scaled to the set's intensity
-        // (RPE) + lift type, instead of a flat 180/90.
-        startRestTimer(result.rest_seconds || 120);
+        // A rest timer for a workout that just completed is a stray timer —
+        // it fires after Sara has already closed the session, and it is
+        // exactly the "phone rest_start two seconds after every completion"
+        // conflict found in the 2026-09-09 audit.
+        if (!result.workout_complete) {
+          // Rest length is backend-driven now — scaled to the set's intensity
+          // (RPE) + lift type, instead of a flat 180/90.
+          startRestTimer(result.rest_seconds || 120);
+        }
         if (result.pr?.is_pr) {
           const e1rm = result.pr.estimated_1rm
             ? ` Est. 1RM: ${Math.round(result.pr.estimated_1rm)} lbs.`
@@ -373,6 +380,16 @@ export default function WorkoutPanel({ onCollapse, isCollapsed = false, onFinish
               <View style={styles.feedbackContainer}>
                 <Ionicons name="chatbubble-ellipses" size={16} color={colors.accent} />
                 <Text style={styles.feedbackText}>{lastFeedback}</Text>
+              </View>
+            )}
+
+            {/* Coaching wants headphones — the phone speaker is never a
+                fallback, so this is the only way David learns Sara has
+                something to say (2026-09-09 hygiene plan §Phase 3). */}
+            {coachingNeedsHeadphones && (
+              <View style={styles.feedbackContainer}>
+                <Ionicons name="headset" size={16} color={colors.textSecondary} />
+                <Text style={styles.feedbackText}>Put in headphones to hear Sara</Text>
               </View>
             )}
 

@@ -90,6 +90,13 @@ def svc():
     return workout_session_service
 
 
+@pytest.fixture(autouse=True)
+def v2_off(monkeypatch):
+    """This module pins the rollback contract regardless of the live dev flag."""
+    import app.services.workout_command_service as mod
+    monkeypatch.setattr(mod, "_v2_enabled", lambda: False)
+
+
 @pytest.fixture
 def no_llm(monkeypatch):
     """Pin coaching to the deterministic fallback.

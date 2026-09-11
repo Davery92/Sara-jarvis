@@ -48,7 +48,7 @@ export interface MirrorStateEvent extends NativeWorkoutState {
 
 export interface CoachingPlaybackEvent {
   eventId: string
-  state: 'started' | 'finished' | 'failed' | 'dropped' | 'restore_failed'
+  state: 'started' | 'finished' | 'failed' | 'dropped' | 'restore_failed' | 'no_headphones'
   error?: string | null
 }
 

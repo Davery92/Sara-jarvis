@@ -1582,6 +1582,19 @@ class SimpleLLMClient:
                 else:
                     formatted_messages.append({"role": msg.role, "content": msg.content})
 
+            # David's actual words for this turn, for tools that need to ground a
+            # model-constructed argument against what he really said (conversation
+            # competence plan, Phase 1 — e.g. food_search_and_log must not log a
+            # planned/invented meal). Strip any <live_context> the caller already
+            # injected into this same message; this must be his words alone.
+            self._current_raw_user_turn = None
+            for _m in reversed(formatted_messages):
+                if _m.get("role") == "user":
+                    self._current_raw_user_turn = _strip_live_context(
+                        _extract_text_content(_m.get("content"))
+                    )
+                    break
+
             # Build and inject session context reminder
             session_summary = session_cache.get_session_context_summary(conversation_id)
 
@@ -2152,7 +2165,11 @@ class SimpleLLMClient:
                 name=function_name,
                 user_id=str(user_id),
                 parameters=arguments,
-                context={"origin": "chat", "conversation_id": conversation_id},
+                context={
+                    "origin": "chat",
+                    "conversation_id": conversation_id,
+                    "raw_user_turn": getattr(self, "_current_raw_user_turn", None),
+                },
             )
             # Collect citations if available
             try:
@@ -2427,6 +2444,12 @@ class SimpleLLMClient:
                     else:
                         last_role = getattr(last_message, "role", None)
                         last_content = _extract_text_content(getattr(last_message, "content", None))
+                    # Same persistence boundary as store_episode's episode path:
+                    # this table's content AND its embedding must be David's raw
+                    # words, not the per-turn <live_context> block. Unstripped
+                    # here, that block was searchable/replayed back to him even
+                    # though the episode path already cleaned it.
+                    last_content = _strip_live_context(last_content)
                 else:
                     last_role = None
                     last_content = None
@@ -7388,6 +7411,7 @@ from app.core.chat_helpers import (
     _is_valid_timezone_name, _extract_profile_timezone,
     _resolve_user_timezone_for_prompt, _resolve_prompt_datetime_for_user,
     _message_role_content_signature, _compute_message_overlap,
+    resolve_should_load_db_history,
 )
 
 _PERSONALITY_FALLBACK = """## Who Sara Is
@@ -8189,6 +8213,7 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                 try:
                     from app.services.context_snapshot import (
                         get_context_snapshot_cached, get_extended_signals, render_engaged_context,
+                        should_skip_recall,
                     )
                     from app.services.memory_recall import recall as _memory_recall, ALL_KINDS as _ALL_RECALL_KINDS
                     from app.services.intent_graph_projection import get_intent_graph
@@ -8218,19 +8243,21 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     # Session across coroutines isn't safe); memory_recall
                     # opens its own sessions, so it runs concurrently with
                     # that trio instead of after it.
-                    # gotcha_chat_amnesia_brief_clip_2026_09_06 Phase 7 §2: a bare
-                    # "Good morning!" vector-recalled two prior "good morning"
-                    # episodes — noise, not memory. A greeting has nothing for
-                    # embedding similarity to match against except its own
-                    # boilerplate, so skip recall rather than surface that.
+                    # conversation competence plan Phase 2: a flat "<=5 words"
+                    # gate skipped recall for "Good morning!" (right call) but
+                    # also for "Same as yesterday?" (wrong call) purely on word
+                    # count. should_skip_recall only skips genuine phatic
+                    # greetings/acknowledgments; any recall-cue language
+                    # ("did i", "yesterday", "we discussed", ...) still runs it
+                    # regardless of length.
                     async def _no_recall():
                         return {"traces": []}
 
-                    _is_short_greeting = len((last_user_message or "").split()) <= 5
+                    _skip_recall = should_skip_recall(last_user_message or "")
                     _kctx_t0 = _kctx_time.monotonic()
                     (_new_context, _new_open_intents, _extended), _new_recalled = await _kctx_asyncio.gather(
                         _sync_db_trio(),
-                        _no_recall() if _is_short_greeting else _memory_recall(
+                        _no_recall() if _skip_recall else _memory_recall(
                             user_id=str(current_user.id), query=last_user_message or "", k=5,
                             # "fact" excluded: extended_signals' _pkg() already
                             # does a dedicated fact-kind lookup (kept separate
@@ -8264,6 +8291,17 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     content=system_message.content + "\n\n" + combined_context
                 )
                 logger.info(f"📝 Context injected: {len(combined_context)} chars (kernel assembly)")
+
+            # conversation competence plan Phase 2: everything render_engaged_
+            # context assembled just went through SectionBudget's hard cap —
+            # everything appended below it (world brief, corrections, recency
+            # floor, inbox/attention/note/re-entry material) did not, and used
+            # to grow unboundedly (this is the same failure mode SectionBudget
+            # itself was built to close for the block above it). Marking the
+            # boundary here lets a single cap be enforced on that whole tail
+            # right before it reaches the model, without having to rewrite
+            # every append site below into a shared allocator in one pass.
+            _post_engaged_ctx_start = len(system_message.content)
 
             # WORLD_CONTEXT_READ is the cutover switch from fragmented,
             # on-demand reconstruction to the continuously maintained model.
@@ -8334,6 +8372,32 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     logger.info(f"🧠 Encoded stated life_fact: {_corrected['predicate']}={_corrected['value_text']}")
             except Exception as e:
                 logger.debug(f"life_fact correction detection skipped: {e}")
+
+            # conversation competence plan Phase 3: same one-shot-before-the-
+            # reply shape as the life_fact block above, for "don't do that
+            # again"/"I removed it" (food context only — see corrections.py
+            # for why this never bans the tool outright).
+            try:
+                from app.services.corrections import apply_chat_prohibition
+                from app.db.session import get_async_session_factory
+                async with get_async_session_factory()() as _corr_db:
+                    _prohibition = await apply_chat_prohibition(
+                        _corr_db, str(current_user.id), last_user_message
+                    )
+                    await _corr_db.commit()
+                if _prohibition:
+                    system_message = ChatMessage(
+                        role="system",
+                        content=system_message.content + (
+                            "\n\n## Correction just recorded\n"
+                            "David just confirmed he doesn't want that food entry recreated. "
+                            "Acknowledge it briefly and don't log it again unless he explicitly "
+                            "asks you to."
+                        ),
+                    )
+                    logger.info(f"🧠 Recorded prohibition/retraction id={_prohibition.get('id')}")
+            except Exception as e:
+                logger.debug(f"chat prohibition detection skipped: {e}")
 
             # Arc 5.2: verification-loop retire half — same shape as the
             # life_fact correction check above (cheap no-op on the
@@ -8735,10 +8799,28 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
 
             # Retrieve conversation history if conversation_id provided
             conversation_history = []
-            should_load_db_history = bool(request.conversation_id and len(request.messages) <= 2)
+            _stored_episode_count = None
+            if request.conversation_id and len(request.messages) > 2:
+                try:
+                    _stored_episode_count = db.query(Episode).filter(
+                        Episode.conversation_id == request.conversation_id,
+                        Episode.user_id == current_user.id,
+                        Episode.role.in_(["user", "assistant"])
+                    ).count()
+                except Exception as e:
+                    logger.debug(f"partial-history count check failed: {e}")
+            should_load_db_history = resolve_should_load_db_history(
+                len(request.messages), bool(request.conversation_id), _stored_episode_count,
+            )
             if request.conversation_id and not should_load_db_history:
                 logger.info(
                     f"⏭️ Skipping DB history load (client supplied {len(request.messages)} messages)"
+                )
+            elif should_load_db_history and _stored_episode_count is not None:
+                logger.warning(
+                    f"⚠️ Client sent {len(request.messages)} messages but conversation "
+                    f"{request.conversation_id} has {_stored_episode_count} stored — "
+                    "history looks partial, falling back to DB history"
                 )
 
             if should_load_db_history:
@@ -8769,6 +8851,30 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                 merged_request_messages = request.messages[overlap:]
                 logger.info(
                     f"🔁 Deduplicated {overlap} overlapping turns between DB history and request payload"
+                )
+
+            # conversation competence plan Phase 2: enforce the one cap on
+            # everything appended since combined_context, whatever grew it —
+            # world brief, corrections, recency floor, inbox/attention/note/
+            # re-entry material all land here with no per-source budget of
+            # their own. A stopgap ceiling (not yet tuned from replay data,
+            # per the plan's own caution against treating one token count as
+            # a correctness target) that trades "some low-value tail section
+            # gets clipped" for "the prompt can no longer grow unbounded" —
+            # the exact trade SectionBudget already made for the block above.
+            from app.services.context_budget import estimate_tokens, clip_to_tokens
+            _POST_ENGAGED_TAIL_MAX_TOKENS = 4000
+            _tail_text = system_message.content[_post_engaged_ctx_start:]
+            if estimate_tokens(_tail_text) > _POST_ENGAGED_TAIL_MAX_TOKENS:
+                _clipped_tail = clip_to_tokens(_tail_text, _POST_ENGAGED_TAIL_MAX_TOKENS)
+                logger.warning(
+                    "context_budget: post-engaged tail %d tok > cap %d tok — clipped to %d tok",
+                    estimate_tokens(_tail_text), _POST_ENGAGED_TAIL_MAX_TOKENS,
+                    estimate_tokens(_clipped_tail),
+                )
+                system_message = ChatMessage(
+                    role="system",
+                    content=system_message.content[:_post_engaged_ctx_start] + _clipped_tail,
                 )
 
             # --- prompt-cache split (local lanes only) ---------------------------

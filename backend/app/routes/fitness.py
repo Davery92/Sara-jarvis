@@ -168,6 +168,29 @@ def _sum_detailed_items(detailed_items: Optional[List[dict]]) -> Optional[Dict[s
     return totals if saw_any else None
 
 
+def _describe_food_log_row(food_items, meal_type: Optional[str]) -> str:
+    """Compact human-readable description of a food_log row's items, for the
+    retraction fingerprint recorded when it's deleted (conversation
+    competence plan Phase 3). `food_items` is jsonb — psycopg2 hands it back
+    as a parsed list already in the normal case; parse defensively in case
+    a driver ever returns the raw string instead."""
+    if isinstance(food_items, str):
+        try:
+            food_items = json.loads(food_items)
+        except (TypeError, ValueError):
+            food_items = []
+    names = []
+    for item in (food_items or []):
+        if isinstance(item, dict) and item.get("name"):
+            qty = item.get("quantity")
+            unit = item.get("unit") or ""
+            names.append(f"{qty}{unit} {item['name']}".strip() if qty else str(item["name"]))
+    if not names:
+        return ""
+    prefix = f"{meal_type}: " if meal_type else ""
+    return prefix + ", ".join(names)
+
+
 async def _resolve_food_log_totals(
     log,
     logger_tag: str,
@@ -861,6 +884,15 @@ async def delete_food_log_entry(
 ):
     """Delete a food log entry"""
     try:
+        # Conversation competence plan Phase 3: capture what's being removed
+        # BEFORE it's gone — this is the ground truth for "David removed
+        # this," independent of whether he ever brings it up in chat, and a
+        # hard DELETE leaves no other way to answer "what was that again?"
+        existing_row = db.execute(text("""
+            SELECT food_items, meal_type FROM food_log
+            WHERE id = :log_id AND user_id = :user_id
+        """), {"log_id": log_id, "user_id": user_id}).fetchone()
+
         query = text("""
             DELETE FROM food_log
             WHERE id = :log_id AND user_id = :user_id
@@ -881,6 +913,18 @@ async def delete_food_log_entry(
 
         if not deleted:
             raise HTTPException(status_code=404, detail="Food log entry not found")
+
+        if existing_row is not None:
+            try:
+                description = _describe_food_log_row(existing_row.food_items, existing_row.meal_type)
+                if description:
+                    from app.services.corrections import record_food_log_retraction
+                    from app.db.session import get_async_session_factory
+                    async with get_async_session_factory()() as _corr_db:
+                        await record_food_log_retraction(_corr_db, str(user_id), log_id, description)
+                        await _corr_db.commit()
+            except Exception as e:
+                logger.warning(f"food_log retraction record failed (non-critical): {e}")
 
         _emit_domain_event_safe(EventType.FOOD_DELETED, user_id, {"log_id": log_id})
 

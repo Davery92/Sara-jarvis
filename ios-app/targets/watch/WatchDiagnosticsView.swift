@@ -18,6 +18,16 @@ struct WatchDiagnosticsView: View {
     @State private var templateId: String = ""
     @State private var exported: String?
 
+    // MARK: - Stray Apple workout cleanup (§Phase 2)
+
+    private let healthStore = HKHealthStore()
+    @State private var strayWorkouts: [HKWorkout] = []
+    @State private var longMisattributedWorkouts: [HKWorkout] = []
+    @State private var isLoadingStrayWorkouts = false
+    @State private var isDeletingStrayWorkouts = false
+    @State private var showDeleteConfirmation = false
+    @State private var strayLoadError: String?
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
@@ -68,6 +78,9 @@ struct WatchDiagnosticsView: View {
 
                 Divider()
                 startLog
+
+                Divider()
+                strayWorkoutsSection
             }
             .padding(.horizontal, 4)
         }
@@ -75,7 +88,110 @@ struct WatchDiagnosticsView: View {
             if authorized == nil {
                 authorized = await manager.requestAuthorization()
             }
+            await loadStrayWorkouts()
         }
+    }
+
+    /// Workouts this Watch app authored that David can review and delete
+    /// (§Phase 2). The list this pulls from `HKSampleQuery` is independent of
+    /// anything Sara's backend knows — it exists precisely because those old
+    /// workouts have no Sara session behind them any more.
+    @ViewBuilder
+    private var strayWorkoutsSection: some View {
+        HStack {
+            Text("Stray Apple workouts").font(.caption.weight(.semibold))
+            Spacer()
+            if isLoadingStrayWorkouts {
+                ProgressView().controlSize(.mini)
+            } else {
+                Button {
+                    Task { await loadStrayWorkouts() }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .font(.caption2)
+            }
+        }
+
+        if let strayLoadError {
+            Text(strayLoadError)
+                .font(.caption2)
+                .foregroundStyle(.orange)
+        } else if strayWorkouts.isEmpty {
+            Text("None found under 10 minutes.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        } else {
+            ForEach(strayWorkouts, id: \.uuid) { workout in
+                Text(strayWorkoutSummary(workout))
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+
+            Button("Delete \(strayWorkouts.count) workout\(strayWorkouts.count == 1 ? "" : "s")", role: .destructive) {
+                showDeleteConfirmation = true
+            }
+            .disabled(isDeletingStrayWorkouts)
+            .font(.caption2)
+            .confirmationDialog(
+                "Delete \(strayWorkouts.count) Apple workout\(strayWorkouts.count == 1 ? "" : "s")?",
+                isPresented: $showDeleteConfirmation,
+                titleVisibility: .visible
+            ) {
+                Button("Delete", role: .destructive) {
+                    Task { await deleteStrayWorkouts() }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("These are short workouts this Watch app saved by mistake. This can't be undone.")
+            }
+        }
+
+        if !longMisattributedWorkouts.isEmpty {
+            Text("Longer, review on phone")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.top, 2)
+            ForEach(longMisattributedWorkouts, id: \.uuid) { workout in
+                Text(strayWorkoutSummary(workout))
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func loadStrayWorkouts() async {
+        isLoadingStrayWorkouts = true
+        strayLoadError = nil
+        defer { isLoadingStrayWorkouts = false }
+        do {
+            async let stray = WatchHealthCleanup.findStrayWorkouts(healthStore: healthStore)
+            async let long = WatchHealthCleanup.findLongMisattributedWorkouts(healthStore: healthStore)
+            strayWorkouts = try await stray
+            longMisattributedWorkouts = try await long
+        } catch {
+            strayLoadError = "Couldn't read Health: \(error.localizedDescription)"
+        }
+    }
+
+    private func deleteStrayWorkouts() async {
+        isDeletingStrayWorkouts = true
+        defer { isDeletingStrayWorkouts = false }
+        do {
+            _ = try await WatchHealthCleanup.delete(strayWorkouts, healthStore: healthStore)
+        } catch {
+            strayLoadError = "Delete failed: \(error.localizedDescription)"
+        }
+        await loadStrayWorkouts()
+    }
+
+    private func strayWorkoutSummary(_ workout: HKWorkout) -> String {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .short
+        formatter.timeStyle = .short
+        let minutes = Int(workout.duration / 60)
+        let seconds = Int(workout.duration) % 60
+        return "\(formatter.string(from: workout.startDate)) · \(minutes)m \(seconds)s"
     }
 
     private var header: some View {
@@ -95,11 +211,21 @@ struct WatchDiagnosticsView: View {
             Button("Log test set") {
                 manager.logSet(weight: 100, reps: 8, effort: "right")
             }
-            Button("Finish") {
-                Task { await manager.finishWorkout() }
-            }
-            Button("Abandon", role: .destructive) {
-                Task { await manager.abandonWorkout() }
+            // Only an acknowledged Sara session is something to finish — the
+            // save gate in `finishWorkout()` would discard anything else
+            // anyway, so say that up front rather than promise a Finish that
+            // silently becomes a discard (Watch HealthKit hygiene plan §Phase 1).
+            if manager.projection?.status == "active" {
+                Button("Finish workout") {
+                    Task { await manager.finishWorkout() }
+                }
+                Button("Abandon", role: .destructive) {
+                    Task { await manager.abandonWorkout() }
+                }
+            } else {
+                Button("Discard Apple workout", role: .destructive) {
+                    Task { await manager.discardOrphanStart() }
+                }
             }
         } else {
             // Free text rather than a picker on purpose: the catalog sync that

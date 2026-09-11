@@ -97,6 +97,22 @@ class TestRenderEngagedContext:
         text = render_engaged_context(_context(), open_intents=0, recall_traces=traces)
         assert text.count("item ") == 5
 
+    def test_recall_trace_distinguishes_speaker_and_carries_id_and_when(self):
+        traces = [
+            {"kind": "episode", "role": "user", "confidence": "observed",
+             "text": "David mentioned the Q3 report", "id": "ep-1",
+             "when": "2026-09-01T10:00:00+00:00"},
+            {"kind": "episode", "role": "assistant", "confidence": "observed",
+             "text": "Sara offered to draft it", "id": "ep-2"},
+            {"kind": "fact", "confidence": "confirmed", "text": "David prefers dark roast", "id": "f-1"},
+        ]
+        text = render_engaged_context(_context(), open_intents=0, recall_traces=traces)
+        assert "David said" in text
+        assert "Sara suggested" in text
+        assert "a tool confirmed" in text
+        assert "id=ep-1" in text
+        assert "id=f-1" in text
+
 
 class TestExtendedSignalsRendering:
     """Arc 2.3 gap-closing (2026-07-29): the categories the comparison log

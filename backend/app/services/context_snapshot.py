@@ -122,7 +122,8 @@ async def get_world_state(db: Session, user_id: str = DEFAULT_USER_ID) -> WorldS
         _win_start = naive_local_now()
         _near_end = _win_start + timedelta(days=14)
         _rows = db.execute(text("""
-            SELECT title, start_time, end_time, COALESCE(all_day, FALSE) AS all_day
+            SELECT title, start_time, end_time, COALESCE(all_day, FALSE) AS all_day,
+                   owner, owner_relation
             FROM calendar_event
             WHERE user_id = :uid
               AND COALESCE(end_time, start_time) >= :win_start
@@ -141,7 +142,21 @@ async def get_world_state(db: Session, user_id: str = DEFAULT_USER_ID) -> WorldS
                     _when = render_when(r.start_time.date())
             else:
                 _when = render_when(r.start_time, source_convention="et")
-            _entry = f"{_when}: {(r.title or '').strip()}"
+            # Ownership marker (same convention as day_replay_builder._get_calendar_events):
+            # a title alone reads as David's own plan, and it isn't always —
+            # this is the gap that turned Everett's dentist appointment into
+            # David's appointment in a place called "Everett".
+            _owner = r.owner or "self"
+            if _owner == "self":
+                _owner_suffix = ""
+            elif _owner == "unknown":
+                _owner_suffix = " [owner unclear — don't assume it's David's]"
+            else:
+                _who = "the family" if _owner == "family" else _owner
+                _marker = "[family]" if _owner == "family" else f"[{_owner}'s]"
+                _rel = f", {r.owner_relation}" if getattr(r, "owner_relation", None) else ""
+                _owner_suffix = f" {_marker}{_rel} — {_who}'s, not David's"
+            _entry = f"{_when}: {(r.title or '').strip()}{_owner_suffix}"
             if r.start_time < _near_end:
                 if len(upcoming_events) < 12:
                     upcoming_events.append(_entry)
@@ -513,6 +528,9 @@ async def get_self_state(user_id: str = DEFAULT_USER_ID, db: Optional[Session] =
     )
 
 
+_THEORY_OF_DAVID_STALE_AFTER = timedelta(hours=72)
+
+
 def get_relationship_state(db: Session, user_id: str = DEFAULT_USER_ID) -> RelationshipStateV1:
     """Active conversation only, today. `recent_promises` stays empty — there
     is no commitment extractor yet (C3) to source it from honestly, and
@@ -538,15 +556,31 @@ def get_relationship_state(db: Session, user_id: str = DEFAULT_USER_ID) -> Relat
     # function is sync, and db here is the same sync Session that method
     # expects, so the tiny query is inlined instead of introducing an
     # async/sync collision into this function's signature.
+    # Conversation competence plan Phase 4 ("expired narratives disappear"):
+    # this row is only ever as fresh as the last dreaming/reflection cycle
+    # that wrote it (normally twice daily) — with no freshness check, a
+    # stalled cycle leaves David's narrative frozen at whatever it said
+    # last, presented every turn as current understanding with no signal
+    # anything is wrong. _THEORY_OF_DAVID_STALE_AFTER gives it the same kind
+    # of staleness budget world_state's slices already have (calendar,
+    # health, fleet) — generous enough that a brief outage doesn't blank the
+    # narrative, tight enough that a genuinely stalled cycle does.
     theory_of_david: Optional[str] = None
     try:
         row = db.execute(text("""
-            SELECT content FROM sara_journal
+            SELECT content, created_at FROM sara_journal
             WHERE user_id = :uid AND entry_type = 'theory_of_david'
             ORDER BY created_at DESC LIMIT 1
         """), {"uid": user_id}).fetchone()
         if row:
-            theory_of_david = row.content
+            age = now - (row.created_at if row.created_at.tzinfo else row.created_at.replace(tzinfo=timezone.utc))
+            if age <= _THEORY_OF_DAVID_STALE_AFTER:
+                theory_of_david = row.content
+            else:
+                logger.info(
+                    f"[context_snapshot] theory_of_david suppressed as stale "
+                    f"({age.total_seconds() / 3600:.0f}h old)"
+                )
     except Exception as e:
         logger.debug(f"[context_snapshot] theory_of_david query failed: {e}")
 
@@ -883,6 +917,89 @@ def _patterns_are_noise(patterns: str) -> bool:
     )
 
 
+# A bare greeting/acknowledgment has nothing for recall's embedding
+# similarity to match against except its own boilerplate (gotcha_chat_
+# amnesia_brief_clip_2026_09_06 Phase 7 §2: "Good morning!" pulled up two
+# prior "good morning" episodes — noise, not memory). Anchored so a longer
+# message that merely starts with "ok" or "thanks" doesn't get swallowed.
+_GREETING_ONLY_RE = re.compile(
+    r"^(hi+|hey+|hello+|yo+|sup|g'?day|"
+    r"good\s*(morning|afternoon|evening|night)|morning|evening|"
+    r"how'?s?\s*(it\s*going|you\s*doin'?g?|things)|what'?s\s*up|"
+    r"thanks?( you)?|ty|np|no\s*problem|lol+|haha+|nice|cool|great|"
+    r"ok(ay)?|k|sounds?\s*good|got\s*it|will\s*do)[\s!.,?]*$",
+    re.IGNORECASE,
+)
+
+
+_RECALL_SPEAKER_LABELS = {
+    "note": "Sara's note",
+    "document": "a document shows",
+    "summary": "a summary states",
+    "fact": "a tool confirmed",
+    "person": "on record",
+    "thread": "an open thread",
+    "intent": "a tracked commitment",
+    "artifact": "an artifact shows",
+}
+
+
+def _recall_speaker_label(trace: Dict[str, Any]) -> str:
+    """Distinguish 'David said' from 'Sara suggested' from 'a tool
+    confirmed' (conversation competence plan Phase 2) — a recall line with
+    no attribution reads as settled fact regardless of whether it was
+    David's own word, Sara's own guess, or a canonical record."""
+    if trace.get("kind") == "episode":
+        role = trace.get("role")
+        if role == "user":
+            return "David said"
+        if role == "assistant":
+            return "Sara suggested"
+        return "episode"
+    return _RECALL_SPEAKER_LABELS.get(trace.get("kind"), trace.get("kind") or "memory")
+
+
+def _render_recall_when(when: Any) -> str:
+    """Best-effort relative time for a recall trace's `when` — never raises,
+    since traces carry a mix of ISO strings, raw datetimes, and None
+    depending on which store produced them."""
+    if not when:
+        return ""
+    dt = when
+    if isinstance(when, str):
+        try:
+            dt = datetime.fromisoformat(when)
+        except ValueError:
+            return ""
+    try:
+        from app.core.timezone import render_relative
+        return render_relative(dt)
+    except Exception:
+        return ""
+
+
+def should_skip_recall(message: str) -> bool:
+    """True only for a genuine phatic exchange, not merely a short one.
+
+    Conversation competence plan Phase 2: replaces a flat "skip recall for
+    any <=5-word message" rule. That rule correctly kept a bare "Good
+    morning!" from vector-matching stale prior greetings, but it also
+    skipped memory for equally short messages that actually need it —
+    "What did we decide?", "Same as yesterday?" — purely because they were
+    short too. Recall-cue language (the same keyword list ContextRouter
+    uses to force memory injection) always wins over brevity; only a message
+    with no such cue that reads as pure greeting/acknowledgment is skipped.
+    """
+    text = (message or "").strip()
+    if not text:
+        return True
+    from app.services.context_router import ContextRouter
+    lowered = text.lower()
+    if any(kw in lowered for kw in ContextRouter.MEMORY_KEYWORDS):
+        return False
+    return bool(_GREETING_ONLY_RE.match(text))
+
+
 
 # Which budget allotment each rendered block draws from. The renderer emits a
 # flat list of lines; this maps a line's leading header back to its section so
@@ -968,6 +1085,10 @@ def render_engaged_context(
     # model quotes instead of reconstructing from memory.
     _cal = (world.get("calendar_horizon") or {}).get("data") or {}
     lines.append("### Calendar — verified upcoming (next 14 days)")
+    lines.append(
+        "  (no owner tag = David's own; a family/other-owned event does not by "
+        "itself mean David attends — ownership and attendance are separate)"
+    )
     if _cal.get("upcoming"):
         for _e in _cal["upcoming"]:
             lines.append(f"  - {_e}")
@@ -1001,7 +1122,13 @@ def render_engaged_context(
     if recall_traces:
         lines.append("\n### Relevant memory (memory.recall)")
         for t in recall_traces[:5]:
-            lines.append(f"- [{t.get('kind')}, {t.get('confidence')}] {(t.get('text') or '')[:150]}")
+            _meta = f"{_recall_speaker_label(t)}, {t.get('confidence')}"
+            _when_str = _render_recall_when(t.get("when"))
+            if _when_str:
+                _meta += f", {_when_str}"
+            if t.get("id"):
+                _meta += f", id={t['id']}"
+            lines.append(f"- [{_meta}] {(t.get('text') or '')[:150]}")
 
     if extended:
         if extended.get("emotional_tone"):

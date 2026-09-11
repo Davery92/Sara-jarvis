@@ -407,6 +407,49 @@ async def _drop_saras_own_output(
     return [t for t in traces if not (t.get("kind") == "note" and str(t.get("id")) in excluded)]
 
 
+_THIN_EPISODE_CHARS = 60
+
+
+async def _attach_context_for_thin_episodes(
+    user_id: str, traces: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """A clipped episode fragment ("Yes", "Same as last time", "ok, do it")
+    can't stand alone once it's pulled out of its conversation and dropped
+    into a prompt next to unrelated recall hits. Prepend the immediately
+    prior turn in the same conversation for any episode trace too short to
+    be self-explanatory on its own (conversation competence plan Phase 2)."""
+    thin = [
+        t for t in traces
+        if t.get("kind") == "episode" and t.get("id")
+        and len((t.get("text") or "").strip()) < _THIN_EPISODE_CHARS
+    ]
+    if not thin:
+        return traces
+    try:
+        from sqlalchemy import text as sa_text
+        from app.db.session import get_async_session_factory
+        factory = get_async_session_factory()
+        async with factory() as db:
+            for t in thin:
+                row = (await db.execute(sa_text("""
+                    SELECT e2.role, e2.content
+                    FROM episode e1
+                    JOIN episode e2
+                      ON e2.conversation_id = e1.conversation_id
+                     AND e2.user_id = e1.user_id
+                     AND e2.created_at < e1.created_at
+                    WHERE e1.id = :id AND e1.user_id = :uid
+                    ORDER BY e2.created_at DESC LIMIT 1
+                """), {"id": t["id"], "uid": user_id})).mappings().first()
+                if row and (row.get("content") or "").strip():
+                    lead_speaker = "David" if row.get("role") == "user" else "Sara"
+                    lead_text = row["content"].strip()[:150]
+                    t["text"] = f'[preceding turn — {lead_speaker}: "{lead_text}"] {t["text"]}'
+    except Exception as e:
+        logger.debug(f"[recall] thin-episode context lookup failed: {e}")
+    return traces
+
+
 def _dedupe_by_title(traces: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Three copies of one note is one hit, not three.
 
@@ -474,6 +517,9 @@ async def recall(
     traces = _dedupe_by_title(traces)
     traces.sort(key=lambda t: t["score"], reverse=True)
     traces = traces[:k]
+    # Only enrich the traces actually being kept — not every candidate a
+    # source fanned out, most of which get truncated away right above.
+    traces = await _attach_context_for_thin_episodes(user_id, traces)
 
     by_kind: Dict[str, int] = {}
     for t in traces:

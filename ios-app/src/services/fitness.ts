@@ -1110,6 +1110,7 @@ class FitnessService {
    */
   async completeWorkoutSession(): Promise<{
     success: boolean;
+    completed_at?: string;
     summary?: {
       duration_minutes: number;
       total_sets: number;

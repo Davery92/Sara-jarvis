@@ -1,0 +1,81 @@
+{
+ "captured_at": "2026-09-10T14:55:46.186039+00:00",
+ "source_database": "sara_hub",
+ "user_id": "64f37c56-85cb-4590-8de9-adfc17d343ed",
+ "conversations": [
+  "0c01dd0e-9f07-4a25-bf11-c863346ce2cc",
+  "f882bce8-58cb-4541-8669-2435917a4623"
+ ],
+ "window": [
+  "2026-09-08",
+  "2026-09-11"
+ ],
+ "cutoff": "2026-09-10 11:00:00+00",
+ "as_of_capture_tables": [
+  "world_brief",
+  "world_thread",
+  "world_fact",
+  "life_fact",
+  "behavioral_pattern",
+  "daily_rhythm",
+  "standing_order",
+  "directive",
+  "reminder",
+  "timer",
+  "scratchpad_entry",
+  "user_profile",
+  "user_settings",
+  "calendar_event",
+  "correction"
+ ],
+ "tables": {
+  "app_user": 1,
+  "episode": 25,
+  "conversation_turn": 16,
+  "calendar_event": 20,
+  "food_log": 8,
+  "food_log_item": 0,
+  "workout_log": 63,
+  "workout_session": 52,
+  "active_workout_session": 69,
+  "health_metric": 717,
+  "life_fact": 10,
+  "sara_journal": 109,
+  "world_brief": 1,
+  "world_thread": 117,
+  "world_fact": 2318,
+  "standing_order": 6,
+  "directive": 2,
+  "scratchpad_entry": 1,
+  "correction": 0,
+  "reminder": 10,
+  "timer": 35,
+  "behavioral_pattern": 94,
+  "daily_rhythm": 19,
+  "attention_item": 56,
+  "world_attention_item": 121,
+  "day_replay_cache": 9,
+  "user_profile": 1,
+  "user_settings": 1,
+  "note": 14
+ },
+ "turns": 8,
+ "brief_layers": [
+  "context.md",
+  "day.md",
+  "moment.md",
+  "stable.md"
+ ],
+ "redactions": [
+  "[\\w.+-]+@[\\w-]+\\.[\\w.-]+",
+  "(?<![\\w-])\\+?\\d{0,2}[\\s.-]?\\(?\\d{3}\\)?[\\s.-]?\\d{3}[\\s.-]\\d{4}(?![\\w-])",
+  "\\b\\d{1,5}\\s+[A-Z][a-z]+\\s+(Street|St|Road|Rd|Avenue|Ave|Lane|Ln|Drive|Dr|Way|Court|Ct)\\b",
+  "(?i)\\b(bearer|api[_-]?key|token|password)\\b\\s*[:=]\\s*\\S+"
+ ],
+ "notes": [
+  "Captured read-only from the live database; no row here was edited by hand.",
+  "Embeddings are dropped: they are large, and nothing in the replay reads them back (recall is exercised against the same text through the live embedder).",
+  "First names of family members are kept deliberately \u2014 the calendar-ownership failure is about a first name being read as a place.",
+  "Time-series tables are cut at `cutoff`, just after the last exchange, so a replay is never shown a row that did not exist yet. The tables in `as_of_capture_tables` hold current state with no history to rewind and are therefore as of `captured_at`, not as of the turn."
+ ]
+}

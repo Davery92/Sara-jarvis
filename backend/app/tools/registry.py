@@ -959,6 +959,8 @@ class ToolRegistry:
                 injectable["_task_id"] = context["task_id"]
             if context.get("conversation_id"):
                 injectable["_conversation_id"] = context["conversation_id"]
+            if context.get("raw_user_turn"):
+                injectable["_raw_user_turn"] = context["raw_user_turn"]
             if injectable:
                 accepted = self._context_kwargs_for(name, tool)
                 extras = {k: v for k, v in injectable.items()

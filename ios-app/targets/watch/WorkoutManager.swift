@@ -76,6 +76,20 @@ public final class WorkoutManager: NSObject, ObservableObject {
     private var mirrorRetryTask: Task<Void, Never>?
     private var isFinalizingHealthKit = false
 
+    /// Below this the Apple workout is discarded rather than saved (Watch
+    /// HealthKit hygiene plan §Phase 1). A false start or an accidental wake
+    /// must not leave a 4-second workout in Health.
+    private static let minSaveSeconds: TimeInterval = 300
+    /// Set count from the most recent accepted projection. Used by the save
+    /// gate: a workout with zero logged sets is not a workout.
+    private var loggedSetCount = 0
+    /// True once the backend has acknowledged this attempt with a session.
+    /// A running HKWorkoutSession Sara never acknowledged must never be saved.
+    private var saraAcknowledged = false
+    /// Discards an Apple workout the phone never acknowledged after it has
+    /// been orphaned for too long (§Phase 1 step 4).
+    private var orphanWatchdogTask: Task<Void, Never>?
+
     /// Rest countdown state, so the rest screen and its haptics don't depend on
     /// a message arriving at exactly the right second.
     @Published public private(set) var restRemaining: Int = 0
@@ -268,6 +282,7 @@ public final class WorkoutManager: NSObject, ObservableObject {
             startElapsedTimer(from: startDate)
             persistRecovery(startedAt: startDate, activityType: configuration.activityType.rawValue)
             recordDiagnostic(stage: "healthkit_started", startAttemptId: attempt.attemptId)
+            startOrphanWatchdog()
         } catch {
             // The exact HealthKit failure, kept and shown. Retaining this was
             // the first implementation task in the plan, not a nicety (§2.2).
@@ -321,6 +336,7 @@ public final class WorkoutManager: NSObject, ObservableObject {
         do {
             try await startHealthKitSession(configuration: configuration, at: startDate)
             recordDiagnostic(stage: "phone_start_healthkit_started")
+            startOrphanWatchdog()
         } catch {
             let ns = error as NSError
             failStart(
@@ -461,6 +477,25 @@ public final class WorkoutManager: NSObject, ObservableObject {
         lastError = message
         recordDiagnostic(stage: stage, error: error)
         log.error("Start failed at \(stage, privacy: .public): \(message, privacy: .public)")
+        startOrphanWatchdog()
+    }
+
+    /// Discard an Apple workout Sara never acknowledged, once it has sat
+    /// unacknowledged for too long (Watch HealthKit hygiene plan §Phase 1
+    /// step 4). A dead link or a phone that never wakes must not leave a real
+    /// HKWorkoutSession collecting forever with nothing recorded against it.
+    private func startOrphanWatchdog() {
+        orphanWatchdogTask?.cancel()
+        orphanWatchdogTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 600_000_000_000)
+            guard let self, !Task.isCancelled,
+                  self.startState.isOrphanedHealthKit,
+                  self.loggedSetCount == 0
+            else { return }
+            self.recordDiagnostic(stage: "orphan_watchdog_discarded")
+            self.lastError = "Ended an Apple workout Sara never started"
+            await self.discardOrphanStart()
+        }
     }
 
     /// Append one bounded diagnostic entry (§5.4).
@@ -511,6 +546,7 @@ public final class WorkoutManager: NSObject, ObservableObject {
             attach(to: recovered)
             let state = recoveryStore.load()
             projection = state?.lastProjection
+            loggedSetCount = state?.lastProjection?.progress.completedSets ?? 0
             startState.healthKit = .running
             startState.phoneLink = transport.linkPhase
 
@@ -524,8 +560,15 @@ public final class WorkoutManager: NSObject, ObservableObject {
                                  startAttemptId: pending.attemptId)
                 submitStartRequest(pending)
                 attachMirrorInBackground()
+                startOrphanWatchdog()
             } else {
                 startState.saraSession = state?.sessionId == nil ? SaraSessionPhase.none : .active
+                // A session id surviving a relaunch is proof Sara already
+                // acknowledged this attempt before the app died — that fact
+                // does not live on disk otherwise, and losing it would make
+                // every recovered workout fail the save gate (§Phase 1 step 1).
+                saraAcknowledged = state?.sessionId != nil
+                if state?.sessionId == nil { startOrphanWatchdog() }
             }
 
             send(.watchRecoveredSession, payload: [
@@ -786,6 +829,14 @@ public final class WorkoutManager: NSObject, ObservableObject {
             }
             applyProjection(from: envelope)
             isStarting = false
+            if (envelope.kind == .startAccepted || envelope.kind == .projectionUpdated), projection != nil {
+                // The backend has acknowledged this attempt with a real
+                // session. Only from here on is the Apple workout eligible
+                // to be saved — before this it belongs to nobody (§Phase 1).
+                saraAcknowledged = true
+                orphanWatchdogTask?.cancel()
+                orphanWatchdogTask = nil
+            }
             if envelope.kind == .startAccepted || projection != nil {
                 // Sara has a session for this attempt. The start is finished,
                 // so nothing is left to retry or discard.
@@ -806,6 +857,10 @@ public final class WorkoutManager: NSObject, ObservableObject {
                 catalogStore.save(incoming)
                 if let active = incoming.activeProjection {
                     projection = active
+                    loggedSetCount = active.progress.completedSets
+                    saraAcknowledged = true
+                    orphanWatchdogTask?.cancel()
+                    orphanWatchdogTask = nil
                     persistRecovery(projection: active)
                     syncRestTimer(with: active.rest)
                     isStarting = false
@@ -825,9 +880,22 @@ public final class WorkoutManager: NSObject, ObservableObject {
             // A rejected command will never apply — retrying forever would
             // just keep the pending badge lit. Drop it and reconcile visibly.
             if let commandId = envelope.payload["command_id"]?.stringValue {
+                let rejectedKind = queue.pending.first(where: { $0.command.commandId == commandId })?.command.kind
                 queue.discard(commandId: commandId,
                               reason: envelope.payload["code"]?.stringValue ?? "rejected")
                 refreshPendingCount()
+                // The backend already considers this session closed. A stale
+                // `complete`/`abandon`/`rest_stop`/`healthkit_state` bouncing
+                // off it means the Watch is still tracking a workout the
+                // phone ended earlier — stop, rather than let HealthKit keep
+                // collecting against nothing (§Phase 1 step 5).
+                if envelope.payload["code"]?.stringValue == "no_active_session",
+                   let rejectedKind,
+                   [.complete, .abandon, .restStop, .healthkitState].contains(rejectedKind) {
+                    let sessionId = envelope.sessionId ?? projection?.sessionId
+                    let discardHealthKit = loggedSetCount == 0
+                    Task { await self.finalizeHealthKit(discard: discardHealthKit, sessionId: sessionId) }
+                }
             }
             lastError = envelope.payload["message"]?.stringValue ?? "That didn't apply"
             applyProjection(from: envelope)
@@ -863,6 +931,8 @@ public final class WorkoutManager: NSObject, ObservableObject {
             let discarded = envelope.payload["discarded"] == .bool(true)
             let endingProjection = projection
             let sessionId = envelope.sessionId ?? endingProjection?.sessionId
+            let endedAt = envelope.payload["ended_at"]?.stringValue
+                .flatMap(ISO8601DateFormatter.saraDate(from:))
             if discarded {
                 completion = nil
             } else if let summary = envelope.payload["summary"], summary != .null {
@@ -879,7 +949,8 @@ public final class WorkoutManager: NSObject, ObservableObject {
             Task {
                 await finalizeHealthKit(
                     discard: discarded,
-                    sessionId: sessionId
+                    sessionId: sessionId,
+                    endDate: endedAt
                 )
             }
 
@@ -935,6 +1006,7 @@ public final class WorkoutManager: NSObject, ObservableObject {
                 return
             }
             projection = incoming
+            loggedSetCount = incoming.progress.completedSets
             if incoming.status == "active" {
                 persistRecovery(projection: incoming)
             } else {
@@ -1018,10 +1090,36 @@ public final class WorkoutManager: NSObject, ObservableObject {
 
     // MARK: - HealthKit lifecycle
 
+    /// Whether a completing (non-discard) Apple workout should actually be
+    /// saved to Health, and why not when it should not be (Watch HealthKit
+    /// hygiene plan §Phase 1 step 1).
+    ///
+    /// Every one of these conditions was true for at least one of the stray
+    /// workouts found in the dev database on 2026-09-09: no session id, a
+    /// session Sara never acknowledged, zero logged sets, or a handful of
+    /// seconds before the Watch was asked to finalize.
+    private func shouldSaveHealthKit(sessionId: String?) -> (save: Bool, reason: String) {
+        guard sessionId != nil else {
+            return (false, "no_session_id")
+        }
+        guard saraAcknowledged else {
+            return (false, "sara_never_acknowledged")
+        }
+        guard loggedSetCount > 0 else {
+            return (false, "no_sets_logged")
+        }
+        if let startDate = session?.startDate,
+           Date().timeIntervalSince(startDate) < Self.minSaveSeconds {
+            return (false, "under_min_save_seconds")
+        }
+        return (true, "")
+    }
+
     private func finalizeHealthKit(
         discard: Bool,
         preserveTerminalCommand: Bool = false,
-        sessionId explicitSessionId: String? = nil
+        sessionId explicitSessionId: String? = nil,
+        endDate: Date? = nil
     ) async {
         // State-bearing phone replies are deliberately fanned out over the
         // mirror and WatchConnectivity. The same terminal message can arrive
@@ -1039,8 +1137,18 @@ public final class WorkoutManager: NSObject, ObservableObject {
             )
             return
         }
-        let endDate = Date()
-        session.stopActivity(with: endDate)
+        let now = Date()
+        // Sara's own completion time is authoritative for a saved workout —
+        // the Watch may not finalize until it reconnects, sometimes much
+        // later (§Phase 1 step 2). Clamped so a stale or skewed value can
+        // never predate the HealthKit start or postdate "now".
+        var effectiveEndDate = discard ? now : (endDate ?? now)
+        if let hkStart = session.startDate {
+            effectiveEndDate = max(effectiveEndDate, hkStart.addingTimeInterval(1))
+        }
+        effectiveEndDate = min(effectiveEndDate, now)
+
+        session.stopActivity(with: effectiveEndDate)
         session.end()
         stopElapsedTimer()
 
@@ -1054,7 +1162,7 @@ public final class WorkoutManager: NSObject, ObservableObject {
         }
 
         if discard {
-            try? await builder.endCollection(at: endDate)
+            try? await builder.endCollection(at: effectiveEndDate)
             builder.discardWorkout()
             send(.healthkitFinished, payload: ["discarded": .bool(true)], sessionId: sessionId)
             await teardown(
@@ -1065,8 +1173,28 @@ public final class WorkoutManager: NSObject, ObservableObject {
             return
         }
 
+        // Even an explicit Finish must pass the gate: a false start Sara
+        // never acknowledged, or one where nothing was logged, is not a
+        // workout and must not land in Health (§Phase 1 step 1).
+        let gate = shouldSaveHealthKit(sessionId: sessionId)
+        guard gate.save else {
+            recordDiagnostic(stage: "healthkit_discarded_by_gate:\(gate.reason)")
+            try? await builder.endCollection(at: effectiveEndDate)
+            builder.discardWorkout()
+            send(.healthkitFinished, payload: [
+                "discarded": .bool(true),
+                "reason": .string(gate.reason),
+            ], sessionId: sessionId)
+            await teardown(
+                discardingHealthKit: true,
+                preserveTerminalCommand: preserveTerminalCommand,
+                sessionId: sessionId
+            )
+            return
+        }
+
         do {
-            try await builder.endCollection(at: endDate)
+            try await builder.endCollection(at: effectiveEndDate)
             // Stamp the Sara session onto the workout's metadata so ingestion
             // can bind the two without guessing (§6.4).
             if let sessionId {
@@ -1075,7 +1203,7 @@ public final class WorkoutManager: NSObject, ObservableObject {
             let workout = try await builder.finishWorkout()
             send(.healthkitFinished, payload: [
                 "workout_uuid": .string(workout?.uuid.uuidString ?? ""),
-                "ended_at": .string(ISO8601DateFormatter.sara.string(from: endDate)),
+                "ended_at": .string(ISO8601DateFormatter.sara.string(from: effectiveEndDate)),
                 "total_energy_kcal": .number(
                     workout?.statistics(for: HKQuantityType(.activeEnergyBurned))?
                         .sumQuantity()?.doubleValue(for: .kilocalorie()) ?? 0
@@ -1097,10 +1225,14 @@ public final class WorkoutManager: NSObject, ObservableObject {
     ) async {
         mirrorRetryTask?.cancel()
         mirrorRetryTask = nil
+        orphanWatchdogTask?.cancel()
+        orphanWatchdogTask = nil
         mirrorAttached = false
         session = nil
         builder = nil
         sessionState = .ended
+        loggedSetCount = 0
+        saraAcknowledged = false
         // A failed start is torn down too, and overwriting `.failed` with
         // `.ended` here would erase the one piece of state the error screen
         // needs — leaving David back at a bare "Couldn't start".

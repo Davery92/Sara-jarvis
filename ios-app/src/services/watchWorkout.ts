@@ -436,7 +436,7 @@ class WatchWorkoutBridge {
 
   async endWatchWorkout(
     reason: string,
-    options: { discarded?: boolean; summary?: unknown } = {}
+    options: { discarded?: boolean; summary?: unknown; endedAt?: string } = {}
   ): Promise<void> {
     const sessionId = workoutCoordinator.sessionId;
     // Build 8 Watch apps predate `workout_ended`. They already treat an
@@ -458,6 +458,9 @@ class WatchWorkoutBridge {
       reason,
       discarded: options.discarded ?? false,
       summary: options.summary ?? null,
+      // Sara's own completion time, not whenever the Watch happens to
+      // reconnect and finalize (Watch HealthKit hygiene plan §Phase 1 step 2).
+      ...(options.endedAt ? { ended_at: options.endedAt } : {}),
     });
     // `session.end()` on the iPhone mirror is not a remote command. Tell the
     // Watch explicitly, over the durable channel, before tearing the mirror

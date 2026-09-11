@@ -10,7 +10,10 @@ query-free "top confidence" path + the shared prose formatter.
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from app.services.memory_recall import _fact_text, _from_facts, _from_search_memory, recall_facts_prose
+from app.services.memory_recall import (
+    _attach_context_for_thin_episodes, _fact_text, _from_facts,
+    _from_search_memory, recall_facts_prose,
+)
 
 
 class TestFactText:
@@ -170,6 +173,56 @@ class TestEpisodeConfidenceTier:
             traces = await _from_search_memory("user-1", "q", ["episode"], 5)
 
         assert traces[0]["confidence"] == "observed"  # _KIND_CONFIDENCE default
+
+
+class TestAttachContextForThinEpisodes:
+    """Conversation competence plan Phase 2: a clipped fragment like "Yes"
+    or "same as last time" can't stand alone once pulled into recall — it
+    needs the turn before it."""
+
+    def _mock_db_factory(self, row):
+        mock_db = MagicMock()
+        mock_result = MagicMock()
+        mock_result.mappings.return_value.first.return_value = row
+        mock_db.execute = AsyncMock(return_value=mock_result)
+        mock_session_cm = MagicMock()
+        mock_session_cm.__aenter__ = AsyncMock(return_value=mock_db)
+        mock_session_cm.__aexit__ = AsyncMock(return_value=False)
+        mock_factory = MagicMock(return_value=mock_session_cm)
+        return mock_factory, mock_db
+
+    @pytest.mark.asyncio
+    async def test_thin_episode_gets_preceding_turn_prepended(self):
+        mock_factory, mock_db = self._mock_db_factory(
+            {"role": "user", "content": "Did you log my workout from this morning?"}
+        )
+        traces = [{"kind": "episode", "id": "ep-2", "text": "Yes", "score": 0.5, "confidence": "observed"}]
+        with patch("app.db.session.get_async_session_factory", return_value=mock_factory):
+            out = await _attach_context_for_thin_episodes("user-1", traces)
+
+        assert "Did you log my workout" in out[0]["text"]
+        assert "Yes" in out[0]["text"]
+        mock_db.execute.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_long_episode_is_left_untouched(self):
+        text = "x" * 200
+        traces = [{"kind": "episode", "id": "ep-1", "text": text, "score": 0.5}]
+        out = await _attach_context_for_thin_episodes("user-1", traces)
+        assert out[0]["text"] == text
+
+    @pytest.mark.asyncio
+    async def test_non_episode_kinds_are_left_untouched(self):
+        traces = [{"kind": "note", "id": "n-1", "text": "ok", "score": 0.5}]
+        out = await _attach_context_for_thin_episodes("user-1", traces)
+        assert out[0]["text"] == "ok"
+
+    @pytest.mark.asyncio
+    async def test_lookup_failure_does_not_raise(self):
+        traces = [{"kind": "episode", "id": "ep-1", "text": "ok", "score": 0.5}]
+        with patch("app.db.session.get_async_session_factory", side_effect=RuntimeError("db down")):
+            out = await _attach_context_for_thin_episodes("user-1", traces)
+        assert out[0]["text"] == "ok"
 
 
 class TestRetrievalStrengthening:

@@ -44,6 +44,13 @@ class WorkoutCoachingService {
   /** Surfaced in the workout UI so the sentence is readable, not only audible. */
   private displayListeners = new Set<(event: CoachingEvent | null) => void>();
   private current: CoachingEvent | null = null;
+  /**
+   * Fired once per workout the first time coaching audio is skipped because
+   * no headphones are connected — the phone speaker is never a fallback
+   * (Watch HealthKit hygiene plan §Phase 3 step 4).
+   */
+  private noHeadphonesListeners = new Set<() => void>();
+  private headphonesWarned = false;
 
   /**
    * Turn coaching on for a workout.
@@ -59,12 +66,17 @@ class WorkoutCoachingService {
     this.enabled = speaks;
     setWorkoutAudioPolicy(speaks);
 
+    this.headphonesWarned = false;
     if (!this.playbackUnsub) {
       this.playbackUnsub = addCoachingPlaybackListener((event) => {
         if (event.state === 'restore_failed') {
           // Music that never came back is the loudest possible bug. Worth a
           // log line even though we cannot fix it from here.
           console.warn('[WorkoutCoaching] other audio may still be ducked:', event.error);
+        }
+        if (event.state === 'no_headphones' && !this.headphonesWarned) {
+          this.headphonesWarned = true;
+          this.noHeadphonesListeners.forEach((l) => l());
         }
       });
     }
@@ -91,6 +103,7 @@ class WorkoutCoachingService {
     this.spoken.clear();
     this.resolvedProposals.clear();
     this.lastVersionSeen = 0;
+    this.headphonesWarned = false;
     this.setCurrent(null);
   }
 
@@ -99,6 +112,12 @@ class WorkoutCoachingService {
     this.displayListeners.add(listener);
     listener(this.current);
     return () => this.displayListeners.delete(listener);
+  }
+
+  /** Subscribe to the once-per-workout "no headphones" notice. */
+  onNoHeadphones(listener: () => void): () => void {
+    this.noHeadphonesListeners.add(listener);
+    return () => this.noHeadphonesListeners.delete(listener);
   }
 
   /**

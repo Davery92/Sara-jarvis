@@ -523,6 +523,46 @@ class TestTheoryOfDavid:
         mock_store.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_normal_stress_reading_is_omitted_from_substrate(self, journal_service):
+        """Conversation competence plan Phase 4: a moderate/normal stress
+        reading is inferred from device patterns, not something David said —
+        narrating it every cycle is how "a low-stress equilibrium" became
+        "established understanding" of him. Absence, not a calm baseline, is
+        the correct entry for an unremarkable day."""
+        with patch.object(journal_service, "get_theory_of_david", new=AsyncMock(return_value="Old.")), \
+             patch("app.services.life_facts.get_life_facts_summary", new=AsyncMock(return_value=None)), \
+             patch("app.services.behavioral_pattern_service.behavioral_pattern_service.get_active_patterns",
+                   new=AsyncMock(return_value=[])), \
+             patch("app.services.working_memory.read_memory",
+                   new=AsyncMock(return_value=MagicMock(stress_load=0.15, alertness=0.5, circadian_phase="normal"))), \
+             patch.object(journal_service, "_generate_entry", new=AsyncMock(return_value="New.")) as mock_gen, \
+             patch.object(journal_service, "_store_entry", new=AsyncMock()):
+            await journal_service.write_theory_of_david(
+                _arc_db([_arc("commitment", "Finish deck", "Finish the deck")]), "user-1",
+            )
+        prompt = mock_gen.call_args[0][0]
+        assert "stress_load" not in prompt
+        assert "0.15" not in prompt
+
+    @pytest.mark.asyncio
+    async def test_elevated_stress_reading_is_labeled_tentative(self, journal_service):
+        stress_snap = MagicMock(stress_load=0.8, alertness=0.4, circadian_phase="evening")
+        with patch.object(journal_service, "get_theory_of_david", new=AsyncMock(return_value="Old.")), \
+             patch("app.services.life_facts.get_life_facts_summary", new=AsyncMock(return_value=None)), \
+             patch("app.services.behavioral_pattern_service.behavioral_pattern_service.get_active_patterns",
+                   new=AsyncMock(return_value=[])), \
+             patch("app.services.working_memory.read_memory", new=AsyncMock(return_value=stress_snap)), \
+             patch.object(journal_service, "_generate_entry", new=AsyncMock(return_value="New.")) as mock_gen, \
+             patch.object(journal_service, "_store_entry", new=AsyncMock()):
+            await journal_service.write_theory_of_david(
+                _arc_db([_arc("commitment", "Finish deck", "Finish the deck")]), "user-1",
+            )
+        prompt = mock_gen.call_args[0][0]
+        assert "0.80" in prompt
+        assert "inferred, not stated by David" in prompt
+        assert "treat as uncertain" in prompt.lower() or "tentative" in prompt.lower()
+
+    @pytest.mark.asyncio
     async def test_write_theory_of_david_llm_failure_returns_none(self, journal_service):
         with patch.object(journal_service, "get_theory_of_david", new=AsyncMock(return_value="Old understanding.")), \
              patch("app.services.life_facts.get_life_facts_summary", new=AsyncMock(return_value=None)), \

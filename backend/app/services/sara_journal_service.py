@@ -678,12 +678,24 @@ Write only about things that actually happened, named in the entries above. A qu
             logger.debug(f"[theory_of_david] behavioral pattern substrate failed: {e}")
 
         try:
+            # Conversation competence plan Phase 4: stress_load is inferred
+            # from ambient device/activity patterns, not anything David said
+            # — narrating it every cycle is how "a low-stress equilibrium"
+            # became "established understanding" of him. A normal/moderate
+            # reading gets silently omitted (same "absence is the answer"
+            # treatment as open arcs above): there is nothing worth saying
+            # about David being unremarkably fine. Only a genuinely elevated
+            # reading is worth surfacing, and even then it's labeled a
+            # tentative device signal, never settled fact.
             from app.services.working_memory import read_memory
             snap = await read_memory(user_id)
-            substrate_lines.append(
-                f"Current stress signal: {snap.stress_load:.2f} (0=relaxed, 1=highly stressed), "
-                f"alertness {snap.alertness:.2f}, circadian phase {snap.circadian_phase}"
-            )
+            if snap.stress_load >= 0.6:
+                substrate_lines.append(
+                    f"Tentative device signal (inferred, not stated by David — treat as "
+                    f"uncertain): elevated stress_load {snap.stress_load:.2f} (0=relaxed, "
+                    f"1=highly stressed), alertness {snap.alertness:.2f}, "
+                    f"circadian phase {snap.circadian_phase}"
+                )
         except Exception as e:
             logger.debug(f"[theory_of_david] stress substrate failed: {e}")
 
@@ -738,7 +750,9 @@ Drop stale items SILENTLY. Do not write sentences about what you are dropping, r
 
 Never state a clock time here. David's routine times are stated once, by the life-facts line, and repeating one in your own words is how the same departure ended up in a single prompt three times over as "leave ~6:24", "7 AM departure" and "leaves for work 7am". Write about what he is like, not what time he does things.
 
-Do not count anything. "Eight live items requiring attention" was written on a day there were three standing orders and two cancelled reminders — a number you assemble here is a number nothing checks.'''
+Do not count anything. "Eight live items requiring attention" was written on a day there were three standing orders and two cancelled reminders — a number you assemble here is a number nothing checks.
+
+If a "Tentative device signal" line is present above, it is an inference from ambient device/activity patterns, not something David told you — mention it only as a tentative impression ("seems like a heavier stretch lately"), never as settled fact about how he feels, and never invent a stress or mood reading when that line is absent. No line present means no signal worth mentioning, not "he's relaxed" — do not manufacture a calm baseline to fill the silence.'''
 
         content = await self._generate_entry(prompt)
         if not content:

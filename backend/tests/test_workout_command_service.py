@@ -464,6 +464,25 @@ async def test_complete_links_the_exact_healthkit_workout(pg, svc, user_id):
 
 @requires_pg
 @pytest.mark.asyncio
+async def test_complete_rejects_healthkit_ended_at_before_started(pg, svc, user_id):
+    """Watch HealthKit hygiene plan §Phase 3 step 5 — a clock skew or a stale
+    replay must never save a workout that appears to end before it started."""
+    tid = _template(pg, user_id)
+    sid = (await svc.start(pg, user_id, tid))["projection"]["session_id"]
+
+    with pytest.raises(ValueError):
+        await svc.execute(pg, user_id, _envelope(
+            "complete", sid, 1,
+            {"healthkit_ended_at": "2020-01-01T00:00:00Z"}, "watch"
+        ))
+
+    assert pg.execute(text(
+        "SELECT status FROM active_workout_session WHERE id = :s"
+    ), {"s": sid}).scalar() == "active"
+
+
+@requires_pg
+@pytest.mark.asyncio
 async def test_healthkit_link_endpoint_is_idempotent(pg, svc, user_id):
     tid = _template(pg, user_id)
     sid = (await svc.start(pg, user_id, tid))["projection"]["session_id"]

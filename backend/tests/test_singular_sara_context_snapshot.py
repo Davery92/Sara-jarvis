@@ -26,6 +26,9 @@ def _db_returning(*results):
         def fetchone(self):
             return self._value
 
+        def fetchall(self):
+            return self._value
+
     db = SimpleNamespace()
     db.execute = lambda *a, **kw: _Result(calls.pop(0))
     return db
@@ -46,7 +49,10 @@ class TestWorldState:
             "app.services.unified_context.read_snapshot",
             AsyncMock(side_effect=RuntimeError("not under test here")),
         )
-        db = _db_returning(3, 5)  # calendar count, then thread count
+        # calendar count, thread count, then the upcoming-events fetchall
+        # (ground-truth Phase 2 added it to the same calendar_horizon slice,
+        # so an IndexError here would degrade the slice confidence we assert).
+        db = _db_returning(3, 5, [])
         state = await ctx.get_world_state(db, "user-1")
 
         assert state.active_calendar_events == 3
@@ -205,15 +211,52 @@ class TestRelationshipState:
         entry_type='theory_of_david' row directly (sync inline query, not
         through sara_journal's async method — get_relationship_state itself
         is sync)."""
+        from datetime import datetime, timezone
         rows = [
             SimpleNamespace(fetchone=lambda: None),  # conversation query — none active
-            SimpleNamespace(fetchone=lambda: SimpleNamespace(content="David trains around 1pm.")),
+            SimpleNamespace(fetchone=lambda: SimpleNamespace(
+                content="David trains around 1pm.", created_at=datetime.now(timezone.utc),
+            )),
         ]
         db = SimpleNamespace()
         db.execute = lambda *a, **kw: rows.pop(0)
         state = ctx.get_relationship_state(db, "user-1")
 
         assert state.theory_of_david == "David trains around 1pm."
+
+    def test_stale_theory_of_david_is_suppressed(self):
+        """Conversation competence plan Phase 4: a row the dreaming cycle
+        hasn't refreshed in days must not be presented as current
+        understanding forever."""
+        from datetime import datetime, timedelta, timezone
+        rows = [
+            SimpleNamespace(fetchone=lambda: None),
+            SimpleNamespace(fetchone=lambda: SimpleNamespace(
+                content="Stale narrative.",
+                created_at=datetime.now(timezone.utc) - timedelta(days=10),
+            )),
+        ]
+        db = SimpleNamespace()
+        db.execute = lambda *a, **kw: rows.pop(0)
+        state = ctx.get_relationship_state(db, "user-1")
+
+        assert state.theory_of_david is None
+
+    def test_naive_created_at_is_handled(self):
+        """sara_journal.created_at may come back naive depending on driver —
+        must not raise comparing it against an aware `now`."""
+        from datetime import datetime
+        rows = [
+            SimpleNamespace(fetchone=lambda: None),
+            SimpleNamespace(fetchone=lambda: SimpleNamespace(
+                content="Fresh but naive.", created_at=datetime.utcnow(),
+            )),
+        ]
+        db = SimpleNamespace()
+        db.execute = lambda *a, **kw: rows.pop(0)
+        state = ctx.get_relationship_state(db, "user-1")
+
+        assert state.theory_of_david == "Fresh but naive."
 
     def test_theory_of_david_read_failure_degrades_silently(self):
         """Same slice-isolation discipline as self_story — a broken

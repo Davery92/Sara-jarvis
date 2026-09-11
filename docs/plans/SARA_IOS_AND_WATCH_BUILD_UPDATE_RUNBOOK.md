@@ -325,3 +325,44 @@ For each installed build, record:
 - known limitations.
 
 This turns the next update into a controlled release instead of another provisioning investigation.
+
+### 2026-09-09 — HealthKit hygiene and v2 cutover, build 12
+
+- Source: `feat/sara-mind-v2` at `1f0b5797320a98e5b1758c0e5384e5e52ca52f76`,
+  plus the uncommitted Phase 1–4 changes from
+  `SARA_WATCH_HEALTHKIT_HYGIENE_AND_V2_CUTOVER_PLAN_2026_09_09.md`.
+- App: Sara 1.0.0 (12). Local Mac build on macOS 26.6 with Xcode 27 beta 4 /
+  iOS 27 and watchOS 27 SDKs. The build script's stale
+  `CURRENT_PROJECT_VERSION=10` override was corrected to 12.
+- Devices: iPhone 15 Pro Max on iOS 27.0; Apple Watch Ultra on watchOS 26.6.
+  Apple Development signing with automatic team provisioning.
+- Build/install: the first build found a missing generated Share extension
+  entitlement. A clean Expo prebuild regenerated the native project and pods;
+  the next Release build succeeded. Both build-12 bundles were verified,
+  installed directly, and launched successfully.
+- Catalog/cross-device sync: passed. A Watch start appeared on the phone, and a
+  phone start plus logged set appeared on the Watch with live heart rate.
+- Device matrix evidence:
+  - Watch start, two sets, Finish: passed. Sara recorded 6m34s, Apple Fitness
+    displayed one 7-minute workout, and the session linked one HealthKit UUID.
+  - Watch abandon with zero sets: discard path passed (the exercised session
+    was 7s rather than the planned 1m); no HealthKit UUID was linked.
+  - Orphan timeout: partial only. A locked phone accepted the background start,
+    proving lock alone does not create an orphan. With the phone offline the
+    Watch showed `Apple workout running — Sara unreachable` and no Sara session
+    was created, but the user manually discarded before the 10-minute watchdog.
+  - Phone start, one set, complete: passed. Sara recorded 6m19.6s, Apple Fitness
+    displayed one 6-minute workout, and HealthKit ended 17ms after the phone's
+    completion timestamp.
+  - Phone complete under 5m, phone completion with Watch offline for 20m, and
+    Diagnostics stray-workout deletion were waived by David on 2026-09-09.
+- Cutover: David accepted the partial matrix and approved activation.
+  `WORKOUT_COMMAND_V2_ENABLED`, `WATCH_WORKOUT_ENABLED`, and
+  `WORKOUT_COACHING_AUDIO_ENABLED` are ON in the development database with
+  `updated_by=watch_plan_2026_09_09`. Production was not changed. Direct flag
+  readback confirmed all three true; unauthenticated
+  `GET /api/diagnostics/feature-flags` correctly returned 401, and no user
+  credential was supplied for an authenticated HTTP readback.
+- Post-cutover tests: 83 passed. Three rollback tests initially inherited the
+  now-live shared flag; they were fixed to pin `_v2_enabled=False`, then the
+  full four-file workout suite passed (83 passed, 24 warnings).

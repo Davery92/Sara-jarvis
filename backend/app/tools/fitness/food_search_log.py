@@ -30,11 +30,13 @@ class FoodSearchAndLogTool(BaseTool):
 
     @property
     def description(self) -> str:
-        return ("PREFERRED TOOL for logging meals. Parse natural language food descriptions "
-                "(e.g., '3 eggs and 4oz ground beef' or 'chicken breast 6oz and rice 1 cup'), "
-                "automatically search FatSecret nutrition database for accurate data, calculate nutritional totals, "
-                "and log the meal. Use this whenever the user mentions eating food in natural language. "
-                "This provides accurate FatSecret nutrition data instead of estimates.")
+        return ("PREFERRED TOOL for logging meals David has ALREADY EATEN or is explicitly asking "
+                "you to log (e.g., '3 eggs and 4oz ground beef', 'log chicken breast 6oz and rice 1 cup'). "
+                "Parses the food description, searches FatSecret for accurate nutrition data, and writes "
+                "a consumed-food entry. Do NOT call this for a planned or future meal ('dinner is going to "
+                "be...', 'I'm going to make...', 'thinking about having...') — discuss those in reply, don't "
+                "log them; only call this once the food has actually been eaten or David explicitly says to "
+                "log it. Use the food's exact wording from David's own message, not an inferred substitute.")
 
     @property
     def parameters(self) -> Dict[str, Any]:
@@ -54,16 +56,94 @@ class FoodSearchAndLogTool(BaseTool):
             "required": ["user_input", "meal_type"]
         }
 
+    # A planned/future meal must not become a consumed-food write (conversation
+    # competence plan, Phase 1 "Food actions"): "dinner is going to be taco
+    # pasta salad" is a plan, not a report of eating, and the model has no
+    # business inventing quantities for something that hasn't happened.
+    _PLAN_RE = re.compile(
+        r"\b(going to (be|have|make|eat|get)|gonna (be|have|make|eat)|will be|"
+        r"planning (to|on)|planned? (to|on)|thinking (about|of) (having|making)|"
+        r"about to (eat|make|have)|tomorrow|later (tonight|today)|next (week|time)|"
+        r"tonight'?s? (dinner|meal) (is|will be))\b",
+        re.IGNORECASE,
+    )
+    _EXPLICIT_LOG_RE = re.compile(r"\b(log|logged|logging|track|record)\b", re.IGNORECASE)
+    _COMPLETED_RE = re.compile(
+        r"\b(ate|had|just (ate|had|finished)|already (ate|had)|finished eating|"
+        r"i'?(ve| have) (eaten|had)|ended up (eating|having))\b", re.IGNORECASE,
+    )
+    _STOPWORDS = {
+        "a", "an", "the", "and", "with", "of", "some", "for", "to", "in", "on", "my", "i",
+        "just", "had", "ate", "eat", "eating", "dinner", "lunch", "breakfast", "snack",
+        "today", "tonight", "was", "is", "it", "that",
+    }
+
+    @classmethod
+    def _tokenize(cls, s: str) -> set:
+        return {w for w in re.findall(r"[a-z]+", (s or "").lower()) if w not in cls._STOPWORDS}
+
+    @classmethod
+    def _grounded_in_user_turn(cls, user_input: str, raw_turn: Optional[str]) -> bool:
+        """True unless `raw_turn` is available and clearly doesn't back up
+        `user_input` — catches the model filling in food/quantities David
+        never said, without requiring exact-string matching."""
+        if not raw_turn:
+            return True  # nothing to check against (non-chat origin, etc.) — don't block
+        input_words = cls._tokenize(user_input)
+        if not input_words:
+            return True
+        overlap = input_words & cls._tokenize(raw_turn)
+        return len(overlap) >= max(1, len(input_words) // 2)
+
     async def execute(self, user_id: str, **kwargs) -> ToolResult:
         """Execute the food search and log operation"""
         user_input = kwargs.get("user_input", "")
         meal_type = kwargs.get("meal_type", "")
+        raw_user_turn = kwargs.get("_raw_user_turn")
 
         if not user_input or not meal_type:
             return ToolResult(
                 success=False,
                 message="Missing required parameters: user_input and meal_type"
             )
+
+        if raw_user_turn:
+            has_explicit_log = self._EXPLICIT_LOG_RE.search(raw_user_turn)
+            if (self._PLAN_RE.search(raw_user_turn) and not has_explicit_log
+                    and not self._COMPLETED_RE.search(raw_user_turn)):
+                return ToolResult(
+                    success=False,
+                    message=(
+                        "That reads like a plan for later, not something already eaten — "
+                        "not logging it as consumed. Mention it again once it's actually "
+                        "eaten (or say \"log it\") and it'll go in."
+                    ),
+                )
+            if not self._grounded_in_user_turn(user_input, raw_user_turn):
+                return ToolResult(
+                    success=False,
+                    message=(
+                        f"'{user_input}' doesn't match what David actually said — "
+                        "use his own words for the food and quantity, or ask him to confirm, "
+                        "before logging."
+                    ),
+                )
+
+        try:
+            from app.services.corrections import find_retracted_match
+            from app.db.session import get_async_session_factory
+            async with get_async_session_factory()() as _corr_db:
+                retracted = await find_retracted_match(_corr_db, user_id, user_input)
+            if retracted:
+                return ToolResult(
+                    success=False,
+                    message=(
+                        "David already removed a matching entry and asked not to have it "
+                        "re-logged — not recreating it. Ask him before logging it again."
+                    ),
+                )
+        except Exception as e:
+            logger.debug(f"food_search_and_log retraction check skipped: {e}")
 
         try:
             # Parse food items from natural language

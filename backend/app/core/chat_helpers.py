@@ -126,6 +126,41 @@ def _message_role_content_signature(message: Any) -> tuple[str, str]:
     return role, normalized_content
 
 
+def resolve_should_load_db_history(
+    client_message_count: int,
+    has_conversation_id: bool,
+    stored_episode_count: Optional[int] = None,
+) -> bool:
+    """Should this turn fall back to server-stored conversation history?
+
+    Conversation competence plan Phase 2 (audit of the ">2 messages" rule):
+    a client sending 2 or fewer messages isn't tracking history itself, so
+    the server always backfills from storage. A client sending more is
+    normally the web app resending its full local conversation state —
+    correct to trust as-is, and the common case, so this does NOT
+    unconditionally reload history for every multi-message request (that
+    would double-inject history for a client that already sent all of it).
+
+    But "client sent more than 2 messages" quietly became "assume the
+    client sent everything," which breaks on a reload/reconnect where the
+    client's local state is itself a partial slice of a much longer stored
+    conversation. `stored_episode_count` (a cheap COUNT, not a content
+    fetch) catches that: when storage holds meaningfully more turns than
+    the client just sent, the client's payload is a fragment, not the
+    whole conversation, and history must be backfilled regardless of the
+    message count. The +5 slack absorbs normal count drift (a turn not
+    flushed yet, a system/tool message the client doesn't echo back) so a
+    client that genuinely sent its whole history isn't second-guessed.
+    """
+    if not has_conversation_id:
+        return False
+    if client_message_count <= 2:
+        return True
+    if stored_episode_count is not None and stored_episode_count > client_message_count + 5:
+        return True
+    return False
+
+
 def _compute_message_overlap(existing_messages: List[Any], incoming_messages: List[Any]) -> int:
     """
     Find the largest overlap where suffix(existing) == prefix(incoming).

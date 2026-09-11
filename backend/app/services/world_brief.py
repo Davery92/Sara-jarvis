@@ -391,7 +391,8 @@ async def sweep_brief(db, user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]:
         window_start = naive_local_now()
         window_end = window_start + timedelta(days=7)
         rows = (await db.execute(text("""
-            SELECT id, title, start_time, end_time, COALESCE(all_day, FALSE) AS all_day
+            SELECT id, title, start_time, end_time, COALESCE(all_day, FALSE) AS all_day,
+                   owner, owner_relation
             FROM calendar_event
             WHERE user_id = :uid
               AND COALESCE(end_time, start_time) >= :window_start
@@ -406,6 +407,16 @@ async def sweep_brief(db, user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]:
             # for a date-scoped item, invisibility was not.
             start_anchor = to_utc(r.start_time)  # naive ET -> aware UTC for storage
             title = f"{r.title} (all day)" if r.all_day else r.title
+            # Same ownership convention as day_replay_builder — an untagged
+            # title in the brief reads as David's own plan by default, which
+            # is exactly the gap that turned a family member's appointment
+            # into David's.
+            _owner = r.owner or "self"
+            if _owner not in ("self", "unknown"):
+                _who = "the family" if _owner == "family" else _owner
+                title = f"[{_who}'s] {title} — not David's"
+            elif _owner == "unknown":
+                title = f"[owner unclear] {title}"
             content = {"text": title, "at": start_anchor.isoformat(), "kind": "calendar"}  # time-ok: absolute storage; render_brief renders it
             if r.end_time:
                 content["migrate_at"] = to_utc(r.end_time).isoformat()  # time-ok: absolute storage; render_brief renders it
@@ -582,7 +593,29 @@ def _body_training_live(user_id: str, away: bool = False) -> str:
                 if recovery.get("sleep_hours") is not None:
                     bits.append(f"sleep {recovery['sleep_hours']:.1f}h")
                 if recovery.get("hrv") is not None:
-                    bits.append(f"HRV {recovery['hrv']:.0f}")
+                    # Same outlier guard as context_snapshot's health_today slice
+                    # (gotcha_chat_amnesia_brief_clip_2026_09_06 Phase 5 §2) — without
+                    # it this line and the chat context can disagree on the same
+                    # sample: one calling it a sensor blip, the other reporting it
+                    # as settled recovery.
+                    _hrv_tag = ""
+                    try:
+                        from datetime import datetime as _dt, timezone as _tz
+                        _now_utc = _dt.now(_tz.utc)
+                        _median = db.execute(text("""
+                            SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY value)
+                            FROM health_metric
+                            WHERE user_id = :uid AND metric_type IN ('hrv_morning', 'hrv')
+                                  AND recorded_at >= :since AND recorded_at < :until
+                        """), {
+                            "uid": user_id,
+                            "since": _now_utc - timedelta(days=15), "until": _now_utc - timedelta(hours=36),
+                        }).scalar()
+                        if _median and (recovery["hrv"] > _median * 2 or recovery["hrv"] < _median * 0.4):
+                            _hrv_tag = ", unverified — outside 14-day range"
+                    except Exception as e:
+                        logger.debug(f"[world_brief] hrv outlier check failed: {e}")
+                    bits.append(f"HRV {recovery['hrv']:.0f}{_hrv_tag}")
                 if recovery.get("soreness_level") is not None:
                     bits.append(f"soreness {recovery['soreness_level']}/5")
                 lines.append(f"- Recovery: {factor_label} ({', '.join(bits)})." if bits

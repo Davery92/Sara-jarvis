@@ -96,6 +96,13 @@ def v2_on(monkeypatch):
     monkeypatch.setattr(mod, "_v2_enabled", lambda: True)
 
 
+@pytest.fixture
+def v2_off(monkeypatch):
+    """Pin rollback behavior even when the shared dev flag is enabled."""
+    import app.services.workout_command_service as mod
+    monkeypatch.setattr(mod, "_v2_enabled", lambda: False)
+
+
 def _history(pg, user_id, exercise, weight, reps, rpe, days_ago):
     """A completed session in the past, so progression has something to read."""
     wid = str(uuid.uuid4())
@@ -231,7 +238,9 @@ async def test_approved_progression_becomes_the_next_workouts_prescription(
 
 @requires_pg
 @pytest.mark.asyncio
-async def test_without_the_flag_progression_is_applied_as_before(pg, svc, user_id, template):
+async def test_without_the_flag_progression_is_applied_as_before(
+    pg, svc, user_id, template, v2_off
+):
     """Rollback path: flag off means today's behaviour, no proposal gate."""
     _history(pg, user_id, "Front Squat", 185, 5, 7, days_ago=4)
     proj = (await svc.start(pg, user_id, template))["projection"]
