@@ -130,15 +130,17 @@ NTFY_DOCUMENTS_TOPIC = _app_state.ntfy_documents_topic
 # for the presence tool diet (Flag.PRESENCE_TOOL_DIET), replacing the 25-tool
 # "always add" category list. Background dispatch is deliberately not part of
 # this unconditional core; it is admitted per turn by the policy below.
-# Per-conversation sticky tool-category order for the chat lane's prompt cache
-# (see the Presence diet block in /chat/stream). session_id -> [categories].
-_CHAT_STICKY_TOOL_CATEGORIES: Dict[str, List[str]] = {}
-_CHAT_STICKY_MAX_CATEGORIES = 10
+# Per-conversation sticky tool NAMES for the chat lane (harness rebuild Phase 2).
+# This used to be sticky *categories*, append-only, which is how a single
+# conversation reached 94 tool schemas / 16.9k prompt tokens on 2026-09-11.
+# Names, capped and FIFO, come either from `find_tools` (the model asked) or
+# from retrieval on an earlier turn. session_id -> [tool names].
+_CHAT_STICKY_TOOL_NAMES: Dict[str, List[str]] = {}
+_CHAT_STICKY_MAX_NAMES = 20
 
-_PRESENCE_CORE_TOOL_NAMES = [
-    "memory_search", "notes_create", "notes_search",
-    "list_add", "list_view", "reminders_create", "calendar_list",
-]
+# The per-turn core lives in app.services.tool_retrieval.CORE_TOOLS; this alias
+# is kept because older call sites (non-chat lanes) still import the name.
+from app.services.tool_retrieval import CORE_TOOLS as _PRESENCE_CORE_TOOL_NAMES  # noqa: E402
 
 _BACKGROUND_DISPATCH_TOOL_NAMES = {"dispatch_and_monitor", "dispatch_agent_task"}
 _BACKGROUND_REQUEST_PHRASES = (
@@ -1552,6 +1554,10 @@ class SimpleLLMClient:
         self._activity_responding_emitted = False
         failed_tool_counts: Dict[str, int] = {}
         disabled_tool_names = set()
+        # The live tool list for this turn. `find_tools` mutates it, and every
+        # follow-up payload reads it — not the `tools` argument — so a tool the
+        # model asks for is callable on the very next round.
+        self._active_tools = list(tools or [])
         try:
             logger.info(f"🔧 chat_with_tools called with conversation_id: {conversation_id}, model: {model}, ephemeral: {ephemeral}")
 
@@ -1824,7 +1830,7 @@ class SimpleLLMClient:
                     await self.emit_activity("synthesizing", round_num=round_num + 1)
 
                     follow_up_tools = [
-                        tool for tool in tools
+                        tool for tool in self._active_tools
                         if tool.get("function", {}).get("name") not in disabled_tool_names
                     ]
 
@@ -2230,6 +2236,17 @@ class SimpleLLMClient:
                     except Exception as e:
                         logger.warning(f"Failed to store workspace_command in Redis: {e}")
 
+            # find_tools is the one tool with a side effect on the turn itself:
+            # the names it returns become callable immediately (this turn's
+            # follow-up payload) and stay loaded for the conversation.
+            if function_name == "find_tools" and reg_result.success:
+                try:
+                    self._load_tools_midturn(
+                        (reg_result.data or {}).get("loaded") or [], conversation_id
+                    )
+                except Exception as _lt_err:
+                    logger.warning(f"⚠️ find_tools mid-turn load failed: {_lt_err}")
+
             result = json.dumps({
                 "success": reg_result.success,
                 "message": reg_result.message,
@@ -2292,6 +2309,41 @@ class SimpleLLMClient:
             "tool_call_id": tool_call["id"],
             "content": str(result)
         }
+
+    def _load_tools_midturn(self, names: List[str], conversation_id: Optional[str]) -> None:
+        """Append tool schemas to the live tool list mid-turn (find_tools).
+
+        `self._active_tools` — not the `tools` argument — is what the follow-up
+        payload builder reads, so a tool loaded here is callable on the very
+        next round rather than a round later. The names also go on the
+        conversation's sticky list so the next turn starts with them.
+        """
+        if not names:
+            return
+        active = getattr(self, "_active_tools", None)
+        if active is None:
+            return
+        from app.services.tool_retrieval import MAX_TOOLS_PER_CALL
+
+        present = {(t.get("function") or {}).get("name") for t in active}
+        new_names = [n for n in names if n not in present]
+        if not new_names:
+            return
+        room = max(0, MAX_TOOLS_PER_CALL + len(new_names) - len(active))
+        added = tool_registry.get_tools_by_names(new_names[:room])
+        active.extend(added)
+        logger.info(
+            f"🧰 find_tools loaded {[(t.get('function') or {}).get('name') for t in added]} "
+            f"mid-turn ({len(active)} tools now active)"
+        )
+        sticky_key = getattr(self, "_sticky_key", None) or conversation_id
+        if sticky_key:
+            sticky = _CHAT_STICKY_TOOL_NAMES.setdefault(sticky_key, [])
+            for n in new_names:
+                if n not in sticky:
+                    sticky.append(n)
+            if len(sticky) > _CHAT_STICKY_MAX_NAMES:
+                del sticky[:-_CHAT_STICKY_MAX_NAMES]
 
     def get_citations(self):
         return list(self._citations)
@@ -7232,6 +7284,17 @@ async def startup_event():
     except Exception as e:
         logger.debug(f"capability manifest check skipped: {e}")
 
+    # 1a2. Warm the tool-description embedding index (harness rebuild Phase 2).
+    # ~300 tools x ~21ms on the GPU embeddings host, and Redis-cached by a hash
+    # of the names+descriptions, so this is ~6s on the first boot after a tool
+    # changes and free after that. Backgrounded: chat must not wait on it, and
+    # retrieval lazily builds if the first turn beats the warm-up.
+    try:
+        from app.services.tool_retrieval import warm_tool_index
+        asyncio.create_task(warm_tool_index())
+    except Exception as e:
+        logger.debug(f"tool index warm-up not scheduled: {e}")
+
     # 1b. Recover orphaned agent dispatch tasks (non-critical)
     try:
         from app.services.agent_dispatch import agent_dispatch_service
@@ -8979,58 +9042,63 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                                 effective_categories.append(category)
                         tools = tool_registry.get_tools_by_categories(effective_categories)
                         logger.info(f"💼 Work mode: Loaded {len(tools)} tools from categories: {effective_categories}")
-                    elif tool_categories:
-                        # Standard chat uses intent-based tool loading from classify_with_context
+                    else:
+                        # Standard chat. The diet branch no longer depends on the
+                        # classifier producing categories at all — retrieval reads
+                        # David's sentence directly — so it is reached even when
+                        # classification returns nothing.
                         from app.core.feature_flags import Flag as _PFlag, is_enabled as _presence_flag_enabled
                         if _presence_flag_enabled(_PFlag.PRESENCE_TOOL_DIET):
-                            # Arc 3.4 (SARA_ALIVE_BUILD_PLAN): the "always add"
-                            # 5-category core (25 tool defs, every turn,
-                            # regardless of intent) traded almost entirely on
-                            # classification already covering the same ground
-                            # (DEVICES/INBOX/PERSONAL_KNOWLEDGE are all their
-                            # own intents — see INTENT_TO_TOOL_CATEGORIES).
-                            # Replaced with a hand-picked, individually-named
-                            # core for quick recall/notes/lists/schedule.
-                            # Background dispatch is added only when the current
-                            # user message passes the explicit policy below.
-                            _diet_tools = tool_registry.get_tools_by_names(_PRESENCE_CORE_TOOL_NAMES)
-                            # Prompt-cache-friendly tool ordering. Qwen3.8's template
-                            # renders the tool schemas at the very top of the prompt,
-                            # so any change in the tool list invalidates llama-server's
-                            # whole prefix (measured: ~11% reuse, 45-55s prompt eval
-                            # per turn). `tool_categories` is a per-turn set that
-                            # changes with intent. So per conversation we keep a
-                            # STICKY, APPEND-ONLY category list in first-seen order:
-                            # new categories only ever append at the end, tools are
-                            # sorted by name within a category, core stays first.
-                            # The prefix therefore survives intent changes within a
-                            # conversation; the cost is a few extra tool schemas on
-                            # later turns (cheap once cached).
-                            _sticky = _CHAT_STICKY_TOOL_CATEGORIES.setdefault(session_id, [])
-                            for _c in sorted(tool_categories):
-                                if _c not in _sticky:
-                                    _sticky.append(_c)
-                            if len(_sticky) > _CHAT_STICKY_MAX_CATEGORIES:
-                                # keep the newest (includes this turn's) — one-time miss
-                                del _sticky[:-_CHAT_STICKY_MAX_CATEGORIES]
-                            if len(_CHAT_STICKY_TOOL_CATEGORIES) > 500:
-                                _CHAT_STICKY_TOOL_CATEGORIES.pop(next(iter(_CHAT_STICKY_TOOL_CATEGORIES)))
-                            for _c in _sticky:
-                                _cat_tools = tool_registry.get_tools_by_categories([_c])
-                                _cat_tools.sort(key=lambda _t: _t.get("function", {}).get("name") or "")
-                                _diet_tools += _cat_tools
-                            _seen_names = set()
-                            tools = []
-                            for _t in _diet_tools:
-                                _tn = _t.get("function", {}).get("name")
-                                if _tn and _tn not in _seen_names:
-                                    _seen_names.add(_tn)
-                                    tools.append(_t)
-                            import hashlib as _hl
-                            _tools_sha = _hl.sha1(json.dumps([_t.get("function", {}).get("name") for _t in tools]).encode()).hexdigest()[:8]
-                            logger.info(f"🍽️ Intent={user_intent}: Presence diet — {len(tools)} tools [sha {_tools_sha}] ({len(_PRESENCE_CORE_TOOL_NAMES)} core + sticky categories {list(_sticky)}; this turn {sorted(tool_categories)})")
-                        else:
-                            # Also ensure awareness/action core categories are always available
+                            # Harness rebuild Phase 2: retrieval, not keyword
+                            # routing. `tool_categories` came from
+                            # ToolIntentClassifier's first-match keyword table —
+                            # "put them in a folder" matched NOTES and never
+                            # reached the tool that files attachments. Sticky
+                            # *categories* then grew the payload to 94 schemas.
+                            #
+                            # Now: a fixed core, plus the tools whose
+                            # descriptions are semantically nearest what David
+                            # actually said, plus whatever `find_tools` loaded
+                            # earlier in this conversation. Hard cap 35.
+                            # The intent classifier still runs — ContextRouter
+                            # uses it for context sections — but it no longer
+                            # picks tools.
+                            from app.services.tool_retrieval import (
+                                CORE_TOOLS as _CORE,
+                                MAX_TOOLS_PER_CALL as _MAX_TOOLS,
+                                ToolIndex as _tool_index,
+                                select_chat_tools as _select_chat_tools,
+                                tools_sha as _tools_sha_of,
+                            )
+                            _sticky = _CHAT_STICKY_TOOL_NAMES.setdefault(session_id, [])
+                            if len(_CHAT_STICKY_TOOL_NAMES) > 500:
+                                _CHAT_STICKY_TOOL_NAMES.pop(next(iter(_CHAT_STICKY_TOOL_NAMES)))
+                            try:
+                                _retrieved = await _tool_index.retrieve(
+                                    last_user_message, k=6,
+                                    exclude=set(_CORE) | set(_sticky),
+                                )
+                            except Exception as _ret_err:
+                                logger.warning(f"⚠️ Tool retrieval failed: {_ret_err}")
+                                _retrieved = []
+                            # Reserve two slots: _apply_background_dispatch_policy
+                            # below may append dispatch_and_monitor /
+                            # dispatch_agent_task, and the cap is on what
+                            # actually goes on the wire.
+                            tools = _select_chat_tools(
+                                _CORE, _retrieved, _sticky,
+                                max_tools=_MAX_TOOLS - len(_BACKGROUND_DISPATCH_TOOL_NAMES),
+                            )
+                            assert len(tools) <= _MAX_TOOLS, f"tool cap breached: {len(tools)}"
+                            _tools_sha = _tools_sha_of(tools)
+                            logger.info(
+                                f"🍽️ Tools — {len(tools)} [sha {_tools_sha}] "
+                                f"core={len(_CORE)} retrieved={_retrieved} sticky={list(_sticky)} "
+                                f"(intent={user_intent}, tools-per-call cap {_MAX_TOOLS})"
+                            )
+                        elif tool_categories:
+                            # Legacy path, flag off: intent categories + an
+                            # awareness/action core.
                             effective_categories = list(tool_categories)
                             capability_core_categories = ["devices", "vm_agents", "personal_knowledge", "inbox", "lists"]
                             for category in capability_core_categories:
@@ -9038,11 +9106,11 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                                     effective_categories.append(category)
                             tools = tool_registry.get_tools_by_categories(effective_categories)
                             logger.info(f"🔧 Intent={user_intent}: Loaded {len(tools)} tools from categories: {effective_categories}")
-                    else:
-                        # Conservative capability fallback when intent routing fails.
-                        fallback_categories = ['memory', 'notes', 'time', 'devices', 'vm_agents', 'personal_knowledge', 'inbox']
-                        tools = tool_registry.get_tools_by_categories(fallback_categories)
-                        logger.info(f"🔧 Intent={user_intent}: Capability fallback ({len(tools)} tools)")
+                        else:
+                            # Conservative capability fallback when intent routing fails.
+                            fallback_categories = ['memory', 'notes', 'time', 'devices', 'vm_agents', 'personal_knowledge', 'inbox']
+                            tools = tool_registry.get_tools_by_categories(fallback_categories)
+                            logger.info(f"🔧 Intent={user_intent}: Capability fallback ({len(tools)} tools)")
 
                     tools = _apply_background_dispatch_policy(tools, last_user_message)
                     logger.info(
@@ -9052,6 +9120,9 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
 
                     # Process chat with loaded tools
                     _mark_stage("tools_loaded")
+                    # Where find_tools should park names it loads mid-turn, so
+                    # the next turn in THIS conversation starts with them.
+                    streaming_client._sticky_key = session_id
                     logger.info(f"⏳ Starting chat_with_tools... ({len(tools)} tools)")
                     await streaming_client.emit_activity("thinking")
                     _mark_stage("llm_dispatched")

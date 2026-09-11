@@ -139,6 +139,8 @@ from app.tools.device_commands import DEVICE_TOOLS
 from app.tools.workspace import WORKSPACE_TOOLS
 from app.tools.maps import MAP_TOOLS
 from app.tools.self_knowledge import SELF_KNOWLEDGE_TOOLS
+from app.tools.find_tools import FindToolsTool
+from app.tools.get_tool_result_details import GET_TOOL_RESULT_DETAILS_TOOLS
 from app.tools.email import EMAIL_TOOLS
 from app.tools.soul import SOUL_TOOLS
 from app.tools.heartbeat import HEARTBEAT_TOOLS
@@ -366,6 +368,10 @@ class ToolRegistry:
         'self_knowledge': {
             'description': 'Retrieve detailed self-knowledge about Sara\'s architecture, capabilities, autonomous systems, and limitations',
             'tools': ['get_self_knowledge']
+        },
+        'meta': {
+            'description': "Find tools that aren't currently loaded, and page through a tool result that was too big to show in full.",
+            'tools': ['find_tools', 'get_tool_result_details']
         },
         'email': {
             'description': 'Search, read, and get summaries of emails from synced mailboxes',
@@ -677,6 +683,10 @@ class ToolRegistry:
 
             # Self-Knowledge Tools (Sara's self-awareness)
             *SELF_KNOWLEDGE_TOOLS,
+
+            # Meta tools — the chat lane's escape hatches out of the 35-tool diet
+            FindToolsTool(),
+            *GET_TOOL_RESULT_DETAILS_TOOLS,
 
             # Email Tools
             *EMAIL_TOOLS,

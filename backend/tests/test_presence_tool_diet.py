@@ -1,37 +1,39 @@
 """
-Tests for Arc 3.4 (SARA_ALIVE_BUILD_PLAN) — presence tool payload diet.
+Tests for the chat lane's tool payload diet.
 
-Measured baseline (2026-07-29): the "always add" capability_core_categories
-list (devices, vm_agents, personal_knowledge, inbox, lists = 25 tool defs)
-gets stacked onto every chat turn regardless of classified intent, on top
-of the intent-specific categories. This is a payload-selection change only
-at the one call site chat loads tools — the 246-tool registry itself is
-untouched, and every existing category/intent path still works unchanged
-when the flag is off (default).
+Originally Arc 3.4 (SARA_ALIVE_BUILD_PLAN): a hand-picked 7-tool core replacing
+25 always-add tools. Rewritten for SARA_CHAT_HARNESS_REBUILD_PLAN_2026_09_11
+Phase 2, which replaced sticky *categories* (append-only, reached 94 schemas
+and 16.9k prompt tokens in one conversation on 2026-09-11) with a fixed core
+plus embedding retrieval plus a `find_tools` escape hatch, hard-capped at 35.
 """
+from app.services.tool_retrieval import (
+    CORE_TOOLS,
+    MAX_TOOLS_PER_CALL,
+    select_chat_tools,
+    tool_names,
+)
 from app.tools.registry import tool_registry
 
 
-PRESENCE_CORE_TOOL_NAMES = [
-    "memory_search", "notes_create", "notes_search",
-    "list_add", "list_view", "reminders_create", "calendar_list",
-]
-
-
-class TestPresenceCoreResolves:
+class TestCoreResolves:
     def test_every_core_tool_name_exists_in_registry(self):
-        for name in PRESENCE_CORE_TOOL_NAMES:
+        for name in CORE_TOOLS:
             assert tool_registry.get_tool(name) is not None, f"{name} not registered"
 
-    def test_core_is_exactly_seven_tools(self):
-        schemas = tool_registry.get_tools_by_names(PRESENCE_CORE_TOOL_NAMES)
-        assert len(schemas) == 7
+    def test_core_is_small(self):
+        # The core is paid for on every single turn; if it starts creeping
+        # toward the cap the retrieval budget disappears.
+        assert len(CORE_TOOLS) <= 16
 
-    def test_dispatch_and_monitor_is_registered_but_not_always_present(self):
-        assert "dispatch_and_monitor" not in PRESENCE_CORE_TOOL_NAMES
+    def test_core_carries_the_escape_hatches(self):
+        assert "find_tools" in CORE_TOOLS
+        assert "get_tool_result_details" in CORE_TOOLS
+
+    def test_dispatch_and_monitor_is_registered_but_not_core(self):
+        assert "dispatch_and_monitor" not in CORE_TOOLS
         schemas = tool_registry.get_tools_by_names(["dispatch_and_monitor"])
         assert len(schemas) == 1
-        assert schemas[0]["function"]["name"] == "dispatch_and_monitor"
 
 
 class TestGetToolsByNames:
@@ -44,27 +46,41 @@ class TestGetToolsByNames:
         assert tool_registry.get_tools_by_names([]) == []
 
 
-class TestConversationalPayloadShrinks:
-    def test_baseline_conversational_case_is_seven_not_twentyfive(self):
-        """The literal target case: no classified intent (CONVERSATIONAL ->
-        empty categories). Old behavior: 5 always-add categories = 25 tools.
-        New: exactly the 7-tool core."""
-        core = tool_registry.get_tools_by_names(PRESENCE_CORE_TOOL_NAMES)
-        old_always_add = tool_registry.get_tools_by_categories(
-            ["devices", "vm_agents", "personal_knowledge", "inbox", "lists"]
-        )
-        assert len(core) == 7
-        assert len(old_always_add) > 20  # the padding this replaces
+class TestSelectChatTools:
+    def test_core_only_when_nothing_retrieved(self):
+        schemas = select_chat_tools(CORE_TOOLS, [], [])
+        assert tool_names(schemas) == list(CORE_TOOLS)
 
-    def test_intent_specific_categories_still_load_fully(self):
-        """A classified intent (e.g. NOTES) must still get its full category
-        on top of the core — the diet only removes the always-add padding,
-        never anything classification actually asked for."""
-        notes_only = tool_registry.get_tools_by_categories(["notes"])
-        merged_names = set()
-        for t in tool_registry.get_tools_by_names(PRESENCE_CORE_TOOL_NAMES):
-            merged_names.add(t["function"]["name"])
-        for t in notes_only:
-            merged_names.add(t["function"]["name"])
-        notes_only_names = {t["function"]["name"] for t in notes_only}
-        assert notes_only_names.issubset(merged_names)
+    def test_core_comes_first_in_declared_order(self):
+        schemas = select_chat_tools(CORE_TOOLS, ["web_search", "home_light_control"], [])
+        names = tool_names(schemas)
+        assert names[: len(CORE_TOOLS)] == list(CORE_TOOLS)
+
+    def test_tail_is_sorted_so_the_prefix_is_stable(self):
+        a = tool_names(select_chat_tools(CORE_TOOLS, ["web_search", "open_page"], []))
+        b = tool_names(select_chat_tools(CORE_TOOLS, ["open_page", "web_search"], []))
+        assert a == b
+
+    def test_duplicates_between_core_sticky_and_retrieved_collapse(self):
+        schemas = select_chat_tools(
+            CORE_TOOLS, ["memory_search", "web_search"], ["web_search", "notes_search"]
+        )
+        names = tool_names(schemas)
+        assert len(names) == len(set(names))
+
+    def test_hard_cap_is_enforced(self):
+        many = [
+            n for n in tool_names(tool_registry.get_openai_schemas())
+            if n not in CORE_TOOLS
+        ]
+        assert len(many) > MAX_TOOLS_PER_CALL  # the registry really is big
+        schemas = select_chat_tools(CORE_TOOLS, many, [])
+        assert len(schemas) <= MAX_TOOLS_PER_CALL
+
+    def test_cap_can_be_lowered_to_reserve_dispatch_slots(self):
+        many = [
+            n for n in tool_names(tool_registry.get_openai_schemas())
+            if n not in CORE_TOOLS
+        ]
+        schemas = select_chat_tools(CORE_TOOLS, many, [], max_tools=MAX_TOOLS_PER_CALL - 2)
+        assert len(schemas) <= MAX_TOOLS_PER_CALL - 2
