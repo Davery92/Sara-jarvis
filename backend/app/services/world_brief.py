@@ -587,7 +587,9 @@ def _body_training_live(user_id: str, away: bool = False) -> str:
                     lines.append("- Today: rest day.")
 
             recovery = get_morning_recovery(db, user_id, today)
-            if any(v is not None for v in recovery.values()):
+            # `hrv_source` is provenance, not a metric — a dict carrying only
+            # that would otherwise render an empty "Recovery:" line.
+            if any(v is not None for k, v in recovery.items() if k != "hrv_source"):
                 factor, factor_label = get_recovery_factor(recovery)
                 bits = []
                 if recovery.get("sleep_hours") is not None:
@@ -615,6 +617,11 @@ def _body_training_live(user_id: str, away: bool = False) -> str:
                             _hrv_tag = ", unverified — outside 14-day range"
                     except Exception as e:
                         logger.debug(f"[world_brief] hrv outlier check failed: {e}")
+                    # An HRV that did not come from health_metric is not
+                    # today's reading and must not be spoken as one — the
+                    # health slice in the same prompt says "unavailable".
+                    if recovery.get("hrv_source") != "health_metric":
+                        _hrv_tag += " — from the recovery log, not a watch reading today"
                     bits.append(f"HRV {recovery['hrv']:.0f}{_hrv_tag}")
                 if recovery.get("soreness_level") is not None:
                     bits.append(f"soreness {recovery['soreness_level']}/5")
@@ -685,6 +692,51 @@ def _when(at: Optional[datetime], now: datetime) -> str:
     return render_when(at, now=now, source_convention="et")
 
 
+# "[Everett's] Meet the Instruments — not David's" → "Meet the Instruments
+# (Everett's)". The ownership marker is load-bearing — it is what stops
+# Everett's dentist appointment being narrated as David's morning — but it
+# was costing 25 characters per event in a section that lists seven.
+_OWNER_TAG_RE = re.compile(r"^\[(?:the )?(.+?)'s\]\s*(.*?)(?:\s+—\s+not David's)?$")
+_OWNER_UNCLEAR_RE = re.compile(r"^\[owner unclear\]\s*(.*)$")
+
+
+def _inline_owner(text: str) -> str:
+    m = _OWNER_TAG_RE.match(text or "")
+    if m:
+        who, title = m.group(1), m.group(2)
+        who = "the family" if who in ("family", "the family") else f"{who}'s"
+        return f"{title} ({who})"
+    m = _OWNER_UNCLEAR_RE.match(text or "")
+    if m:
+        return f"{m.group(1)} (owner unclear)"
+    return text
+
+
+# Threads whose subject is Sara's own pending work, not something David owes
+# anyone. The world interpreter opens these from Sara's own turns (see
+# gotcha_world_interpreter_invents_obligations), and they then sit in OPEN
+# LOOPS telling her to chase herself.
+_SARAS_OWN_LOOP_RE = re.compile(
+    r"\b(waiting for sara|sara to (check|look|find|run|report)|sara commitment)\b",
+    re.IGNORECASE,
+)
+_LOOP_MAX_AGE_DAYS = 7
+
+
+def _is_saras_own_loop(text: str) -> bool:
+    return bool(_SARAS_OWN_LOOP_RE.search(text or ""))
+
+
+def _loop_is_stale(aging_since: Optional[str], now: datetime) -> bool:
+    at = _parse_iso(aging_since)
+    if at is None:
+        return False
+    try:
+        return (now - at).days > _LOOP_MAX_AGE_DAYS
+    except Exception:
+        return False
+
+
 async def render_brief(db, user_id: str = DEFAULT_USER_ID, now: Optional[datetime] = None) -> str:
     """Render the brief for prompt consumption. ALL timestamps are rendered
     relative to `now` here — the stored form stays absolute UTC-backed ISO.
@@ -695,16 +747,29 @@ async def render_brief(db, user_id: str = DEFAULT_USER_ID, now: Optional[datetim
 
     lines: List[str] = [f"AS OF: {now.strftime('%A, %B %-d, %Y, %-I:%M %p')} ET", ""]  # time-ok: the "as of" line itself
 
+    # Harness rebuild Phase 6: no keys, no duplicates, at most 6.
+    # On 2026-09-11 this ran 1,526 chars, of which two entries were the same
+    # event twice — once as a world_thread slug and once as `[cal:<uuid>]` —
+    # and every line carried a 40-character key nothing in the prompt ever
+    # referenced. The text is what Sara reads; the key was for us.
     lines.append("## HAPPENED (last 72h, closed items, past tense)")
     cutoff = now - timedelta(hours=_HAPPENED_WINDOW_HOURS)
     shown = 0
+    _seen_happened: set = set()
     for item in sections.get("happened", []):
         at = _parse_iso(item.get("at"))
         if at is not None and at < cutoff:
             continue
+        _text = _inline_owner((item.get("text") or "(untitled)").strip())
+        _fingerprint = re.sub(r"[^a-z0-9]+", "", _text.lower())[:48]
+        if _fingerprint in _seen_happened:
+            continue
+        _seen_happened.add(_fingerprint)
         rel = f" — {_when(at, now)}" if at else ""
-        lines.append(f"- [{item.get('key', '?')}] {item.get('text', '(untitled)')}{rel}")
+        lines.append(f"- {_text}{rel}")
         shown += 1
+        if shown >= 6:
+            break
     if not shown:
         lines.append("- Nothing notable.")
 
@@ -724,17 +789,33 @@ async def render_brief(db, user_id: str = DEFAULT_USER_ID, now: Optional[datetim
             at = _parse_iso(item.get("at"))
             # No time is "no time", never a guessed one.
             rel = _when(at, now) if at else "no time given"
-            lines.append(f"- [{item.get('key', '?')}] {rel}: {item.get('text', '(untitled)')}")
+            # Ownership reads inline now: "Meet the Instruments (Everett's)"
+            # rather than "[Everett's] Meet the Instruments — not David's".
+            # This is the only calendar list in the prompt (Phase 6 dropped
+            # context_snapshot's duplicate), so the marker has to survive —
+            # but at a third of the width. The uuid key goes too; nothing
+            # ever referenced it and it was ~40 chars per event.
+            lines.append(f"- {rel}: {_inline_owner(item.get('text', '(untitled)'))}")
     else:
         lines.append("- Nothing scheduled.")
 
+    # OPEN LOOPS: at most 5, freshest first, and never a bare `thread:<uuid>`
+    # with no summary. On 2026-09-11 this listed eight, two of which were
+    # Sara's own turns ("Waiting for Sara to check capability to download
+    # attachments") and one of which had aged four days past a finished trip.
     lines.append("\n## OPEN LOOPS")
-    open_loops = sections.get("open_loops", [])
+    open_loops = [
+        i for i in sections.get("open_loops", [])
+        if (i.get("text") or "").strip()
+        and not _is_saras_own_loop(i.get("text") or "")
+        and not _loop_is_stale(i.get("aging_since"), now)
+    ]
+    open_loops.sort(key=lambda i: i.get("aging_since") or "", reverse=True)
     if open_loops:
-        for item in open_loops:
+        for item in open_loops[:5]:
             at = _parse_iso(item.get("aging_since"))
             rel = f" (aging {render_relative(at, reference=now)})" if at else ""
-            lines.append(f"- [{item.get('key', '?')}] {item.get('text', '(untitled)')}{rel}")
+            lines.append(f"- {item.get('text')}{rel}")
     else:
         lines.append("- None open.")
 
@@ -744,7 +825,10 @@ async def render_brief(db, user_id: str = DEFAULT_USER_ID, now: Optional[datetim
         for item in comms[:3]:
             at = _parse_iso(item.get("aged_since"))
             rel = f" ({render_relative(at, reference=now)})" if at else ""
-            lines.append(f"- [{item.get('key', '?')}] {item.get('text', '(untitled)')}{rel}")
+            # The key here is a 200-character Graph message id. Three of them
+            # were 600 of this section's 855 chars on 2026-09-11, and nothing
+            # reads them — email_search takes a query, not a Graph id.
+            lines.append(f"- {item.get('text', '(untitled)')}{rel}")
     else:
         lines.append("- Nothing outstanding.")
 
@@ -757,20 +841,22 @@ async def render_brief(db, user_id: str = DEFAULT_USER_ID, now: Optional[datetim
         for item in health_deltas:
             lines.append(f"- {item.get('text', '(untitled)')}")
 
+    # SARA'S OWN STATE is gone from the chat brief (harness rebuild Phase 6).
+    # It re-rendered a CACHED copy of the interoception header that the chat
+    # prompt already carries live, from `sara_state` rows written by a periodic
+    # sweep — so on 2026-09-11 the prompt opened with "David: engaged
+    # (interruptibility 1.00). You feel: proud (0.42)" and then, 160 lines
+    # later, said "David: unknown ... You feel: attentive (0.30)". Two clocks,
+    # one of them stale, contradicting each other inside one prompt.
+    # `## Right now (your internal clock & state)` from interoception.py is the
+    # single source. In-flight background work is the one thing this section
+    # said that nothing else does, so it survives as a line.
     sara_state = sections.get("sara_state", {})
-    lines.append("\n## SARA'S OWN STATE")
-    state_lines = []
-    if sara_state.get("interoception"):
-        # build_interoception_header() emits its own leading "## " — demote
-        # to bold so it doesn't read as a second top-level section here.
-        interoception_text = sara_state["interoception"].lstrip()
-        if interoception_text.startswith("## "):
-            head, _, rest = interoception_text.partition("\n")
-            interoception_text = f"**{head[3:]}**" + (f"\n{rest}" if rest else "")
-        state_lines.append(f"- {interoception_text}")
     if sara_state.get("inflight_work_count"):
-        state_lines.append(f"- {sara_state['inflight_work_count']} thing(s) in flight in the background.")
-    lines.extend(state_lines or ["- Nothing notable."])
+        lines.append(
+            f"\n## IN FLIGHT\n- {sara_state['inflight_work_count']} thing(s) "
+            "running in the background right now."
+        )
 
     return "\n".join(lines)
 

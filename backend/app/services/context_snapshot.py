@@ -35,7 +35,7 @@ from sqlalchemy.orm import Session
 
 from app.schemas.contracts import RelationshipStateV1, SelfStateV1, WorldStateV1
 from app.core.config import get_owner_id
-from app.core.timezone import render_when
+from app.core.timezone import render_when, USER_TIMEZONE as ET
 
 logger = logging.getLogger(__name__)
 
@@ -293,6 +293,49 @@ async def get_world_state(db: Session, user_id: str = DEFAULT_USER_ID) -> WorldS
         present = sum(1 for m in EXPECTED_HEALTH_METRICS if m in by_metric)
         for metric in EXPECTED_HEALTH_METRICS:
             by_metric.setdefault(metric, "unavailable (nothing recorded in the last 36h)")
+
+        # Harness rebuild Phase 6 §9 — staleness has to be in the KEY, not
+        # only in a parenthetical. On 2026-09-11 the slice said
+        #   sleep_hours=7.13 (measured Thu Sep 10, 6:00 AM ET (1d 3h ago))
+        # and Sara opened the morning with "you slept 7.1 hours" — the date was
+        # right there and read straight past. A metric whose newest reading
+        # predates this morning is not last night's sleep, and a key that says
+        # `sleep_last_night` cannot be misread as one.
+        _row_at = {r.metric_type: r.recorded_at for r in rows if r.recorded_at}
+        _sleep_at = next(
+            (_row_at[k] for k in ("sleep_hours", "sleep") if k in _row_at), None
+        )
+        if "sleep_hours" in by_metric and not str(
+            by_metric["sleep_hours"]
+        ).startswith("unavailable"):
+            _local_now = now.astimezone(ET) if now.tzinfo else now
+            _sleep_local = (
+                _sleep_at.astimezone(ET) if _sleep_at and _sleep_at.tzinfo
+                else _sleep_at
+            )
+            if _sleep_local is not None and _sleep_local.date() < _local_now.date():
+                by_metric["sleep_last_night"] = (
+                    "unavailable (no row yet); most recent sleep: "
+                    + str(by_metric.pop("sleep_hours"))
+                )
+            else:
+                by_metric["sleep_last_night"] = by_metric.pop("sleep_hours")
+
+        # Same shape for the day-scoped counters: a steps or exercise figure
+        # from 22 hours ago is yesterday's, and saying so is the difference
+        # between a report and a guess.
+        for _m in ("steps", "exercise_minutes", "active_energy", "stand_minutes"):
+            _v = by_metric.get(_m)
+            if not _v or str(_v).startswith("unavailable"):
+                continue
+            _at = _row_at.get(_m)
+            if _at is None:
+                continue
+            try:
+                if (now - _at) > timedelta(hours=12):
+                    by_metric[_m] = f"yesterday's {_v}"
+            except TypeError:
+                pass
 
         health_slice = _slice(
             newest or now, "health_metric",
@@ -882,6 +925,52 @@ def _clip_to_paragraph(text_: str, limit: int) -> str:
     return head.rsplit(" ", 1)[0] + "…"
 
 
+# Harness rebuild Phase 6 §10. The brief layers are LLM-written prose,
+# regenerated on a schedule, and they say things like "These are active tasks
+# for today (Sept 10)". Read back on Sept 11 that is a confident, wrong claim
+# about what David is doing right now — and the date it carries is the proof.
+# Rewrite the anchor rather than dropping the item: the content is still true,
+# it is just not today's.
+_STALE_TODAY_RE = re.compile(
+    r"\b(?:for\s+)?today\s*[\(,]\s*"
+    r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.?\s+(\d{1,2})"
+    r"\s*\)?",
+    re.IGNORECASE,
+)
+_MONTHS = {m: i for i, m in enumerate(
+    ["jan", "feb", "mar", "apr", "may", "jun",
+     "jul", "aug", "sep", "oct", "nov", "dec"], start=1)}
+
+
+def _restate_stale_today(text_: str, today: Optional[Any] = None) -> str:
+    """Turn "today (Sept 10)" into "as of Wed Sep 10" when it isn't today."""
+    if not text_ or "today" not in text_.lower():
+        return text_ or ""
+    from app.core.timezone import today as _local_today
+
+    ref = today or _local_today()
+
+    def _sub(m):
+        mon = _MONTHS.get(m.group(1)[:3].lower())
+        try:
+            day = int(m.group(2))
+        except (TypeError, ValueError):
+            return m.group(0)
+        if mon is None:
+            return m.group(0)
+        if mon == ref.month and day == ref.day:
+            return m.group(0)  # genuinely today — leave it alone
+        try:
+            when = ref.replace(month=mon, day=day)
+        except ValueError:
+            return m.group(0)
+        if when > ref:  # a date this year that hasn't happened -> last year's
+            when = when.replace(year=when.year - 1)
+        return f"as of {when.strftime('%a %b %-d')}"
+
+    return _STALE_TODAY_RE.sub(_sub, text_)
+
+
 def _slice_is_dead(slice_name: str, data: Dict[str, Any]) -> bool:
     """True when a slice has nothing worth a line in the prompt."""
     if slice_name == "fleet":
@@ -1009,7 +1098,7 @@ _SECTION_HEADERS = (
     ("### Relevant memory", "memory"),
     ("## Right now / today / this week", "brief_volatile"),
     ("## Who David is (stable)", "brief_stable"),
-    ("## Knowledge Graph", "brief"),
+    ("## What Sara Knows About David", "brief"),
     ("## Recent Journal", "brief"),
     ("### What you understand about David", "brief"),
     ("## Lessons", "lessons"),
@@ -1040,6 +1129,7 @@ def render_engaged_context(
     context: Dict[str, Any], open_intents: int, recall_traces: list,
     extended: Optional[Dict[str, Any]] = None,
     workspace_ctx: Optional[str] = None,
+    intent: Optional[str] = None,
 ) -> str:
     """Render kernel.engaged_turn()'s assembled context (world/self/
     relationship + recall) into the markdown block chat's system prompt
@@ -1073,29 +1163,29 @@ def render_engaged_context(
             # mentioned it because it was noise — it just cost tokens and made
             # everything around it look equally ignorable.
             continue
+        # `open_threads` said 95 in the same prompt whose OPEN LOOPS section
+        # listed eight. A raw count of every proposed/open/waiting/blocked row
+        # is not something Sara can act on and it is not what "open threads"
+        # means to David — the OPEN LOOPS list is the honest version.
         data_str = ", ".join(
             f"{k}={v}" for k, v in s["data"].items()
-            if v not in (None, [], "") and k not in ("upcoming", "later")
+            if v not in (None, [], "")
+            and k not in ("upcoming", "later", "open_threads")
         )
         if data_str:
             lines.append(f"- **{slice_name}** ({s.get('source', '?')}, confidence={s.get('confidence', '?')}): {data_str}")
 
-    # Verified calendar block (2026-09-01): the ONLY authoritative source for
-    # upcoming plans in a chat turn. Rendered as explicit dated lines so the
-    # model quotes instead of reconstructing from memory.
+    # Calendar used to render TWICE in one prompt: here as "### Calendar —
+    # verified upcoming (next 14 days)" and again in world_brief's "## AHEAD"
+    # block, the same events with the same ownership tags in a different shape.
+    # Harness rebuild Phase 6 keeps AHEAD (it carries the ownership marker and
+    # is dated relative to now) and drops this list. `later` — events 14-90
+    # days out, which AHEAD's 7-day window never covers — is the one part of
+    # this block that was not duplicated, so it survives as a single line.
     _cal = (world.get("calendar_horizon") or {}).get("data") or {}
-    lines.append("### Calendar — verified upcoming (next 14 days)")
-    lines.append(
-        "  (no owner tag = David's own; a family/other-owned event does not by "
-        "itself mean David attends — ownership and attendance are separate)"
-    )
-    if _cal.get("upcoming"):
-        for _e in _cal["upcoming"]:
-            lines.append(f"  - {_e}")
-    else:
-        lines.append("  - nothing on the calendar in the next 14 days")
     if _cal.get("later"):
-        lines.append("  further out: " + "; ".join(_cal["later"]))
+        lines.append("### Further out (beyond the next week)")
+        lines.append("  " + "; ".join(_cal["later"][:4]))
 
     self_state = context.get("self_state") or {}
     if self_state.get("kernel_state"):
@@ -1133,7 +1223,16 @@ def render_engaged_context(
     if extended:
         if extended.get("emotional_tone"):
             lines.append(f"- **sara_feels**: {extended['emotional_tone']}")
-        if extended.get("patterns") and not _patterns_are_noise(extended["patterns"]):
+        # Learned home-automation patterns ("Side Door Lock locks around 00:00
+        # (100%)") are only an answer when David asked about patterns. In an
+        # ordinary conversation they are five lines of the house behaving
+        # normally, and _patterns_are_noise only catches the all-noise case.
+        _patterns_wanted = (intent or "").upper() in ("PATTERNS", "HABITS", "INSIGHTS")
+        if (
+            _patterns_wanted
+            and extended.get("patterns")
+            and not _patterns_are_noise(extended["patterns"])
+        ):
             lines.append(f"- **patterns**: {extended['patterns']}")
         if extended.get("device"):
             lines.append(f"\n{extended['device']}")
@@ -1148,7 +1247,10 @@ def render_engaged_context(
             if t and t.strip()
         )
         if volatile_text:
-            lines.append(f"\n## Right now / today / this week\n{_clip_to_paragraph(volatile_text, 1800)}")
+            lines.append(
+                "\n## Right now / today / this week\n"
+                + _restate_stale_today(_clip_to_paragraph(volatile_text, 1800))
+            )
         stable_text = (brief_layers.get("stable") or "").strip()
         if stable_text:
             lines.append(f"\n## Who David is (stable)\n{_clip_to_paragraph(stable_text, 900)}")
@@ -1156,10 +1258,17 @@ def render_engaged_context(
             pkg_text = suppress_pkg_health_conflicts(
                 extended["pkg"], (world.get("health_today") or {}).get("data") or {}
             )
+            # recall_facts_prose already opens with its own
+            # "## What Sara Knows About David" header. Wrapping it in a second
+            # "## Knowledge Graph" header produced two headers for one list,
+            # the outer one looking empty. Emit the block as it comes.
+            # (A header with nothing under it is not free: it reads as "there
+            # is a knowledge graph and it knows nothing about this".)
             if pkg_text.strip():
-                lines.append(f"\n## Knowledge Graph\n{pkg_text[:1000]}")
-        if extended.get("journal"):
-            lines.append(f"\n## Recent Journal\n{_clip_to_paragraph(extended['journal'], 1000)}")
+                lines.append("\n" + pkg_text.strip()[:1000])
+        _journal = _clip_to_paragraph(extended.get("journal") or "", 1000).strip()
+        if _journal:
+            lines.append(f"\n## Recent Journal\n{_journal}")
         if extended.get("lessons"):
             lines.append(f"\n{extended['lessons']}")
 
@@ -1169,9 +1278,15 @@ def render_engaged_context(
     # Ground-truth plan, Phase 5 §4: one hard cap, with a stated share per
     # section. Before this the block was assembled and injected whole — 7-8k
     # uncacheable tokens a turn, growing with every new slice anyone added.
-    from app.services.context_budget import SectionBudget
+    from app.services.context_budget import (
+        ENGAGED_BLOCK_MAX_TOKENS,
+        ENGAGED_SECTION_ALLOTMENTS,
+        SectionBudget,
+    )
 
-    budget = SectionBudget()
+    budget = SectionBudget(
+        max_tokens=ENGAGED_BLOCK_MAX_TOKENS, allotments=ENGAGED_SECTION_ALLOTMENTS
+    )
     for name, block in _split_sections(lines):
         budget.add(name, block)
     return budget.render()

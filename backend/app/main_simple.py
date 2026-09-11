@@ -251,6 +251,12 @@ def _apply_local_qwen_chat_sampling(payload: dict) -> None:
 # volatile text there means turn N+1 re-evaluates only [prev user, prev reply,
 # live ctx, new question] (~3k tokens) instead of the whole ~13k prompt.
 # store_conversation() strips the block so episodes/PKG keep David's raw words.
+# Harness rebuild Phase 6. The live-awareness block had grown to 8,900 chars of
+# duplicated headers, empty sections, a keyword bag, and stale specifics; by
+# 2026-09-11 the assembled volatile context was 19,900 chars — more than three
+# times the persona prompt. Anything over this warns with its section list.
+LIVE_CONTEXT_CHAR_BUDGET = int(os.getenv("LIVE_CONTEXT_CHAR_BUDGET", "4500"))
+
 _LIVE_CTX_OPEN = "<live_context>"
 _LIVE_CTX_CLOSE = "</live_context>"
 
@@ -8694,7 +8700,7 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     )
                     combined_context = render_engaged_context(
                         _new_context, _new_open_intents, _new_recalled.get("traces") or [], extended=_extended,
-                        workspace_ctx=workspace_ctx,
+                        workspace_ctx=workspace_ctx, intent=user_intent,
                     )
                     injected_lesson_ids = _extended.get("lesson_ids") or []
                     try:
@@ -8845,7 +8851,10 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                 )
                 from app.db.session import get_async_session_factory
                 async with get_async_session_factory()() as _rb_db:
-                    _recency = await build_recency_floor(_rb_db, str(current_user.id))
+                    _recency = await build_recency_floor(
+                        _rb_db, str(current_user.id),
+                        exclude_conversation_id=request.conversation_id,
+                    )
                     _repeat = await detect_repeat_question(
                         _rb_db, str(current_user.id), last_user_message,
                         conversation_id=request.conversation_id,
@@ -9321,22 +9330,21 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                 # feeling, what she remembers, what's going on with David) — it
                 # used to live in the system prompt. Present it as HER awareness to
                 # speak from, not as foreign data to consult, or she goes flat.
+                # Phase 6 trimmed this preamble from 1,129 chars to ~400. Most
+                # of what it said — don't reach for a tool the awareness already
+                # answers, never state a specific that isn't in front of you,
+                # no write tool without a reported event — is now in the persona
+                # prompt's Truth and Tools sections, said once. What survives is
+                # the part only this block can say: what it IS and who put it
+                # here.
                 _live_block = (
                     f"{_LIVE_CTX_OPEN}\n"
-                    "[Sara — this is your own live awareness for this moment, placed here by your system, "
-                    "not typed by David: the time, how you're feeling, what you remember and notice about "
-                    "him and his day. Treat it exactly as you would your system prompt. Speak from it "
-                    "naturally, in your own voice and warmth — don't recite it, quote it, or refer to "
-                    "\"this block\". Most turns are just conversation: answer from what you already "
-                    "have, in your own voice — warm, playful, alive. Do NOT reach for a tool when this "
-                    "awareness or the conversation already holds the answer, and never call a "
-                    "write/log tool unless David reports something that actually happened. Precision "
-                    "still matters: any specific detail you state about David's day (an exercise, a "
-                    "number, a time, an event) must actually appear here, in the conversation, or in "
-                    "a tool result — never paraphrase one detail into a different one. If a specific "
-                    "isn't anywhere in front of you, say so or check — a wrong specific costs more "
-                    "trust than admitting you don't know. David's actual message follows after the "
-                    "closing tag.]\n\n"
+                    "[Sara — your own live awareness for this moment, placed here by your system, "
+                    "not typed by David: the time, how you're feeling, what you know about him and "
+                    "his day. Read it as your own knowing, not as data to consult. Speak from it "
+                    "naturally — never recite it, quote it, or refer to \"this block\". Every "
+                    "specific you state about his day must actually appear here, in the "
+                    "conversation, or in a tool result. David's message follows the closing tag.]\n\n"
                     + _datetime_line + ("\n\n" + _volatile if _volatile else "") + f"\n{_LIVE_CTX_CLOSE}\n\n"
                 )
                 all_messages = [ChatMessage(role="system", content=_stable_system_prompt)] + conversation_history + list(merged_request_messages)
@@ -9352,6 +9360,31 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                         _new_content = _live_block + (_um.content or "")
                     all_messages[_last_user_idx] = ChatMessage(role="user", content=_new_content)
                 import hashlib as _hl
+                # Phase 6 budget. The live block is the single largest thing in
+                # a chat prompt (19,900 chars / 4,976 tokens on 2026-09-11, more
+                # than three times the persona) and it grew section by section
+                # with no one watching the total. Warn loudly past the budget,
+                # and name the sections so the offender is identifiable.
+                _ctx_chars = len(_volatile)
+                _ctx_sections = re.findall(r"^#{2,3} +(.+)$", _volatile, re.MULTILINE)
+                _ctx_line = (
+                    f"📝 Context injected: {_ctx_chars} chars, "
+                    f"sections={_ctx_sections}"
+                )
+                if _ctx_chars > LIVE_CONTEXT_CHAR_BUDGET:
+                    logger.warning(
+                        f"{_ctx_line} — over the {LIVE_CONTEXT_CHAR_BUDGET}-char budget"
+                    )
+                else:
+                    logger.info(_ctx_line)
+                if os.getenv("CHAT_DUMP_LIVE_CONTEXT", "").strip().lower() in ("1", "true", "yes"):
+                    try:
+                        _dump = f"/tmp/live_context_{(request.conversation_id or 'new')}.txt"
+                        with open(_dump, "w") as _fh:
+                            _fh.write(_live_block)
+                        logger.info(f"📝 live_context dumped to {_dump}")
+                    except Exception:
+                        pass
                 logger.info(
                     f"💬 Total messages: {len(all_messages)} "
                     f"(stable system ~{len(_stable_system_prompt)//4} tok [sha {_hl.sha1(_stable_system_prompt.encode()).hexdigest()[:8]}] "

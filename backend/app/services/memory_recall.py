@@ -450,6 +450,45 @@ async def _attach_context_for_thin_episodes(
     return traces
 
 
+# Harness rebuild Phase 6. On 2026-09-11 the chat prompt's "Relevant memory"
+# section, for the message "Good morning Sara how are you today", was:
+#     - [David said, observed, 1 minute ago] Good morning Sara how are you today
+#     - [David said, observed, 1 week ago]   Good afternoon Sara
+#     - [David said, inferred, 2 weeks ago]  Good morning sara
+# Three greetings, one of them the message being answered. Embedding similarity
+# on a greeting matches other greetings — that is the boilerplate matching
+# itself, not memory. An episode too short to carry a fact, or too weak a match
+# to be about the question, is worse than nothing: it fills the section so the
+# real hits get cut by the top-k.
+_RECALL_MIN_CHARS = 40
+_RECALL_MIN_SCORE = 0.55
+
+
+def _drop_thin_matches(traces: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Drop episode hits that are too short or too weak to be memory.
+
+    Only `episode` is filtered: facts, notes and artifacts are short by nature
+    and their presence is itself the signal.
+    """
+    kept = []
+    for t in traces:
+        if t.get("kind") != "episode":
+            kept.append(t)
+            continue
+        text = (t.get("text") or "").strip()
+        if len(text) < _RECALL_MIN_CHARS:
+            continue
+        if float(t.get("score") or 0.0) < _RECALL_MIN_SCORE:
+            continue
+        kept.append(t)
+    if len(kept) != len(traces):
+        logger.debug(
+            f"[recall] dropped {len(traces) - len(kept)} thin episode hit(s) "
+            f"(<{_RECALL_MIN_CHARS} chars or score <{_RECALL_MIN_SCORE})"
+        )
+    return kept
+
+
 def _dedupe_by_title(traces: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Three copies of one note is one hit, not three.
 
@@ -515,6 +554,7 @@ async def recall(
 
     traces = await _drop_saras_own_output(user_id, query, traces)
     traces = _dedupe_by_title(traces)
+    traces = _drop_thin_matches(traces)
     traces.sort(key=lambda t: t["score"], reverse=True)
     traces = traces[:k]
     # Only enrich the traces actually being kept — not every candidate a

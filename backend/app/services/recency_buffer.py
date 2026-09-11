@@ -22,25 +22,44 @@ from sqlalchemy.ext.asyncio import AsyncSession
 logger = logging.getLogger(__name__)
 
 RECENCY_HOURS = 2
-RECENCY_MAX_TOKENS = 1200
-RECENCY_MAX_TURNS = 16
+# Harness rebuild Phase 6. At 1200 tokens / 400-char snippets this was the
+# single largest section of the 2026-09-11 live block — 3,841 chars, 26% of it
+# — and most of what it carried was already in `conversation_history` a few
+# hundred tokens further down the same prompt. Its actual job is narrow: know
+# what you just tried when the turns are NOT in this conversation's history
+# (a session boundary, a crashed client, a turn from the iOS app answered on
+# the web). Turns from the live conversation are now excluded outright, and
+# what remains is capped at a third of the old width.
+RECENCY_MAX_TOKENS = 450
+RECENCY_MAX_TURNS = 10
+RECENCY_SNIPPET_CHARS = 220
 REPEAT_SIMILARITY_THRESHOLD = 0.92
 _CHARS_PER_TOKEN = 4
 
 
-async def build_recency_floor(db: AsyncSession, user_id: str) -> Optional[str]:
+async def build_recency_floor(
+    db: AsyncSession, user_id: str, exclude_conversation_id: Optional[str] = None
+) -> Optional[str]:
     """Formatted last-2h conversation turns, capped, for a non-evictable
-    context section. Includes errored/system turns so failures aren't invisible."""
+    context section. Includes errored/system turns so failures aren't invisible.
+
+    `exclude_conversation_id` drops turns from the conversation being answered:
+    those are already in `conversation_history` in the same prompt, verbatim
+    and untruncated, and repeating a clipped copy of them costs tokens and
+    invites the model to treat the clipped version as the real one.
+    """
     rows = (await db.execute(text("""
         SELECT role, content, created_at, source
         FROM episode
         WHERE user_id = :uid
           AND created_at > NOW() - INTERVAL ':hours hours'::interval
           AND role IN ('user', 'assistant', 'system')
+          AND (:cid::text IS NULL OR conversation_id IS DISTINCT FROM :cid)
         ORDER BY created_at DESC
         LIMIT :limit
     """.replace(":hours", str(int(RECENCY_HOURS)))),
-        {"uid": user_id, "limit": RECENCY_MAX_TURNS})).fetchall()
+        {"uid": user_id, "limit": RECENCY_MAX_TURNS,
+         "cid": exclude_conversation_id})).fetchall()
     if not rows:
         return None
 
@@ -55,13 +74,20 @@ async def build_recency_floor(db: AsyncSession, user_id: str) -> Optional[str]:
         tag = ""
         if r.source and "error" in str(r.source).lower():
             tag = " [errored]"
-        snippet = content[:400]
+        snippet = content[:RECENCY_SNIPPET_CHARS]
+        if len(content) > RECENCY_SNIPPET_CHARS:
+            snippet += "…"
         line = f"{speaker}{tag}: {snippet}"
-        used += len(line) // _CHARS_PER_TOKEN
-        lines.append(line)
-        if used >= RECENCY_MAX_TOKENS:
+        # Check the budget BEFORE appending, or a full-width turn always
+        # overshoots it by its own length.
+        cost = len(line) // _CHARS_PER_TOKEN
+        if lines and used + cost > RECENCY_MAX_TOKENS:
             break
+        used += cost
+        lines.append(line)
 
+    if not lines:
+        return None
     lines.reverse()
     return "## Last couple hours (verbatim recency floor)\n" + "\n".join(lines)
 
@@ -113,8 +139,11 @@ async def detect_repeat_question(
 
         return {
             "minutes_ago": round(float(row.minutes_ago)),
-            "prior_question": (row.content or "")[:300],
-            "prior_answer": (answer.content[:400] if answer and answer.content else None),
+            # Short. The point of this note is "you've said this already",
+            # not a transcript: quoting 400 chars of the prior answer cost
+            # 660 chars of the 2026-09-11 prompt and invited a re-run of it.
+            "prior_question": (row.content or "")[:140],
+            "prior_answer": (answer.content[:180] if answer and answer.content else None),
             "similarity": round(float(row.similarity), 3),
         }
     except Exception as e:
@@ -126,10 +155,15 @@ def repeat_note(repeat: Dict[str, Any]) -> str:
     """Prompt note instructing Sara to acknowledge the repeat and add value."""
     mins = repeat["minutes_ago"]
     when = "just now" if mins < 1 else (f"{mins} min ago" if mins < 90 else f"{round(mins/60)}h ago")
-    ans = f" You answered: \"{repeat['prior_answer']}\"." if repeat.get("prior_answer") else ""
+    # Clip here as well as at the query — this note is a nudge, and any caller
+    # handing it a long answer would otherwise re-present the very reply Sara
+    # is being told not to repeat.
+    q = (repeat.get("prior_question") or "")[:140]
+    a = (repeat.get("prior_answer") or "")[:180]
+    ans = f" You started: \"{a}…\"." if a else ""
     return (
         "## You've been asked this before\n"
-        f"David asked essentially the same thing {when} (\"{repeat['prior_question']}\").{ans}\n"
+        f"David asked essentially the same thing {when} (\"{q}\").{ans}\n"
         "Acknowledge you're revisiting it — don't re-answer verbatim. Add something new, "
         "ask what changed, or note if nothing has."
     )

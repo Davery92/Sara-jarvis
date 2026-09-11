@@ -145,7 +145,14 @@ class TestExtendedSignalsRendering:
             "device": "[Device awareness] iPhone online.",
             "emotional_tone": "attentive (0.60)",
         }
-        text = render_engaged_context(_context(), open_intents=0, recall_traces=[], extended=extended)
+        # `intent="PATTERNS"`: harness rebuild Phase 6 gates the patterns line
+        # on the turn actually being about patterns (see
+        # TestPatternsAreIntentGated below) — in ordinary conversation it was
+        # five lines of the house behaving normally.
+        text = render_engaged_context(
+            _context(), open_intents=0, recall_traces=[], extended=extended,
+            intent="PATTERNS",
+        )
         assert "attentive (0.60)" in text
         assert "David trains around 1pm" in text
         assert "[Device awareness] iPhone online." in text
@@ -162,7 +169,10 @@ class TestExtendedSignalsRendering:
         house behaving normally reads as insight into David and crowds out the
         patterns that are. It is omitted rather than reported."""
         extended = {"patterns": "Side door locks around midnight (100%); kitchen light cycle (99%)"}
-        text = render_engaged_context(_context(), open_intents=0, recall_traces=[], extended=extended)
+        text = render_engaged_context(
+            _context(), open_intents=0, recall_traces=[], extended=extended,
+            intent="PATTERNS",
+        )
         assert "Side door locks" not in text
         assert "patterns" not in text
 
@@ -176,3 +186,215 @@ class TestExtendedSignalsRendering:
         assert text.count("w") <= 1000  # 900-char stable cap + slack
         assert text.count("y") <= 1100  # 1000 cap
         assert text.count("z") <= 1100  # 1000 cap
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Harness rebuild Phase 6 — the live-context diet
+#
+# Measured on 2026-09-11: the assembled volatile block was 19,200 chars, more
+# than three times the persona prompt, with the same header twice, a calendar
+# rendered twice, two contradicting internal-state lines, three empty headers,
+# a keyword bag restating the message being answered, and a memory section
+# whose top hit was that same message from one minute earlier.
+# ═══════════════════════════════════════════════════════════════════════════
+
+_CAL_SLICE = {
+    "calendar_horizon": {
+        "source": "calendar_event+world_thread", "confidence": 1.0,
+        "data": {
+            "active_calendar_events": 1,
+            "open_threads": 95,
+            "upcoming": [
+                "Fri Sep 11 (all day): Pay Day",
+                "Wed Sep 16, 5:00 PM ET (in 5d): Meet the Instruments [Everett's]",
+            ],
+            "later": ["Sun Sep 27 (all day)–Thu Oct 1 (all day): David Applied Net"],
+        },
+    }
+}
+
+
+class TestCalendarRendersOnce:
+    def test_the_verified_upcoming_list_is_gone(self):
+        """world_brief's ## AHEAD renders the same events with the same
+        ownership tags. Two calendars in one prompt is two chances to
+        disagree, and twice the tokens."""
+        text = render_engaged_context(
+            _context(world_state=_CAL_SLICE), open_intents=0, recall_traces=[]
+        )
+        assert "Calendar — verified upcoming" not in text
+        assert "Meet the Instruments" not in text
+
+    def test_events_beyond_a_week_survive_as_one_line(self):
+        """AHEAD's window is 7 days, so `later` is the one part of the old
+        block nothing else covered."""
+        text = render_engaged_context(
+            _context(world_state=_CAL_SLICE), open_intents=0, recall_traces=[]
+        )
+        assert "David Applied Net" in text
+        assert "Further out" in text
+
+
+class TestOpenThreadCountIsGone:
+    def test_the_raw_count_is_not_rendered(self):
+        """It said 95 in the same prompt whose OPEN LOOPS listed eight."""
+        text = render_engaged_context(
+            _context(world_state=_CAL_SLICE), open_intents=0, recall_traces=[]
+        )
+        assert "open_threads" not in text
+        assert "95" not in text
+
+    def test_the_rest_of_the_slice_still_renders(self):
+        text = render_engaged_context(
+            _context(world_state=_CAL_SLICE), open_intents=0, recall_traces=[]
+        )
+        assert "active_calendar_events=1" in text
+
+
+class TestPatternsAreIntentGated:
+    EXT = {"patterns": "David trains around 1pm on weekdays (82%)"}
+
+    def test_absent_from_an_ordinary_conversation(self):
+        for intent in (None, "CONVERSATIONAL", "GENERAL", "NOTES"):
+            text = render_engaged_context(
+                _context(), open_intents=0, recall_traces=[], extended=self.EXT,
+                intent=intent,
+            )
+            assert "David trains around 1pm" not in text, intent
+
+    def test_present_when_david_asked_about_patterns(self):
+        text = render_engaged_context(
+            _context(), open_intents=0, recall_traces=[], extended=self.EXT,
+            intent="PATTERNS",
+        )
+        assert "David trains around 1pm" in text
+
+
+class TestNoEmptyHeaders:
+    def test_a_whitespace_only_journal_renders_no_header(self):
+        text = render_engaged_context(
+            _context(), open_intents=0, recall_traces=[],
+            extended={"journal": "   \n  \n"},
+        )
+        assert "Recent Journal" not in text
+
+    def test_a_whitespace_only_pkg_renders_no_header(self):
+        text = render_engaged_context(
+            _context(), open_intents=0, recall_traces=[], extended={"pkg": "  \n "},
+        )
+        assert "Knowledge Graph" not in text
+        assert "What Sara Knows About David" not in text
+
+
+class TestKnowsAboutDavidHeaderAppearsOnce:
+    def test_the_pkg_block_is_not_double_wrapped(self):
+        """recall_facts_prose already opens with its own header; the old
+        `## Knowledge Graph` wrapper made two headers for one list, the outer
+        one looking empty."""
+        pkg = ("\n\n## What Sara Knows About David (relevant to this conversation)\n"
+               "- David co-founded Risk Ninja (confirmed)\n")
+        text = render_engaged_context(
+            _context(), open_intents=0, recall_traces=[], extended={"pkg": pkg},
+        )
+        assert text.count("What Sara Knows About David") == 1
+        assert "## Knowledge Graph" not in text
+        assert "Risk Ninja" in text
+
+
+class TestStaleTodayIsRestated:
+    def test_yesterdays_today_becomes_an_as_of_date(self):
+        from datetime import date
+        from app.services.context_snapshot import _restate_stale_today
+
+        out = _restate_stale_today(
+            "These are active tasks for today (Sept 10), distinct from older items.",
+            today=date(2026, 9, 11),
+        )
+        assert "today (Sept 10)" not in out
+        assert "as of Thu Sep 10" in out
+
+    def test_an_actual_today_is_left_alone(self):
+        from datetime import date
+        from app.services.context_snapshot import _restate_stale_today
+
+        text = "These are active tasks for today (Sept 11)."
+        assert _restate_stale_today(text, today=date(2026, 9, 11)) == text
+
+    def test_text_without_a_date_anchor_is_untouched(self):
+        from datetime import date
+        from app.services.context_snapshot import _restate_stale_today
+
+        text = "David is working on the memory system today."
+        assert _restate_stale_today(text, today=date(2026, 9, 11)) == text
+
+
+class TestHealthHonesty:
+    def _slice(self, **data):
+        return {"health_today": {"source": "health_metric", "confidence": 0.75,
+                                 "data": data}}
+
+    def test_a_stale_sleep_row_is_keyed_as_unavailable(self):
+        """The slice said `sleep_hours=7.13 (measured Thu Sep 10, 6:00 AM ET)`
+        and Sara opened the morning with "you slept 7.1 hours". The date was
+        right there and read straight past; the KEY now says so."""
+        text = render_engaged_context(
+            _context(world_state=self._slice(
+                sleep_last_night=("unavailable (no row yet); most recent sleep: "
+                                  "7.13 (measured Thu Sep 10, 6:00 AM ET)"),
+            )),
+            open_intents=0, recall_traces=[],
+        )
+        assert "sleep_last_night=unavailable (no row yet)" in text
+        assert "most recent sleep: 7.13" in text
+
+    def test_a_stale_counter_is_labelled_yesterdays(self):
+        text = render_engaged_context(
+            _context(world_state=self._slice(
+                exercise_minutes="yesterday's 1 (measured Thu Sep 10, 11:27 AM ET)",
+            )),
+            open_intents=0, recall_traces=[],
+        )
+        assert "yesterday's 1" in text
+
+
+class TestBudget:
+    def test_a_full_realistic_render_fits_the_budget(self):
+        """The 4,500-char budget from the rebuild plan, against a fixture
+        shaped like the 2026-09-11 snapshot."""
+        world_state = dict(_CAL_SLICE)
+        world_state["david"] = {
+            "source": "unified_context", "confidence": 1.0,
+            "data": {"activity_state": "engaged", "interruptibility": 1.0,
+                     "current_place": "Home"},
+        }
+        world_state["health_today"] = {
+            "source": "health_metric", "confidence": 0.75,
+            "data": {"weight": "240 (measured Fri Sep 11, 7:00 AM ET)",
+                     "resting_hr": "64 (measured Fri Sep 11, 7:00 AM ET)",
+                     "hrv": "unavailable (nothing recorded in the last 36h)"},
+        }
+        extended = {
+            "emotional_tone": "proud (0.42)",
+            "pkg": ("\n\n## What Sara Knows About David\n"
+                    + "\n".join(f"- fact number {i} about David" for i in range(8))),
+            "daily_brief_layers": {
+                "moment": "I'm in conversation with David this morning.",
+                "day": "x" * 1200,
+                "stable": "y" * 800,
+            },
+            "journal": "z" * 600,
+            "patterns": "Side Door Lock locks around 00:00 (100%)",
+            "device": "[Device awareness] iPhone online.",
+        }
+        traces = [
+            {"kind": "episode", "id": f"ep-{i}", "text": "a" * 140,
+             "confidence": "observed", "when": None, "role": "user"}
+            for i in range(5)
+        ]
+        text = render_engaged_context(
+            _context(world_state=world_state,
+                     relationship_state={"theory_of_david": "w" * 900}),
+            open_intents=7, recall_traces=traces, extended=extended,
+            intent="CONVERSATIONAL",
+        )
+        assert len(text) <= 4500, f"{len(text)} chars:\n{text[:1500]}"

@@ -240,15 +240,23 @@ def get_morning_recovery(db: Session, user_id: str, on_date: Optional[date] = No
         LIMIT 1
     """), {"uid": user_id, "d": on_date}).fetchone()
 
+    # `hrv_source` says WHERE the number came from, so a renderer can decide
+    # whether to present it as today's reading. On 2026-09-11 the chat prompt
+    # said `hrv=unavailable (nothing recorded in the last 36h)` in the health
+    # slice and "Recovery: high HRV (HRV 72)" in the training brief, 40 lines
+    # apart — the 72 was a daily_recovery_log row, not a health_metric sample.
+    # Sara reported "Recovery looks solid — HRV 72" off the second one.
+    # health_metric is the only authority for a body number.
     if row and row.value is not None:
-        hrv = float(row.value)
+        hrv, hrv_source = float(row.value), "health_metric"
     elif base and base.hrv is not None:
-        hrv = float(base.hrv)
+        hrv, hrv_source = float(base.hrv), "daily_recovery_log"
     else:
-        hrv = None
+        hrv, hrv_source = None, None
 
     return {
         "hrv": hrv,
+        "hrv_source": hrv_source,
         "heart_rate": float(heart_rate) if heart_rate is not None else None,
         "sleep_hours": float(sleep_hours) if sleep_hours is not None else None,
         "soreness_level": int(soreness) if soreness is not None else None,

@@ -151,36 +151,17 @@ class MomentLayer:
                     last_created_at = last_created_at.replace(tzinfo=timezone.utc)
                 time_gap = datetime.now(timezone.utc) - last_created_at
 
-            # Extract keywords from message
-            keywords = self._extract_keywords(current_message)
-            topic_str = ', '.join(keywords) if keywords else 'general conversation'
-
-            # Detect energy
-            energy = self._detect_energy(current_message)
-
-            # Determine conversation depth
-            if conversation_turn_count == 0:
-                # Try to count from database
-                if conversation_id:
-                    turn_count = db.query(Episode).filter(
-                        Episode.conversation_id == conversation_id,
-                        Episode.user_id == user_id
-                    ).count()
-                else:
-                    turn_count = 0
-            else:
-                turn_count = conversation_turn_count
-
-            if turn_count <= 1:
-                depth = "just starting"
-            elif turn_count <= 3:
-                depth = "warming up"
-            elif turn_count <= 6:
-                depth = "engaged"
-            elif turn_count <= 10:
-                depth = "deep conversation"
-            else:
-                depth = f"extended session ({turn_count} exchanges)"
+            # Harness rebuild Phase 6 removed the keyword/energy/depth
+            # computation that used to live here. It fed three lines of the
+            # rendered layer — "**Current topic**: good, morning, sara, today",
+            # "**Energy level**: low (brief)", "**Conversation depth**: just
+            # starting" — and nothing else. The topic line was a
+            # stopword-stripped copy of the message Sara was already reading;
+            # energy and depth are computed properly by the personality engine
+            # from the same turn count and arrive as tone. `_extract_keywords`
+            # and `_detect_energy` still exist for any other caller; the DB
+            # count is gone, which also removes an Episode COUNT(*) from every
+            # moment-layer refresh.
 
             # Get current time context
             now = local_now()
@@ -194,14 +175,19 @@ class MomentLayer:
             else:
                 time_of_day = "night"
 
-            # Build moment content
+            # Build moment content.
+            #
+            # Harness rebuild Phase 6 dropped the three-line keyword bag that
+            # used to follow: "**Current topic**: good, morning, sara, today",
+            # "**Energy level**: low (brief)", "**Conversation depth**: just
+            # starting". The topic line was a stopword-stripped copy of the
+            # message Sara was already reading; energy and depth are things the
+            # personality engine computes properly from the same turn_count and
+            # feeds in as tone. Three lines of the model being told what it
+            # could already see.
             moment_content = f"""## Right Now
 
 I'm in conversation with David this {time_of_day}. {self._format_time_gap(time_gap)}
-
-**Current topic**: {topic_str}
-**Energy level**: {energy}
-**Conversation depth**: {depth}
 """
 
             # Write to file

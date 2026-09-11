@@ -64,6 +64,26 @@ SECTION_ALLOTMENTS = {
 }
 
 
+# Harness rebuild Phase 6. render_engaged_context ran to 9,371 chars on
+# 2026-09-11 inside a 19,200-char live block, because the 6,000-token cap above
+# is 24,000 characters — far past the point where any of it is read. This is
+# the engaged renderer's own budget: 1,100 tokens, ~4,400 characters, matching
+# the plan's ≤4,500 target for the `📝 Context injected` line. Sections are
+# consumed in render order, so the ones that are actually load-bearing
+# (situation, calendar, recall) sit at the front.
+ENGAGED_BLOCK_MAX_TOKENS = 1100
+
+ENGAGED_SECTION_ALLOTMENTS = {
+    "brief": 420,
+    "calendar": 60,
+    "memory": 220,
+    "brief_volatile": 260,
+    "brief_stable": 160,
+    "device": 60,
+    "lessons": 120,
+}
+
+
 def clip_to_tokens(text: str, max_tokens: int) -> str:
     """Trim to a token allotment, ending at a sentence boundary.
 
@@ -91,8 +111,10 @@ class SectionBudget:
     than in a token bill three weeks later.
     """
 
-    def __init__(self, max_tokens: int = VOLATILE_BLOCK_MAX_TOKENS):
+    def __init__(self, max_tokens: int = VOLATILE_BLOCK_MAX_TOKENS,
+                 allotments: Optional[dict] = None):
         self.max_tokens = max_tokens
+        self.allotments = allotments if allotments is not None else SECTION_ALLOTMENTS
         self._sections: List[tuple] = []
 
     def add(self, name: str, text: Optional[str]) -> None:
@@ -103,7 +125,7 @@ class SectionBudget:
         kept, cut, used = [], [], 0
         parts: List[str] = []
         for name, text in self._sections:
-            allotment = SECTION_ALLOTMENTS.get(name, self.max_tokens)
+            allotment = self.allotments.get(name, self.max_tokens)
             allowed = min(allotment, max(0, self.max_tokens - used))
             if allowed <= 0:
                 cut.append(f"{name}=dropped")
