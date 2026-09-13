@@ -16,6 +16,7 @@ from app.models.world_model import (
     WorldEventDisposition, WorldFact, WorldSnapshot, WorldThread,
 )
 from app.services.world_state.catalog import get_spec
+from app.services.world_state.thread_kinds import coerce_interpreted_kind
 
 REDUCER_VERSION = 1
 ACTIVE_THREAD_STATUSES = {"proposed", "open", "waiting", "blocked"}
@@ -506,15 +507,25 @@ def _reduce_domain(db: Session, event: WorldEvent) -> Tuple[Dict[str, Any], List
             outcomes.append("threads_discarded_own_speech")
         thread_items = []
 
+    # The second lock on the interpreter's kind vocabulary (the first is in
+    # interpreter.py). Trusted producers keep their raw kind — calendar opens
+    # `prep`/`meeting`, the conversation tracker opens `active_conversation` —
+    # but a kind an LLM chose has to be one something can close.
+    from_interpretation = kind == "world.interpretation.completed"
+
     for item in thread_items:
         if not isinstance(item, dict) or not item.get("title"):
             continue
         thread_key = item.get("thread_key") or f"explicit:{event.event_id}:{len(outputs['threads'])}"
         due_at, due_provenance = _deterministic_due_at(event, item.get("due_at"))
+        item_kind = (
+            coerce_interpreted_kind(item.get("kind")) if from_interpretation
+            else str(item.get("kind") or "follow_up")[:32]
+        )
         thread, operation = _thread(
             db, event,
             thread_key=str(thread_key)[:768],
-            kind=str(item.get("kind") or "follow_up")[:32],
+            kind=item_kind,
             title=str(item["title"])[:2000],
             status=str(item.get("status") or "open")[:24],
             next_step=str(item.get("next_step"))[:2000] if item.get("next_step") else None,
