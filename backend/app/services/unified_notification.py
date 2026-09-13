@@ -409,9 +409,12 @@ async def _send_notification_impl(
     # anything is dedup-checked or delivered. Exempt categories (raw
     # timer/reminder fires) and any composer failure fall back to the
     # original text unchanged — see notification_composer.compose_notification_text.
-    # _skip_phrasing is set only by route_through_attention_queue's internal
+    # _skip_phrasing is set by route_through_attention_queue's internal
     # recursive calls, which already received composed text from this same
-    # pass — without it every attention-routed push would compose twice.
+    # pass (without it every attention-routed push would compose twice), and
+    # by the few callers whose text must survive verbatim — mindv2_deliver
+    # (already composed in the one voice) and system_wiring_check (a findings
+    # list is evidence, not prose).
     if not _skip_phrasing:
         try:
             from app.services.notification_composer import compose_notification_text

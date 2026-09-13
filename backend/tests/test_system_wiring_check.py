@@ -337,6 +337,10 @@ class TestNotificationShape:
         assert call["category"] == "system"
         assert call["source"] == "system_wiring_check"
         assert call["title"] == "Wiring check: 2 new finding(s)"
+        # The phrasing stage turned the first verification run into "I found
+        # one new thing in the wiring check" — the finding's name, the only
+        # part David can act on, paraphrased away.
+        assert call["_skip_phrasing"] is True
 
     def test_the_new_findings_come_first_and_whole(self):
         h = _DeltaHarness()

@@ -601,6 +601,12 @@ def run_check(notify: bool = True):
                 cooldown_hours=24 * 6,
                 category="system",
                 source="system_wiring_check",
+                # A findings list is evidence, not prose. Left to the phrasing
+                # stage the first verification run came out as "I found one new
+                # thing in the wiring check" — the name of the finding, the one
+                # thing David needs, paraphrased away. Same reason
+                # mindv2_deliver.py skips it.
+                _skip_phrasing=True,
                 db=db,
             )
             # send_notification doesn't commit a caller-supplied session
