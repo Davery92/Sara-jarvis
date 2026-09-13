@@ -4,7 +4,12 @@ Overhaul C1/C2).
 Scheduled via the `scheduled_job` table:
 - `materialize-ml-features` at 2:30 AM ET (after consolidation at 2:00 AM,
   before daily-rhythm recompute at 3:45 AM)
-- `ml-retrain-all` at 3:15 AM ET
+- `sync-ml-notification-outcomes`
+
+There is no nightly retrain. `retrain_all` queued into a Redis job plane with
+no worker and no caller — the docstring advertised a 3:15 AM job that never
+had a `scheduled_job` row — so it was deleted on 2026-09-13. Training is
+started by hand from Settings > Intelligence via `routes/ml_control.py`.
 """
 import logging
 import os
@@ -15,8 +20,6 @@ from app.core.config import get_owner_id
 
 logger = logging.getLogger(__name__)
 SOLO_USER_ID = get_owner_id()
-
-MODEL_FAMILIES = ["interruptibility_v2", "notification_value", "next_block", "rhythm_forecaster"]
 
 
 @celery_app.task(name="app.tasks.ml.materialize_features", queue="cognitive")
@@ -90,21 +93,3 @@ def sync_notification_outcomes():
 
     logger.info(f"sync_notification_outcomes: {updated} rows updated")
     return {"updated": updated}
-
-
-@celery_app.task(name="app.tasks.ml.retrain_all", queue="cognitive")
-def retrain_all():
-    """Queue one train_model job per model family against the ML job plane
-    (app/routes/ml_control.py) — the GPU-cluster ml-worker claims and runs
-    them. Nightly; matches the voice-control training job pattern."""
-    from app.services.ml.job_queue import create_ml_training_job
-
-    queued = []
-    for family in MODEL_FAMILIES:
-        try:
-            job = create_ml_training_job(family, requested_by="system:ml-retrain-all")
-            queued.append(job["job_id"])
-        except Exception as e:
-            logger.error(f"retrain_all: failed to queue job for {family}: {e}")
-    logger.info(f"retrain_all: queued {len(queued)} training jobs")
-    return {"queued_job_ids": queued}

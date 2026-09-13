@@ -38,17 +38,6 @@ EXPIRE_HOURS = 24.0
 
 
 @celery_app.task(
-    name="app.tasks.attention.escalate_unread_attention",
-    queue="cognitive",
-)
-def escalate_unread_attention():
-    """Deprecated name kept so the DB-scheduled job row (now disabled) and
-    any stale beat cache resolve to a real, harmless task instead of an
-    'unknown task' error. Delegates to the real (non-escalating) sweep."""
-    return expire_stale_attention()
-
-
-@celery_app.task(
     name="app.tasks.attention.expire_stale_attention",
     queue="cognitive",
 )

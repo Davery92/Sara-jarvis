@@ -5,8 +5,11 @@ SARA_PROACTIVENESS_AUDIT_AND_PLAN_2026_07_25 §5.3: the old
 escalate_unread_attention force-pushed unread items after 24h at bumped
 priority. It's deleted; these tests lock in that the replacement
 (expire_stale_attention) only ever archives rows — it must never call
-send_notification / any push path — and that the old task name still
-resolves harmlessly by delegating to the new one.
+send_notification / any push path.
+
+The deprecated ``escalate_unread_attention`` shim (and its test) went away
+on 2026-09-13: no scheduled_job row had referenced it for weeks, so it was
+only there to keep the weekly wiring check reporting an unscheduled task.
 """
 from unittest.mock import MagicMock, patch
 
@@ -84,12 +87,3 @@ class TestExpireStaleAttentionAsync:
             with pytest.raises(RuntimeError):
                 await attention._expire_stale_attention_async()
         db.close.assert_called_once()
-
-
-class TestDeprecatedAliasDelegates:
-    def test_escalate_unread_attention_delegates_to_expire(self):
-        with patch("app.tasks.attention.expire_stale_attention",
-                   return_value={"expired": 0}) as mock_expire:
-            result = attention.escalate_unread_attention()
-        mock_expire.assert_called_once()
-        assert result == {"expired": 0}
