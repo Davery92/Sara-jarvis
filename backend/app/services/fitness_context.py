@@ -134,6 +134,18 @@ async def get_fitness_context(user_id: str, db: Session) -> Optional[str]:
             day_type = "Training Day" if is_training else "Rest Day"
             lines.append(f"**Phase:** {phase_name} | **Today:** {day_type}")
 
+            # What today actually prescribes. Without this Sara knows the macros
+            # but not the sessions, so "what's my workout today?" fell back to a
+            # tool call — or to nothing. Two-a-day means both windows, in order.
+            try:
+                from app.services.training_day import templates_for_day
+                from app.services.workout_prescription import describe_day, program_week
+                sessions = templates_for_day(db, user_id, today, phase=phase_row)
+                if sessions:
+                    lines.append(f"**Today's sessions:** {describe_day(sessions, program_week(db, user_id, today))}")
+            except Exception as e:
+                logger.warning(f"Failed to describe today's sessions ({type(e).__name__}): {e}")
+
         lines.append(
             f"**Targets:** {_fmt(target['calories'])} cal | "
             f"{_fmt(target['protein'])}g protein | "

@@ -2095,7 +2095,7 @@ class WorkoutCommandService:
             "events": self.list_events(db, row.id, after_version=after_version),
         }
 
-    def catalog(self, db: Session, user_id: str, limit: int = 8) -> Dict[str, Any]:
+    def catalog(self, db: Session, user_id: str, limit: int = 16) -> Dict[str, Any]:
         """Compact template list the Watch caches so it can start standalone (§7.5).
 
         Deliberately thin: enough to render a pre-start summary, never enough

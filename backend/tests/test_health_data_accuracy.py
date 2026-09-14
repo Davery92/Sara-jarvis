@@ -236,6 +236,37 @@ class TestHealthTodaySlice:
         assert world.health_today.confidence == pytest.approx(0.25)
 
 
+class TestHRVReachesTheSliceFromTheRecoverySync:
+    """HRV_PIPELINE_AND_TWO_A_DAY_PROGRAM_2026_09_14 Part A: on 2026-09-14 Sara
+    said "your HRV swung between 16 and 137 last week" and "no HRV logged in the
+    last 36 hours" in the same reply. `daily_recovery_log` had the reading;
+    `health_metric` — what this slice reads — did not, because the iOS batch
+    path gated `hrv_morning` on a 4-hour window and a 05:00–07:59 sync. The
+    ingest now mirrors it, so a recovery-sync HRV has to land here."""
+
+    @pytest.mark.asyncio
+    async def test_mirrored_recovery_hrv_renders_as_a_measurement(self):
+        from unittest.mock import AsyncMock
+        from app.services.health_metric_mirror import canonical_recorded_at
+
+        # What the mirror writes for a sync-recovery HRV of 64 today.
+        mirrored = MagicMock(
+            metric_type="hrv_morning", value=64.0,
+            recorded_at=canonical_recorded_at(datetime.now(ET).date()),
+            created_at=None,
+        )
+        get_world_state, db = TestHealthTodaySlice()._slice_for([mirrored])
+        with patch("app.services.unified_context.read_snapshot",
+                   new=AsyncMock(side_effect=Exception("skip"))):
+            world = await get_world_state(db, user_id="u1")
+
+        hrv = str(world.health_today.data["hrv"])
+        assert "64" in hrv
+        assert "measured" in hrv
+        assert "unavailable" not in hrv
+        assert "36h" not in hrv
+
+
 class TestPKGHealthSuppression:
     """2.1: raw wins, always. Two numbers for the same metric side by side is
     how the model ends up choosing the wrong one."""

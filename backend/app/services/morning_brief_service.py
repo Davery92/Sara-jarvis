@@ -1813,22 +1813,14 @@ Synthesized summary:"""
                     "tts": "No active training program. Enjoy your rest day or set up a workout plan."
                 }
 
-            # Find today's scheduled template
-            templates = db.execute(text("""
-                SELECT id, name, exercises, scheduled_days, notes
-                FROM fitness_template
-                WHERE user_id = :user_id AND phase_id = :phase_id
-            """), {"user_id": user_id, "phase_id": active_phase["id"]}).fetchall()
+            # Every template scheduled today, in plan order — the two-a-day
+            # program runs an AM strength session and a PM hypertrophy one, and
+            # taking only the first hid the second from the brief entirely.
+            from app.services.training_day import templates_for_day
+            from app.services.workout_prescription import describe_exercise, program_week
+            todays_templates = templates_for_day(db, user_id, today, phase=active_phase)
 
-            today_template = None
-            for t in templates:
-                if t.scheduled_days:
-                    days = json.loads(t.scheduled_days or "[]")
-                    if day_of_week in [d.lower() for d in days]:
-                        today_template = t
-                        break
-
-            if not today_template:
+            if not todays_templates:
                 # No scheduled template — but a logged/started session still
                 # makes it a training day. Use the shared definition so this
                 # never contradicts the nutrition targets.
@@ -1843,30 +1835,41 @@ Synthesized summary:"""
                     "tts": "Today is a rest day. No workout scheduled. Focus on recovery and stay hydrated."
                 }
 
-            # Parse exercises
-            exercises = json.loads(today_template.exercises or "[]")
-            exercise_names = [e.get("name", "") for e in exercises if e.get("name")]
-
-            # Build markdown
+            week = program_week(db, user_id, today)
             lines = ["## Today's Plan"]
-            lines.append(f"**{today_template.name}**")
-            if exercise_names:
-                lines.append(f"- Exercises: {', '.join(exercise_names[:5])}" +
-                           (" ..." if len(exercise_names) > 5 else ""))
-            if today_template.notes:
-                lines.append(f"- Notes: {today_template.notes}")
+            tts_parts = []
 
-            # Build TTS
-            tts_parts = [f"For today, you have {today_template.name} scheduled."]
-            if exercise_names:
-                if len(exercise_names) <= 3:
-                    tts_parts.append(f"Key exercises include {', '.join(exercise_names)}.")
+            for tmpl in todays_templates:
+                exercises = tmpl["exercises"]
+                exercise_names = [e.get("name", "") for e in exercises if e.get("name")]
+                lines.append(f"**{tmpl['name']}**")
+
+                if len(exercises) == 1:
+                    # A single-lift strength session: the load is the whole point,
+                    # so state the week's prescription rather than just a name.
+                    lines.append(f"- {describe_exercise(exercises[0], week)}")
+                    tts_parts.append(f"{tmpl['name']}: {describe_exercise(exercises[0], week)}.")
+                elif exercise_names:
+                    lines.append(f"- Exercises: {', '.join(exercise_names[:5])}" +
+                                 (" ..." if len(exercise_names) > 5 else ""))
+                    if len(exercise_names) <= 3:
+                        tts_parts.append(
+                            f"{tmpl['name']}, with {', '.join(exercise_names)}.")
+                    else:
+                        tts_parts.append(
+                            f"{tmpl['name']}, {len(exercise_names)} exercises including "
+                            f"{', '.join(exercise_names[:3])}.")
                 else:
-                    tts_parts.append(f"You've got {len(exercise_names)} exercises planned including {', '.join(exercise_names[:3])}.")
+                    tts_parts.append(f"{tmpl['name']}.")
 
+                if tmpl["notes"]:
+                    lines.append(f"- Notes: {tmpl['notes']}")
+
+            lead = ("For today, you have two sessions. " if len(todays_templates) > 1
+                    else "For today, you have ")
             return {
                 "text": "\n".join(lines),
-                "tts": " ".join(tts_parts)
+                "tts": lead + " ".join(tts_parts),
             }
 
         except Exception as e:
@@ -2232,26 +2235,17 @@ Synthesized summary:"""
             # Use the dated phase of the approved active program.
             active_phase = get_effective_phase(db, user_id, today)
 
-            # Find today's scheduled template
-            template = None
-            template_exercises = []
-            if active_phase:
-                templates = db.execute(text("""
-                    SELECT id, name, exercises, notes, scheduled_days FROM fitness_template
-                    WHERE user_id = :user_id AND phase_id = :phase_id
-                """), {"user_id": user_id, "phase_id": active_phase["id"]}).fetchall()
-
-                for t in templates:
-                    if t.scheduled_days:
-                        days = json.loads(t.scheduled_days or "[]")
-                        if day_of_week in [d.lower() for d in days]:
-                            template = t
-                            template_exercises = json.loads(t.exercises or "[]")
-                            break
+            # Every template scheduled today, in plan order (AM then PM).
+            from app.services.training_day import templates_for_day
+            from app.services.workout_prescription import prescription_for_week, program_week
+            todays_templates = templates_for_day(db, user_id, today, phase=active_phase) \
+                if active_phase else []
+            week = program_week(db, user_id, today) if todays_templates else None
+            template_exercises = [ex for t in todays_templates for ex in t["exercises"]]
 
             # If we have a scheduled workout, get recent performance for each exercise
             exercise_history = {}
-            if template and template_exercises:
+            if template_exercises:
                 exercise_names = [e.get("name", "") for e in template_exercises if e.get("name")]
 
                 for exercise_name in exercise_names:
@@ -2331,49 +2325,60 @@ Synthesized summary:"""
                 weight_adjustment = 0.80  # Consider rest or very light
                 adjustment_note = "Consider a rest day or very light session"
 
-            # Build exercise recommendations with suggested weights
-            exercise_recommendations = []
-            for ex in template_exercises:
-                ex_name = ex.get("name", "")
-                target_sets = ex.get("sets", 3)
-                target_reps = ex.get("reps", "8-10")
-                target_rpe = ex.get("rpe_target", 7)
+            # Build exercise recommendations with suggested weights, grouped by
+            # session so a two-a-day renders as two tables rather than one
+            # undifferentiated list.
+            recommendations_by_session = []
+            for tmpl in todays_templates:
+                recs = []
+                for ex in tmpl["exercises"]:
+                    ex_name = ex.get("name", "")
+                    target_sets = ex.get("sets", 3)
+                    target_reps = ex.get("reps", "8-10")
 
-                if ex_name in exercise_history:
-                    hist = exercise_history[ex_name]
-                    last_weight = hist["last_weight"]
-                    suggested_weight = int(last_weight * weight_adjustment / 5) * 5  # Round to nearest 5
+                    # When the plan prescribes this week's load outright (the AM
+                    # lifts carry an 8-week table in their notes), that number
+                    # wins over anything extrapolated from history.
+                    prescribed = prescription_for_week(ex.get("notes") or "", week)
 
-                    days_since = (today - datetime.strptime(hist["last_date"], "%Y-%m-%d").date()).days
-
-                    exercise_recommendations.append({
+                    rec = {
                         "name": ex_name,
                         "sets": target_sets,
                         "reps": target_reps,
-                        "suggested_weight": suggested_weight,
-                        "last_weight": last_weight,
-                        "last_reps": hist["last_reps"],
-                        "days_since": days_since
-                    })
-                else:
-                    # No history - use starting weight if available
-                    starting = ex.get("starting_weight")
-                    exercise_recommendations.append({
-                        "name": ex_name,
-                        "sets": target_sets,
-                        "reps": target_reps,
-                        "suggested_weight": int(starting * weight_adjustment / 5) * 5 if starting else None,
+                        "prescribed_top": prescribed.get("top"),
+                        "prescribed_backoff": prescribed.get("backoff"),
+                        "suggested_weight": None,
                         "last_weight": None,
                         "last_reps": None,
-                        "days_since": None
-                    })
+                        "days_since": None,
+                    }
+
+                    if ex_name in exercise_history:
+                        hist = exercise_history[ex_name]
+                        rec["last_weight"] = hist["last_weight"]
+                        rec["last_reps"] = hist["last_reps"]
+                        rec["days_since"] = (
+                            today - datetime.strptime(hist["last_date"], "%Y-%m-%d").date()).days
+                        if not prescribed:
+                            # Round to nearest 5
+                            rec["suggested_weight"] = int(
+                                hist["last_weight"] * weight_adjustment / 5) * 5
+                    elif not prescribed:
+                        starting = ex.get("starting_weight")
+                        rec["suggested_weight"] = (
+                            int(starting * weight_adjustment / 5) * 5 if starting else None)
+
+                    recs.append(rec)
+                recommendations_by_session.append((tmpl["name"], recs))
 
             # Build the output text
-            if template:
-                # Header
-                recovery_text = f"## Today's Workout: {template.name}\n"
+            if todays_templates:
+                # Header — name every session, not just the first.
+                recovery_text = "## Today's Workout: " + " · ".join(
+                    t["name"] for t in todays_templates) + "\n"
                 if active_phase:
-                    recovery_text += f"*Phase: {active_phase['name']}*\n\n"
+                    week_note = f", week {week}" if week else ""
+                    recovery_text += f"*Phase: {active_phase['name']}{week_note}*\n\n"
 
                 # Recovery status
                 if recovery:
@@ -2389,15 +2394,26 @@ Synthesized summary:"""
                         "- Weights below are the prescribed ones, not recovery-adjusted.\n\n"
                     )
 
-                # Exercise table with suggested weights
-                recovery_text += "### Suggested Weights\n"
-                recovery_text += "| Exercise | Sets × Reps | Today | Last |\n"
-                recovery_text += "|----------|-------------|-------|------|\n"
-
-                for rec in exercise_recommendations:
-                    suggested = f"{rec['suggested_weight']} lbs" if rec['suggested_weight'] else "—"
-                    last = f"{rec['last_weight']} lbs" if rec['last_weight'] else "—"
-                    recovery_text += f"| {rec['name']} | {rec['sets']}×{rec['reps']} | **{suggested}** | {last} |\n"
+                # Exercise table with suggested weights — one per session.
+                for session_name, recs in recommendations_by_session:
+                    if not recs:
+                        continue
+                    recovery_text += f"### {session_name}\n"
+                    recovery_text += "| Exercise | Sets × Reps | Today | Last |\n"
+                    recovery_text += "|----------|-------------|-------|------|\n"
+                    for rec in recs:
+                        if rec["prescribed_top"]:
+                            today_cell = f"top {rec['prescribed_top']}"
+                            if rec["prescribed_backoff"]:
+                                today_cell += f", backoff {rec['prescribed_backoff']}"
+                        elif rec["suggested_weight"]:
+                            today_cell = f"{rec['suggested_weight']} lbs"
+                        else:
+                            today_cell = "—"
+                        last = f"{rec['last_weight']} lbs" if rec["last_weight"] else "—"
+                        recovery_text += (f"| {rec['name']} | {rec['sets']}×{rec['reps']} | "
+                                          f"**{today_cell}** | {last} |\n")
+                    recovery_text += "\n"
 
                 # Coaching note
                 if recovery_factors:
@@ -2421,8 +2437,9 @@ Synthesized summary:"""
             audio_dir = BRIEFINGS_BASE_PATH / user_id / today_str
             recovery_audio_path = audio_dir / "recovery_brief.mp3"
 
-            if template:
-                tts_text = f"Today is {template.name}. "
+            if todays_templates:
+                tts_text = "Today is " + " and then ".join(
+                    t["name"] for t in todays_templates) + ". "
                 if recovery_score is not None:
                     tts_text += f"Your recovery score is {recovery_score} out of 100. {adjustment_note}. "
                 else:
@@ -2430,7 +2447,8 @@ Synthesized summary:"""
                         "I don't have a recovery score for you today — nothing was logged, "
                         "so these are your prescribed weights. "
                     )
-                tts_text += f"You have {len(exercise_recommendations)} exercises planned."
+                tts_text += f"You have {len(template_exercises)} exercises planned"
+                tts_text += (" across the two sessions." if len(todays_templates) > 1 else ".")
             else:
                 tts_text = "Today is a rest day. Focus on recovery."
 

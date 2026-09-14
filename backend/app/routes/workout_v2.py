@@ -215,7 +215,7 @@ async def v2_healthkit_link(
 
 @router.get("/catalog")
 async def v2_catalog(
-    limit: int = 8,
+    limit: int = 16,  # a two-a-day week is 8 templates; 8 sat exactly on the cutoff
     user_id: str = Depends(get_current_user_id),
     db: Session = Depends(get_db),
 ):

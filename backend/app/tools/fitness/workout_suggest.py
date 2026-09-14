@@ -51,23 +51,32 @@ class WorkoutSuggestTool(BaseTool):
             "target_date": {
                 "type": "string",
                 "description": "Optional date in YYYY-MM-DD format. Defaults to today if not provided."
+            },
+            "session": {
+                "type": "string",
+                "enum": ["am", "pm"],
+                "description": "Optional. On a two-a-day, limit the answer to the morning "
+                               "strength session or the afternoon hypertrophy session. "
+                               "Omit to get both, in order."
             }
         },
         "required": []
     }
 
-    async def execute(self, user_id: str, target_date: Optional[str] = None, db: Session = None, **kwargs) -> ToolResult:
+    async def execute(self, user_id: str, target_date: Optional[str] = None,
+                      session: Optional[str] = None, db: Session = None, **kwargs) -> ToolResult:
         """
         Suggest today's workout
 
         Args:
             user_id: User ID
             target_date: Optional date (YYYY-MM-DD), defaults to today
+            session: Optional "am"/"pm" filter for two-a-day training days
             db: Database session
 
         Returns:
             ToolResult with workout suggestion including:
-            - Template details
+            - Every session scheduled for the day, in plan order (`sessions`)
             - Exercise prescriptions with weights/reps/RPE
             - Progressive overload recommendations
             - Recovery notes
@@ -92,7 +101,7 @@ class WorkoutSuggestTool(BaseTool):
 
             # 2. Find templates scheduled for this day
             templates_result = db.execute(text("""
-                SELECT id, name, phase_id, scheduled_days, exercises, notes
+                SELECT id, name, phase_id, scheduled_days, exercises, notes, order_in_phase
                 FROM fitness_template
                 WHERE user_id = :user_id
             """), {"user_id": user_id}).fetchall()
@@ -131,123 +140,46 @@ class WorkoutSuggestTool(BaseTool):
                     message=f"No workout scheduled for {day_of_week}"
                 )
 
-            # Use the first matching template (if multiple, user can specify)
-            template = matching_templates[0]
+            # Order the day's sessions the way the plan does (AM before PM);
+            # taking [0] used to hide the second session of a two-a-day.
+            matching_templates.sort(key=lambda t: (t.get("order_in_phase") is None,
+                                                   t.get("order_in_phase") or 0))
+            if session:
+                wanted = session.strip().lower()
+                filtered = [t for t in matching_templates
+                            if f" {wanted} " in f" {(t.get('name') or '').lower()} "
+                            or f"{wanted} —" in (t.get("name") or "").lower()]
+                if filtered:
+                    matching_templates = filtered
 
-            # 2. Get phase context if template is linked to a phase
+            # 2. Get phase context if the templates are linked to a phase
             phase_context = None
-            if template.get("phase_id"):
+            phase_for_context = next((t["phase_id"] for t in matching_templates if t.get("phase_id")), None)
+            if phase_for_context:
                 phase_result = db.execute(text("""
                     SELECT name, goal, status FROM fitness_phase WHERE id = :phase_id
-                """), {"phase_id": template["phase_id"]}).fetchone()
+                """), {"phase_id": phase_for_context}).fetchone()
                 if phase_result:
                     phase_context = dict(phase_result._mapping)
 
-            # 3. Analyze past performance for each exercise in the template
-            exercise_suggestions = []
+            from app.services.workout_prescription import prescription_for_week, program_week
+            week = program_week(db, user_id, workout_date)
 
-            for exercise_spec in template["exercises"]:
-                exercise_name = exercise_spec.get("name")
-                target_sets = exercise_spec.get("sets", 3)
-                target_reps = exercise_spec.get("reps", "8-10")
-                target_rpe = exercise_spec.get("rpe_target", 7)
-
-                # Get last 3 sessions of this exercise
-                # Note: workout_log uses exercise_id which stores exercise names as strings
-                past_sessions = db.execute(text("""
-                    SELECT session_date, weight, reps, rpe, notes
-                    FROM workout_log
-                    WHERE user_id = :user_id
-                      AND LOWER(exercise_id) = LOWER(:exercise_name)
-                      AND session_date IS NOT NULL
-                      AND voided_at IS NULL
-                      AND COALESCE(set_kind, 'working') = 'working'
-                    ORDER BY session_date DESC, created_at DESC
-                    LIMIT 15
-                """), {
-                    "user_id": user_id,
-                    "exercise_name": exercise_name
-                }).fetchall()
-
-                # Group by session date
-                sessions_by_date = {}
-                for log in past_sessions:
-                    log_date = log.session_date
-                    if log_date not in sessions_by_date:
-                        sessions_by_date[log_date] = []
-                    sessions_by_date[log_date].append({
-                        "weight": log.weight,
-                        "reps": log.reps,
-                        "rpe": log.rpe or 7,
-                        "notes": log.notes
-                    })
-
-                # Analyze last session
-                last_session = None
-                suggested_weight = None
-                suggested_reps = target_reps
-                progression_note = ""
-
-                if sessions_by_date:
-                    last_date = max(sessions_by_date.keys())
-                    last_session = sessions_by_date[last_date]
-
-                    # Simple progressive overload logic:
-                    # If all sets completed with RPE < 8, suggest adding weight
-                    # If struggled (any RPE >= 9), maintain weight
-                    # Default: 5lb increase for upper body, 10lb for lower body
-
-                    last_weights = [s["weight"] for s in last_session]
-                    last_reps = [s["reps"] for s in last_session]
-                    last_rpes = [s["rpe"] for s in last_session]
-
-                    avg_weight = sum(last_weights) / len(last_weights) if last_weights else 0
-                    avg_rpe = sum(last_rpes) / len(last_rpes) if last_rpes else 7
-
-                    # Check if user is using consistent reps
-                    if last_reps:
-                        avg_reps = sum(last_reps) / len(last_reps)
-                        min_reps = min(last_reps)
-
-                        # Progressive overload decision tree
-                        if avg_rpe < 7.5 and min_reps >= int(target_reps.split("-")[0] if "-" in str(target_reps) else target_reps):
-                            # Easy session, all reps hit - add weight
-                            # Heuristic: add 5lbs for upper body, 10lbs for lower body
-                            is_lower_body = any(keyword in exercise_name.lower() for keyword in ["squat", "deadlift", "leg", "lunge"])
-                            weight_increase = 10 if is_lower_body else 5
-                            suggested_weight = avg_weight + weight_increase
-                            progression_note = f"Last session felt easy (RPE {avg_rpe:.1f}). Adding {weight_increase}lbs."
-                        elif avg_rpe >= 8.5:
-                            # Hard session - maintain weight or reduce slightly
-                            suggested_weight = avg_weight
-                            progression_note = f"Last session was challenging (RPE {avg_rpe:.1f}). Maintaining weight."
-                        elif min_reps < int(target_reps.split("-")[0] if "-" in str(target_reps) else target_reps):
-                            # Didn't hit rep target - maintain weight
-                            suggested_weight = avg_weight
-                            progression_note = f"Didn't complete all reps last time. Focus on hitting {target_reps} reps."
-                        else:
-                            # Normal progression
-                            suggested_weight = avg_weight + 2.5  # Small increment
-                            progression_note = f"Solid session. Small progression from {avg_weight}lbs."
-                    else:
-                        suggested_weight = avg_weight
-
-                else:
-                    # No history - suggest starting conservative
-                    progression_note = "First time doing this exercise. Start with a weight that feels like RPE 7."
-                    suggested_weight = None  # User needs to choose
-
-                exercise_suggestion = {
-                    "exercise": exercise_name,
-                    "sets": target_sets,
-                    "reps": target_reps,
-                    "rpe_target": target_rpe,
-                    "suggested_weight": suggested_weight,
-                    "progression_note": progression_note,
-                    "last_session_summary": f"{len(sessions_by_date)} previous sessions found" if sessions_by_date else "No previous history"
-                }
-
-                exercise_suggestions.append(exercise_suggestion)
+            # 3. Analyze past performance for each exercise in each session
+            sessions = []
+            for template in matching_templates:
+                exercise_suggestions = [
+                    self._suggest_for_exercise(db, user_id, spec, week)
+                    for spec in template["exercises"]
+                ]
+                sessions.append({
+                    "template": {
+                        "id": template["id"],
+                        "name": template["name"],
+                        "notes": template.get("notes"),
+                    },
+                    "exercises": exercise_suggestions,
+                })
 
             # 4. Check recovery status
             last_workout_date = db.execute(text("""
@@ -271,32 +203,161 @@ class WorkoutSuggestTool(BaseTool):
                     recovery_note = f"{days_since_last} days rest. Good recovery time."
 
             # 5. Compile final suggestion
+            session_names = [s["template"]["name"] for s in sessions]
+            total_exercises = sum(len(s["exercises"]) for s in sessions)
+            if len(sessions) > 1:
+                general = (f"Today has {len(sessions)} sessions: {' then '.join(session_names)}. "
+                           f"{total_exercises} exercises in total, in that order.")
+            else:
+                general = (f"Today's workout: {session_names[0]}. "
+                           f"Complete {total_exercises} exercises as prescribed.")
+
             suggestion = {
                 "date": str(workout_date),
                 "day_of_week": day_of_week,
-                "template": {
-                    "id": template["id"],
-                    "name": template["name"],
-                    "notes": template.get("notes")
-                },
+                "sessions": sessions,
+                # Back-compat: existing callers read `template`/`exercises` and
+                # get the first session, which is the one that happens first.
+                "template": sessions[0]["template"],
+                "exercises": sessions[0]["exercises"],
                 "phase": phase_context,
-                "exercises": exercise_suggestions,
                 "recovery": {
                     "days_since_last_workout": days_since_last,
                     "note": recovery_note
                 },
-                "general_notes": f"Today's workout: {template['name']}. Complete {len(exercise_suggestions)} exercises as prescribed."
+                "general_notes": general,
             }
 
             return ToolResult(
                 success=True,
                 data=suggestion,
-                message=f"Workout suggestion for {day_of_week}: {template['name']}"
+                message=f"Workout suggestion for {day_of_week}: {' · '.join(session_names)}"
             )
 
         except Exception as e:
-            logger.exception(f"workout_suggest failed: {e}")
+            logger.exception(f"workout_suggest failed ({type(e).__name__}): {e}")
             return ToolResult(
                 success=False,
                 error=f"Failed to suggest workout: {str(e)}"
             )
+
+    def _suggest_for_exercise(self, db: Session, user_id: str, exercise_spec: Dict,
+                              week: Optional[int] = None) -> Dict:
+        """Prescription for one exercise: the plan's number when it has one,
+        otherwise progressive overload off the log."""
+        from app.services.workout_prescription import prescription_for_week
+
+        exercise_name = exercise_spec.get("name")
+        target_sets = exercise_spec.get("sets", 3)
+        target_reps = exercise_spec.get("reps", "8-10")
+        target_rpe = exercise_spec.get("rpe_target", 7)
+
+        # Get last 3 sessions of this exercise
+        # Note: workout_log uses exercise_id which stores exercise names as strings
+        past_sessions = db.execute(text("""
+            SELECT session_date, weight, reps, rpe, notes
+            FROM workout_log
+            WHERE user_id = :user_id
+              AND LOWER(exercise_id) = LOWER(:exercise_name)
+              AND session_date IS NOT NULL
+              AND voided_at IS NULL
+              AND COALESCE(set_kind, 'working') = 'working'
+            ORDER BY session_date DESC, created_at DESC
+            LIMIT 15
+        """), {
+            "user_id": user_id,
+            "exercise_name": exercise_name
+        }).fetchall()
+
+        # Group by session date
+        sessions_by_date = {}
+        for log in past_sessions:
+            log_date = log.session_date
+            if log_date not in sessions_by_date:
+                sessions_by_date[log_date] = []
+            sessions_by_date[log_date].append({
+                "weight": log.weight,
+                "reps": log.reps,
+                "rpe": log.rpe or 7,
+                "notes": log.notes
+            })
+
+        suggested_weight = None
+        progression_note = ""
+
+        # The AM lifts carry an 8-week loading table in their notes. Where the
+        # plan states this week's load, it is the prescription — a +5/+10
+        # extrapolation from the log would quietly compete with the program.
+        prescribed = prescription_for_week(exercise_spec.get("notes") or "", week)
+
+        if sessions_by_date:
+            last_date = max(sessions_by_date.keys())
+            last_session = sessions_by_date[last_date]
+
+            # Simple progressive overload logic:
+            # If all sets completed with RPE < 8, suggest adding weight
+            # If struggled (any RPE >= 9), maintain weight
+            # Default: 5lb increase for upper body, 10lb for lower body
+
+            last_weights = [s["weight"] for s in last_session]
+            last_reps = [s["reps"] for s in last_session]
+            last_rpes = [s["rpe"] for s in last_session]
+
+            avg_weight = sum(last_weights) / len(last_weights) if last_weights else 0
+            avg_rpe = sum(last_rpes) / len(last_rpes) if last_rpes else 7
+
+            # Check if user is using consistent reps
+            if last_reps:
+                min_reps = min(last_reps)
+
+                # Progressive overload decision tree
+                if avg_rpe < 7.5 and min_reps >= int(target_reps.split("-")[0] if "-" in str(target_reps) else target_reps):
+                    # Easy session, all reps hit - add weight
+                    # Heuristic: add 5lbs for upper body, 10lbs for lower body
+                    is_lower_body = any(keyword in exercise_name.lower() for keyword in ["squat", "deadlift", "leg", "lunge"])
+                    weight_increase = 10 if is_lower_body else 5
+                    suggested_weight = avg_weight + weight_increase
+                    progression_note = f"Last session felt easy (RPE {avg_rpe:.1f}). Adding {weight_increase}lbs."
+                elif avg_rpe >= 8.5:
+                    # Hard session - maintain weight or reduce slightly
+                    suggested_weight = avg_weight
+                    progression_note = f"Last session was challenging (RPE {avg_rpe:.1f}). Maintaining weight."
+                elif min_reps < int(target_reps.split("-")[0] if "-" in str(target_reps) else target_reps):
+                    # Didn't hit rep target - maintain weight
+                    suggested_weight = avg_weight
+                    progression_note = f"Didn't complete all reps last time. Focus on hitting {target_reps} reps."
+                else:
+                    # Normal progression
+                    suggested_weight = avg_weight + 2.5  # Small increment
+                    progression_note = f"Solid session. Small progression from {avg_weight}lbs."
+            else:
+                suggested_weight = avg_weight
+        else:
+            # No history - suggest starting conservative
+            progression_note = "First time doing this exercise. Start with a weight that feels like RPE 7."
+            suggested_weight = None  # User needs to choose
+
+        suggestion = {
+            "exercise": exercise_name,
+            "sets": target_sets,
+            "reps": target_reps,
+            "rpe_target": target_rpe,
+            "suggested_weight": suggested_weight,
+            "progression_note": progression_note,
+            "last_session_summary": f"{len(sessions_by_date)} previous sessions found" if sessions_by_date else "No previous history"
+        }
+
+        if prescribed.get("top"):
+            suggestion["prescribed_top_set"] = prescribed["top"]
+            if prescribed.get("backoff"):
+                suggestion["prescribed_backoff"] = prescribed["backoff"]
+            week_label = f" (week {week})" if week else ""
+            suggestion["progression_note"] = (
+                f"The program prescribes{week_label}: top set {prescribed['top']}"
+                + (f", backoffs at {prescribed['backoff']}" if prescribed.get("backoff") else "")
+                + ". Follow the plan, not a computed increment."
+            )
+            # Don't offer a competing number.
+            suggestion["suggested_weight"] = None
+
+        return suggestion

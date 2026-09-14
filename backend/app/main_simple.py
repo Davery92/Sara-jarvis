@@ -50,6 +50,7 @@ from app.services.intent_classifier import get_tool_intent_classifier
 from app.services.sara_journal_service import sara_journal
 from app.services.context_router import get_context_router
 from app.services.workout_session_service import workout_session_service
+from app.services.health_metric_mirror import mirror_hrv_morning
 from app.services.cognitive.working_memory import get_working_memory_service
 from app.services.cognitive.raw_buffer import get_raw_buffer_service, StreamType
 from app.core import config
@@ -7746,8 +7747,11 @@ async def sync_recovery_from_health(data: SyncRecoveryRequest, db: Session = Dep
                     RETURNING id, log_date, hrv, heart_rate, sleep_hours, body_weight, weight_unit
                 """)
                 result = db.execute(query, params).first()
+                mirrored = mirror_hrv_morning(db, user_id, data.hrv, on_date=today, via="sync-recovery")
                 db.commit()
 
+                if data.hrv is not None:
+                    logger.info(f"🫀 hrv_morning mirrored={mirrored} (hrv={data.hrv}, date={today_str})")
                 logger.info(f"✅ Updated recovery log for user {user_id}: HRV={data.hrv}, HR={data.resting_hr}, Sleep={data.sleep_hours}h, Weight={final_weight}")
 
                 return {
@@ -7787,8 +7791,11 @@ async def sync_recovery_from_health(data: SyncRecoveryRequest, db: Session = Dep
                 """),
                 insert_params
             )
+            mirrored = mirror_hrv_morning(db, user_id, data.hrv, on_date=today, via="sync-recovery")
             db.commit()
 
+            if data.hrv is not None:
+                logger.info(f"🫀 hrv_morning mirrored={mirrored} (hrv={data.hrv}, date={today_str})")
             logger.info(f"✅ Created recovery log for user {user_id}: HRV={data.hrv}, HR={data.resting_hr}, Sleep={data.sleep_hours}h, Weight={final_weight}")
 
             return {

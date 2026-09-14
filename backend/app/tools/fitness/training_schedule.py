@@ -106,7 +106,8 @@ Actions:
             FROM fitness_template t
             LEFT JOIN fitness_phase p ON t.phase_id = p.id
             WHERE t.user_id = :uid
-            ORDER BY t.phase_id = CAST(:phase_id AS VARCHAR) DESC NULLS LAST, t.name
+            ORDER BY t.phase_id = CAST(:phase_id AS VARCHAR) DESC NULLS LAST,
+                     t.order_in_phase ASC NULLS LAST, t.name
         """), {
             "uid": user_id,
             "phase_id": effective["id"] if effective else None,

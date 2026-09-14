@@ -4,6 +4,7 @@ Tools for tracking daily recovery metrics: HRV, heart rate, sleep, soreness, bod
 """
 from typing import Dict, Any, List
 from app.tools.base import BaseTool, ToolResult
+from app.services.health_metric_mirror import mirror_hrv_morning
 from sqlalchemy import text
 from datetime import datetime, timezone, timedelta, date
 import uuid
@@ -149,6 +150,10 @@ class RecoveryLogCreateTool(BaseTool):
                                   body_weight, weight_unit, notes
                     """)
                     result = db.execute(query, params).first()
+                    # A number David types in is still the day's HRV — mirror it
+                    # into the authoritative store.
+                    mirror_hrv_morning(db, user_id, hrv, on_date=log_date,
+                                       source="manual", via="recovery-log")
                     db.commit()
 
                     return ToolResult(
@@ -190,6 +195,8 @@ class RecoveryLogCreateTool(BaseTool):
                         "notes": notes
                     }
                 )
+                mirror_hrv_morning(db, user_id, hrv, on_date=log_date,
+                                   source="manual", via="recovery-log")
                 db.commit()
 
                 return ToolResult(

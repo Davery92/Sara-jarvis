@@ -100,20 +100,22 @@ async function collectHealthMetrics(): Promise<HealthMetric[]> {
       });
     }
 
-    // 2. HRV — sync all samples in last 4h with context tag.
-    //    Morning samples (5-8 AM) get a stable canonical 6 AM row + flag for downstream
-    //    consumers that want a single daily HRV; daytime/evening samples are tagged so
-    //    they can be filtered by the analysis layer rather than thrown away here.
-    const fourHoursAgo = new Date(now.getTime() - 4 * 60 * 60 * 1000);
-    const hour = now.getHours();
-    const hrvSamples = await healthKitService.getHRVSamples(fourHoursAgo, now);
+    // 2. HRV — sync all samples in the last 24h with a context tag.
+    //    The window used to be 4h and the canonical morning row was additionally
+    //    gated on the sync running 05:00–07:59, so `hrv_morning` landed on 11 of
+    //    30 days while daily_recovery_log (which takes any sample in 24h) had all
+    //    30. Sara then read the two stores and said both "your HRV swung between
+    //    16 and 137 last week" and "no HRV logged in the last 36 hours" in one
+    //    reply. Dedup is by recorded_at, so a wider window costs nothing.
+    const hrvWindowStart = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+    const hrvSamples = await healthKitService.getHRVSamples(hrvWindowStart, now);
     if (hrvSamples.length === 0) {
       // HRV/continuous heart rate only get generated while an Apple Watch is
       // actively worn — unlike steps/sleep which the phone alone can supply.
       // A sustained run of these zero-sample logs (not a single quiet night)
       // points at the watch, not the sync path — check Health app charts
       // directly on the phone before assuming a code regression.
-      console.log('[BackgroundHealth] 0 HRV samples in last 4h — watch may be unworn/unpaired');
+      console.log('[BackgroundHealth] 0 HRV samples in last 24h — watch may be unworn/unpaired');
     }
     for (const sample of hrvSamples) {
       const sampleHour = new Date(sample.startDate).getHours();
@@ -132,29 +134,32 @@ async function collectHealthMetrics(): Promise<HealthMetric[]> {
         metadata: { context },
       });
     }
-    // Canonical morning HRV row (6 AM stamped) so daily aggregates have a stable key
-    if (hour >= 5 && hour < 8 && hrvSamples.length > 0) {
-      const morningSamples = hrvSamples.filter((s) => {
-        const h = new Date(s.startDate).getHours();
-        return h >= 4 && h < 10;
+    // Canonical daily HRV row (6 AM stamped) so daily aggregates have a stable key.
+    // No hour-of-day gate and no morning-only filter: whenever the watch produced
+    // a reading in the last 24h, the day gets its row. The value is the LATEST
+    // sample so this agrees with healthSync.ts's getLatestHRV() — the two paths
+    // writing different numbers for the same day was half the original problem.
+    // The backend mirrors the same row from /api/health/sync-recovery
+    // (services/health_metric_mirror.py); identical stamps mean whichever
+    // arrives second is a no-op, not a duplicate.
+    if (hrvSamples.length > 0) {
+      const latest = hrvSamples.reduce((a, b) =>
+        new Date(b.startDate).getTime() > new Date(a.startDate).getTime() ? b : a
+      );
+      const hrvRecordedAt = new Date(now);
+      hrvRecordedAt.setHours(6, 0, 0, 0);
+      metrics.push({
+        metric_type: 'hrv_morning',
+        value: Math.round(latest.value),
+        recorded_at: hrvRecordedAt.toISOString(),
+        source: 'apple_health',
+        metadata: { morning_reading: true, sample_count: hrvSamples.length },
       });
-      if (morningSamples.length > 0) {
-        const avgMorning = Math.round(
-          morningSamples.reduce((sum, s) => sum + s.value, 0) / morningSamples.length
-        );
-        const hrvRecordedAt = new Date(now);
-        hrvRecordedAt.setHours(6, 0, 0, 0);
-        metrics.push({
-          metric_type: 'hrv_morning',
-          value: avgMorning,
-          recorded_at: hrvRecordedAt.toISOString(),
-          source: 'apple_health',
-          metadata: { morning_reading: true, sample_count: morningSamples.length },
-        });
-      }
     }
 
-    // 3. Heart rate samples from last 4 hours.
+    // 3. Heart rate samples from last 4 hours. (Unlike HRV this is a dense
+    //    series, so the window stays narrow to keep the payload small.)
+    const fourHoursAgo = new Date(now.getTime() - 4 * 60 * 60 * 1000);
     //    Decimate large series to ~120 samples to avoid payload bloat while preserving
     //    enough density to detect spikes/drops (≈1 sample/2min over 4h).
     const hrSamples = await healthKitService.getHeartRateSamples(fourHoursAgo, now);
@@ -174,6 +179,7 @@ async function collectHealthMetrics(): Promise<HealthMetric[]> {
     // 4. Sleep last night — full stage breakdown (morning sync only).
     //    Emits sleep_hours + per-stage minutes + bedtime/wake-time so the
     //    analysis layer can compute deep%, REM%, sleep efficiency, etc.
+    const hour = now.getHours();
     if (hour >= 5 && hour <= 12) {
       const sleepBreakdown = await healthKitService.getSleepStagesBreakdown();
       const sleepRecordedAt = new Date(now);

@@ -258,10 +258,15 @@ async def _update_daily_recovery(
                 "sleep_hours": recovery.sleep_hours,
             })
 
+        # `health_metric` is the authority for body numbers — make sure this
+        # ingest path feeds it too, not only the legacy recovery log.
+        from app.services.health_metric_mirror import mirror_hrv_morning
+        mirror_hrv_morning(db, user_id, recovery.hrv, via="metrics-batch-daily-recovery")
+
         return True
 
     except Exception as e:
-        logger.error(f"Error updating daily_recovery_log: {e}")
+        logger.error(f"Error updating daily_recovery_log ({type(e).__name__}): {e}")
         return False
 
 

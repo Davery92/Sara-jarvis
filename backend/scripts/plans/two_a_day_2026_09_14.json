@@ -1,0 +1,115 @@
+{
+  "program": {
+    "name": "Two-A-Day Powerbuilding Recomp (Sep 14 – Nov 8)",
+    "goal": "recomp",
+    "duration_weeks": 8,
+    "notes": "One powerbuilding program split into two daily windows: AM (~7:00) = one heavy primary lift, 3-5 work sets, RPE <= 8, no grinders; PM (~1:00) = hypertrophy volume, compounds 1-2 RIR, isolation 0-2 RIR. Mon chest / Tue back / Wed shoulders / Thu legs; Fri-Sun no required lifting. Tue deadlift volume deliberately low so Thu squat stays productive; if Thu squat repeatedly declines, cut Tue deadlift backoffs first. Cardio AFTER the AM lift only: 10-15 min StairMaster/incline walk, 2-4 mornings/wk, easy-moderate; no hard intervals around deadlift/squat days. Do not add AM bodybuilding work. Reduce volume (never add) on joint irritation, worse sleep, falling performance, unusual fatigue. Programming anchors (David's numbers, unverified in the log): NewTech Flat 270 total plates x2-3; Deadlift ~365 1RM; Smith OHP 135x4x4 (~180 e1RM, provisional); Squat ~265 1RM. Load convention: NewTech = total plates both sides; Smith OHP same convention as the logged 135x4x4."
+  },
+  "phases": [
+    {"name": "Build 1 (Weeks 1-3)", "goal": "recomp", "order_index": 0, "duration_weeks": 3, "deload_week": null,
+     "notes": "Learn a recoverable workload. AM: Wk1/2/3 top sets per the loading table in each AM exercise's notes; advance only when the top set is clean and <= RPE 8, else repeat the week. PM: double progression - same load until every set hits the top of the range at the intended RIR, then add load and rebuild reps.",
+     "nutrition": {"calories_target": 2650, "protein_target": 240, "carbs_target": 242, "fat_target": 80,
+                   "calories_training_day": 2760, "calories_rest_day": 2500, "carbs_training_day": 270, "carbs_rest_day": 205,
+                   "fat_training_day": 80, "fat_rest_day": 80, "training_days_per_week": 4}},
+    {"name": "Deload (Week 4)", "goal": "recomp", "order_index": 1, "duration_weeks": 1, "deload_week": 1,
+     "notes": "Deload. AM: NewTech 230x4 + 210x5x2; Deadlift 285x2 + 250x3x1-2; Smith OHP 125x4 + 115x5x2; Squat 205x3 + 180x5x2. PM: ~50% of sets, stay 3-4 RIR.",
+     "nutrition": {"calories_target": 2650, "protein_target": 240, "carbs_target": 242, "fat_target": 80,
+                   "calories_training_day": 2760, "calories_rest_day": 2500, "carbs_training_day": 270, "carbs_rest_day": 205,
+                   "fat_training_day": 80, "fat_rest_day": 80, "training_days_per_week": 4}},
+    {"name": "Build 2 (Weeks 5-7)", "goal": "recomp", "order_index": 2, "duration_weeks": 3, "deload_week": null,
+     "notes": "Beat Weeks 1-3 with clean progression. Wk7 approaches the top of the block: if 340 deadlift, 165 Smith OHP or 245 squat would be a grinder, repeat Wk6 or use the smallest available increase.",
+     "nutrition": {"calories_target": 2650, "protein_target": 240, "carbs_target": 242, "fat_target": 80,
+                   "calories_training_day": 2760, "calories_rest_day": 2500, "carbs_training_day": 270, "carbs_rest_day": 205,
+                   "fat_training_day": 80, "fat_rest_day": 80, "training_days_per_week": 4}},
+    {"name": "Rep PR (Week 8)", "goal": "recomp", "order_index": 3, "duration_weeks": 1, "deload_week": null,
+     "notes": "Controlled rep-PR week at familiar loads, no true max testing. Targets: NewTech 270x5, Deadlift 325x3, Smith OHP 155x4+, Squat 230x4+. Backoffs: NewTech 235x4-6x3, Deadlift 280x3-5x2, Smith OHP 140x4-6x3, Squat 205x4-6x3. PM normal-to-slightly reduced volume.",
+     "nutrition": {"calories_target": 2650, "protein_target": 240, "carbs_target": 242, "fat_target": 80,
+                   "calories_training_day": 2760, "calories_rest_day": 2500, "carbs_training_day": 270, "carbs_rest_day": 205,
+                   "fat_training_day": 80, "fat_rest_day": 80, "training_days_per_week": 4}}
+  ],
+  "templates": [
+    {"name": "Mon AM — NewTech Flat Press (Strength)", "scheduled_days": ["monday"], "order_in_phase": 0,
+     "notes": "AM strength, ~7:00. One lift: 1 top set + 3 backoffs. RPE <= 8, no grinders. Optional 10-15 min StairMaster/incline walk AFTER. Loads = total plates both sides.",
+     "exercises": [
+       {"name": "Newtech Flat", "sets": 4, "reps": "2-6", "rpe_target": 8, "rest_seconds": 240, "is_per_side": false, "metric_type": "reps",
+        "notes": "Warm-up: 90x10, 180x5, 230x2 (easy). Set 1 = TOP SET, sets 2-4 = BACKOFF x4-6 @1-2 RIR.\nTOP: Wk1 270x2 · Wk2 270x3 · Wk3 270x4 · Wk4 DELOAD 230x4 · Wk5 280x2 · Wk6 280x3 · Wk7 280x4 · Wk8 REP PR 270x5 target\nBACKOFF: Wk1 230 · Wk2 230 · Wk3 240 · Wk4 DELOAD 210x5x2 · Wk5 240 · Wk6 250 · Wk7 250 · Wk8 235\nAdvance only when the top set is clean and <= RPE 8; otherwise repeat the previous week."}
+     ]},
+    {"name": "Mon PM — Chest + Triceps (Hypertrophy)", "scheduled_days": ["monday"], "order_in_phase": 1,
+     "notes": "PM hypertrophy, ~1:00. Compounds 1-2 RIR, isolation 0-2 RIR. Double progression. The AM NewTech sets already count toward weekly chest volume.",
+     "exercises": [
+       {"name": "Incline Press", "sets": 3, "reps": "6-10", "rpe_target": 8, "rest_seconds": 120, "is_per_side": false, "metric_type": "reps", "notes": "Incline DB or incline machine. 1-2 RIR."},
+       {"name": "Cable Fly", "sets": 3, "reps": "10-15", "rpe_target": 9, "rest_seconds": 90, "is_per_side": false, "metric_type": "reps", "notes": "Controlled stretch; 0-2 RIR."},
+       {"name": "Chest Press Machine", "sets": 2, "reps": "8-12", "rpe_target": 8, "rest_seconds": 120, "is_per_side": false, "metric_type": "reps", "notes": "Converging / chest press machine. 1-2 RIR."},
+       {"name": "Triceps Pushdown", "sets": 3, "reps": "10-15", "rpe_target": 9, "rest_seconds": 60, "is_per_side": false, "metric_type": "reps", "notes": "Rope pressdown. 0-2 RIR."},
+       {"name": "Overhead Cable Triceps Extension", "sets": 2, "reps": "10-15", "rpe_target": 9, "rest_seconds": 60, "is_per_side": false, "metric_type": "reps", "notes": "0-2 RIR."}
+     ]},
+    {"name": "Tue AM — Deadlift (Strength)", "scheduled_days": ["tuesday"], "order_in_phase": 2,
+     "notes": "AM strength, ~7:00. 1 top set + 2 backoffs ONLY. No 5x5, no deficits, no extra heavy hinging - keep Thursday squats productive. Stop top set at RPE 7.5-8.",
+     "exercises": [
+       {"name": "Deadlift", "sets": 3, "reps": "1-5", "rpe_target": 8, "rest_seconds": 240, "is_per_side": false, "metric_type": "reps",
+        "notes": "Warm-up: 135x5, 185x3, 225x2, 275x1. Set 1 = TOP SET x1-3 (RPE 7.5-8), sets 2-3 = BACKOFF x3-5, clean technique, no grinding.\nTOP: Wk1 315 · Wk2 320 · Wk3 325 · Wk4 DELOAD 285x2 · Wk5 330 · Wk6 335 · Wk7 340x1-2 · Wk8 REP PR 325x3 target\nBACKOFF: Wk1 275 · Wk2 280 · Wk3 285 · Wk4 DELOAD 250x3x1-2 · Wk5 290 · Wk6 295 · Wk7 300 · Wk8 280\nIf Wk7 340 would be a grinder, repeat Wk6 or take the smallest increase."}
+     ]},
+    {"name": "Tue PM — Back + Biceps (Hypertrophy)", "scheduled_days": ["tuesday"], "order_in_phase": 3,
+     "notes": "PM hypertrophy, ~1:00. Build the back without loading the erectors again. Double progression.",
+     "exercises": [
+       {"name": "Lat Pulldown", "sets": 3, "reps": "6-10", "rpe_target": 8, "rest_seconds": 120, "is_per_side": false, "metric_type": "reps", "notes": "1-2 RIR."},
+       {"name": "Chest-Supported Row", "sets": 3, "reps": "8-12", "rpe_target": 8, "rest_seconds": 120, "is_per_side": false, "metric_type": "reps", "notes": "1-2 RIR. (Chest-supported T-bar counts.)"},
+       {"name": "Single-Arm Cable Lat Row", "sets": 2, "reps": "10-15", "rpe_target": 8, "rest_seconds": 90, "is_per_side": true, "metric_type": "reps", "notes": "Drive elbow toward hip."},
+       {"name": "Straight-Arm Pulldown", "sets": 2, "reps": "12-15", "rpe_target": 8, "rest_seconds": 60, "is_per_side": false, "metric_type": "reps", "notes": "Lat isolation."},
+       {"name": "Rear Delt Fly", "sets": 2, "reps": "12-20", "rpe_target": 8, "rest_seconds": 60, "is_per_side": false, "metric_type": "reps", "notes": "Cable rear-delt fly or reverse pec deck. Controlled reps."},
+       {"name": "Hammer Curl", "sets": 3, "reps": "8-12", "rpe_target": 9, "rest_seconds": 60, "is_per_side": false, "metric_type": "reps", "notes": "Forearm-friendly grip."},
+       {"name": "Cable Curl", "sets": 2, "reps": "10-15", "rpe_target": 9, "rest_seconds": 60, "is_per_side": false, "metric_type": "reps", "notes": "Avoid painful straight/EZ-bar variations."}
+     ]},
+    {"name": "Wed AM — Smith Overhead Press (Strength)", "scheduled_days": ["wednesday"], "order_in_phase": 4,
+     "notes": "AM strength, ~7:00. 1 top set + 3 backoffs. RPE <= 8. Same load convention as the logged 135x4x4. Optional cardio after.",
+     "exercises": [
+       {"name": "Smith Machine Press", "sets": 4, "reps": "2-6", "rpe_target": 8, "rest_seconds": 180, "is_per_side": false, "metric_type": "reps",
+        "notes": "Smith machine OHP. Warm-up: 65x8, 95x5, 115x3, 135x1. Set 1 = TOP SET x2-4, sets 2-4 = BACKOFF x4-6 @1-2 RIR. Provisional e1RM anchor 180 - let progression validate it.\nTOP: Wk1 145 · Wk2 150 · Wk3 155 · Wk4 DELOAD 125x4 · Wk5 155 · Wk6 160 · Wk7 165x1-3 · Wk8 REP PR 155x4+ target\nBACKOFF: Wk1 130 · Wk2 135 · Wk3 140 · Wk4 DELOAD 115x5x2 · Wk5 140 · Wk6 145 · Wk7 150 · Wk8 140"}
+     ]},
+    {"name": "Wed PM — Delts + Arms (Hypertrophy)", "scheduled_days": ["wednesday"], "order_in_phase": 5,
+     "notes": "PM hypertrophy, ~1:00. Bias side/rear delts, not more pressing - the AM press already counts.",
+     "exercises": [
+       {"name": "Seated DB Shoulder Press", "sets": 2, "reps": "6-10", "rpe_target": 8, "rest_seconds": 120, "is_per_side": false, "metric_type": "reps", "notes": "Machine or DB. 1-2 RIR."},
+       {"name": "Lateral Raise", "sets": 3, "reps": "12-20", "rpe_target": 9, "rest_seconds": 60, "is_per_side": false, "metric_type": "reps", "notes": "DB lateral raise. 0-2 RIR."},
+       {"name": "Cable Lateral Raise", "sets": 3, "reps": "12-20", "rpe_target": 9, "rest_seconds": 60, "is_per_side": true, "metric_type": "reps", "notes": "0-2 RIR."},
+       {"name": "Rear Delt Fly", "sets": 3, "reps": "12-20", "rpe_target": 8, "rest_seconds": 60, "is_per_side": false, "metric_type": "reps", "notes": "Controlled; avoid momentum."},
+       {"name": "Triceps Pushdown", "sets": 2, "reps": "10-15", "rpe_target": 9, "rest_seconds": 60, "is_per_side": false, "metric_type": "reps", "notes": "Rope pressdown. 0-2 RIR."},
+       {"name": "Hammer Curl", "sets": 2, "reps": "10-15", "rpe_target": 9, "rest_seconds": 60, "is_per_side": false, "metric_type": "reps", "notes": "Hammer or cable curl. 0-2 RIR."}
+     ]},
+    {"name": "Thu AM — Squat (Strength)", "scheduled_days": ["thursday"], "order_in_phase": 6,
+     "notes": "AM strength, ~7:00. 1 top set + 3 backoffs. RPE <= 8. Optional cardio after; no hard intervals today.",
+     "exercises": [
+       {"name": "Back Squat", "sets": 4, "reps": "2-6", "rpe_target": 8, "rest_seconds": 240, "is_per_side": false, "metric_type": "reps",
+        "notes": "Warm-up: 45x8, 135x5, 185x3, 205x1. Set 1 = TOP SET x2-4, sets 2-4 = BACKOFF x4-6 @1-2 RIR. Anchor ~265 1RM (unverified).\nTOP: Wk1 225 · Wk2 230 · Wk3 235 · Wk4 DELOAD 205x3 · Wk5 235 · Wk6 240 · Wk7 245x1-3 · Wk8 REP PR 230x4+ target\nBACKOFF: Wk1 200 · Wk2 205 · Wk3 210 · Wk4 DELOAD 180x5x2 · Wk5 210 · Wk6 215 · Wk7 220 · Wk8 205\nIf Wk7 245 would be a grinder, repeat Wk6."}
+     ]},
+    {"name": "Thu PM — Legs (Hypertrophy)", "scheduled_days": ["thursday"], "order_in_phase": 7,
+     "notes": "PM hypertrophy, ~1:00. No RDL - Tuesday already supplied the heavy hinge; leg curls cover hamstrings.",
+     "exercises": [
+       {"name": "Leg Press", "sets": 3, "reps": "8-12", "rpe_target": 8, "rest_seconds": 120, "is_per_side": false, "metric_type": "reps", "notes": "Leg press or hack squat. 1-2 RIR. If unavailable: heel-elevated goblet squat 3x10-15."},
+       {"name": "Leg Extension", "sets": 3, "reps": "10-15", "rpe_target": 9, "rest_seconds": 90, "is_per_side": false, "metric_type": "reps", "notes": "Hard squeeze at lockout."},
+       {"name": "Leg Curl", "sets": 3, "reps": "8-15", "rpe_target": 9, "rest_seconds": 90, "is_per_side": false, "metric_type": "reps", "notes": "Controlled eccentric."},
+       {"name": "Calf Raise", "sets": 3, "reps": "8-15", "rpe_target": 9, "rest_seconds": 60, "is_per_side": false, "metric_type": "reps", "notes": "Full stretch and pause."}
+     ]}
+  ],
+  "nutrition_guide": {
+    "goal": "Recomp on a two-a-day split: fuel a heavy 7 AM lift, a 1 PM volume session, and recovery - at a starting intake, not a growing one.",
+    "how_it_works": "Training days (Mon-Thu) ~2,760 kcal / 240P / 270C / 80F across five feeds timed to the two sessions. Rest days (Fri-Sun) hold protein and fat, drop carbs (~2,500 kcal / 240P / 205C / 80F - starting assumption, adjust from trends). Treat 2,760 as a starting intake: adjust from bodyweight/waist trends, gym performance, hunger and recovery after several weeks of consistent data. Do not raise calories just because there are two sessions.",
+    "weekly_average": "~2,650 cal/day · 240g protein every day · scale roughly flat week-over-week with the waist shrinking and the AM lifts climbing",
+    "macros": [
+      {"label": "Calories", "training": "~2,760", "rest": "~2,500"},
+      {"label": "Protein", "training": "240g", "rest": "240g"},
+      {"label": "Carbs", "training": "270g", "rest": "~205g"},
+      {"label": "Fat", "training": "80g", "rest": "80g"}
+    ],
+    "rules": [
+      {"title": "Training-day feed schedule", "body": "5:00-5:30 wake/water · 6:15-6:40 Nurri + easy carbs 30P/38C/3F (fuels the 7 AM lift) · 8:00-8:15 office breakfast 45P/52C/15F · 11:30 main pre-workout meal 50P/75C/12F (largest carb feed, for the 1 PM session) · 2:15-2:30 post-workout 50P/65C/15F · 6:30-7:00 dinner 65P/40C/35F. Total 240P/270C/80F ≈ 2,760."},
+      {"title": "Fast morning fuel stays", "body": "Nurri plus banana / rice cake / honey - the AM session is heavy but intentionally low-volume, so it needs quick carbs, not a full meal."},
+      {"title": "Biggest carbs before 1 PM", "body": "The PM bodybuilding session creates far more repeated-set glycogen demand than a few heavy AM sets. The 11:30 meal is the main carb feed."},
+      {"title": "Don't add calories for the second session", "body": "Start at the planned recomp intake; let performance and body-composition trends decide whether more food is needed."},
+      {"title": "Protein stays distributed", "body": "Five feeds provide repeated high-quality protein doses; no late-night meal required."}
+    ],
+    "carb_timing": {"days": "Tue (deadlift) and Thu (legs) matter most", "pre": "11:30 meal, 75g carbs", "post": "2:15 meal, 65g carbs", "note": "If carbs ever get redistributed, bias them toward Tue/Thu rather than adding calories blindly."},
+    "staples": {"carbs": "rice, oats, banana / rice cake / honey pre-lift", "protein": "Nurri, chicken, beef, eggs", "watch_out": "Heavy-fat meals before the PM session delay gastric emptying; keep fat low in the 6:15 and 11:30 feeds."},
+    "self_check": ["Was the AM top set clean and at or under RPE 8?", "Did the 11:30 meal happen before the 1 PM session?", "Is the scale flat week-over-week while the waist tape drops?", "Any joint irritation, worse sleep or falling performance? Then reduce, don't add."]
+  }
+}

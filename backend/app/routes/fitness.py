@@ -3940,10 +3940,14 @@ async def get_today_template(user_id: str = Depends(get_current_user_id), db: Se
         db.commit()
         active_phase_id = active_phase["id"] if active_phase else None
 
+        # Ordered by the plan's own sequence: on a two-a-day the AM strength
+        # session must come back before the PM hypertrophy one, because clients
+        # render the first entry as the hero card.
         templates = db.execute(text("""
-            SELECT id, phase_id, name, scheduled_days, exercises, notes
+            SELECT id, phase_id, name, scheduled_days, exercises, notes, order_in_phase
             FROM fitness_template
             WHERE user_id = :user_id
+            ORDER BY order_in_phase ASC NULLS LAST, name ASC
         """), {"user_id": user_id}).fetchall()
 
         # Find templates that have today in their scheduled_days
@@ -4814,6 +4818,12 @@ async def create_or_update_recovery_log(
                     "raw_weight": recovery_data.body_weight,
                     "trend_weight": trend_weight
                 })
+
+        # A number David types into the recovery card is still the day's HRV —
+        # mirror it into `health_metric`, the authority for body numbers.
+        from app.services.health_metric_mirror import mirror_hrv_morning
+        mirror_hrv_morning(db, user_id, recovery_data.hrv, on_date=log_date,
+                           source="manual", via="recovery-log")
 
         db.commit()
 

@@ -229,6 +229,28 @@ export default function FitnessScreen({ navigation }: Props) {
     return `${year}-${month}-${day}`;
   };
 
+  // The two-a-day program schedules an AM strength session and a PM
+  // hypertrophy session on the same date, so "today's workout" is no longer a
+  // single card. The hero shows the next one still outstanding — AM until a
+  // session for it is logged, then PM — instead of always the first template,
+  // which would have kept pointing at the morning lift all afternoon.
+  // Sessions carry no template_id, so they are matched by title.
+  const nextTemplateToday = React.useMemo(() => {
+    if (todaysTemplates.length === 0) return null;
+    const today = getLocalDateString(new Date().toISOString());
+    const doneTitles = new Set(
+      (workoutLogs || [])
+        .filter(s => (s.session_date || (s.created_at && getLocalDateString(s.created_at))) === today)
+        .map(s => (s.title || '').trim().toLowerCase())
+        .filter(Boolean),
+    );
+    const outstanding = todaysTemplates.find(
+      t => !doneTitles.has((t.name || '').trim().toLowerCase()),
+    );
+    // Everything done: keep showing the last session rather than an empty card.
+    return outstanding ?? todaysTemplates[todaysTemplates.length - 1];
+  }, [todaysTemplates, workoutLogs]);
+
   const loadData = async () => {
     try {
       setLoading(true);
@@ -524,8 +546,9 @@ export default function FitnessScreen({ navigation }: Props) {
     const tasksDone = tasks.filter(t => t.done).length;
 
     const hasActivePlan = !!activePhase;
-    const hasWorkoutToday = todaysTemplates.length > 0;
-    const firstTemplate = todaysTemplates[0];
+    // The next session still outstanding today, not always the first one.
+    const firstTemplate = nextTemplateToday;
+    const hasWorkoutToday = firstTemplate !== null;
     const guidanceTitle = !hasActivePlan
       ? 'Next move: set a training direction'
       : hasWorkoutToday
@@ -1085,7 +1108,7 @@ export default function FitnessScreen({ navigation }: Props) {
   };
 
   const renderWorkoutView = () => {
-    const todaysTemplate = todaysTemplates[0] ?? null;
+    const todaysTemplate = nextTemplateToday;
     const focusMuscles = todaysTemplate?.exercises?.length
       ? Array.from(
           new Set(

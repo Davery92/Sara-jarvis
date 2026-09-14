@@ -182,6 +182,15 @@ class FitnessSummaryTool(BaseTool):
                 summary["last_workout"] = None
 
             # === UPCOMING WORKOUTS ===
+            # Scoped to the phase in effect, ordered the way the plan runs.
+            # This used to take the 5 most recent templates by `created_at`
+            # across every phase of every program — an importer writes a whole
+            # program's templates in one transaction, so that ordering is
+            # arbitrary between them and "scheduled today" was a coin flip.
+            from app.services.phase_resolution import get_effective_phase
+            today_date = naive_local_now().date()
+            effective_phase = get_effective_phase(db, user_id, today_date)
+
             upcoming_sql = text("""
                 SELECT
                     id,
@@ -191,11 +200,17 @@ class FitnessSummaryTool(BaseTool):
                     created_at
                 FROM fitness_template
                 WHERE user_id = :user_id
-                ORDER BY created_at DESC
-                LIMIT 5
+                  AND (
+                    (CAST(:phase_id AS VARCHAR) IS NOT NULL AND phase_id = CAST(:phase_id AS VARCHAR))
+                    OR (CAST(:phase_id AS VARCHAR) IS NULL AND phase_id IS NULL)
+                  )
+                ORDER BY order_in_phase ASC NULLS LAST, created_at DESC
             """)
 
-            upcoming_result = db.execute(upcoming_sql, {"user_id": user_id})
+            upcoming_result = db.execute(upcoming_sql, {
+                "user_id": user_id,
+                "phase_id": effective_phase["id"] if effective_phase else None,
+            })
 
             upcoming_workouts = []
             current_day = naive_local_now().strftime('%A').lower()
@@ -318,10 +333,11 @@ class FitnessSummaryTool(BaseTool):
                 f"{summary['this_week']['total_sets']} sets"
             )
 
-            # Upcoming
-            if summary["upcoming_workouts"]["scheduled_today"]:
-                today_workout = summary["upcoming_workouts"]["scheduled_today"][0]
-                msg_parts.append(f"Scheduled today: {today_workout['name']}")
+            # Upcoming — name every session, in order. A two-a-day has two.
+            scheduled_today = summary["upcoming_workouts"]["scheduled_today"]
+            if scheduled_today:
+                msg_parts.append("Scheduled today: "
+                                 + " · ".join(w["name"] for w in scheduled_today))
 
             message = ". ".join(msg_parts) + "."
 

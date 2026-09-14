@@ -22,7 +22,7 @@ worse than before.
 import json
 import logging
 from datetime import date
-from typing import Dict
+from typing import Any, Dict, List, Optional
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -31,11 +31,65 @@ from app.services.phase_resolution import get_effective_phase
 logger = logging.getLogger(__name__)
 
 
+def templates_for_day(db: Session, user_id: str, on_date: date,
+                      phase: Optional[Dict] = None) -> List[Dict[str, Any]]:
+    """Every active-phase template scheduled for `on_date`, in plan order.
+
+    Ordered by `order_in_phase`, which the two-a-day program uses to put the AM
+    strength session before the PM hypertrophy one. Callers used to loop the
+    templates and `break` on the first weekday match, which silently hid the
+    second session of the day from the brief, the suggestions and the chat.
+
+    Each entry: {id, name, order_in_phase, notes, exercises (parsed list)}.
+    """
+    phase = phase if phase is not None else get_effective_phase(db, user_id, on_date)
+    if not phase:
+        return []
+
+    weekday = on_date.strftime("%A").lower()
+    rows = db.execute(text("""
+        SELECT id, name, scheduled_days, exercises, notes, order_in_phase
+        FROM fitness_template
+        WHERE user_id = :uid AND phase_id = :pid
+        ORDER BY order_in_phase ASC NULLS LAST, name ASC
+    """), {"uid": user_id, "pid": phase["id"]}).fetchall()
+
+    out: List[Dict[str, Any]] = []
+    for t in rows:
+        if not t.scheduled_days:
+            continue
+        try:
+            days = [str(d).lower() for d in (
+                json.loads(t.scheduled_days) if isinstance(t.scheduled_days, str)
+                else (t.scheduled_days or []))]
+        except (ValueError, TypeError):
+            continue
+        if weekday not in days:
+            continue
+        try:
+            exercises = (json.loads(t.exercises) if isinstance(t.exercises, str)
+                         else (t.exercises or []))
+        except (ValueError, TypeError):
+            exercises = []
+        out.append({
+            "id": t.id,
+            "name": t.name,
+            "order_in_phase": t.order_in_phase,
+            "notes": t.notes or "",
+            "exercises": exercises,
+        })
+    return out
+
+
 def is_training_day(db: Session, user_id: str, on_date: date) -> Dict:
     """Resolve training vs rest for `on_date`.
 
-    Returns {is_training_day: bool, reason: str, template_id, template_name}.
+    Returns {is_training_day, reason, template_id, template_name, templates}.
     `reason` is one of: "session_logged", "scheduled", "rest".
+
+    `templates` lists every session scheduled for the day (AM before PM);
+    `template_id`/`template_name` stay the first one so existing callers keep
+    working.
     """
     # 0. Explicit day-type override (Phase 10D set_day_type) wins over everything.
     try:
@@ -46,7 +100,7 @@ def is_training_day(db: Session, user_id: str, on_date: date) -> Dict:
         if ov:
             is_tr = ov.day_type == "training"
             return {"is_training_day": is_tr, "reason": "override",
-                    "template_id": None, "template_name": None}
+                    "template_id": None, "template_name": None, "templates": []}
     except Exception:
         pass  # table may not exist yet
 
@@ -57,32 +111,22 @@ def is_training_day(db: Session, user_id: str, on_date: date) -> Dict:
         LIMIT 1
     """), {"uid": user_id, "d": on_date}).fetchone()
     if sess:
+        # Still resolve the day's templates: with two sessions a date, logging
+        # the AM one must not make the PM one disappear from every reader.
         return {"is_training_day": True, "reason": "session_logged",
-                "template_id": None, "template_name": None}
+                "template_id": None, "template_name": None,
+                "templates": templates_for_day(db, user_id, on_date)}
 
-    # 2. Effective approved-program phase template scheduled for this weekday.
-    weekday = on_date.strftime("%A").lower()
-    active_phase = get_effective_phase(db, user_id, on_date)
-
-    if active_phase:
-        templates = db.execute(text("""
-            SELECT id, name, scheduled_days
-            FROM fitness_template
-            WHERE user_id = :uid AND phase_id = :pid
-        """), {"uid": user_id, "pid": active_phase["id"]}).fetchall()
-        for t in templates:
-            if not t.scheduled_days:
-                continue
-            try:
-                days = [str(d).lower() for d in json.loads(t.scheduled_days or "[]")]
-            except (ValueError, TypeError):
-                days = []
-            if weekday in days:
-                return {"is_training_day": True, "reason": "scheduled",
-                        "template_id": t.id, "template_name": t.name}
+    # 2. Effective approved-program phase templates scheduled for this weekday.
+    scheduled = templates_for_day(db, user_id, on_date)
+    if scheduled:
+        return {"is_training_day": True, "reason": "scheduled",
+                "template_id": scheduled[0]["id"], "template_name": scheduled[0]["name"],
+                "templates": [{"id": t["id"], "name": t["name"],
+                               "order_in_phase": t["order_in_phase"]} for t in scheduled]}
 
     return {"is_training_day": False, "reason": "rest",
-            "template_id": None, "template_name": None}
+            "template_id": None, "template_name": None, "templates": []}
 
 
 def set_day_type(db: Session, user_id: str, on_date: date, day_type: str, note: str = "") -> Dict:
