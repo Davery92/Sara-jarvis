@@ -2121,12 +2121,37 @@ const planMarkdownStyles = {
   list_item: {
     color: colors.text,
   },
+  // react-native-markdown-display's unstyled defaults are light (#F5F5F5) —
+  // on this dark theme an unoverridden rule renders as a near-white slab.
+  // `blockquote` was missing, so the plan's opening epigraph came out as a
+  // big white rectangle at the top of the Plan tab. `code_block` shares the
+  // same default as `fence` and needs the same treatment.
+  blockquote: {
+    color: colors.textSecondary,
+    backgroundColor: 'rgba(255,255,255,0.04)',
+    borderColor: colors.accent,
+    borderLeftWidth: 3,
+    marginLeft: 0,
+    marginVertical: spacing.sm,
+    paddingVertical: spacing.xs,
+    paddingHorizontal: spacing.sm,
+    borderRadius: borderRadius.sm,
+  },
   code_inline: {
     color: colors.primary,
     backgroundColor: 'rgba(255,255,255,0.08)',
     fontSize: fontSizes.sm,
     paddingHorizontal: 4,
     borderRadius: 3,
+  },
+  code_block: {
+    color: colors.text,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderColor: colors.border,
+    borderWidth: 1,
+    borderRadius: borderRadius.sm,
+    padding: spacing.sm,
+    fontSize: fontSizes.xs,
   },
   fence: {
     color: colors.text,
