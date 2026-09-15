@@ -41,6 +41,11 @@ from fastapi import APIRouter
 from urllib.parse import urlparse, parse_qsl, urlencode
 import pytz
 from app.tools.registry import tool_registry
+from app.tools.mutating import (
+    is_write_tool as _is_write_tool,
+    partition_by_effect as _partition_by_effect,
+    tool_call_name as _tool_call_name,
+)
 from app.services.search_service import search_service
 from app.services.soul_loader import load_soul_for_prompt
 from app.services.embedding_service import embedding_service
@@ -1799,10 +1804,30 @@ class SimpleLLMClient:
                     _pre_elapsed = time.monotonic() - self._turn_started_at
                     if _pre_elapsed > CHAT_TURN_DEADLINE_S:
                         self._turn_ended_by = "deadline"
+                        # Drop the reads, but never the writes. The model can
+                        # always ask for a search again; a write it already
+                        # decided on is an action David asked for, and skipping
+                        # it loses that silently — on 2026-09-15 this branch
+                        # threw away `recovery_log_create` nine seconds past the
+                        # deadline and told him it had "run out of room".
+                        # Still no further model call for tools: the deadline's
+                        # point is that a round costs the tools AND the call
+                        # after them, and the forced final is that call.
+                        _writes, _reads = _partition_by_effect(message["tool_calls"])
                         logger.warning(
                             f"⏱️ {_pre_elapsed:.1f}s elapsed before round {round_num + 1}'s "
-                            f"tools — skipping them and forcing a final answer"
+                            f"tools — running {len(_writes)} write(s) "
+                            f"{[_tool_call_name(t) for t in _writes]}, skipping "
+                            f"{len(_reads)} read(s) {[_tool_call_name(t) for t in _reads]}, "
+                            f"then forcing a final answer"
                         )
+                        if _writes:
+                            await self._run_pending_writes_past_deadline(
+                                message, _writes, current_messages,
+                                user_id, conversation_id, session_cache,
+                                round_num + 1,
+                            )
+                            self._turn_rounds = round_num + 1
                         response_content = await self._force_final_answer(current_messages)
                         await self.emit_event("response_ready", {
                             "rounds": round_num, "content_length": len(response_content or ""),
@@ -2671,8 +2696,102 @@ class SimpleLLMClient:
         "one question. If a tool result said 'Found N emails' or similar, "
         "summarize the actual items, never the status string. Never say you are "
         "about to go check something — this is the last thing you get to say on "
-        "this turn. No apology for the delay, no menu of options."
+        "this turn. No apology for the delay, no menu of options. "
+        "If a tool above already wrote something — logged, created, saved, sent, "
+        "cancelled — say so in the past tense and do not offer to do it again; "
+        "it is done, and offering invites a duplicate."
     )
+
+    async def _run_pending_writes_past_deadline(
+        self, message: dict, writes: list, current_messages: list,
+        user_id: str, conversation_id, session_cache, round_number: int,
+    ) -> None:
+        """Execute the write calls of a round the deadline cut short.
+
+        Appends the assistant message and one tool response per pending call so
+        the forced final sees what happened — the writes with their real
+        results, the skipped reads with a short note saying they were skipped.
+        The protocol needs a response for every `tool_call` in the assistant
+        message; leaving one unanswered makes the follow-up payload malformed.
+
+        Without the results in `current_messages` the write lands but the reply
+        does not know it, which is the same failure wearing a better outcome:
+        the row is written and Sara still says she ran out of time.
+        """
+        write_ids = {id(w) for w in writes}
+        tool_responses = []
+
+        await self.emit_event("tool_calls_start", {
+            "round": round_number,
+            "tools": [_tool_call_name(w) for w in writes],
+            "count": len(writes),
+        })
+
+        for tool_call in message["tool_calls"]:
+            tool_name = _tool_call_name(tool_call) or "unknown"
+
+            if id(tool_call) not in write_ids:
+                tool_responses.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.get("id", ""),
+                    "content": json.dumps({
+                        "success": False,
+                        "message": (
+                            f"Skipped: the turn ran out of time before {tool_name} "
+                            "could run. It was not executed. Answer with what you "
+                            "already have and say plainly what you did not get to."
+                        ),
+                    }),
+                })
+                continue
+
+            await self.emit_event("tool_executing", {"tool": tool_name, "round": round_number})
+            await self.emit_activity("tool_running", tool=tool_name, round_num=round_number)
+
+            _tool_t0 = time.monotonic()
+            try:
+                tool_response = await self.execute_tool(
+                    tool_call, user_id, conversation_id, session_cache
+                )
+                self._remember_tool_result(tool_call, tool_response)
+            except Exception as e:
+                # A write that raises here is the one case worth being loud
+                # about: the turn is already over, so nothing else will retry.
+                logger.error(
+                    f"❌ Past-deadline write {tool_name} failed "
+                    f"({type(e).__name__}): {e}"
+                )
+                tool_response = {
+                    "role": "tool",
+                    "tool_call_id": tool_call.get("id", ""),
+                    "content": json.dumps({
+                        "success": False,
+                        "message": f"{tool_name} failed: {type(e).__name__}. Tell David it did not save.",
+                    }),
+                }
+
+            try:
+                _payload = json.loads(tool_response.get("content") or "{}")
+            except (TypeError, json.JSONDecodeError):
+                _payload = {}
+            self._turn_tools_called.append({
+                "name": tool_name,
+                "ms": int((time.monotonic() - _tool_t0) * 1000),
+                "result_chars": len(tool_response.get("content") or ""),
+                "success": _payload.get("success") is not False,
+                "past_deadline": True,
+            })
+            tool_responses.append(tool_response)
+
+            await self.emit_event("tool_completed", {"tool": tool_name, "round": round_number})
+            await self.emit_activity("tool_complete", tool=tool_name, round_num=round_number)
+
+        current_messages.append({
+            "role": "assistant",
+            "content": message.get("content", ""),
+            "tool_calls": message["tool_calls"],
+        })
+        current_messages.extend(await _reference_large_tool_results(tool_responses))
 
     async def _force_final_answer(self, current_messages: list) -> str:
         """Get a real reply out of the model with the tools taken away.
@@ -2741,13 +2860,37 @@ class SimpleLLMClient:
                 logger.error(f"Forced final answer failed: {type(e).__name__}: {e}")
                 break
 
-        # Last resort. Honest, short, and clearly not a tool status line — but
-        # it names the work that actually happened, because "ask me again" on
-        # its own tells David nothing about whether anything ran.
-        ran = []
+        return self._last_resort_reply()
+
+    def _last_resort_reply(self) -> str:
+        """What Sara says when even the forced final produced nothing.
+
+        Honest, short, and clearly not a tool status line — but it names the
+        work that actually happened, because "ask me again" on its own tells
+        David nothing about whether anything ran. On 2026-09-15 the forced
+        final came back empty twice and this string was his entire answer.
+        """
+        ran, wrote = [], []
         for t in getattr(self, "_turn_tools_called", []) or []:
-            if t.get("name") and t["name"] not in ran:
-                ran.append(t["name"])
+            name = t.get("name")
+            if not name:
+                continue
+            if name not in ran:
+                ran.append(name)
+            # A write that succeeded has to be reported even here. "Ask me
+            # again" after `recovery_log_create` landed is an invitation to
+            # log the same thing twice.
+            if (t.get("success") is not False and _is_write_tool(name)
+                    and name not in wrote):
+                wrote.append(name)
+
+        if wrote:
+            done = ", ".join(wrote[:5])
+            return (
+                f"That's saved — {done} went through. I ran out of room before I could "
+                "write you a proper reply about it, so ask me to read it back if you "
+                "want to check it, but don't ask me to log it again."
+            )
         if ran:
             return (
                 "I ran " + ", ".join(ran[:5]) + " and then ran out of room before I "
