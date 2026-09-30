@@ -220,7 +220,7 @@ async def _prep_for_event(
         except Exception as e:
             logger.debug(f"Calendar prep PKG search failed: {e}")
 
-        # Business-meeting enrichment: counterparty company + any ready research.
+        # Business-meeting enrichment: counterparty company.
         # meeting_research is synchronous, so use a short-lived sync session.
         try:
             from app.services.meeting_research import build_prep
@@ -233,12 +233,8 @@ async def _prep_for_event(
                     "start_time": start_time,
                     "ios_calendar_name": calendar_name,
                 })
-            if mprep["is_business_meeting"]:
-                if mprep["companies"]:
-                    context_parts.append("With: " + ", ".join(mprep["companies"][:3]))
-                for r in mprep["research"]:
-                    if r.get("summary"):
-                        context_parts.append(f"Research ({r['company']}): {r['summary'][:200]}")
+            if mprep["is_business_meeting"] and mprep["companies"]:
+                context_parts.append("With: " + ", ".join(mprep["companies"][:3]))
         except Exception as e:
             logger.debug(f"Calendar prep meeting research failed: {e}")
 

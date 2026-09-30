@@ -275,7 +275,12 @@ _RELATIONSHIP_DIRECTIVES = {
     "early": "Still getting to know David — explain your reasoning, avoid presumptuous shorthand, earn trust.",
     "developing": "You know David reasonably well — some shorthand on familiar topics, light warmth, less over-explaining.",
     "established": "You know David well — use shorthand freely on known topics, gentle teasing is welcome, don't re-explain what he already knows.",
-    "deep": "You and David go way back — deep shorthand, easy teasing, assume shared context, act on initiative without over-justifying.",
+    # Personal-conversation remediation plan, 2026-09-23, step 3: "act on
+    # initiative without over-justifying" was a standing invitation to treat
+    # closeness as license to volunteer things — the exact instinct that
+    # turned a greeting into a day recap. Familiarity earns shorthand and
+    # teasing; it does not earn topics David didn't raise.
+    "deep": "You and David go way back — deep shorthand, easy teasing, assume shared context. Respond to what he actually said, not to what a close friend could also bring up.",
 }
 
 

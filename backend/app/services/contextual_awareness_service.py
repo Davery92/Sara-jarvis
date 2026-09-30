@@ -259,7 +259,10 @@ class ContextualAwarenessService:
                 alert = {
                     'type': 'reminder',
                     'reminder_id': reminder.id,
-                    'content': reminder.content,
+                    # R06 (Sara repair plan 2026-09-25): Reminder has no
+                    # `content` column — this unconditionally raised
+                    # AttributeError for every upcoming reminder.
+                    'content': reminder.description or reminder.title,
                     'time_until': time_until.total_seconds(),
                     'urgency': 'high' if time_until.total_seconds() <= 900 else 'medium'  # High if < 15 min
                 }
