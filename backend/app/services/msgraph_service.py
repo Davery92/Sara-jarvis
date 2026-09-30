@@ -318,8 +318,19 @@ class MSGraphService:
             return emails
 
         except Exception as e:
+            # R12 (Sara repair plan 2026-09-25, evidence
+            # P03_SOURCE_UNAVAILABLE_MISREPORTED_AS_ZERO_ERRORS): this used
+            # to log the real error and then `return []` — indistinguishable,
+            # to every caller, from a genuinely empty inbox. Both real
+            # callers (app/tasks/email_sync.py's inbound and sent-items sync
+            # loops) already wrap this call in a per-mailbox
+            # `except Exception: total_errors += 1; continue`, so re-raising
+            # here is enough to make a real outage actually counted as an
+            # error instead of silently reported as "0 errors, 0 new mail" —
+            # without losing the existing per-mailbox isolation (one
+            # mailbox's outage still doesn't stop the others from syncing).
             logger.error(f"MS Graph get_emails error for {mailbox}: {e}")
-            return []
+            raise
 
     async def get_unread_ids(
         self,
@@ -485,8 +496,16 @@ class MSGraphService:
         """
         results = {}
         for mailbox in self.mailboxes:
-            emails = await self.get_emails(mailbox, since=since, top=top_per_mailbox)
-            results[mailbox] = emails
+            # get_emails now raises on a real fetch failure instead of
+            # swallowing it into an empty list (R12) — this caller has no
+            # error-accounting contract of its own, so preserve its
+            # original per-mailbox-isolated behavior explicitly rather than
+            # letting one mailbox's outage abort the whole sync silently.
+            try:
+                results[mailbox] = await self.get_emails(mailbox, since=since, top=top_per_mailbox)
+            except Exception as e:
+                logger.error(f"sync_all_mailboxes: {mailbox} failed: {e}")
+                results[mailbox] = []
         return results
 
 
