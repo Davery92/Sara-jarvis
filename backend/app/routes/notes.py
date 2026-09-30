@@ -3,7 +3,7 @@ import uuid
 import logging
 from datetime import datetime
 from app.core.timezone import naive_local_now
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 from typing import List, Optional
 
@@ -16,10 +16,20 @@ from app.schemas.notes import (
     NoteConnectionCreate, NoteConnectionResponse
 )
 from app.core.deps import get_current_user
+from app.core.device_auth import get_device_user
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/notes", tags=["Notes"])
+
+# Second router, for the `/api/notes/*` paths moved out of main_simple.py on
+# 2026-09-30. Separate only because the prefix differs; both are registered in
+# main_simple. The `/api` spelling is NOT a legacy alias to collapse: the Pi
+# dashboard (pi-dashboard/src/services/api.js) and the canvas
+# (workbench-canvas/src/services/api.ts) both call it, and unlike
+# `/notes/search` it accepts a device token as well as a session cookie, which
+# is the only way the Pi authenticates.
+api_router = APIRouter(prefix="/api/notes", tags=["Notes"])
 
 
 def normalize_note_tags(tags: Optional[List[str]]) -> List[str]:
@@ -282,17 +292,13 @@ async def get_notes_graph_data(
     return response
 
 
-@router.get("/search")
-async def search_notes(
-    q: str = Query(..., min_length=1),
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """Fuzzy title+content search for notes.
+def _search_notes_rows(db: Session, user_id, q: str):
+    """Fuzzy title+content note search, shared by `/notes/search` and
+    `/api/notes/search`.
 
-    Mirrors `/api/notes/search`. Without this, a `GET /notes/search?q=...`
-    matches the `/notes/{note_id}` handler with note_id="search" and 404s.
-    iOS clients hit the unprefixed `/notes/search`.
+    One implementation on purpose: until 2026-09-30 this query and response
+    shape existed as two byte-identical copies in two files, differing only in
+    how they authenticated. Only the auth differs now.
     """
     from sqlalchemy import text
     import json as _json
@@ -316,7 +322,7 @@ async def search_notes(
         LIMIT 10
         """
     ), {
-        "user_id": current_user.id,
+        "user_id": user_id,
         "query_pattern": f"%{q}%",
         "normalized_pattern": f"%{normalized_query}%",
     }).fetchall()
@@ -339,6 +345,47 @@ async def search_notes(
         for row in rows
     ]
 
+
+@router.get("/search")
+async def search_notes(
+    q: str = Query(..., min_length=1),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Fuzzy title+content search for notes, session-authenticated.
+
+    This route must exist: without it, `GET /notes/search?q=...` matches the
+    `/notes/{note_id}` handler with note_id="search" and 404s. iOS and web
+    clients hit this unprefixed path.
+    """
+    return _search_notes_rows(db, current_user.id, q)
+
+
+@api_router.get("/search")
+async def search_notes_api(
+    q: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """`/api/notes/search` — device-token OR session auth.
+
+    Moved from main_simple.py on 2026-09-30, path and response shape unchanged.
+    The device-token branch is the whole point of this route: the Pi dashboard
+    has no session cookie. `get_current_user` is SYNCHRONOUS and is
+    deliberately not awaited (2026-09-22 fix; awaiting it yielded a coroutine
+    whose attribute access then failed).
+    """
+    user_id = await get_device_user(request, db)
+
+    if not user_id:
+        try:
+            current_user = get_current_user(request, db)
+            user_id = current_user.id
+        except Exception as auth_err:
+            logger.debug(f"Authentication failed for /api/notes/search: {auth_err}")
+            raise HTTPException(status_code=401, detail="Not authenticated")
+
+    return _search_notes_rows(db, user_id, q)
 
 @router.get("/{note_id}", response_model=NoteResponse)
 async def get_note(

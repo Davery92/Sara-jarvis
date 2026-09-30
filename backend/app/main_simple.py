@@ -7176,6 +7176,13 @@ try:
 except Exception as e:
     logger.warning(f"Notes routes not available from module: {e}")
 
+# The `/api/notes/*` router. Registered OUTSIDE a try/except deliberately: a
+# swallowed import error here would silently drop the route the Pi dashboard
+# and the canvas depend on, and report success. If this import fails, the
+# process should fail to start.
+from app.routes.notes import api_router as notes_api_router  # noqa: E402
+app.include_router(notes_api_router, tags=["Notes"])
+
 # item 2.2 (2026-07-30): the legacy top-level /recipes router (routes/recipes.py)
 # had zero live callers — web (RecipesSection), iOS (recipesService), and the
 # chat tool layer (app/tools/recipes.py, direct ORM) all exclusively use
@@ -12130,68 +12137,10 @@ async def speak_text(
 # Desktop app downloads extracted to app/routes/downloads.py
 
 
-@app.get("/api/notes/search")
-async def search_notes_api(
-    q: str,
-    request: Request,
-    db: Session = Depends(get_db)
-):
-    """
-    Search notes by title or content. Supports device token auth for Pi dashboard.
-    Uses text matching with fuzzy title search (handles spaces).
-    """
-    # Try device token auth first
-    user_id = await get_device_user(request, db)
-
-    # Fall back to cookie auth
-    if not user_id:
-        try:
-            # get_current_user is synchronous — see pi_dashboard_voice_chat's
-            # matching fix (2026-09-22) for why this was `await`ed incorrectly.
-            current_user = get_current_user(request, db)
-            user_id = current_user.id
-        except Exception as auth_err:
-            logger.debug(f"Authentication failed for search-notes: {auth_err}")
-            raise HTTPException(status_code=401, detail="Not authenticated")
-
-    # Normalize query for fuzzy matching
-    normalized_query = q.replace(" ", "")
-
-    # Search title and content with fuzzy matching
-    results = db.execute(text("""
-        SELECT id, title, content, folder_id, tags, starred, created_at, updated_at
-        FROM note
-        WHERE user_id = :user_id
-          AND (
-            title ILIKE :query_pattern
-            OR REPLACE(title, ' ', '') ILIKE :normalized_pattern
-            OR content ILIKE :query_pattern
-          )
-        ORDER BY
-            CASE WHEN title ILIKE :query_pattern THEN 0
-                 WHEN REPLACE(title, ' ', '') ILIKE :normalized_pattern THEN 1
-                 ELSE 2 END,
-            updated_at DESC
-        LIMIT 10
-    """), {
-        "user_id": user_id,
-        "query_pattern": f"%{q}%",
-        "normalized_pattern": f"%{normalized_query}%"
-    }).fetchall()
-
-    return [
-        {
-            "id": str(row.id),
-            "title": row.title or "Untitled",
-            "content": row.content,
-            "folder_id": row.folder_id,
-            "tags": row.tags if isinstance(row.tags, list) else (json.loads(row.tags) if row.tags else []),
-            "starred": bool(row.starred),
-            "created_at": row.created_at.isoformat() if row.created_at else None,
-            "updated_at": row.updated_at.isoformat() if row.updated_at else None
-        }
-        for row in results
-    ]
+# `/api/notes/search` moved to app/routes/notes.py (api_router) on 2026-09-30.
+# It kept its own route rather than folding into `/notes/search` because it
+# accepts a device token, which is how the Pi dashboard and the canvas
+# authenticate; the shared query now lives in notes._search_notes_rows.
 
 
 # Memory Management endpoints
