@@ -22,6 +22,23 @@ done
 cp "$SRC/alembic.ini" "$SRC/pytest.ini" "$SNAP/backend/"
 [ -f "$SRC/requirements.txt" ] && cp "$SRC/requirements.txt" "$SNAP/backend/"
 
+# The anonymous-volume mountpoints docker-compose.dev.yml declares INSIDE the
+# read-only frozen mount must exist in the snapshot, or the container cannot
+# start at all: runc has to create the mountpoint, and it cannot mkdir inside a
+# read-only bind. This cost a short production outage during the 2026-09-30
+# cutover — every application container came up "Created" and refused to start
+# with `mkdirat .../app/app/__pycache__: read-only file system`.
+#
+# Generation 1 only worked by accident: its snapshot had root-owned __pycache__
+# directories left behind before the mount went read-only. rsync excludes
+# __pycache__ above (correctly — stale .pyc must never ship), so the directory
+# has to be recreated empty here, deliberately.
+#
+# Keep this in sync with the `- /app/app/__pycache__` volume lines in
+# docker-compose.dev.yml. /app/__pycache__ needs nothing: /app itself is not
+# bind-mounted, so that mountpoint is created in the image's writable layer.
+mkdir -p "$SNAP/backend/app/__pycache__"
+
 cd "$SNAP"
 find backend/app backend/alembic -type f ! -name '*.pyc' -print0 \
   | sort -z | xargs -0 sha256sum > CANDIDATE_MANIFEST.sha256
