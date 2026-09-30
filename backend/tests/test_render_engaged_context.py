@@ -15,6 +15,8 @@ That's real, evidence-based grounds to hold the cutover, not risk-aversion.
 """
 from datetime import datetime, timezone
 
+import pytest
+
 from app.services.context_snapshot import render_engaged_context
 
 
@@ -327,6 +329,44 @@ class TestStaleTodayIsRestated:
         text = "David is working on the memory system today."
         assert _restate_stale_today(text, today=date(2026, 9, 11)) == text
 
+    def test_weekday_qualified_heading_is_restated(self):
+        """The exact format day_layer.py writes — '## Today (Tuesday,
+        September 15)' — went unmatched by the original regex (chat harness
+        repair Phase 3): it only expected a month directly after '(' or ','."""
+        from datetime import date
+        from app.services.context_snapshot import _restate_stale_today
+
+        out = _restate_stale_today(
+            "## Today (Tuesday, September 15)\n\nShoulder day went well.",
+            today=date(2026, 9, 16),
+        )
+        assert "Today (Tuesday, September 15)" not in out
+        assert "as of Tue Sep 15" in out
+        assert "Shoulder day went well." in out
+
+    def test_weekday_qualified_heading_for_actual_today_is_left_alone(self):
+        from datetime import date
+        from app.services.context_snapshot import _restate_stale_today
+
+        text = "## Today (Wednesday, September 16)\n\nGood morning."
+        assert _restate_stale_today(text, today=date(2026, 9, 16)) == text
+
+    def test_full_month_name_without_weekday_is_restated(self):
+        from datetime import date
+        from app.services.context_snapshot import _restate_stale_today
+
+        out = _restate_stale_today("Today (September 15) tasks are done.", today=date(2026, 9, 16))
+        assert "Today (September 15)" not in out
+        assert "as of Tue Sep 15" in out
+
+    def test_bare_comma_form_is_restated(self):
+        from datetime import date
+        from app.services.context_snapshot import _restate_stale_today
+
+        out = _restate_stale_today("These were today, September 15 plans.", today=date(2026, 9, 16))
+        assert "today, September 15" not in out
+        assert "as of Tue Sep 15" in out
+
 
 class TestHealthHonesty:
     def _slice(self, **data):
@@ -398,3 +438,182 @@ class TestBudget:
             intent="CONVERSATIONAL",
         )
         assert len(text) <= 4500, f"{len(text)} chars:\n{text[:1500]}"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Personal-conversation remediation plan (2026-09-23), step 2: conversation
+# mode governs whether ambient world-brief/health/work material is worth
+# showing the model at all, on top of (not instead of) the intent-based
+# gating above. "Good evening" pulled a completed-workout callback AND a day
+# recap; "just relaxing lol I'm tired" got an unsolicited HRV reading — both
+# traced to this renderer including health_today/work/expectations/
+# calendar_horizon and the volatile daily-brief/journal prose unconditionally.
+# ═══════════════════════════════════════════════════════════════════════════
+
+_AMBIENT_WORLD_STATE = {
+    "david": {"source": "unified_context", "confidence": 1.0,
+              "data": {"activity_state": "WINDING_DOWN", "current_place": "Home"}},
+    "home": {"source": "unified_context", "confidence": 1.0,
+             "data": {"home_occupied": True, "weather_condition": "clear"}},
+    "calendar_horizon": {
+        "source": "calendar_event+world_thread", "confidence": 1.0,
+        "data": {"active_calendar_events": 1, "open_threads": 4,
+                  "upcoming": ["Thu Sep 24, 9:00 AM ET: File ACORD form"],
+                  "later": ["Sun Sep 27: David Applied Net"]},
+    },
+    "health_today": {"source": "health_metric", "confidence": 0.6,
+                      "data": {"hrv": "32 (measured 6:12 AM)"}},
+    "work": {"source": "email+background_task", "confidence": 1.0,
+             "data": {"emails_needing_reply": 3, "tasks_in_flight": 1}},
+    "fleet": {"source": "managed_host", "confidence": 1.0,
+              "data": {"host_count": 6, "unreachable": []}},
+    "expectations": {"source": "daily_rhythm+training_day+calendar_event", "confidence": 0.8,
+                      "data": {"next_meeting": "1:1 with Sam", "is_training_day": True}},
+}
+
+_AMBIENT_EXTENDED = {
+    "daily_brief_layers": {"moment": "David just finished a push workout.",
+                            "stable": "David has a kitten named Vesper."},
+    "journal": "Noticed David seemed quieter than usual tonight.",
+}
+
+
+class TestConversationModeAmbientSuppression:
+    @pytest.mark.parametrize("mode", [None, "action", "factual_advice", "mixed"])
+    def test_full_context_modes_render_everything(self, mode):
+        text = render_engaged_context(
+            _context(world_state=_AMBIENT_WORLD_STATE), open_intents=0,
+            recall_traces=[], extended=_AMBIENT_EXTENDED, conversation_mode=mode,
+        )
+        assert "health_today" in text
+        assert "work" in text
+        assert "expectations" in text
+        assert "calendar_horizon" in text
+        assert "push workout" in text  # volatile brief layer
+        assert "quieter than usual" in text  # journal
+
+    @pytest.mark.parametrize("mode", ["social", "personal_vulnerable"])
+    def test_task_and_health_slices_are_dropped(self, mode):
+        text = render_engaged_context(
+            _context(world_state=_AMBIENT_WORLD_STATE), open_intents=0,
+            recall_traces=[], extended=_AMBIENT_EXTENDED, conversation_mode=mode,
+        )
+        assert "health_today" not in text
+        assert "32 (measured" not in text
+        assert "work" not in text
+        assert "emails_needing_reply" not in text
+        assert "expectations" not in text
+        assert "calendar_horizon" not in text
+        assert "Further out" not in text
+
+    @pytest.mark.parametrize("mode", ["social", "personal_vulnerable"])
+    def test_day_recap_and_journal_are_dropped(self, mode):
+        text = render_engaged_context(
+            _context(world_state=_AMBIENT_WORLD_STATE), open_intents=0,
+            recall_traces=[], extended=_AMBIENT_EXTENDED, conversation_mode=mode,
+        )
+        assert "push workout" not in text
+        assert "Right now / today / this week" not in text
+        assert "quieter than usual" not in text
+        assert "Recent Journal" not in text
+
+    @pytest.mark.parametrize("mode", ["social", "personal_vulnerable"])
+    def test_situational_and_identity_slices_survive(self, mode):
+        """At most one relevant personal callback is still fine on a
+        greeting — this is situational awareness (location, mood), not a
+        task list or a health readout, and stable identity facts."""
+        text = render_engaged_context(
+            _context(world_state=_AMBIENT_WORLD_STATE), open_intents=0,
+            recall_traces=[], extended=_AMBIENT_EXTENDED, conversation_mode=mode,
+        )
+        assert "david" in text
+        assert "WINDING_DOWN" in text
+        assert "kitten named Vesper" in text  # stable brief layer
+
+    def test_none_mode_is_the_unconditional_default(self):
+        """Every existing caller that hasn't been updated to pass a mode
+        keeps exactly the prior behavior."""
+        with_none = render_engaged_context(
+            _context(world_state=_AMBIENT_WORLD_STATE), open_intents=0,
+            recall_traces=[], extended=_AMBIENT_EXTENDED, conversation_mode=None,
+        )
+        without_arg = render_engaged_context(
+            _context(world_state=_AMBIENT_WORLD_STATE), open_intents=0,
+            recall_traces=[], extended=_AMBIENT_EXTENDED,
+        )
+        assert with_none == without_arg
+
+
+class TestConversationModeSuppressesTheoryOfDavid:
+    """Found live (personal-conversation remediation plan, replay against
+    the 2026-09-22 "Good evening" turn's real fixture, 2026-09-23):
+    calendar_horizon/health_today/work were correctly suppressed, but
+    theory_of_david — an LLM-generated free-text narrative of David's open
+    obligations — still put "pending ACORD form" and an "urgent AWS ...
+    SSL/TLS certificate renewal" in front of the model anyway. Same failure
+    class as the day-recap prose, different source."""
+
+    RELATIONSHIP = {
+        "theory_of_david": (
+            "David has a pending ACORD form to complete and an urgent AWS "
+            "notification about SSL/TLS certificate renewal."
+        )
+    }
+
+    @pytest.mark.parametrize("mode", [None, "action", "mixed", "factual_advice"])
+    def test_full_context_modes_still_render_it(self, mode):
+        text = render_engaged_context(
+            _context(relationship_state=self.RELATIONSHIP), open_intents=0,
+            recall_traces=[], conversation_mode=mode,
+        )
+        assert "ACORD form" in text
+        assert "SSL/TLS" in text
+
+    @pytest.mark.parametrize("mode", ["social", "personal_vulnerable"])
+    def test_ambient_suppress_modes_drop_it(self, mode):
+        text = render_engaged_context(
+            _context(relationship_state=self.RELATIONSHIP), open_intents=0,
+            recall_traces=[], conversation_mode=mode,
+        )
+        assert "ACORD form" not in text
+        assert "SSL/TLS" not in text
+        assert "What you understand about David" not in text
+
+
+class TestConversationModeDropsNoteKindRecallOnly:
+    """Found live (personal-conversation remediation plan, replay against
+    the real 2026-09-22 "Just relaxing lol I'm tired" turn, 2026-09-23):
+    memory.recall's semantic match surfaced Sara's own "Agent Task Result"
+    notes (SSL/DNS certificate renewal work) for a message about being
+    tired. note-kind traces are work artifacts; episode-kind traces (past
+    conversation) are the closest thing to "recent conversation" the plan
+    says to keep."""
+
+    TRACES = [
+        {"kind": "note", "confidence": "confirmed", "text": "# Agent Task Result\n**Task:** SSL/DNS renewal"},
+        {"kind": "episode", "role": "user", "confidence": "observed", "text": "David mentioned feeling burnt out"},
+        {"kind": "fact", "confidence": "confirmed", "text": "David prefers dark roast"},
+    ]
+
+    @pytest.mark.parametrize("mode", [None, "action", "mixed", "factual_advice"])
+    def test_full_context_modes_keep_note_traces(self, mode):
+        text = render_engaged_context(
+            _context(), open_intents=0, recall_traces=self.TRACES, conversation_mode=mode,
+        )
+        assert "SSL/DNS renewal" in text
+
+    @pytest.mark.parametrize("mode", ["social", "personal_vulnerable"])
+    def test_ambient_suppress_modes_drop_only_note_traces(self, mode):
+        text = render_engaged_context(
+            _context(), open_intents=0, recall_traces=self.TRACES, conversation_mode=mode,
+        )
+        assert "SSL/DNS renewal" not in text
+        assert "David mentioned feeling burnt out" in text
+        assert "dark roast" in text
+
+    def test_all_note_traces_removes_the_heading_entirely(self):
+        text = render_engaged_context(
+            _context(), open_intents=0,
+            recall_traces=[self.TRACES[0]], conversation_mode="social",
+        )
+        assert "Relevant memory" not in text

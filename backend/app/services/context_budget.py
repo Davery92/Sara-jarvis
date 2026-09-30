@@ -84,6 +84,112 @@ ENGAGED_SECTION_ALLOTMENTS = {
 }
 
 
+def enforce_live_context_budget(volatile_text: str, budget_chars: int) -> tuple:
+    """Hard final-boundary clip for the assembled live-context block.
+
+    Chat harness repair Phase 2: the engaged block and the post-engaged tail
+    each had their own token cap, but nothing capped their SUM before this —
+    LIVE_CONTEXT_CHAR_BUDGET only produced a warning, so a turn could carry
+    8,200-10,555 chars of live context despite a configured 4,500-char
+    "budget". This is the true final wire boundary: whatever grew the
+    volatile block, and by however many separate append sites, gets clipped
+    here, once, at a paragraph boundary — never mid-word.
+
+    Returns (clipped_text, raw_chars_before_clip). raw_chars_before_clip
+    equals len(clipped_text) when nothing needed trimming.
+    """
+    raw_chars = len(volatile_text or "")
+    if raw_chars <= budget_chars:
+        return volatile_text, raw_chars
+
+    text_ = (volatile_text or "").strip()
+    head = text_[:budget_chars]
+    for boundary in ("\n\n", "\n", ". "):
+        cut = head.rfind(boundary)
+        if cut > budget_chars // 2:
+            clipped = head[:cut].rstrip() + ("." if boundary == ". " else "")
+            return clipped, raw_chars
+    clipped = head.rsplit(" ", 1)[0] + "…" if " " in head else head
+    return clipped, raw_chars
+
+
+# ── Living-world-context plan, Finding #1 ────────────────────────────────
+#
+# "Fresh world context can disappear": the final local-provider clip used to
+# be one call to enforce_live_context_budget() on the WHOLE assembled
+# volatile string — engaged context (~4400 chars) sits first in that string
+# and already nearly fills the 4500-char budget on its own, so the world
+# brief appended after it was silently, almost always dropped entirely. A
+# reproduction confirmed it: the whole brief gone, no warning, no log line
+# distinguishing "nothing to show" from "budget ate it".
+#
+# This is the initial version of the context envelope the plan calls for:
+# named sections, each with its own floor, allocated in priority order
+# (highest-authority first) so a section injected later in the string
+# cannot be zeroed out by one injected earlier just because both share one
+# undifferentiated budget. It reuses SectionBudget rather than inventing a
+# second allocator — the difference from ENGAGED_SECTION_ALLOTMENTS above is
+# which sections compete and what they're worth, not the mechanism.
+LIVE_CONTEXT_SECTION_ALLOTMENTS = {
+    # Current-turn corrections / unanswered-question tracking — already
+    # terse by construction (dialogue_state.py caps at a few lines).
+    "dialogue_state": 50,
+    # The compact, always-current-state core (living-world-context plan
+    # §7): workout, location, calendar, soonest-due commitment, email
+    # needing a reply, recent health sync — six possible lines now, sized
+    # for all of them without truncating every turn. Must survive
+    # allocation — these are facts a stale summary elsewhere in the prompt
+    # must not be allowed to contradict.
+    "world_state_core": 220,
+    # The prose World Brief. Zero, previously, almost every local-provider
+    # turn — see the module docstring above.
+    "world_brief": 200,
+    # Everything else already assembled upstream: engaged context (itself
+    # already internally budgeted by SectionBudget/ENGAGED_SECTION_ALLOTMENTS
+    # to ~700 tokens) plus whatever corrections/attention/notes/re-entry
+    # material was appended after it. Getting the remainder, front-loaded,
+    # means engaged context (which comes first) is what actually survives
+    # here in practice — the same priority it has today — while the
+    # low-value tail past it absorbs the trim instead of the brief.
+    "rest": 655,
+}
+
+
+def allocate_live_context_sections(
+    *,
+    dialogue_state: str = "",
+    world_state_core: str = "",
+    world_brief: str = "",
+    rest: str = "",
+    max_chars: int = None,
+) -> tuple:
+    """Structured, authority-ordered allocation for the final local-provider
+    live-context clip. Returns (rendered_text, raw_chars_before_clip) —
+    same contract as the old enforce_live_context_budget, so callers don't
+    need to change beyond what they pass in.
+    """
+    budget_chars = max_chars if max_chars is not None else VOLATILE_BLOCK_MAX_TOKENS * CHARS_PER_TOKEN
+    raw_chars = sum(len(s or "") for s in (dialogue_state, world_state_core, world_brief, rest))
+    budget = SectionBudget(
+        max_tokens=max(1, budget_chars // CHARS_PER_TOKEN),
+        allotments=LIVE_CONTEXT_SECTION_ALLOTMENTS,
+    )
+    budget.add("dialogue_state", dialogue_state)
+    budget.add("world_state_core", world_state_core)
+    budget.add("world_brief", world_brief)
+    budget.add("rest", rest)
+    rendered = budget.render()
+    # Backstop, not the mechanism: each section is already clipped to its
+    # own token allotment, but up to 3 "\n\n" join separators (6 chars) sit
+    # outside that per-section accounting, and allotments summing to
+    # exactly budget_chars leaves no room to absorb them. The caller's
+    # LIVE_CONTEXT_CHAR_BUDGET invariant must hold regardless of how the
+    # allotments above are tuned later.
+    if len(rendered) > budget_chars:
+        rendered, _ = enforce_live_context_budget(rendered, budget_chars)
+    return rendered, raw_chars
+
+
 def clip_to_tokens(text: str, max_tokens: int) -> str:
     """Trim to a token allotment, ending at a sentence boundary.
 

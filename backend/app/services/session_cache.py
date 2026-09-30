@@ -49,6 +49,24 @@ class SessionToolCache:
         """Key for storing tool call history."""
         return f"session:{conversation_id}:tool_history"
 
+    def _domain_index_key(self, conversation_id: str, domain: str) -> str:
+        """Set of cache keys belonging to one domain in one conversation.
+
+        Reliable-assistant plan D1, "invalidate affected read caches after
+        writes". Finding 22 (`C05_..._STALE_CACHE_FALSE_DENIAL`): a reminder
+        created one turn earlier was reported as "possibly never actually
+        created", because this cache held eight read tools for 30 minutes with
+        no write-invalidation of any kind, and the log shows "Cache HIT"
+        immediately before the false claim. The study flagged it as a
+        plausible common root cause for several other false-denial findings.
+
+        An index set — rather than a `SCAN`/`KEYS` sweep — because
+        invalidation runs on the critical path of every write turn, and
+        pattern-scanning a shared Redis is exactly the operation that is fine
+        in a test and a problem in production.
+        """
+        return f"session:{conversation_id}:domain:{domain}:keys"
+
     def should_cache(self, tool_name: str) -> bool:
         """Check if this tool type should be cached."""
         return tool_name in self.CACHEABLE_TOOLS
@@ -83,6 +101,24 @@ class SessionToolCache:
             key = self._make_key(conversation_id, tool_name, params)
             self.redis.setex(key, self.ttl_seconds, result)
 
+            # Index this key under its domain so a later write in the same
+            # domain can invalidate it without scanning.
+            try:
+                from app.services.operation_contract import domain_for_tool
+                index_key = self._domain_index_key(conversation_id, domain_for_tool(tool_name))
+                self.redis.sadd(index_key, key)
+                self.redis.expire(index_key, self.ttl_seconds)
+            except Exception as index_err:
+                # A cache that cannot be invalidated must not be a cache that
+                # silently serves stale reads: if indexing fails, drop the
+                # entry we just wrote rather than keep an un-invalidatable one.
+                logger.warning(f"Cache domain-index failed, dropping entry: {index_err}")
+                try:
+                    self.redis.delete(key)
+                except Exception:
+                    pass
+                return
+
             # Add to history
             history_key = self._make_history_key(conversation_id)
             history_entry = json.dumps({
@@ -97,6 +133,47 @@ class SessionToolCache:
             logger.info(f"💾 Cached {tool_name} result for conversation {conversation_id[:8]}")
         except Exception as e:
             logger.error(f"Cache store error: {e}")
+
+    def invalidate_domain(self, conversation_id: str, domain: str) -> int:
+        """Drop every cached read in one domain for one conversation.
+
+        Returns how many entries were dropped (0 when nothing was cached).
+        """
+        if not conversation_id or not domain:
+            return 0
+        try:
+            index_key = self._domain_index_key(conversation_id, domain)
+            keys = self.redis.smembers(index_key) or set()
+            if not keys:
+                return 0
+            decoded = [k.decode("utf-8") if isinstance(k, bytes) else k for k in keys]
+            self.redis.delete(*decoded)
+            self.redis.delete(index_key)
+            logger.info(
+                f"🧹 Invalidated {len(decoded)} cached '{domain}' read(s) "
+                f"in conversation {conversation_id[:8]} after a write"
+            )
+            return len(decoded)
+        except Exception as e:
+            logger.error(f"Cache invalidation error for domain '{domain}': {e}")
+            return 0
+
+    def invalidate_for_write(self, conversation_id: str, tool_name: str) -> int:
+        """Invalidate the reads a successful write to `tool_name` could have
+        made stale — its own domain, plus the cross-domain reads that genuinely
+        summarize it.
+
+        `memory_search` is included for every write because episodes and
+        memories summarize activity across domains: a note written this turn
+        legitimately changes what a memory search should return.
+        """
+        from app.services.operation_contract import domain_for_tool
+
+        domain = domain_for_tool(tool_name)
+        dropped = self.invalidate_domain(conversation_id, domain)
+        if domain != "memory":
+            dropped += self.invalidate_domain(conversation_id, "memory")
+        return dropped
 
     def get_session_context_summary(self, conversation_id: str) -> Dict[str, List[str]]:
         """

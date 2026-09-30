@@ -18,7 +18,6 @@ import pytest
 from sqlalchemy import text
 
 from app.db.base import SessionLocal
-from app.core.config import get_owner_id
 from app.services.memory_service import MemoryService
 from app.services.memory_scoring import MIN_SIMILARITY_FLOOR
 
@@ -61,7 +60,12 @@ async def seeded_episodes():
     dot = sum(a * b for a, b in zip(seed, base))
     ortho = _unit([s - dot * b for s, b in zip(seed, base)])
 
-    user_id = get_owner_id()
+    # 2026-09-22 incident follow-up: was get_owner_id() (the real David
+    # account) — see docs/plans/incidents/2026-09-22_test_run_against_
+    # live_db.md §6c. A fresh synthetic principal proves the same ranking
+    # behavior without writing under a real identity; episode.user_id has
+    # no foreign-key constraint, so no companion app_user row is needed.
+    user_id = f"test-synth-{uuid.uuid4()}"
     fresh_id, old_id, below_floor_id = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
     ids = [fresh_id, old_id, below_floor_id]
 

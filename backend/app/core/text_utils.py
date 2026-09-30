@@ -181,8 +181,12 @@ def parse_glm45_tool_calls(content: str) -> tuple[str, list]:
     think_pattern = r'<think>(.*?)</think>'
     think_matches = re.findall(think_pattern, cleaned_content, re.DOTALL)
     if think_matches:
-        reasoning = " ".join([m.strip() for m in think_matches])
-        logger.debug(f"Model reasoning: {reasoning[:100]}...")
+        # Harness/thinking/personality plan, Phase 1: never log reasoning
+        # content, even at DEBUG level and even truncated — DEBUG gets
+        # turned on during exactly the sessions most likely to have this
+        # captured somewhere. A length is enough to confirm the strip ran.
+        reasoning_chars = sum(len(m.strip()) for m in think_matches)
+        logger.debug(f"Model reasoning present and stripped ({reasoning_chars} chars, not logged)")
         cleaned_content = re.sub(think_pattern, '', cleaned_content, flags=re.DOTALL).strip()
     cleaned_content = strip_tool_markup(cleaned_content)
 
@@ -269,3 +273,66 @@ def parse_json_text_tool_calls(content: str) -> tuple[str, list]:
 
     cleaned_content = re.sub(r'```(?:json)?\s*```', '', cleaned_content).strip()
     return cleaned_content, tool_calls
+
+
+# ---------------------------------------------------------------------------
+# Self-addressed planning text (reliable-assistant plan, 2026-09-29)
+# ---------------------------------------------------------------------------
+#
+# Finding 12: "internal reasoning/scratchpad text leaked directly into a
+# user-facing reply", reproduced three times in the 2026-09-24 study and a
+# fourth time on this task's acceptance trial, where a reply about filing two
+# notes contained, mid-message:
+#
+#     The task is done — both notes are filed. No coding task is actually
+#     pending; the system nudge is generic. I should just give the final result.
+#
+# `strip_thinking_content` cannot catch this: there is no marker, no tag, and no
+# channel — it is ordinary prose that happens to be addressed to the model
+# itself rather than to David. What identifies it is that self-address: a
+# sentence about what "I should" do next, or about "the task"/"the system"/"the
+# user" as things being reasoned about rather than talked to.
+#
+# Deliberately a short, explicit list of phrases that only ever appear in
+# planning text, matched per sentence, and only when the sentence ALSO has no
+# second-person address. A false positive removes one sentence from a reply; a
+# false negative shows David the model's scratchpad.
+_SELF_ADDRESSED_PLANNING_PHRASES = (
+    "i should just", "i should now", "i should probably just give",
+    "i'll just give", "let me just give", "the task is done",
+    "the system nudge", "no coding task", "the user is asking",
+    "the user wants", "the user said", "my final answer",
+    "i need to respond", "i should respond", "i should answer",
+    "the final result", "so i should", "now i should",
+    "as an ai", "i am an ai language model",
+)
+
+_SECOND_PERSON_RE = re.compile(r"\b(?:you|your|you're|you'll|david)\b", re.IGNORECASE)
+_PLANNING_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
+
+
+def strip_self_addressed_planning(content: str) -> str:
+    """Drop sentences that are the model talking to itself.
+
+    Returns `content` unchanged when nothing matches, and never returns an
+    empty string for non-empty input — if every sentence looked like planning
+    text, that is far more likely to be a bad match than a reply made entirely
+    of scratchpad, so the original is kept and the caller logs it.
+    """
+    if not isinstance(content, str) or not content:
+        return content if isinstance(content, str) else ""
+    pieces = [p for p in _PLANNING_SENTENCE_SPLIT_RE.split(content) if p.strip()]
+    if not pieces:
+        return content
+    kept = []
+    dropped = []
+    for piece in pieces:
+        low = piece.lower()
+        if any(phrase in low for phrase in _SELF_ADDRESSED_PLANNING_PHRASES) \
+                and not _SECOND_PERSON_RE.search(piece):
+            dropped.append(piece)
+            continue
+        kept.append(piece)
+    if not kept or not dropped:
+        return content
+    return " ".join(k.strip() for k in kept).strip()

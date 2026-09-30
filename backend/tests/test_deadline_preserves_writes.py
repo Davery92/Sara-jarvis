@@ -20,6 +20,7 @@ import pytest
 
 from app.tools.mutating import (
     WRITE_TOOLS, is_write_tool, partition_by_effect, tool_call_name,
+    tool_success_state,
 )
 
 
@@ -65,6 +66,30 @@ class TestWriteClassification:
         from app.tools.registry import tool_registry
         unknown = sorted(WRITE_TOOLS - set(tool_registry.tools.keys()))
         assert unknown == [], f"not in the registry: {unknown}"
+
+
+class TestToolSuccessState:
+    """Harness/thinking/personality plan, Phase 3: a write's outcome is
+    True (confirmed), False (confirmed failed), or None (genuinely
+    unknown) — not a two-way `is not False` collapse that treated a
+    timeout or missing `success` key as a confirmed save."""
+
+    def test_explicit_true(self):
+        assert tool_success_state({"success": True}) is True
+
+    def test_explicit_false(self):
+        assert tool_success_state({"success": False}) is False
+
+    @pytest.mark.parametrize("payload", [
+        {"success": None, "message": "timed out, outcome unknown"},
+        {"message": "no success field at all"},
+        {"success": "unknown"},
+        {},
+        None,
+        "not even a dict",
+    ])
+    def test_anything_else_is_unknown_not_success(self, payload):
+        assert tool_success_state(payload) is None
 
 
 class TestPartition:
@@ -206,6 +231,60 @@ class TestRunPendingWritesPastDeadline:
         assert h._turn_tools_called[0]["success"] is True
 
     @pytest.mark.asyncio
+    async def test_an_ambiguous_result_is_traced_as_unknown_not_success(self):
+        """The exact bug this phase found: a tool that honestly reports
+        `success: None` (a timeout, an unconfirmed outcome) must not be
+        recorded the same way as a confirmed True."""
+        h = _bind()
+
+        async def ambiguous(tool_call, *a, **k):
+            return {"role": "tool", "tool_call_id": tool_call.get("id", ""),
+                    "content": json.dumps({"success": None, "message": "timed out, unknown"})}
+        h.execute_tool = ambiguous
+
+        message = {"content": "", "tool_calls": [call("recovery_log_create", "w1")]}
+        writes, _ = partition_by_effect(message["tool_calls"])
+
+        await h._run_pending_writes_past_deadline(
+            message, writes, [], "u1", "conv1", None, 3)
+
+        assert h._turn_tools_called[0]["success"] is None
+
+    @pytest.mark.asyncio
+    async def test_ambiguous_same_turn_removals_are_withheld_even_past_deadline(self):
+        """Harness/thinking/personality plan Phase 4: a deadline crossing
+        must not become a back door around the ambiguous-removal guard —
+        two deletes for one ambiguous "the bank reminder" reference must
+        still execute zero writes here, same as the normal in-round path."""
+        h = _bind()
+        h._current_raw_user_turn = "Delete the reminder about the bank."
+        message = {"content": "", "tool_calls": [
+            call("reminders_cancel", "w1", reminder_id="rem-1"),
+            call("reminders_cancel", "w2", reminder_id="rem-2"),
+        ]}
+        writes, _ = partition_by_effect(message["tool_calls"])
+
+        await h._run_pending_writes_past_deadline(
+            message, writes, [], "u1", "conv1", None, 3)
+
+        assert h.executed == []  # zero writes
+
+    @pytest.mark.asyncio
+    async def test_bulk_language_still_authorizes_both_past_deadline(self):
+        h = _bind()
+        h._current_raw_user_turn = "Delete both bank reminders."
+        message = {"content": "", "tool_calls": [
+            call("reminders_cancel", "w1", reminder_id="rem-1"),
+            call("reminders_cancel", "w2", reminder_id="rem-2"),
+        ]}
+        writes, _ = partition_by_effect(message["tool_calls"])
+
+        await h._run_pending_writes_past_deadline(
+            message, writes, [], "u1", "conv1", None, 3)
+
+        assert h.executed == ["reminders_cancel", "reminders_cancel"]
+
+    @pytest.mark.asyncio
     async def test_a_raising_write_is_reported_not_swallowed(self):
         """Nothing retries after this point, so a failure has to reach David."""
         h = _bind()
@@ -260,3 +339,21 @@ class TestLastResortFallback:
     def test_no_tools_at_all(self):
         out = self._fallback([])
         assert "ran out of room" in out.lower()
+
+    def test_an_unknown_outcome_is_neither_saved_nor_a_blind_retry_invitation(self):
+        """The bug this phase found: `success: None` used to be treated the
+        same as `True` here, so an unconfirmed write got reported as
+        confirmed. It must say neither "saved" nor invite a blind retry —
+        Phase 4's "uncertain external writes" territory."""
+        out = self._fallback([{"name": "recovery_log_create", "success": None}])
+        assert "that's saved" not in out.lower()  # the confirmed-success phrasing
+        assert "can't confirm" in out.lower() or "cannot confirm" in out.lower()
+        assert "recovery_log_create" in out
+
+    def test_a_confirmed_write_alongside_an_unknown_one_reports_both_honestly(self):
+        out = self._fallback([
+            {"name": "notes_create", "success": True},
+            {"name": "recovery_log_create", "success": None},
+        ])
+        assert "notes_create" in out and "saved" in out.lower()
+        assert "recovery_log_create" in out and "can't confirm" in out.lower()

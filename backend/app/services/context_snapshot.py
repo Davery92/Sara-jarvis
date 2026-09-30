@@ -937,6 +937,10 @@ def _clip_to_paragraph(text_: str, limit: int) -> str:
 # it is just not today's.
 _STALE_TODAY_RE = re.compile(
     r"\b(?:for\s+)?today\s*[\(,]\s*"
+    # Daily-layer headings spell "Today (Tuesday, September 15)" — a weekday
+    # name ahead of the month the original pattern never accounted for, so
+    # it silently didn't match the exact format day_layer.py writes.
+    r"(?:(?:Mon|Tue|Tues|Wed|Thu|Thur|Thurs|Fri|Sat|Sun)[a-z]*,\s*)?"
     r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.?\s+(\d{1,2})"
     r"\s*\)?",
     re.IGNORECASE,
@@ -1134,6 +1138,7 @@ def render_engaged_context(
     extended: Optional[Dict[str, Any]] = None,
     workspace_ctx: Optional[str] = None,
     intent: Optional[str] = None,
+    conversation_mode: Optional[str] = None,
 ) -> str:
     """Render kernel.engaged_turn()'s assembled context (world/self/
     relationship + recall) into the markdown block chat's system prompt
@@ -1152,11 +1157,32 @@ def render_engaged_context(
     `workspace_ctx` (item 1.3 ruling 2, 2026-07-31): the Desktop Jarvis
     workspace-scene string main_simple.py builds straight from the
     request (active scene, open windows) — cheap, synchronous, request-
-    scoped, so it's passed in rather than re-fetched here."""
+    scoped, so it's passed in rather than re-fetched here.
+
+    `conversation_mode` (personal-conversation remediation plan, step 2):
+    when it's one of `context_router.AMBIENT_SUPPRESS_MODES` ("social",
+    "personal_vulnerable"), health/work/fleet/expectations/calendar-task
+    slices and the day-recap/journal prose are left out — the "Good
+    evening" turn that became a status briefing and the "just relaxing...
+    tired" turn that got an unsolicited HRV reading are both this block.
+    `None` (the default) preserves the prior unconditional behavior for a
+    caller that hasn't been updated to pass a mode yet."""
+    from app.services.context_router import AMBIENT_SUPPRESS_MODES
+    _suppress_ambient = conversation_mode in AMBIENT_SUPPRESS_MODES
+
     lines = ["## Current Situation (world_state + self_state + relationship_state)"]
 
     world = context.get("world_state") or {}
-    for slice_name in ("david", "home", "calendar_horizon", "health_today", "work", "fleet", "expectations"):
+    _slice_names = ("david", "home", "calendar_horizon", "health_today", "work", "fleet", "expectations")
+    if _suppress_ambient:
+        # "david"/"home" are situational awareness (location, mood,
+        # weather) rather than a task list or a health readout — a
+        # greeting is allowed "at most one relevant personal callback."
+        # calendar_horizon/health_today/work/fleet/expectations are
+        # exactly the "unrelated world-brief tasks[,] health metrics"
+        # the plan's step 2 says to demote.
+        _slice_names = ("david", "home")
+    for slice_name in _slice_names:
         s = world.get(slice_name)
         if not s or not s.get("data"):
             continue
@@ -1187,7 +1213,7 @@ def render_engaged_context(
     # days out, which AHEAD's 7-day window never covers — is the one part of
     # this block that was not duplicated, so it survives as a single line.
     _cal = (world.get("calendar_horizon") or {}).get("data") or {}
-    if _cal.get("later"):
+    if _cal.get("later") and not _suppress_ambient:
         lines.append("### Further out (beyond the next week)")
         lines.append("  " + "; ".join(_cal["later"][:4]))
 
@@ -1206,16 +1232,36 @@ def render_engaged_context(
     relationship = context.get("relationship_state") or {}
     if relationship.get("active_conversation_id"):
         lines.append(f"- **relationship**: active_conversation={relationship['active_conversation_id']}")
-    if relationship.get("theory_of_david"):
+    # theory_of_david is a free-text narrative summary of David's open
+    # obligations/tasks/health items — found live (personal-conversation
+    # remediation plan replay, 2026-09-23) to be exactly what put "pending
+    # ACORD form" and "urgent AWS ... SSL/TLS certificate renewal" in front
+    # of the model on the "Good evening" turn, despite calendar_horizon/
+    # work/health_today all being correctly suppressed above. Same
+    # demotion as the day-recap/journal prose.
+    if relationship.get("theory_of_david") and not _suppress_ambient:
         # Arc 4.5: same "every context in every state" treatment as
         # self-story — its own prose block, not a bullet.
         lines.append(f"\n### What you understand about David\n{relationship['theory_of_david']}")
 
     lines.append(f"- **open_intents**: {open_intents}")
 
-    if recall_traces:
+    # Found live (personal-conversation remediation plan replay against the
+    # 2026-09-22 "Just relaxing lol I'm tired" turn's real fixture,
+    # 2026-09-23): memory.recall's semantic match surfaced Sara's own
+    # "Agent Task Result" notes (SSL/DNS certificate renewal work) for a
+    # message about being tired — note-kind traces are work artifacts, not
+    # personal/conversational recall, and are exactly the "old project
+    # threads" the plan's step 2 says to demote. episode-kind traces (David
+    # and Sara's own past exchanges) are the closest thing to "recent
+    # conversation" the plan says to keep, so those still come through.
+    _recall_traces = recall_traces
+    if _suppress_ambient and recall_traces:
+        _recall_traces = [t for t in recall_traces if t.get("kind") != "note"]
+
+    if _recall_traces:
         lines.append("\n### Relevant memory (memory.recall)")
-        for t in recall_traces[:5]:
+        for t in _recall_traces[:5]:
             _meta = f"{_recall_speaker_label(t)}, {t.get('confidence')}"
             _when_str = _render_recall_when(t.get("when"))
             if _when_str:
@@ -1250,7 +1296,10 @@ def render_engaged_context(
             t.strip() for t in (brief_layers.get(name) for name in ("moment", "day", "context"))
             if t and t.strip()
         )
-        if volatile_text:
+        # The moment/day/context layers are exactly the day-recap prose the
+        # plan's "Good evening" example turned into a status briefing —
+        # left out for social/personal_vulnerable turns (plan step 2).
+        if volatile_text and not _suppress_ambient:
             lines.append(
                 "\n## Right now / today / this week\n"
                 + _restate_stale_today(_clip_to_paragraph(volatile_text, 1800))
@@ -1271,7 +1320,7 @@ def render_engaged_context(
             if pkg_text.strip():
                 lines.append("\n" + pkg_text.strip()[:1000])
         _journal = _clip_to_paragraph(extended.get("journal") or "", 1000).strip()
-        if _journal:
+        if _journal and not _suppress_ambient:
             lines.append(f"\n## Recent Journal\n{_journal}")
         if extended.get("lessons"):
             lines.append(f"\n{extended['lessons']}")

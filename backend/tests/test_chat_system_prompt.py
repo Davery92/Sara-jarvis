@@ -16,6 +16,7 @@ import pytest
 
 from app.prompts.chat_system_prompt import (
     MAX_PROMPT_CHARS,
+    _SOUL_FALLBACK,
     build_chat_system_prompt,
 )
 from app.services.tool_retrieval import CORE_TOOLS
@@ -66,6 +67,41 @@ class TestToolsAreGenerated:
         assert "find_tools" in p
         assert "before telling David you cannot" in p
 
+    def test_find_tools_is_not_offered_as_an_escape_hatch_when_not_loaded(self):
+        """Milestone A review, 2026-09-22: the prompt used to tell the model
+        to call `find_tools` unconditionally, even on a turn where
+        `find_tools` itself was not among the tools actually loaded —
+        inviting exactly the reflexive call-to-an-unavailable-tool failure
+        documented in StreamScaffoldGuard's docstring (MTPLX tried to call
+        `find_tools` with zero tools declared). Without `find_tools` in
+        hand, the prompt must not promise it."""
+        p = build(["memory_search", "notes_search"])
+        assert "call `find_tools`" not in p
+        assert "cannot discover new tools this turn" in p
+        assert "tell David plainly" in p
+
+    def test_character_budget_is_unchanged_in_the_common_find_tools_present_case(self):
+        """The fix must not cost anything against the 17-char headroom Phase
+        5 measured — verified by exact length, not just "still fits"."""
+        with_ft = build(["memory_search", "notes_search", "find_tools"])
+        without_ft_branch_text = with_ft.replace(
+            "If the task needs something not in that list, call `find_tools` "
+            "with a plain description of what you need — before telling "
+            "David you cannot do it. Do not improvise with web_search, a "
+            "shell, or a page fetch.",
+            "PLACEHOLDER",
+        )
+        assert without_ft_branch_text != with_ft, "expected exact original wording, byte for byte"
+
+    def test_ambiguous_action_intent_gets_a_clarifying_question_not_a_guess(self):
+        """Voice-authorization follow-up: when a mutating tool is withheld
+        by gate_mutating_tools because the message doesn't clearly ask for
+        it, the model has no tool to reach for either way — this is what
+        tells it to ask rather than silently do nothing or guess."""
+        p = build()
+        assert "ask one focused question rather than guessing" in p
+        assert "continues that" in p and "not a new one" in p
+
 
 class TestTheContradictionIsGone:
     def test_the_dispatch_anything_line_is_gone(self):
@@ -92,6 +128,69 @@ class TestTruthRulesSurvive:
         assert rule in build()
 
 
+class TestConversationRules:
+    """Reliable-assistant plan Phase B — one case per observed behavior in
+    docs/plans/SARA_PERSONAL_TEST_REVIEW_2026_09_28.md §1. These assert the
+    rule text is actually assembled into the prompt the model sees; whether
+    the model then follows it is a live-conversation question, not a unit
+    test, and is recorded separately in the evidence map."""
+
+    @pytest.mark.parametrize("rule,review_case", [
+        ("Answer the invitation he actually made", "17 breakfast-at-night lecture"),
+        ("wants your opinion, not a briefing", "17 opinion invitation"),
+        ("explain his own feelings back to him", "32 being-listened-to"),
+        ('"probably means"', "09 father's tests speculation"),
+        ("Don't grant permission he didn't ask for", "05/06/09/31/37 managerial voice"),
+        ("Don't invent shared history", "33 fish lamp 'three years later'"),
+        ("the new subject is the subject", "39 bakery pivot"),
+        ('"No advice" means none', "06 vent/no-advice"),
+        ("Let an ending end", "27 ending"),
+        ("not volunteering it", "soul 'anticipating what he needs' conflict"),
+    ])
+    def test_rule_present(self, rule, review_case):
+        assert rule in build(), review_case
+
+    def test_it_does_not_impose_a_length_limit(self):
+        # The review is explicit that shorter alone was not sufficient and
+        # that a blanket one-sentence rule is the wrong fix.
+        p = build()
+        assert "one sentence" not in p.lower()
+        assert "keep it short" not in p.lower()
+
+    def test_it_does_not_demand_a_question(self):
+        p = build()
+        assert "always ask" not in p.lower()
+        assert "end with a question" not in p.lower()
+
+    def test_a_realistic_db_sized_soul_keeps_every_rule_and_no_less_soul(self):
+        # The real sara_soul block is ~3,400 chars (four sections plus the
+        # loader's own headers), which the cap has ALWAYS trimmed — at the
+        # pre-existing 6,500 cap the fixed blocks were ~4,630, leaving the
+        # soul ~1,870 chars, so its growth section was already being cut every
+        # turn. That trim is the documented, deliberate behavior ("trim the
+        # soul rather than silently drop a truth rule"), not a regression.
+        #
+        # What this test pins is that adding the conversation block did not
+        # make it worse: the cap went up by 1,100 to cover the ~1,050-char
+        # block, so the soul's own budget is unchanged or slightly larger,
+        # and every fixed rule still survives.
+        realistic_soul = "## Who Sara Is\n\n" + ("soul sentence. " * 225)
+        assert 3200 <= len(realistic_soul) <= 3600
+        p = build(soul=realistic_soul)
+        assert len(p) <= MAX_PROMPT_CHARS
+        assert "Answer the invitation he actually made" in p
+        assert "Absence is an answer" in p
+        assert "find_tools" in p
+
+        fixed_overhead = len(build(soul="")) - len(_SOUL_FALLBACK)
+        soul_budget_now = MAX_PROMPT_CHARS - fixed_overhead
+        PRE_CHANGE_SOUL_BUDGET = 1870  # 6500 cap - ~4630 of fixed blocks
+        assert soul_budget_now >= PRE_CHANGE_SOUL_BUDGET, (
+            f"the conversation block must not cost the soul characters it had "
+            f"before: {soul_budget_now} < {PRE_CHANGE_SOUL_BUDGET}"
+        )
+
+
 class TestVoice:
     def test_no_option_menus(self):
         assert "No menus of options" in build()
@@ -113,6 +212,23 @@ class TestSoul:
         assert "Sara" in p
         assert "Absence is an answer" in p
         assert len(p) > 1000
+
+
+class TestMemoryContractIsHonest:
+    """Living-world-context plan §3 finding: 'Prompt discourages freshness
+    checks' — the prompt said 'You remember everything in this thread' while
+    the fallback DB history load is capped at 20 messages. An overclaiming
+    contract discourages the model from ever using memory_search to recover
+    something genuinely out of view."""
+
+    def test_the_overclaiming_line_is_gone(self):
+        p = build()
+        assert "you remember everything" not in p.lower()
+
+    def test_the_prompt_names_the_actual_limitation_and_the_recovery_tool(self):
+        p = build(["memory_search", "find_tools"])
+        assert "memory_search" in p
+        assert "recall" in p.lower() or "total recall" in p.lower()
 
 
 class TestNoVolatileContent:

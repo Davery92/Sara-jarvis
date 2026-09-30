@@ -8,17 +8,43 @@ dispatching to a VM.
 Used by AgentDispatchService when a task is classified as "internal".
 """
 
+import asyncio
 import json
 import logging
+import os
 import time
+from contextlib import suppress
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 import httpx
 
 from app.tools.registry import tool_registry
 
 logger = logging.getLogger(__name__)
+
+# Internal research turns accumulate large tool results and can take several
+# minutes to synthesize on the shared background lane. Match the durable VM
+# dispatch path's 30-minute ceiling instead of treating a still-running model
+# as dead after three minutes. Heartbeats keep the task watchdog and UI alive
+# during that wait.
+INTERNAL_AGENT_LLM_TIMEOUT_SECONDS = float(os.getenv(
+    "INTERNAL_AGENT_LLM_TIMEOUT_SECONDS", "1800"
+))
+INTERNAL_AGENT_HEARTBEAT_SECONDS = float(os.getenv(
+    "INTERNAL_AGENT_HEARTBEAT_SECONDS", "15"
+))
+
+
+def _format_llm_error(exc: Exception) -> str:
+    """Return a useful persisted error even when an exception has no message."""
+    error_type = type(exc).__name__
+    message = str(exc).strip()
+    if isinstance(exc, httpx.TimeoutException):
+        timeout = f"{INTERNAL_AGENT_LLM_TIMEOUT_SECONDS:g}"
+        detail = f"{error_type} after {timeout}s"
+        return f"{detail}: {message}" if message else detail
+    return f"{error_type}: {message}" if message else error_type
 
 # All possible internal categories (used as fallback when classifier doesn't specify)
 ALL_INTERNAL_CATEGORIES = [
@@ -176,6 +202,7 @@ class InternalToolAgent:
         mission_id: str,
         user_id: str,
         categories: list = None,
+        progress_callback: Optional[Callable[[str], Awaitable[None]]] = None,
     ):
         self.task_id = task_id
         self.mission_id = mission_id
@@ -192,6 +219,7 @@ class InternalToolAgent:
         self._complete_summary: Optional[str] = None
         self._complete_findings: List[str] = []
         self._found_items: List[dict] = []
+        self._progress_callback = progress_callback
         # Drawer-compatible execution log (same entry shape the VM
         # dispatch loop emits) so internal tasks are inspectable too.
         self._execution_log: List[dict] = []
@@ -260,9 +288,19 @@ class InternalToolAgent:
             force_report = iteration == final_iteration
 
             try:
-                response = await self._call_llm(messages, force_report_complete=force_report)
+                response = await self._call_llm_with_heartbeat(
+                    messages,
+                    force_report_complete=force_report,
+                    iteration=iteration,
+                )
             except Exception as e:
-                logger.error(f"[internal-agent] LLM call failed on iteration {iteration}: {e}")
+                error_detail = _format_llm_error(e)
+                logger.error(
+                    "[internal-agent] LLM call failed on iteration %s: %s",
+                    iteration,
+                    error_detail,
+                    exc_info=True,
+                )
                 # Build fallback summary from what we have
                 fallback = self._build_fallback_summary(tool_results_log)
                 if not fallback:
@@ -270,7 +308,7 @@ class InternalToolAgent:
                     # dressing the exception string up as a result.
                     return {
                         "status": "failed",
-                        "error": f"Internal agent LLM call failed: {e}",
+                        "error": f"Internal agent LLM call failed: {error_detail}",
                         "summary": "",
                         "artifacts": [],
                         "found_items": [],
@@ -448,6 +486,43 @@ class InternalToolAgent:
             "execution_log": self._execution_log,
         }
 
+    async def _call_llm_with_heartbeat(
+        self,
+        messages: List[dict],
+        force_report_complete: bool = False,
+        iteration: int = 0,
+    ) -> dict:
+        """Call the LLM while keeping task liveness and the UI up to date."""
+        call = asyncio.create_task(self._call_llm(
+            messages,
+            force_report_complete=force_report_complete,
+        ))
+        waited = 0.0
+        try:
+            while True:
+                done, _ = await asyncio.wait(
+                    {call}, timeout=INTERNAL_AGENT_HEARTBEAT_SECONDS
+                )
+                if done:
+                    return call.result()
+                waited += INTERNAL_AGENT_HEARTBEAT_SECONDS
+                if self._progress_callback:
+                    try:
+                        await self._progress_callback(
+                            f"Waiting on background model… "
+                            f"({int(waited)}s, iteration {iteration + 1})"
+                        )
+                    except Exception as progress_error:
+                        logger.debug(
+                            "[internal-agent] Progress heartbeat failed: %s",
+                            progress_error,
+                        )
+        finally:
+            if not call.done():
+                call.cancel()
+                with suppress(asyncio.CancelledError):
+                    await call
+
     async def _call_llm(
         self,
         messages: List[dict],
@@ -485,7 +560,9 @@ class InternalToolAgent:
         else:
             tool_choice = "auto"
 
-        async with httpx.AsyncClient(timeout=180.0) as client:
+        async with httpx.AsyncClient(
+            timeout=INTERNAL_AGENT_LLM_TIMEOUT_SECONDS
+        ) as client:
             resp = await client.post(
                 f"{self.llm_url}/chat/completions",
                 json={

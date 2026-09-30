@@ -45,6 +45,7 @@ from app.tools.mutating import (
     is_write_tool as _is_write_tool,
     partition_by_effect as _partition_by_effect,
     tool_call_name as _tool_call_name,
+    tool_success_state as _tool_success_state,
 )
 from app.services.search_service import search_service
 from app.services.soul_loader import load_soul_for_prompt
@@ -147,6 +148,24 @@ NTFY_DOCUMENTS_TOPIC = _app_state.ntfy_documents_topic
 _CHAT_STICKY_TOOL_NAMES: Dict[str, List[str]] = {}
 _CHAT_STICKY_MAX_NAMES = 20
 
+# Separate from the schema-continuity list above. Living-world-context plan
+# §3 finding "Discovery bypasses tool limits and mutation policy": a name
+# `find_tools` merely surfaced used to go straight onto
+# `_CHAT_STICKY_TOOL_NAMES`, which `gate_mutating_tools` then treated as
+# standing authorization to skip the action-intent check on every later
+# turn — so asking Sara what a tool does was enough to leave it able to
+# write without evidence for the rest of the conversation.
+#
+# This list holds only tools this session has actually EXECUTED (appended
+# in `execute_tool`, regardless of how they got offered) — but executing a
+# tool once is ALSO not standing permission forever: the chat turn handler
+# reads it with `.pop(session_id, [])`, so each turn sees only what ran in
+# the turn immediately before it, and `gate_mutating_tools` additionally
+# requires the current message to read as a continuation of that specific
+# action before treating it as authorization. See
+# `tool_mutation.is_continuation_of_pending_action`.
+_CHAT_INVOKED_MUTATING_TOOL_NAMES: Dict[str, List[str]] = {}
+
 # The per-turn core lives in app.services.tool_retrieval.CORE_TOOLS; this alias
 # is kept because older call sites (non-chat lanes) still import the name.
 from app.services.tool_retrieval import CORE_TOOLS as _PRESENCE_CORE_TOOL_NAMES  # noqa: E402
@@ -171,6 +190,73 @@ _SYSTEM_WORK_ACTIONS = (
     "debug", "run", "execute", "restart", "update", "change", "edit",
     "write", "create", "implement", "push",
 )
+
+
+def _human_refusal_detail(decision) -> str:
+    """The user-facing half of a withheld operation. Internal reason codes are
+    for the log and the decision record; this is what may be rendered into a
+    reply (see outcome_grounding.render_outcome)."""
+    # Second person: this text is rendered into a reply David reads. An earlier
+    # version used the internal record's third person and put "he asked for
+    # something else" in front of him on a live journey turn.
+    phrases = {
+        "utterance_class_cannot_authorize_operation": "nothing you said asked for it",
+        "operation_not_requested_by_message": "that isn't what you asked for",
+        "correction_does_not_authorize_destruction": "you corrected a fact, you didn't ask me to remove anything",
+        "no_recurring_scope_in_request": "you asked for it once, not every time",
+        "target_belongs_to_another_owner": "that record isn't yours",
+        "reference_matches_multiple_targets": "more than one of your records matches",
+        "named_target_not_referenced_by_message": "that isn't the one you meant",
+        "proposal_was_for_a_different_operation": "your yes was about something else",
+        "target_not_resolvable": "I couldn't find what you meant",
+    }
+    return phrases.get(getattr(decision, "reason", ""), "it wasn't authorized this turn")
+
+
+def _outcome_for_tool_result(reg_result) -> "object":
+    """Map a ToolResult onto the ledger's seven distinguishable outcomes
+    (reliable-assistant plan D2: "not found", "not authorized", "failed to
+    execute", "not yet checked", "outcome unknown" must all be tellable
+    apart). A tool's own `success` flag only distinguishes two of them, so the
+    message is inspected for the specific words tools in this codebase use for
+    the others — deliberately narrow, defaulting to the tool's own verdict.
+    """
+    from app.services.outcome_grounding import Outcome
+    message = (getattr(reg_result, "message", "") or "").lower()
+    if getattr(reg_result, "success", False):
+        # "Didn't find those on the grocery list." is success=True and a
+        # NO-OP — the list tools report a miss that way, and a reply calling
+        # that "checked off" is the false-success shape all over again.
+        if any(p in message for p in (
+            "didn't find", "did not find", "not found", "no matching",
+            "nothing to", "no items", "couldn't find",
+        )):
+            return Outcome.NOT_FOUND
+        if any(p in message for p in ("queued", "dispatched", "started", "in progress", "running")):
+            return Outcome.PENDING
+        return Outcome.COMPLETED
+    if any(p in message for p in ("not found", "couldn't find", "could not find", "no such")):
+        return Outcome.NOT_FOUND
+    if any(p in message for p in ("not authorized", "did not run", "refused", "permission")):
+        return Outcome.REFUSED
+    if "unknown" in message or "can't confirm" in message or "cannot confirm" in message:
+        return Outcome.UNKNOWN
+    return Outcome.FAILED
+
+
+def _resolved_target_labels(resolution) -> tuple:
+    """Every label the resolution knows for this operation's target(s), used
+    to bind a reply's status claims to the right object."""
+    if resolution is None:
+        return ()
+    labels = []
+    named = getattr(resolution, "named", None)
+    if named is not None and named.label:
+        labels.append(named.label)
+    for candidate in getattr(resolution, "candidates", ()) or ():
+        if candidate.label and candidate.label not in labels:
+            labels.append(candidate.label)
+    return tuple(labels)
 
 
 def _chat_requests_background_dispatch(message: Optional[str]) -> bool:
@@ -202,9 +288,9 @@ def _apply_background_dispatch_policy(
 NTFY_SYSTEM_TOPIC = _app_state.ntfy_system_topic
 AI_PROVIDER = _app_state.ai_provider
 OPENAI_BASE_URL = _app_state.openai_base_url
-# Chat-lane thinking toggle (see chat_with_tools). Default off: reasoning is
-# never shown to the user and roughly doubles-to-10x time-to-first-token.
-CHAT_ENABLE_THINKING = os.getenv("CHAT_ENABLE_THINKING", "false").strip().lower() in ("1", "true", "yes", "on")
+# Think before answering, but never retain reasoning in conversation history.
+# Low effort is the conversational default; callers can tune it via env.
+CHAT_ENABLE_THINKING = os.getenv("CHAT_ENABLE_THINKING", "true").strip().lower() in ("1", "true", "yes", "on")
 # When thinking is on, Qwen3.8's template defaults reasoning_effort to "xhigh"
 # (the pre-2026-08-19 behaviour: warm, considered, and slow). CHAT_REASONING_EFFORT
 # = low | medium | xhigh picks the budget; "low" keeps her deliberating briefly
@@ -212,6 +298,21 @@ CHAT_ENABLE_THINKING = os.getenv("CHAT_ENABLE_THINKING", "false").strip().lower(
 CHAT_REASONING_EFFORT = os.getenv("CHAT_REASONING_EFFORT", "low").strip().lower()
 if CHAT_REASONING_EFFORT not in ("low", "medium", "xhigh"):
     CHAT_REASONING_EFFORT = "low"
+
+# MTP (multi-token prediction) request controls — chat harness repair Phase 7.
+# Default is "ar", NOT the plan's suggested "mtp": gotcha_mtplx_mtp_derails_
+# qwen38_27b.md found MTP speculative decoding corrupts tool-bearing replies
+# on this exact model (Qwen3.8-27B on the M3 Ultra), and the server's own
+# /health currently reports default_generation_mode="ar" too. Set
+# LOCAL_GENERATION_MODE=mtp only after the Phase 7 parity/regression suite
+# has re-verified the current server build.
+LOCAL_GENERATION_MODE = os.getenv("LOCAL_GENERATION_MODE", "ar").strip().lower()
+if LOCAL_GENERATION_MODE not in ("ar", "mtp"):
+    LOCAL_GENERATION_MODE = "ar"
+try:
+    LOCAL_MTP_DEPTH = int(os.getenv("LOCAL_MTP_DEPTH", "3"))
+except ValueError:
+    LOCAL_MTP_DEPTH = 3
 
 
 try:
@@ -236,13 +337,30 @@ def _apply_local_qwen_chat_sampling(payload: dict) -> None:
     0.6; tune via CHAT_PRESENCE_PENALTY. Penalties stay OUT of thinking mode
     and background JSON lanes — they degrade long structured output.
     """
-    payload["chat_template_kwargs"] = {"enable_thinking": CHAT_ENABLE_THINKING}
+    # Explicit on every local-lane request — chat harness repair Phase 7.
+    # The server's OpenAPI schema supports top-level generation_mode/depth;
+    # never rely on its default alone, and never conflate this with thinking
+    # mode (a separate axis, set via chat_template_kwargs below).
+    from app.services.mtp_control import generation_request_fields
+    payload.update(generation_request_fields(LOCAL_GENERATION_MODE, LOCAL_MTP_DEPTH))
+
+    payload["chat_template_kwargs"] = {
+        "enable_thinking": CHAT_ENABLE_THINKING,
+        "preserve_thinking": False,
+    }
     if CHAT_ENABLE_THINKING:
+        # MTPLX advertises a top-level field; template kwargs also support
+        # compatible Qwen servers. Never rely on a server's effort default.
+        payload["reasoning_effort"] = CHAT_REASONING_EFFORT
         payload["chat_template_kwargs"]["reasoning_effort"] = CHAT_REASONING_EFFORT
         payload["temperature"] = 1.0
         payload["top_p"] = 0.95
         payload["top_k"] = 20
+        payload["min_p"] = 0.0
+        payload["presence_penalty"] = 0.0
+        payload["repetition_penalty"] = 1.0
     else:
+        payload.pop("reasoning_effort", None)
         payload["temperature"] = 0.7
         payload["top_p"] = 0.8
         payload["top_k"] = 20
@@ -303,6 +421,7 @@ from app.core.text_utils import is_local_base_url as _is_local_base_url
 from app.core.text_utils import safe_parse_iso_datetime as _safe_parse_iso_datetime
 from app.core.text_utils import parse_glm45_tool_calls, parse_json_text_tool_calls, strip_tool_markup
 from app.core.text_utils import claude_rejects_sampling_params, claude_thinking_always_on
+from app.services.chat_reasoning import ThinkingContentFilter, strip_thinking_content, StreamScaffoldGuard
 
 
 async def _mark_shown_discoveries(user_id: str, response_text: str):
@@ -939,7 +1058,21 @@ class SimpleLLMClient:
         await self.emit_event("assistant_activity", data)
 
     async def emit_text_chunk(self, content: str, full_content: str):
-        """Mark visible response generation once, then emit the text delta."""
+        """Mark visible response generation once, then emit the text delta.
+
+        Reliable-assistant plan D2, "cover final and streamed output… do not
+        stream an unverified success and attempt to correct it afterward":
+        once this turn has attempted a write, the deltas are HELD instead of
+        emitted, and `_release_held_stream` sends the grounded text once — the
+        same string that gets persisted and echoed on `final_response`. A
+        conversational turn that writes nothing still streams normally, which
+        is the overwhelming majority of turns.
+        """
+        if getattr(self, "_hold_stream_for_grounding", False):
+            self._held_stream_text = full_content or (
+                getattr(self, "_held_stream_text", "") + content
+            )
+            return
         # Phase 9 trace: the first visible character is the number that
         # describes what David experienced (presence latency), not the total.
         if getattr(self, "_turn_first_token_ms", None) is None:
@@ -950,7 +1083,30 @@ class SimpleLLMClient:
             self._activity_responding_emitted = True
             await self.emit_activity("responding")
         await self.emit_event("text_chunk", {"content": content, "full_content": full_content})
-    
+
+    async def _release_held_stream(self, grounded_content: Optional[str]) -> None:
+        """Send the grounded reply as one chunk, if the stream was held.
+
+        Idempotent and safe to call when nothing was held. Clears the hold so
+        a later turn on the same client object streams normally again.
+        """
+        if not getattr(self, "_hold_stream_for_grounding", False):
+            return
+        self._hold_stream_for_grounding = False
+        held = getattr(self, "_held_stream_text", "") or ""
+        self._held_stream_text = ""
+        text = grounded_content if grounded_content is not None else held
+        if not text:
+            return
+        if not self._activity_responding_emitted:
+            self._activity_responding_emitted = True
+            await self.emit_activity("responding")
+        if getattr(self, "_turn_first_token_ms", None) is None:
+            _t0 = getattr(self, "_turn_started_at", None)
+            if _t0 is not None:
+                self._turn_first_token_ms = int((time.monotonic() - _t0) * 1000)
+        await self.emit_event("text_chunk", {"content": text, "full_content": text})
+
     def _extract_final_message(self, content: str) -> str:
         """Extract final message from MLX fine-tuned model's channel format.
 
@@ -1219,7 +1375,6 @@ class SimpleLLMClient:
 
     async def _stream_response(self, payload):
         """Stream response from LLM with XML filtering for GLM-4.5 and MLX channel format"""
-        import re
 
         # Get model config - use stored config or fall back to global
         model_config = getattr(self, '_current_model_config', None)
@@ -1261,10 +1416,13 @@ class SimpleLLMClient:
             return result
 
         full_content = ""
+        thinking_filter = ThinkingContentFilter()
+        scaffold_guard = StreamScaffoldGuard()
         emitted_content = ""  # Track what we've already sent to user
         tool_calls = []
         in_analysis_channel = False  # Track if we're in analysis channel (MLX format)
         usage_data = {}  # Track token usage from stream
+        mtp_stats_data = {}  # MTPLX runtime stats from the final chunk (chat harness repair Phase 7)
 
         # Estimate prompt tokens from payload (for providers that don't return usage)
         payload_str = json.dumps(payload.get("messages", []))
@@ -1300,12 +1458,17 @@ class SimpleLLMClient:
                         # Capture usage data if present (some providers send it in final chunk)
                         if "usage" in chunk:
                             usage_data = chunk["usage"]
+                        if "mtplx_stats" in chunk:
+                            mtp_stats_data = chunk["mtplx_stats"]
 
-                        delta = chunk.get("choices", [{}])[0].get("delta", {})
+                        # Usage-only chunks may have no choices. Separate
+                        # reasoning deltas are deliberately never retained.
+                        choices = chunk.get("choices") or []
+                        delta = choices[0].get("delta", {}) if choices else {}
 
                         # Handle content streaming with XML filtering and MLX channel filtering
                         if "content" in delta and delta["content"]:
-                            content_chunk = delta["content"]
+                            content_chunk = thinking_filter.feed(delta["content"])
 
                             # Some models/providers lead their very first token
                             # with a stray newline from the chat template — strip
@@ -1342,25 +1505,23 @@ class SimpleLLMClient:
                                 # Otherwise, skip emitting (we're in analysis or waiting for final)
                                 continue
 
-                            # Standard XML filtering (for GLM-4.5 and other models)
-                            # Check if we're inside an XML tag or if one is starting
-                            # Look for incomplete tags: <tool_call, <think, etc
-                            xml_tag_pattern = r'<(tool_call|think)(?:\s|>|$)'
-                            tag_match = re.search(xml_tag_pattern, unemitted)
-
-                            if tag_match:
-                                # Found start of XML tag - only emit content before it
-                                safe_content = unemitted[:tag_match.start()]
-                                if safe_content:
-                                    emitted_content += safe_content
-                                    await self.emit_text_chunk(safe_content, emitted_content)
-                            else:
-                                # Check if we might be at the start of a tag (e.g., just got "<")
-                                if unemitted and not unemitted.rstrip().endswith('<'):
-                                    # Safe to emit - no XML tag detected
-                                    emitted_content += unemitted
-                                    await self.emit_text_chunk(unemitted, emitted_content)
-                                # Otherwise, hold the buffer (might be start of XML tag)
+                            # Standard filtering (for GLM-4.5 XML tool calls and
+                            # other models) — holds back an XML tag marker
+                            # (open OR bare close) for the rest of the turn,
+                            # and a provider-scaffolding bracket
+                            # (`[MTPLX: ...]` etc) until its closing `]`. See
+                            # StreamScaffoldGuard's docstring (chat_reasoning.py)
+                            # for why a stateful longest-suffix-match guard
+                            # replaced a single regex + `endswith('<')` check:
+                            # the old check only ever recognized the first
+                            # character of ONE marker family, so a bare
+                            # `</tool_call>` (no opener) or any provider
+                            # advisory streamed straight to the user —
+                            # harness/thinking/personality plan Phase 1.
+                            safe_content = scaffold_guard.feed(content_chunk)
+                            if safe_content:
+                                emitted_content += safe_content
+                                await self.emit_text_chunk(safe_content, emitted_content)
 
                         # Handle tool calls (standard OpenAI streaming format).
                         # Each delta tool_call carries an `index` field identifying which
@@ -1396,6 +1557,11 @@ class SimpleLLMClient:
                     except json.JSONDecodeError:
                         continue
 
+            full_content += thinking_filter.finish()
+            _leftover_safe = scaffold_guard.finish()
+            if _leftover_safe:
+                emitted_content += _leftover_safe
+                await self.emit_text_chunk(_leftover_safe, emitted_content)
             # After streaming completes, process content based on format
             processed_content = full_content
 
@@ -1468,6 +1634,30 @@ class SimpleLLMClient:
                     operation_type="chat"
                 )
 
+            # MTP fallback must always be visible, never a silent downgrade
+            # (chat harness repair Phase 7). Only meaningful for requests that
+            # actually asked for generation_mode — non-local providers never
+            # set it and mtp_stats_data stays empty.
+            if payload.get("generation_mode") and mtp_stats_data:
+                try:
+                    from app.services.mtp_control import check_response_generation_mode, record_mtp_fallback
+                    fallback = check_response_generation_mode(
+                        requested_mode=payload["generation_mode"],
+                        requested_depth=payload.get("depth", 0),
+                        mtplx_stats=mtp_stats_data,
+                    )
+                    if fallback:
+                        record_mtp_fallback(
+                            model=payload.get("model") or "unknown",
+                            endpoint=base_url,
+                            requested_mode=payload["generation_mode"],
+                            requested_depth=payload.get("depth", 0),
+                            failure_category=fallback["failure_category"],
+                            ar_recovery_ok=True,  # the turn completed; whatever ran, it produced a response
+                        )
+                except Exception as _mtp_check_err:
+                    logger.debug(f"MTP fallback check failed (non-critical): {_mtp_check_err}")
+
             # Return message object compatible with existing code (standard OpenAI format)
             return {
                 "content": processed_content,
@@ -1506,6 +1696,23 @@ class SimpleLLMClient:
             return result["choices"][0]["message"]
 
     async def chat(self, messages: list, model: str | None = None):
+        """No-tools chat (voice's no-tools path is the current caller).
+
+        Milestone A review, 2026-09-22: this used to return
+        `result["choices"][0]["message"]["content"]` straight off the wire —
+        no `_apply_local_qwen_chat_sampling` (so the local lane's
+        enable_thinking/preserve_thinking template kwargs were never sent,
+        unlike every other local-provider call site), and no cleanup, so an
+        inline `<think>...</think>`, an MLX `<|channel|>analysis...<|channel|>
+        final<|message|>` wrapper, or a reflexive `<tool_call>` a
+        zero-tools turn has no business emitting could all reach the voice
+        user, the stored assistant message, and reconstructed history
+        untouched. Brought under the same reasoning-isolation contract as
+        the streaming path: same sampling kwargs on the local lane, then
+        MLX-channel extraction, `<think>` stripping, and tool-markup
+        stripping on whatever the provider returned — each step is a no-op
+        on content that doesn't match its pattern, so this is safe across
+        every provider, not just the local Qwen lane."""
         try:
             # Handle both dict and object message formats
             formatted_messages = []
@@ -1528,7 +1735,7 @@ class SimpleLLMClient:
                     temperature=0.7,
                     model=effective_model,
                 )
-                return result.get("content", "")
+                return self._clean_no_tools_chat_content(result.get("content", ""))
 
             if provider == "codex":
                 codex_result = await self._stream_codex_response(
@@ -1540,7 +1747,7 @@ class SimpleLLMClient:
                     model_config["base_url"],
                     model_config["api_key"],
                 )
-                return codex_result.get("content", "")
+                return self._clean_no_tools_chat_content(codex_result.get("content", ""))
 
             # Build payload for OpenAI-compatible API
             chat_payload = {
@@ -1553,6 +1760,9 @@ class SimpleLLMClient:
             # Add Ollama-specific context length if using local model
             if provider == "local":
                 chat_payload["num_ctx"] = 131072
+                # Same reasoning-isolation contract as chat_with_tools: never
+                # rely on the server's thinking-mode default for this lane.
+                _apply_local_qwen_chat_sampling(chat_payload)
 
             response = await self.client.post(
                 f"{model_config['base_url']}/chat/completions",
@@ -1561,12 +1771,29 @@ class SimpleLLMClient:
             )
             response.raise_for_status()
             result = response.json()
-            return result["choices"][0]["message"]["content"]
+            return self._clean_no_tools_chat_content(
+                result["choices"][0]["message"]["content"]
+            )
         except Exception as e:
             logger.error(f"LLM error: {e}")
             return f"I'm sorry, I'm having trouble connecting to my AI service. Error: {str(e)}"
 
-    async def chat_with_tools(self, messages, tools, user_id, conversation_id=None, model=None, ephemeral=False):
+    def _clean_no_tools_chat_content(self, content: str) -> str:
+        """Reasoning-isolation cleanup for the non-streaming `chat()` path —
+        see its docstring. Only ever reads `message.content`; a provider
+        reasoning field such as `reasoning_content` living alongside it is
+        never consulted here, so it cannot reach the return value."""
+        if not isinstance(content, str) or not content:
+            return content or ""
+        content = self._extract_final_message(content)
+        content = strip_thinking_content(content)
+        content = strip_tool_markup(content)
+        return content
+
+    async def chat_with_tools(
+        self, messages, tools, user_id, conversation_id=None, model=None, ephemeral=False, world_state_core="",
+        turn_message="",
+    ):
         """Run one chat turn and record a `chat_turn_trace` row for it.
 
         The trace is written on EVERY exit — a normal reply, a forced final, an
@@ -1579,7 +1806,8 @@ class SimpleLLMClient:
         reply = None
         try:
             reply = await self._chat_with_tools_inner(
-                messages, tools, user_id, conversation_id, model=model, ephemeral=ephemeral
+                messages, tools, user_id, conversation_id, model=model, ephemeral=ephemeral,
+                world_state_core=world_state_core, turn_message=turn_message,
             )
             return reply
         finally:
@@ -1592,7 +1820,10 @@ class SimpleLLMClient:
             except Exception as _trace_err:
                 logger.debug(f"turn trace skipped: {_trace_err}")
 
-    async def _chat_with_tools_inner(self, messages, tools, user_id, conversation_id=None, model=None, ephemeral=False):
+    async def _chat_with_tools_inner(
+        self, messages, tools, user_id, conversation_id=None, model=None, ephemeral=False, world_state_core="",
+        turn_message="",
+    ):
         """Enhanced chat with tool calling support
 
         Args:
@@ -1602,14 +1833,68 @@ class SimpleLLMClient:
             conversation_id: Optional conversation ID for context
             model: Optional model override (e.g., "claude-opus-4-6", "gemini-2.5-pro")
             ephemeral: If True, don't save to memory/episodes
+            turn_message: The human's own message that started this turn —
+                what `gate_mutating_tools` filtered the initial `tools` menu
+                against. Kept for `_load_tools_midturn` (living-world-context
+                plan Turn 3 item 4): source content (an email/document body
+                with embedded instructions) reaching the model in a tool
+                result must not be able to authorize a NEWLY discovered
+                mutating tool via find_tools mid-turn — only THIS turn's
+                actual human message can.
         """
         self._activity_responding_emitted = False
+        # Per-turn grounding state (reliable-assistant plan Phase D). Reset
+        # here, at the one entry every chat turn passes through, so a ledger
+        # from a previous turn on the same client object can never ground this
+        # turn's reply.
+        self._turn_ledger = None
+        self._hold_stream_for_grounding = False
+        self._held_stream_text = ""
+        self._turn_grounding_reasons = []
+        self._turn_operation_decisions = []
+        # Recovery is once per turn, and the flag is set BEFORE the attempt, so
+        # a recovery that itself throws cannot be retried into a loop.
+        self._turn_recovery_attempted = False
+        self._turn_conversation_id = conversation_id
         failed_tool_counts: Dict[str, int] = {}
         disabled_tool_names = set()
         # The live tool list for this turn. `find_tools` mutates it, and every
         # follow-up payload reads it — not the `tools` argument — so a tool the
         # model asks for is callable on the very next round.
         self._active_tools = list(tools or [])
+        self._turn_message_for_mutation_gate = turn_message or ""
+        # R01 (Sara repair plan 2026-09-25, J11): a read-only peek (never a
+        # pop — the diet-path/voice-path gates above still own the actual
+        # pop/consume of this data for THEIR OWN schema-offer decision) at
+        # what mutating tools this session actually executed last turn, so
+        # `execute_tool`'s execution-boundary authorization check below can
+        # recognize a legitimate continuation ("yes", "do it") without
+        # depending on which of the three tool-selection branches ran.
+        # `conversation_id` mirrors the fallback key `execute_tool` itself
+        # already uses when writing to `_CHAT_INVOKED_MUTATING_TOOL_NAMES`
+        # (`_sticky_key or conversation_id` — see the write site).
+        #
+        # 2026-09-28, found by the first live journey: this read was ALWAYS
+        # EMPTY on the real /chat/stream path. That path POPS
+        # `_CHAT_INVOKED_MUTATING_TOOL_NAMES[session_id]` for its own
+        # `gate_mutating_tools` call, before `chat_with_tools` is entered — so
+        # by the time this peek runs the entry is gone, and the key differs
+        # besides (`session_id` there, `conversation_id` here). The continuation
+        # path this exists to serve therefore never fired live at all: the
+        # journey's second turn ("And one for the dentist on October 2nd at
+        # 9am.") was refused, because the boundary could not see that
+        # `reminders_create` had just run.
+        #
+        # The caller now hands the popped list over explicitly. The peek stays
+        # as the fallback for callers that don't (the voice lane, tests).
+        _boundary_override = getattr(self, "_last_turn_mutating_override", None)
+        if _boundary_override is not None:
+            self._last_turn_mutating_tools_for_boundary = list(_boundary_override)
+            self._last_turn_mutating_override = None
+        else:
+            self._last_turn_mutating_tools_for_boundary = list(
+                _CHAT_INVOKED_MUTATING_TOOL_NAMES.get(conversation_id, [])
+            ) if conversation_id else []
         try:
             logger.info(f"🔧 chat_with_tools called with conversation_id: {conversation_id}, model: {model}, ephemeral: {ephemeral}")
 
@@ -1639,6 +1924,12 @@ class SimpleLLMClient:
                     formatted_messages.append({"role": msg["role"], "content": msg["content"]})
                 else:
                     formatted_messages.append({"role": msg.role, "content": msg.content})
+
+            # Do not replay inline reasoning supplied by an older client or
+            # history record. Separate reasoning fields were omitted above.
+            for msg in formatted_messages:
+                if msg["role"] == "assistant" and isinstance(msg["content"], str):
+                    msg["content"] = strip_thinking_content(msg["content"])
 
             # David's actual words for this turn, for tools that need to ground a
             # model-constructed argument against what he really said (conversation
@@ -1757,10 +2048,8 @@ class SimpleLLMClient:
             # Add Ollama-specific context length if using local model
             if model_config["provider"] == "local":
                 payload["num_ctx"] = 131072
-                # Qwen defaults to thinking mode. Nothing in the chat pipeline or
-                # either UI surfaces reasoning_content, so thinking is pure
-                # time-to-first-token cost (can be thousands of hidden tokens).
-                # Off by default; CHAT_ENABLE_THINKING=true re-enables.
+                # Deliberation stays out of displayed/stored answers and
+                # subsequent tool-round assistant messages.
                 _apply_local_qwen_chat_sampling(payload)
 
             # Log payload size for debugging context overflow
@@ -1786,6 +2075,21 @@ class SimpleLLMClient:
             # (tool name, exact arguments) -> the result it returned, for this
             # turn only. See _repeat_tool_note.
             self._turn_tool_results: Dict[str, str] = {}
+            # removal tool name -> set of argument-JSON strings attempted
+            # this turn, any round. Post-hoc correction: the ambiguous-
+            # removal guard originally only ever saw one round's tool_calls,
+            # so candidate A in round 1 and candidate B in round 2 each
+            # looked "just one call" and both executed. See
+            # find_ambiguous_same_turn_removals / record_removal_attempts.
+            self._turn_removal_attempts: Dict[str, set] = {}
+            # R01 review remediation round 2 (2026-09-26): the pending
+            # proposal candidate(s) this turn — a refused scope-sensitive
+            # call is stashed here, not persisted immediately, because
+            # "the user actually saw it" can't be verified until the
+            # turn's final reply text exists. See
+            # app/services/chat_proposal_service.py and
+            # _store_conversation_with_timeout below.
+            self._turn_unpresented_proposals: List[Dict[str, Any]] = []
 
             message = await self._stream_response(payload)
 
@@ -1794,6 +2098,15 @@ class SimpleLLMClient:
             # the Sept 11 conversation run 500 seconds behind a dead client.
             max_tool_rounds = CHAT_TOOL_ROUNDS_MAX
             current_messages = formatted_messages
+
+            # Living-world-context plan, Turn 3 item 2 ("Updates during
+            # long turns"): world_state_core was baked into `messages` once,
+            # before this loop started. Tracked here so a later round can
+            # detect it went stale (via WorldSnapshot.revision, bumped by
+            # every reducer write) and REPLACE it in place rather than the
+            # model working off round 1's snapshot for the rest of the turn.
+            _wsc_current = world_state_core or ""
+            _wsc_last_revision = None
 
             for round_num in range(max_tool_rounds):
                 if message.get("tool_calls"):
@@ -1832,7 +2145,7 @@ class SimpleLLMClient:
                         await self.emit_event("response_ready", {
                             "rounds": round_num, "content_length": len(response_content or ""),
                         })
-                        episode_id = await self._store_conversation_with_timeout(
+                        response_content, episode_id = await self._store_conversation_with_timeout(
                             messages, response_content, user_id, conversation_id
                         )
                         self.current_episode_id = episode_id
@@ -1851,7 +2164,55 @@ class SimpleLLMClient:
                     
                     tool_responses = []
                     _out_of_tool_budget = False
-                    
+
+                    # Harness/thinking/personality plan, Phase 4: "delete
+                    # the bank reminder" when two reminders match must not
+                    # authorize deleting both — reproduced live
+                    # (thinking-off called reminders_cancel on both
+                    # candidates in one round instead of asking). Checked
+                    # against this round's ACTUAL tool_calls PLUS every
+                    # removal target already attempted in an earlier round
+                    # this turn (self._turn_removal_attempts) — a model that
+                    # spreads candidate A and candidate B across two
+                    # separate rounds must not slip through just because
+                    # neither round's batch alone looked ambiguous. A bulk
+                    # phrase in David's own words ("delete both"), scoped to
+                    # the actual removal clause and not negated, clears it.
+                    #
+                    # Reliable-assistant plan C3, 2026-09-28: the per-CALL
+                    # target/ownership/operation decision used to be made here
+                    # too (`target_authorization.find_target_unauthorized_
+                    # mutations`) AND again inside execute_tool, from two
+                    # different rule sets. Two policy authorities for one
+                    # question is exactly what C3 forbids, and the round-level
+                    # copy was the stricter of the two — its 4-character
+                    # minimum word match refused "Scratch the vet one" before
+                    # execute_tool ever saw it. The per-call decision now lives
+                    # only in execute_tool's operation contract, which refuses
+                    # before dispatch just as effectively and can say WHY.
+                    #
+                    # What genuinely needs the whole round is this check: the
+                    # same removal tool aimed at a SECOND distinct target with
+                    # no bulk language from David ("delete both"). One call at
+                    # a time cannot see that shape, so it stays here, routed
+                    # through the contract so the call site is still one place.
+                    from app.services.tool_mutation import record_removal_attempts
+                    from app.services.operation_contract import (
+                        find_unauthorized_multi_target_calls,
+                    )
+                    _raw_turn_msg = getattr(self, "_current_raw_user_turn", None) or ""
+                    _blocked_call_ids = set(find_unauthorized_multi_target_calls(
+                        message["tool_calls"], _raw_turn_msg,
+                        prior_attempts=self._turn_removal_attempts,
+                    ))
+                    record_removal_attempts(self._turn_removal_attempts, message["tool_calls"])
+                    if _blocked_call_ids:
+                        logger.warning(
+                            f"🚫 Withholding {len(_blocked_call_ids)} ambiguous same-turn "
+                            f"removal call(s) — multiple targets, no bulk language: "
+                            f"{[_tool_call_name(tc) for tc in message['tool_calls'] if tc.get('id') in _blocked_call_ids]}"
+                        )
+
                     for tool_call in message["tool_calls"]:
                         tool_name = tool_call.get("function", {}).get("name", "unknown")
                         await self.emit_event("tool_executing", {
@@ -1863,14 +2224,37 @@ class SimpleLLMClient:
                         )
                         
                         _tool_t0 = time.monotonic()
+                        if tool_call.get("id") in _blocked_call_ids:
+                            # Ambiguous same-turn removal, OR a scope-
+                            # sensitive tool beyond what this turn's message
+                            # independently supports (J10) — see above.
+                            # Never reaches execute_tool; still flows into
+                            # the same _turn_tools_called bookkeeping below
+                            # with success=False, same as any other refused
+                            # call, so it can never be misreported as a
+                            # completed write later in this turn.
+                            tool_response = {
+                                "role": "tool",
+                                "tool_call_id": tool_call.get("id", ""),
+                                "content": json.dumps({
+                                    "success": False,
+                                    "message": (
+                                        f"Not executed: {tool_name} wasn't clearly authorized by "
+                                        "what David actually said this turn — either it matched "
+                                        "more than one target with no bulk language (\"all\"/"
+                                        "\"both\"), or it's a second, different action beyond "
+                                        "what his message specifically asked for. Ask him to "
+                                        "confirm exactly what he wants before acting on it."
+                                    ),
+                                }),
+                            }
                         # Identical call, same turn, seconds apart: re-running
                         # it cannot tell the model anything new, and for a
                         # write tool it does the work twice. Three of six
                         # replayed turns hit the round cap this way — calling
                         # files_to_studio and email_search over and over, then
                         # running out of rounds before writing a reply.
-                        _repeat = self._repeat_tool_note(tool_call)
-                        if _repeat is not None:
+                        elif (_repeat := self._repeat_tool_note(tool_call)) is not None:
                             tool_response = _repeat
                             # A refused call still costs a round and a full LLM
                             # call to tell the model "no". Measured: turn 4 of
@@ -1895,7 +2279,7 @@ class SimpleLLMClient:
                             "name": tool_name,
                             "ms": int((time.monotonic() - _tool_t0) * 1000),
                             "result_chars": len(tool_response.get("content") or ""),
-                            "success": response_payload.get("success") is not False,
+                            "success": _tool_success_state(response_payload),
                         })
                         if response_payload.get("success") is False:
                             failed_tool_counts[tool_name] = failed_tool_counts.get(tool_name, 0) + 1
@@ -1991,11 +2375,48 @@ class SimpleLLMClient:
                             "rounds": round_num + 1,
                             "content_length": len(response_content or ""),
                         })
-                        episode_id = await self._store_conversation_with_timeout(
+                        response_content, episode_id = await self._store_conversation_with_timeout(
                             messages, response_content, user_id, conversation_id
                         )
                         self.current_episode_id = episode_id
                         return response_content
+
+                    # Refresh world_state_core if it's gone stale since the
+                    # turn started (or since the last round) — a tool call
+                    # THIS turn just ran (e.g. workout.completed) or an
+                    # external event landing between rounds can move a fact
+                    # before this next model call. Checked via
+                    # WorldSnapshot.revision (one cheap SELECT) rather than
+                    # unconditionally re-rendering every round.
+                    if _wsc_current and user_id:
+                        try:
+                            from sqlalchemy import select as _wsc_select
+                            from app.db.base import SessionLocal as _WSCSessionLocal
+                            from app.models.world_model import WorldSnapshot as _WSCSnapshot
+                            from app.services.world_state.chat_facts import render_world_state_core as _render_wsc
+                            from app.services.chat_assembly import replace_world_state_core_in_messages as _replace_wsc
+                            _wsc_db = _WSCSessionLocal()
+                            try:
+                                _wsc_revision = _wsc_db.execute(
+                                    _wsc_select(_WSCSnapshot.revision).where(_WSCSnapshot.user_id == str(user_id))
+                                ).scalar_one_or_none() or 0
+                                if _wsc_revision != _wsc_last_revision:
+                                    _new_wsc = _render_wsc(_wsc_db, str(user_id))
+                                    if _new_wsc and _new_wsc != _wsc_current:
+                                        current_messages, _wsc_replaced = _replace_wsc(
+                                            current_messages, _wsc_current, _new_wsc
+                                        )
+                                        if _wsc_replaced:
+                                            logger.info(
+                                                f"🔄 world_state_core changed mid-turn (round {round_num + 1}) "
+                                                "— replaced in place for the next round"
+                                            )
+                                        _wsc_current = _new_wsc
+                                    _wsc_last_revision = _wsc_revision
+                            finally:
+                                _wsc_db.close()
+                        except Exception as _wsc_refresh_err:
+                            logger.debug(f"world_state_core mid-turn refresh skipped (non-critical): {_wsc_refresh_err}")
 
                     follow_up_tools = [
                         tool for tool in self._active_tools
@@ -2105,7 +2526,7 @@ class SimpleLLMClient:
                             "rounds": round_num + 1,
                             "content_length": len(_forced or ""),
                         })
-                        episode_id = await self._store_conversation_with_timeout(
+                        _forced, episode_id = await self._store_conversation_with_timeout(
                             messages, _forced, user_id, conversation_id
                         )
                         self.current_episode_id = episode_id
@@ -2117,7 +2538,7 @@ class SimpleLLMClient:
                         logger.error("Failed to get message after retries")
                         self._turn_ended_by = "error"
                         _forced = await self._force_final_answer(current_messages)
-                        episode_id = await self._store_conversation_with_timeout(
+                        _forced, episode_id = await self._store_conversation_with_timeout(
                             messages, _forced, user_id, conversation_id
                         )
                         self.current_episode_id = episode_id
@@ -2131,8 +2552,15 @@ class SimpleLLMClient:
                     logger.info(f"🔍 Round {round_num + 1} - Has tool_calls: {bool(message.get('tool_calls'))}")
                     if message.get('tool_calls'):
                         logger.info(f"🔍 Round {round_num + 1} - Tool calls: {[tc.get('function', {}).get('name') for tc in message.get('tool_calls', [])]}")
-                    if hasattr(message, 'reasoning'):
-                        logger.info(f"🔍 Round {round_num + 1} - Reasoning: {message.get('reasoning', '')[:100]}")
+                    # Harness/thinking/personality plan, Phase 1: never log
+                    # reasoning content, even a preview. This used to read
+                    # `hasattr(message, 'reasoning')` on a plain dict — always
+                    # False, so it never actually fired — but a "fix" to the
+                    # dict-vs-attribute bug would have reintroduced a raw
+                    # hidden-reasoning log leak. A presence flag is the most
+                    # this should ever report.
+                    if message.get('reasoning'):
+                        logger.info(f"🔍 Round {round_num + 1} - Reasoning present (not logged)")
 
                     # If no more tool calls, we're done
                     if not message.get("tool_calls"):
@@ -2148,7 +2576,7 @@ class SimpleLLMClient:
                             "content_length": len(response_content) if response_content else 0
                         })
                         # Store conversation and get episode_id for rating
-                        episode_id = await self._store_conversation_with_timeout(
+                        response_content, episode_id = await self._store_conversation_with_timeout(
                             messages, response_content, user_id, conversation_id
                         )
                         self.current_episode_id = episode_id
@@ -2162,7 +2590,7 @@ class SimpleLLMClient:
                         "content_length": len(response_content) if response_content else 0
                     })
                     # Store conversation and get episode_id for rating
-                    episode_id = await self._store_conversation_with_timeout(
+                    response_content, episode_id = await self._store_conversation_with_timeout(
                         messages, response_content, user_id, conversation_id
                     )
                     self.current_episode_id = episode_id
@@ -2177,7 +2605,7 @@ class SimpleLLMClient:
             response_content = await self._force_final_answer(current_messages)
 
             # Store conversation and get episode_id for rating
-            episode_id = await self._store_conversation_with_timeout(
+            response_content, episode_id = await self._store_conversation_with_timeout(
                 messages, response_content, user_id, conversation_id
             )
             self.current_episode_id = episode_id
@@ -2201,6 +2629,328 @@ class SimpleLLMClient:
             logger.error(f"Full traceback:\n{traceback.format_exc()}")
             return f"I'm sorry, I'm having trouble connecting to my AI service. Error: {str(e)}"
 
+    # ── Turn outcome ledger (reliable-assistant plan Phase D) ──────────────
+    #
+    # Every write this turn attempted, and what actually came of it, recorded
+    # at the execution boundary where the decision and the result are both
+    # known. `_finalize_response_content` grounds the reply against it. See
+    # app/services/outcome_grounding.py for the eleven findings this closes.
+
+    def _turn_outcome_ledger(self):
+        from app.services.outcome_grounding import TurnLedger
+        ledger = getattr(self, "_turn_ledger", None)
+        if ledger is None:
+            ledger = TurnLedger()
+            self._turn_ledger = ledger
+        return ledger
+
+    def _record_turn_outcome(
+        self, *, tool_name, operation, domain, outcome, target_ids=(),
+        target_labels=(), detail="", operation_id=None, revision=None,
+    ) -> None:
+        # The first write of the turn is what makes the reply's status claims
+        # checkable — and therefore what makes streaming them before the check
+        # unsafe. Holding starts here rather than at turn start so the ~95% of
+        # turns that write nothing keep streaming token by token.
+        self._hold_stream_for_grounding = True
+        try:
+            from app.services.outcome_grounding import TurnOutcome
+            self._turn_outcome_ledger().record(TurnOutcome(
+                tool_name=tool_name, operation=operation, domain=domain,
+                outcome=outcome, target_ids=tuple(target_ids),
+                target_labels=tuple(t for t in target_labels if t),
+                detail=(detail or "")[:400], operation_id=operation_id,
+                revision=revision,
+            ))
+        except Exception as _ledger_err:  # never let bookkeeping break a turn
+            logger.debug(f"turn outcome ledger skipped: {_ledger_err}")
+
+    async def _finalize_response_content(
+        self, response_content: str, messages, user_id: Optional[str] = None,
+    ) -> str:
+        """Canonical reply finalization (Phase 5) — the single point every
+        exit from `_chat_with_tools_inner` must pass through before the
+        reply is persisted or returned.
+
+        This used to run only in the SSE handler in `process_chat()`, AFTER
+        `chat_with_tools()` had already returned and `_store_conversation_with_timeout`
+        had already written the episode and legacy-conversation rows. That
+        fixed the text echoed to the client but left the durable record
+        holding the unrepaired reply — a duplicated trailing question could
+        be stripped from what David saw while the stored episode, the one
+        every later turn's own dialogue-state check reads back, still had
+        it. Running the repair here, inside the one function every storage
+        call site shares, means the persisted text and the returned text are
+        always the same string.
+        """
+        if not response_content:
+            return response_content
+
+        response_content = strip_thinking_content(response_content)
+
+        # Leak guard: raw <tool_call>/<function=...> markup that wasn't
+        # salvaged into a real tool call must never reach the user — or be
+        # what gets stored as the episode. Must run before the dialogue-state
+        # repair below so that repair sees the same text David will.
+        _stripped = strip_tool_markup(response_content)
+        if _stripped != response_content:
+            logger.warning("🧹 Stripped tool-call markup from final response")
+            response_content = _stripped or (
+                "I hit a snag executing that — mind asking again?"
+            )
+
+        # Planning text addressed to the model itself, not to David. Finding 12,
+        # reproduced a 4th time on this task's acceptance trial with no marker of
+        # any kind to strip — see strip_self_addressed_planning.
+        from app.core.text_utils import strip_self_addressed_planning
+        _departed = strip_self_addressed_planning(response_content)
+        if _departed != response_content:
+            logger.warning(
+                "🧹 Stripped self-addressed planning text from the final response"
+            )
+            response_content = _departed
+
+        try:
+            from app.services.dialogue_state import (
+                build_dialogue_state,
+                find_repeated_sentences,
+                is_duplicate_or_answered_trailing_question,
+                strip_duplicate_trailing_question,
+            )
+            dialogue_messages = [
+                {
+                    "role": (m.get("role") if isinstance(m, dict) else m.role),
+                    "content": _strip_live_context(_extract_text_content(
+                        m.get("content") if isinstance(m, dict) else m.content
+                    )) or "",
+                }
+                for m in messages
+                if (m.get("role") if isinstance(m, dict) else m.role) in ("user", "assistant")
+            ]
+            dialogue_state = build_dialogue_state(dialogue_messages)
+            recent_assistant = [m["content"] for m in dialogue_messages if m["role"] == "assistant"][-2:]
+
+            if is_duplicate_or_answered_trailing_question(response_content, recent_assistant, dialogue_state):
+                repaired = strip_duplicate_trailing_question(response_content)
+                if repaired != response_content:
+                    logger.info("🔁 Repaired duplicated/already-answered trailing question in response")
+                    response_content = repaired
+
+            # Detection only — see find_repeated_sentences docstring for why
+            # there's no safe generic textual repair for a repeated
+            # declarative sentence.
+            repeated = find_repeated_sentences(response_content, recent_assistant)
+            if repeated:
+                logger.warning(f"🔁 Repeated declarative sentence(s) from recent replies: {repeated}")
+        except Exception as _finalize_err:
+            logger.debug(f"reply finalization failed (non-critical): {_finalize_err}")
+
+        # ── Ground the reply in what actually happened (plan Phase D2) ──────
+        #
+        # Last, so it sees the exact text that will be both persisted AND sent,
+        # and so no later edit can reintroduce a status claim after the check.
+        # Deliberately NOT wrapped in the broad try above: a grounding failure
+        # must not silently fall through to an ungrounded reply on a turn that
+        # wrote something, so it has its own handler that says so.
+        _ledger = getattr(self, "_turn_ledger", None)
+        _mutation_expected = False
+        _turn_is_correction = False
+        _turn_msg_for_grounding = getattr(
+            self, "_turn_message_for_mutation_gate", "") or ""
+        try:
+            from app.services.operation_contract import (
+                UtteranceClass as _UClass,
+                classify_utterance as _classify,
+                turn_requests_a_mutation,
+            )
+            _mutation_expected = turn_requests_a_mutation(_turn_msg_for_grounding)
+            _turn_is_correction = (
+                _classify(_turn_msg_for_grounding) is _UClass.CORRECTION)
+        except Exception as _intent_err:
+            logger.debug(f"mutation-intent check skipped: {_intent_err}")
+        if _ledger is None and _mutation_expected:
+            from app.services.outcome_grounding import TurnLedger as _EmptyLedger
+            _ledger = _EmptyLedger()
+
+        # ── One bounded recovery attempt (plan gap 3) ───────────────────────
+        #
+        # David asked for something explicit and the turn made no call at all.
+        # Telling him so truthfully is the floor, not the goal — he then has to
+        # ask again, which is the repeated intervention this work exists to
+        # remove. If the application can derive exactly one call from his own
+        # words, it makes it, through the SAME execution boundary: the contract
+        # authorizes it on the same evidence, and the durable receipt gives it
+        # the same idempotency. See request_recovery for the four bounds.
+        #
+        # Deliberately BEFORE grounding, so what David reads is the outcome of
+        # the recovered call — not a denial the application went on to falsify
+        # one line later.
+        if (
+            _mutation_expected
+            and _ledger is not None
+            and not _ledger.writes_attempted
+            and not getattr(self, "_turn_recovery_attempted", False)
+            and user_id
+        ):
+            self._turn_recovery_attempted = True
+            try:
+                from app.services.request_recovery import recover as _recover_call
+                from app.db.session import get_db as _get_db_for_recovery
+                _recovery = None
+                _rec_gen = _get_db_for_recovery()
+                _rec_db = next(_rec_gen)
+                try:
+                    _recovery = _recover_call(
+                        _rec_db, str(user_id),
+                        getattr(self, "_current_raw_user_turn", None)
+                        or _turn_msg_for_grounding,
+                        offered_tools=getattr(self, "_active_tools", None),
+                    )
+                finally:
+                    _rec_db.close()
+                if _recovery is not None:
+                    logger.warning(
+                        "🔁 Recovering a request that produced no tool call: %s (%s)",
+                        _recovery.tool_name, _recovery.reason,
+                    )
+                    await self.execute_tool(
+                        {
+                            "id": f"recovery-{uuid.uuid4().hex[:8]}",
+                            "function": {
+                                "name": _recovery.tool_name,
+                                "arguments": json.dumps(_recovery.arguments),
+                            },
+                        },
+                        user_id=user_id,
+                        conversation_id=getattr(self, "_turn_conversation_id", None),
+                    )
+                    _ledger = getattr(self, "_turn_ledger", None) or _ledger
+            except Exception as _recovery_err:
+                # A recovery failure leaves the turn exactly as it was: nothing
+                # written, and grounding about to say so.
+                logger.warning(f"request recovery skipped: {_recovery_err}")
+
+        if _ledger is not None and (_ledger.writes_attempted or _mutation_expected):
+            # What the DURABLE record says completed in this conversation
+            # already. A denial about a PREVIOUS turn's write is invisible to the
+            # per-turn ledger, and the acceptance trial produced exactly that:
+            # "I only said 'logged' in chat, I never actually saved it anywhere"
+            # about a food entry written one turn earlier. Best effort — a
+            # receipt-store failure must not block the reply, and the per-turn
+            # checks still run without it.
+            _completed_earlier = []
+            try:
+                if not user_id:
+                    raise RuntimeError("no user_id on this finalization path")
+                from app.services.action_receipt_service import list_recent_receipts
+                from app.db.session import get_db as _get_db_for_receipts
+                _rdb_gen = _get_db_for_receipts()
+                _rdb = next(_rdb_gen)
+                try:
+                    _completed_earlier = sorted({
+                        (r.get("action_type") or "").split(":")[0]
+                        for r in list_recent_receipts(_rdb, str(user_id), limit=30)
+                        if r.get("status") == "completed" and r.get("action_type")
+                    })
+                finally:
+                    _rdb.close()
+            except Exception as _receipts_err:
+                logger.debug(f"durable-receipt lookup for grounding skipped: {_receipts_err}")
+
+            # The readback provider. Grounding no longer guesses which record a
+            # sentence is about by matching its words against entity labels; it
+            # reads the row back by stable id and says what the row says. Each
+            # call opens and closes its own short session, because the request
+            # session may hold uncommitted state from the write that just ran
+            # and a readback must not report what has not landed.
+            def _read_state(domain: str, target_id: str):
+                if not user_id:
+                    return None
+                try:
+                    from app.services.reference_resolution import read_current_state
+                    from app.db.session import get_db as _get_db_for_state
+                    _sdb_gen = _get_db_for_state()
+                    _sdb = next(_sdb_gen)
+                    try:
+                        return read_current_state(_sdb, str(user_id), domain, target_id)
+                    finally:
+                        _sdb.close()
+                except Exception as _state_err:
+                    logger.debug(f"state readback skipped for {domain}: {_state_err}")
+                    return None
+
+            try:
+                from app.services.outcome_grounding import ground_reply
+                _grounded = ground_reply(
+                    response_content, _ledger, mutation_expected=_mutation_expected,
+                    correction=_turn_is_correction,
+                    completed_earlier=_completed_earlier,
+                    state_provider=_read_state)
+                if _grounded.repaired:
+                    logger.warning(
+                        "🧾 Reply grounded against the turn ledger: %s",
+                        "; ".join(_grounded.reasons)[:500],
+                    )
+                    response_content = _grounded.text
+                self._turn_grounding_reasons = list(_grounded.reasons)
+            except Exception as _ground_err:
+                logger.error(
+                    "⚠️ Grounding pass failed on a turn that wrote something "
+                    "(%s): the reply is being sent unverified",
+                    _ground_err,
+                )
+
+        # Release the stream that was held while the writes were unverified.
+        # Held text is never sent: only this grounded string is.
+        await self._release_held_stream(response_content)
+        return response_content
+
+    def _finalize_turn_proposals(self, response_content: Optional[str]) -> None:
+        """R01 review remediation round 2 (2026-09-26): persist any
+        candidate proposal(s) execute_tool stashed this turn (in
+        `self._turn_unpresented_proposals`), now that the ACTUAL finalized
+        reply text exists — this is the only point `presented_summary` can
+        honestly be filled in. A candidate whose accompanying reply turns
+        out too short/generic to have told the user anything
+        (chat_proposal_service.propose's own MIN_PRESENTED_SUMMARY_CHARS
+        guard) is silently never persisted — there is then nothing for a
+        later "yes" to confirm, which is correct: nothing confirmable was
+        ever actually shown.
+
+        Called from `_store_conversation_with_timeout` (the single choke
+        point every turn-exit path funnels through) right after
+        `_finalize_response_content`, and directly by tests that want to
+        simulate "the turn's reply is now known" without going through the
+        full storage/embedding machinery. Synchronous and best-effort — a
+        failure here must never affect the turn's own response.
+        """
+        _unpresented = getattr(self, "_turn_unpresented_proposals", None)
+        if not _unpresented:
+            return
+        try:
+            from app.services.chat_proposal_service import propose as _propose_pending
+            from app.db.session import get_db as _get_db_for_proposal3
+            _prop_db_gen3 = _get_db_for_proposal3()
+            _prop_db3 = next(_prop_db_gen3)
+            try:
+                for _candidate in _unpresented:
+                    _propose_pending(
+                        _prop_db3,
+                        user_id=_candidate["user_id"],
+                        conversation_id=_candidate["conversation_id"],
+                        tool_name=_candidate["tool_name"],
+                        arguments_json=_candidate["arguments_json"],
+                        source_message=_candidate["source_message"],
+                        summary=_candidate["summary"],
+                        presented_summary=response_content or "",
+                    )
+            finally:
+                _prop_db3.close()
+        except Exception as _prop_err3:
+            logger.debug(f"Pending-proposal finalization skipped: {_prop_err3}")
+        finally:
+            self._turn_unpresented_proposals = []
+
     async def _store_conversation_with_timeout(
         self,
         messages,
@@ -2208,7 +2958,7 @@ class SimpleLLMClient:
         user_id,
         conversation_id,
         timeout_seconds: float = 4.0
-    ) -> Optional[str]:
+    ) -> tuple:
         """
         Keep chat completion responsive: do not block final stream events on memory persistence.
         If storage exceeds timeout, continue without waiting and persist in background.
@@ -2219,7 +2969,15 @@ class SimpleLLMClient:
         is still running in the background past the timeout. Without this,
         final_response.episode_id was null whenever storage ran long, and the
         client had no id to attach a rating to.
+
+        Returns (finalized_content, episode_id): every caller must use the
+        finalized content it gets back, not the response_content it passed
+        in, as the value it returns/streams — see `_finalize_response_content`.
         """
+        response_content = await self._finalize_response_content(
+            response_content, messages, user_id=user_id)
+        self._finalize_turn_proposals(response_content)
+
         # Only the assistant-response episode gets a pre-generated id — if
         # there's no response_content, store_conversation writes nothing for
         # it and a pre-issued id would dangle (no matching episode row).
@@ -2229,7 +2987,7 @@ class SimpleLLMClient:
         )
         try:
             await asyncio.wait_for(asyncio.shield(store_task), timeout=timeout_seconds)
-            return pre_episode_id
+            return response_content, pre_episode_id
         except asyncio.TimeoutError:
             logger.warning(
                 f"⚠️ store_conversation timed out after {timeout_seconds}s; continuing stream without waiting"
@@ -2243,10 +3001,10 @@ class SimpleLLMClient:
                     logger.warning(f"⚠️ Background conversation storage failed: {exc}")
 
             store_task.add_done_callback(_log_background_failure)
-            return pre_episode_id
+            return response_content, pre_episode_id
         except Exception as e:
             logger.warning(f"⚠️ Conversation storage failed (continuing): {e}")
-            return None
+            return response_content, None
 
     async def execute_tool(self, tool_call, user_id, conversation_id=None, session_cache=None):
         """Execute a tool call and return the response"""
@@ -2361,6 +3119,277 @@ class SimpleLLMClient:
                     "content": cached_result + "\n\n[Retrieved from session cache - already fetched this conversation]"
                 }
         
+        # Living-world-context plan §3 finding "Tool execution is broader
+        # than the offered menu": checking the global registry (below) only
+        # proves the tool exists SOMEWHERE, not that it was offered THIS
+        # turn — a model can name a real tool that mutation gating or the
+        # tool-selection cap deliberately withheld from this payload, and
+        # without this check it would run anyway. `_active_tools` is exactly
+        # what went out on the wire for this turn (set at the top of
+        # `_chat_with_tools_inner`, mutated only by legitimate mid-turn
+        # `find_tools` loads), so a name missing from it was never
+        # authorized, regardless of why. Checked before registry lookup so
+        # neither path can execute an unoffered tool.
+        _active_names = {
+            (t.get("function") or {}).get("name")
+            for t in (getattr(self, "_active_tools", None) or [])
+        }
+        if function_name not in _active_names:
+            logger.warning(
+                f"🚫 Model called '{function_name}' — not in this turn's offered tool set "
+                f"({len(_active_names)} offered); refusing without executing"
+            )
+            return {
+                "role": "tool",
+                "tool_call_id": tool_call["id"],
+                "content": json.dumps({
+                    "success": False,
+                    "message": (
+                        f"{function_name} was not offered this turn and did not run. "
+                        "Do not describe it as done. If David actually needs it, say so "
+                        "plainly, or use find_tools to load it first."
+                    ),
+                    "data": None,
+                }),
+            }
+
+        # ── The single execution-boundary authorization (reliable-assistant
+        # plan Phase C3, 2026-09-28) ─────────────────────────────────────────
+        #
+        # Every chat write path funnels through here, and this is now the one
+        # place the decision is made: `operation_contract.decide()`. It
+        # replaces the `has_action_intent` boolean and its eleven accreted
+        # guard clauses with three represented facts — what kind of act
+        # David's turn was, what the call would actually DO, and which
+        # operations his own words support — plus owner-scoped target
+        # resolution. See app/services/operation_contract.py for the full
+        # rationale and the findings each rule descends from (J10, J11, C03,
+        # the convention run's 7-of-9 refused capture phrasings).
+        #
+        # The old functions are all still present, still tested, and still
+        # called: `is_mutating_tool` decides read-vs-write, `has_recurring_
+        # scope` decides standing authority, and the round-level checks in
+        # `_chat_with_tools_inner` remain as defense in depth. What changed is
+        # that one decision function now owns the verdict, so a refusal has a
+        # reason David can be told and an auditable record either way.
+        #
+        # Fails CLOSED: a decision that cannot be computed is not evidence of
+        # authorization.
+        _operation_decision = None
+        try:
+            from app.services.operation_contract import (
+                ALWAYS_ALLOWED_TOOLS as _ALWAYS_ALLOWED_TOOLS,
+                OperationKind as _OperationKind,
+                TurnContext as _TurnContext,
+                UtteranceClass as _UtteranceClass,
+                Verdict as _Verdict,
+                build_request as _build_operation_request,
+                decide as _decide_operation,
+                operation_kind_for as _operation_kind_for,
+                refusal_message as _operation_refusal_message,
+            )
+            from app.services.reference_resolution import resolve_if_needed as _resolve_target
+
+            _turn_msg = getattr(self, "_turn_message_for_mutation_gate", "") or ""
+            _recent_mutating = getattr(self, "_last_turn_mutating_tools_for_boundary", None) or []
+            _request = _build_operation_request(
+                request_id=str(tool_call.get("id") or ""),
+                conversation_id=str(conversation_id) if conversation_id else None,
+                owner_id=str(user_id),
+                tool_name=function_name,
+                arguments=arguments,
+            )
+
+            if _request.operation_kind is not _OperationKind.READ \
+                    and function_name not in _ALWAYS_ALLOWED_TOOLS:
+                _ctx = _TurnContext.build(_turn_msg, last_turn_mutating_tools=_recent_mutating)
+
+                # A scoped confirmation is where a pending proposal is
+                # consumed. Unchanged in substance from the round-2/round-4
+                # design: the proposal is bound to this user+conversation+tool,
+                # consumed exactly once, re-executed with the ORIGINALLY
+                # proposed arguments (never whatever the model passes on the
+                # confirming turn), and its presented summary must structurally
+                # match what it claims to be. What is new is that the contract
+                # then also checks the proposal was for THIS operation kind, so
+                # a "yes" to a create cannot authorize a cancel.
+                if _ctx.utterance is _UtteranceClass.CONFIRMATION and conversation_id:
+                    try:
+                        from app.services.chat_proposal_service import consume as _consume_proposal
+                        from app.services.proposal_presentation import (
+                            presented_summary_matches_proposal as _presented_matches,
+                        )
+                        from app.services.tool_mutation import (
+                            RECURRING_ESTABLISHING_TOOLS as _RECURRING_FOR_PROPOSAL_CHECK,
+                        )
+                        from app.db.session import get_db as _get_db_for_proposal
+                        _prop_db_gen = _get_db_for_proposal()
+                        _prop_db = next(_prop_db_gen)
+                        try:
+                            _consumed = _consume_proposal(
+                                _prop_db, user_id=str(user_id),
+                                conversation_id=str(conversation_id),
+                                tool_name=function_name,
+                            )
+                        finally:
+                            _prop_db.close()
+                        if _consumed is not None:
+                            _consumed_args = json.loads(_consumed.arguments_json)
+                            if not _presented_matches(
+                                function_name, _consumed_args, _consumed.presented_summary,
+                                require_recurring=function_name in _RECURRING_FOR_PROPOSAL_CHECK,
+                            ):
+                                logger.warning(
+                                    f"🚫 Pending proposal for '{function_name}' found but its "
+                                    f"presented_summary doesn't structurally match the proposed "
+                                    f"operation — refusing to bind an unrelated/denied 'yes' to it"
+                                )
+                            else:
+                                arguments = _consumed_args
+                                _request = _build_operation_request(
+                                    request_id=str(tool_call.get("id") or ""),
+                                    conversation_id=str(conversation_id),
+                                    owner_id=str(user_id),
+                                    tool_name=function_name,
+                                    arguments=_consumed_args,
+                                    argument_source="proposal",
+                                    proposal_id=str(getattr(_consumed, "id", "") or ""),
+                                )
+                                _ctx = _TurnContext.build(
+                                    _turn_msg,
+                                    last_turn_mutating_tools=_recent_mutating,
+                                    proposal_authorized=True,
+                                    proposal_operation_kind=_operation_kind_for(
+                                        function_name, _consumed_args),
+                                    proposal_source_message=_consumed.source_message or "",
+                                )
+                                logger.info(
+                                    f"✅ '{function_name}' has a matching pending proposal — "
+                                    f"deciding on the originally-proposed arguments"
+                                )
+                    except json.JSONDecodeError:
+                        logger.error(
+                            f"⚠️ Pending proposal for '{function_name}' had unparseable "
+                            f"arguments; ignoring"
+                        )
+                    except Exception as _prop_err:
+                        logger.debug(f"Pending-proposal consume skipped: {_prop_err}")
+
+                # Resolve the reference ONCE, owner-scoped. The same
+                # resolution is carried into the receipt below, rather than
+                # resolved again by the tool and possibly differently.
+                from app.db.session import get_db as _get_db_for_resolution
+                _resolution = _resolve_target(
+                    lambda: next(_get_db_for_resolution()), _request,
+                    getattr(self, "_current_raw_user_turn", None) or _turn_msg,
+                )
+                _operation_decision = _decide_operation(_request, _ctx, _resolution)
+                self._turn_operation_decisions = getattr(
+                    self, "_turn_operation_decisions", [])
+                self._turn_operation_decisions.append(_operation_decision.as_log_record())
+
+                if not _operation_decision.allowed:
+                    logger.warning(
+                        "🚫 Operation contract %s '%s' — %s (%s)",
+                        _operation_decision.verdict.value, function_name,
+                        _operation_decision.reason, _operation_decision.detail,
+                    )
+                    # A withheld call is an outcome, and the reply must not be
+                    # able to describe it as anything else. Recorded BEFORE the
+                    # early return, so the grounding pass sees it.
+                    from app.services.outcome_grounding import Outcome as _Outcome
+                    self._record_turn_outcome(
+                        tool_name=function_name,
+                        operation=_operation_decision.operation_kind.value,
+                        domain=_operation_decision.domain,
+                        outcome=(_Outcome.NOT_FOUND
+                                 if _operation_decision.reason == "target_belongs_to_another_owner"
+                                 else _Outcome.REFUSED),
+                        target_ids=_operation_decision.resolved_target_ids,
+                        target_labels=tuple(
+                            t.label for t in (
+                                ((_resolution.named,) if _resolution and _resolution.named else ())
+                                + (tuple(_resolution.candidates) if _resolution else ())
+                            ) if t and t.label
+                        ),
+                        # NOT the reason code: `detail` is rendered into
+                        # user-visible text by outcome_grounding, and the first
+                        # live journey put "operation_not_requested_by_message"
+                        # in front of David verbatim. The code goes to the log
+                        # (above) and the decision record; the human phrase
+                        # goes here.
+                        detail=_human_refusal_detail(_operation_decision),
+                    )
+                    # Stash what was refused as a CANDIDATE proposal — not
+                    # persisted yet. The real persist happens in
+                    # _store_conversation_with_timeout, the single choke point
+                    # every turn-exit path funnels through, AFTER the finalized
+                    # reply content is known, so a proposal can never be
+                    # recorded (and later confirmed) unless Sara's own reply
+                    # actually told David about it.
+                    #
+                    # Only a refusal for MISSING AUTHORITY becomes a proposal.
+                    # A wrong target, another owner's row or an ambiguous
+                    # reference is not something a "yes" should be able to
+                    # push through — those need David to say which thing he
+                    # means, not to approve a guess.
+                    _proposable = _operation_decision.reason in (
+                        "utterance_class_cannot_authorize_operation",
+                        "operation_not_requested_by_message",
+                        "no_recurring_scope_in_request",
+                        "correction_does_not_authorize_destruction",
+                    )
+                    if conversation_id and _proposable:
+                        try:
+                            _unpresented = getattr(self, "_turn_unpresented_proposals", None)
+                            if _unpresented is None:
+                                _unpresented = []
+                                self._turn_unpresented_proposals = _unpresented
+                            _unpresented.append({
+                                "user_id": str(user_id),
+                                "conversation_id": str(conversation_id),
+                                "tool_name": function_name,
+                                "arguments_json": json.dumps(arguments),
+                                "source_message": _turn_msg,
+                                "summary": (
+                                    f"{function_name} withheld: "
+                                    f"{_operation_decision.reason}"
+                                ),
+                            })
+                        except Exception as _prop_err2:
+                            logger.debug(f"Pending-proposal candidate stash skipped: {_prop_err2}")
+                    return {
+                        "role": "tool",
+                        "tool_call_id": tool_call["id"],
+                        "content": json.dumps({
+                            "success": False,
+                            "message": _operation_refusal_message(
+                                _operation_decision, function_name),
+                            "data": None,
+                        }),
+                    }
+        except Exception as _authz_err:
+            # Fail CLOSED for a mutating tool whose decision itself errored —
+            # an authorization check that cannot run is not evidence of
+            # authorization. A read-only tool is unaffected: `build_request`
+            # classifies it READ via `is_mutating_tool`, and this whole block
+            # only ever refuses, never grants.
+            logger.error(
+                f"⚠️ Execution-boundary authorization failed for '{function_name}': "
+                f"{type(_authz_err).__name__}: {_authz_err}"
+            )
+            from app.services.tool_mutation import is_mutating_tool as _is_mutating_for_failclosed
+            if _is_mutating_for_failclosed(function_name):
+                return {
+                    "role": "tool",
+                    "tool_call_id": tool_call["id"],
+                    "content": json.dumps({
+                        "success": False,
+                        "message": f"{function_name} did not run — an internal authorization check failed. Try again.",
+                        "data": None,
+                    }),
+                }
+
         # Work-order item 5 (2026-07-30): the 8 inline branches that used to
         # live here (search_notes/create_note/list_notes/list_folders/
         # create_reminder/start_timer/search_documents/search_memory) were
@@ -2386,6 +3415,96 @@ class SimpleLLMClient:
                     "data": None,
                 }),
             }
+        # R03 review remediation round 4 (2026-09-27): claim a durable,
+        # application-controlled operation slot BEFORE the mutation runs —
+        # this is what actually prevents a DUPLICATE EFFECT, not merely a
+        # duplicate log row. Round 3's `record_chat_tool_action` wrote
+        # AFTER execution, keyed only by the model's own per-call
+        # tool_call_id — an id the inference server reassigns fresh on
+        # every model turn, so it does NOT survive a client retry/
+        # reconnect that causes the SAME logical user message to be
+        # reprocessed into a NEW model turn (a genuinely different
+        # tool_call_id for what is semantically the same authorized
+        # operation). "Deduplicating receipt rows does not prevent
+        # duplicate effects" (review finding 4) — the fix is to gate
+        # EXECUTION itself on a key that stays stable across exactly that
+        # retry: `_current_client_message_id`, the client's own
+        # idempotency token for the turn (already used elsewhere in this
+        # codebase — store_conversation is idempotent on it too).
+        _operation_id = None
+        _operation_key = None
+        _claim_db_for_op = None
+        from app.services.tool_mutation import is_mutating_tool as _is_mutating_tool_for_claim
+        if _is_mutating_tool_for_claim(function_name):
+            try:
+                from app.services.action_receipt_service import (
+                    claim_operation, compute_operation_key, get_operation_by_key,
+                    reclaim_stale_running_operation, _infer_chat_tool_target,
+                )
+                from app.db.session import get_db as _get_db_for_claim
+                _operation_key = compute_operation_key(
+                    getattr(self, "_current_client_message_id", None), conversation_id,
+                    function_name, arguments, fallback_call_id=tool_call.get("id"),
+                )
+                _claim_db_gen = _get_db_for_claim()
+                _claim_db_for_op = next(_claim_db_gen)
+                try:
+                    _operation_id = claim_operation(
+                        _claim_db_for_op, user_id=str(user_id), conversation_id=str(conversation_id) if conversation_id else None,
+                        operation_key=_operation_key, tool_name=function_name,
+                        target=_infer_chat_tool_target(function_name, arguments, None),
+                    )
+                    if _operation_id is None:
+                        _existing_op = get_operation_by_key(_claim_db_for_op, _operation_key)
+                        if _existing_op and _existing_op["status"] == "running":
+                            _operation_id = reclaim_stale_running_operation(_claim_db_for_op, _operation_key)
+                finally:
+                    _claim_db_for_op.close()
+                    _claim_db_for_op = None
+                if _operation_id is None:
+                    # Either a still-fresh in-flight claim (another
+                    # concurrent attempt at the SAME operation is already
+                    # running), or a terminal outcome from a prior attempt
+                    # — either way, the mutation must NOT run again. Relay
+                    # the existing outcome instead of re-executing.
+                    if _existing_op and _existing_op["status"] in ("completed", "failed", "partial"):
+                        logger.info(f"🔁 '{function_name}' already processed for this exact operation (status={_existing_op['status']}) — not re-executing")
+                        return {
+                            "role": "tool",
+                            "tool_call_id": tool_call["id"],
+                            "content": json.dumps({
+                                "success": _existing_op["status"] in ("completed", "partial"),
+                                "message": f"{function_name} was already run for this exact request (status: {_existing_op['status']}). Not repeating it.",
+                                "data": None,
+                            }),
+                        }
+                    logger.warning(f"⏳ '{function_name}' has a matching operation already in flight — refusing to run it again concurrently")
+                    return {
+                        "role": "tool",
+                        "tool_call_id": tool_call["id"],
+                        "content": json.dumps({
+                            "success": False,
+                            "message": f"{function_name} is already being processed for this exact request. Wait a moment before retrying.",
+                            "data": None,
+                        }),
+                    }
+            except Exception as _claim_err:
+                if _claim_db_for_op is not None:
+                    try:
+                        _claim_db_for_op.close()
+                    except Exception:
+                        pass
+                logger.error(f"⚠️ Operation-claim check failed for '{function_name}', refusing to execute (fail closed): {_claim_err}")
+                return {
+                    "role": "tool",
+                    "tool_call_id": tool_call["id"],
+                    "content": json.dumps({
+                        "success": False,
+                        "message": f"{function_name} did not run — an internal idempotency check failed. Try again.",
+                        "data": None,
+                    }),
+                }
+
         # Dispatch through the global tool registry.
         try:
             reg_result = await tool_registry.execute_tool(
@@ -2475,14 +3594,124 @@ class SimpleLLMClient:
             })
             _tool_call_success = reg_result.success
             _tool_call_error = None if reg_result.success else reg_result.message
+
+            # R03 review remediation round 4 (2026-09-27): finalize the
+            # operation slot claimed BEFORE dispatch above — completed or
+            # failed, never skipped just because it failed ("a failed
+            # write stays failed," not silently dropped from the record).
+            # This is what a later confirmation or a skeptical "did you
+            # actually do that?" gets checked against (see verify_action)
+            # instead of conversational recollection. Best-effort; never
+            # blocks the chat response. Uses the SAME claim-db session
+            # opened before dispatch (not same DB TRANSACTION as the
+            # tool's own mutation — that would need a per-tool refactor
+            # this round doesn't attempt — but same durable row, finalized
+            # right after the mutation's own result is known).
+            if _operation_id is not None:
+                try:
+                    from app.services.action_receipt_service import finalize_operation
+                    from app.db.session import get_db as _get_db_for_finalize
+                    _finalize_db_gen = _get_db_for_finalize()
+                    _finalize_db = next(_finalize_db_gen)
+                    try:
+                        finalize_operation(
+                            _finalize_db, _operation_id,
+                            success=reg_result.success,
+                            result_message=reg_result.message or "",
+                            result_data=reg_result.data if isinstance(reg_result.data, dict) else None,
+                        )
+                    finally:
+                        _finalize_db.close()
+                except Exception as _receipt_err:
+                    logger.debug(f"action_receipt finalize skipped: {_receipt_err}")
+
+            # The turn ledger the reply is grounded against. Same moment as
+            # the durable receipt, from the same result — so the two can never
+            # disagree about whether this write happened.
+            if _operation_decision is not None:
+                self._record_turn_outcome(
+                    tool_name=function_name,
+                    operation=_operation_decision.operation_kind.value,
+                    domain=_operation_decision.domain,
+                    outcome=_outcome_for_tool_result(reg_result),
+                    target_ids=_operation_decision.resolved_target_ids,
+                    target_labels=_resolved_target_labels(locals().get("_resolution")),
+                    detail=(reg_result.message or ""),
+                    operation_id=_operation_id,
+                )
+
+            # A mutating tool that actually ran is what earns sticky
+            # authorization for the rest of this conversation — not one
+            # find_tools merely surfaced. See _CHAT_INVOKED_MUTATING_TOOL_NAMES.
+            if reg_result.success:
+                try:
+                    from app.services.tool_mutation import is_mutating_tool
+                    if is_mutating_tool(function_name):
+                        _inv_key = getattr(self, "_sticky_key", None) or conversation_id
+                        if _inv_key:
+                            _invoked = _CHAT_INVOKED_MUTATING_TOOL_NAMES.setdefault(_inv_key, [])
+                            if function_name not in _invoked:
+                                _invoked.append(function_name)
+                            if len(_invoked) > _CHAT_STICKY_MAX_NAMES:
+                                del _invoked[:-_CHAT_STICKY_MAX_NAMES]
+                except Exception as _inv_err:
+                    logger.debug(f"invoked-tool tracking skipped: {_inv_err}")
         except Exception as e:
             result = f"Unknown tool: {function_name} ({e})"
             _tool_call_success = False
             _tool_call_error = f"{type(e).__name__}: {e}"
+            # R03: a mutating tool that raised before returning a ToolResult
+            # gets a 'failed' outcome recorded too — there is no evidence
+            # it succeeded, and silence here is exactly the gap that let a
+            # swallowed exception look like nothing happened either way.
+            if _operation_id is not None:
+                try:
+                    from app.services.action_receipt_service import finalize_operation as _finalize_receipt2
+                    from app.db.session import get_db as _get_db_for_finalize2
+                    _finalize_db2_gen = _get_db_for_finalize2()
+                    _finalize_db2 = next(_finalize_db2_gen)
+                    try:
+                        _finalize_receipt2(
+                            _finalize_db2, _operation_id,
+                            success=False, result_message=_tool_call_error or "",
+                        )
+                    finally:
+                        _finalize_db2.close()
+                except Exception as _receipt_err2:
+                    logger.debug(f"action_receipt finalize (exception path) skipped: {_receipt_err2}")
+            # A tool that RAISED has no evidence it did anything. Recorded as
+            # failed, not omitted — a swallowed exception that leaves the
+            # ledger silent is exactly how "nothing happened either way"
+            # became a confident "done".
+            if _operation_decision is not None:
+                from app.services.outcome_grounding import Outcome as _OutcomeExc
+                self._record_turn_outcome(
+                    tool_name=function_name,
+                    operation=_operation_decision.operation_kind.value,
+                    domain=_operation_decision.domain,
+                    outcome=_OutcomeExc.FAILED,
+                    target_ids=_operation_decision.resolved_target_ids,
+                    target_labels=_resolved_target_labels(locals().get("_resolution")),
+                    detail=_tool_call_error or "",
+                    operation_id=_operation_id,
+                )
 
         # STORE IN CACHE
         if session_cache and conversation_id:
             session_cache.set(conversation_id, function_name, arguments, str(result))
+            # ...and drop the reads this write just made stale (plan D1,
+            # finding 22: a reminder created one turn earlier was reported as
+            # "possibly never actually created" off a 30-minute cached read
+            # with no write-invalidation anywhere). Only on a write that
+            # actually succeeded — a refused or failed write changed nothing,
+            # so the cached read is still accurate.
+            if _tool_call_success:
+                try:
+                    from app.services.tool_mutation import is_mutating_tool as _is_write
+                    if _is_write(function_name):
+                        session_cache.invalidate_for_write(conversation_id, function_name)
+                except Exception as _inval_err:
+                    logger.warning(f"⚠️ Read-cache invalidation skipped: {_inval_err}")
 
         # Arc 6.5 (skill minting, work-order item 4, 2026-07-31): fumble
         # detector B needs a real record of which tools get called together
@@ -2727,6 +3956,30 @@ class SimpleLLMClient:
             "count": len(writes),
         })
 
+        # Same guard as the normal in-round path (harness/thinking/
+        # personality plan Phase 4) — a deadline crossing does not change
+        # whether "delete the bank reminder" authorized deleting every
+        # candidate the model happened to call, this round or an earlier
+        # one this turn.
+        # Reliable-assistant plan C3: the per-call target/ownership/operation
+        # decision is made once, in execute_tool's operation contract, on this
+        # path too — a deadline crossing changes nothing about authorization,
+        # and every write below still goes through execute_tool. Only the
+        # whole-round check (same removal tool, second distinct target, no
+        # bulk language) needs to be here, where the round is visible.
+        from app.services.tool_mutation import record_removal_attempts
+        from app.services.operation_contract import find_unauthorized_multi_target_calls
+        _turn_removal_attempts = getattr(self, "_turn_removal_attempts", None)
+        if _turn_removal_attempts is None:
+            _turn_removal_attempts = {}
+            self._turn_removal_attempts = _turn_removal_attempts
+        _deadline_raw_turn_msg = getattr(self, "_current_raw_user_turn", None) or ""
+        _blocked_call_ids = set(find_unauthorized_multi_target_calls(
+            writes, _deadline_raw_turn_msg,
+            prior_attempts=_turn_removal_attempts,
+        ))
+        record_removal_attempts(_turn_removal_attempts, writes)
+
         for tool_call in message["tool_calls"]:
             tool_name = _tool_call_name(tool_call) or "unknown"
 
@@ -2742,6 +3995,27 @@ class SimpleLLMClient:
                             "already have and say plainly what you did not get to."
                         ),
                     }),
+                })
+                continue
+
+            if tool_call.get("id") in _blocked_call_ids:
+                tool_responses.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.get("id", ""),
+                    "content": json.dumps({
+                        "success": False,
+                        "message": (
+                            f"Not executed: {tool_name} wasn't clearly authorized by what "
+                            "David actually said this turn — either it matched more than "
+                            "one target with no bulk language (\"all\"/\"both\"), or it's a "
+                            "second, different action beyond what his message specifically "
+                            "asked for. Ask him to confirm exactly what he wants."
+                        ),
+                    }),
+                })
+                self._turn_tools_called.append({
+                    "name": tool_name, "ms": 0, "result_chars": 0,
+                    "success": False, "past_deadline": True,
                 })
                 continue
 
@@ -2778,7 +4052,7 @@ class SimpleLLMClient:
                 "name": tool_name,
                 "ms": int((time.monotonic() - _tool_t0) * 1000),
                 "result_chars": len(tool_response.get("content") or ""),
-                "success": _payload.get("success") is not False,
+                "success": _tool_success_state(_payload),
                 "past_deadline": True,
             })
             tool_responses.append(tool_response)
@@ -2809,7 +4083,7 @@ class SimpleLLMClient:
             "model": self._current_model,
             "messages": msgs,
             "temperature": 0.7,
-            "max_tokens": 1200,
+            "max_tokens": CHAT_FORCED_FINAL_MAX_TOKENS,
             "stream": True,
         }
         if (self._current_model_config or {}).get("provider") == "local":
@@ -2870,27 +4144,46 @@ class SimpleLLMClient:
         David nothing about whether anything ran. On 2026-09-15 the forced
         final came back empty twice and this string was his entire answer.
         """
-        ran, wrote = [], []
+        ran, wrote, unknown = [], [], []
         for t in getattr(self, "_turn_tools_called", []) or []:
             name = t.get("name")
             if not name:
                 continue
             if name not in ran:
                 ran.append(name)
+            if not _is_write_tool(name):
+                continue
+            # Tri-state (harness/thinking/personality plan, Phase 3):
+            # `success` is True (confirmed), False (confirmed failed, not
+            # reported as done), or None (genuinely unknown — a timeout or
+            # ambiguous tool result, not the same claim as a confirmed
+            # write). Collapsing None into "succeeded" told David "That's
+            # saved" on a write nobody actually confirmed.
+            state = t.get("success")
             # A write that succeeded has to be reported even here. "Ask me
             # again" after `recovery_log_create` landed is an invitation to
             # log the same thing twice.
-            if (t.get("success") is not False and _is_write_tool(name)
-                    and name not in wrote):
+            if state is True and name not in wrote:
                 wrote.append(name)
+            elif state is None and name not in unknown:
+                unknown.append(name)
 
-        if wrote:
-            done = ", ".join(wrote[:5])
-            return (
-                f"That's saved — {done} went through. I ran out of room before I could "
-                "write you a proper reply about it, so ask me to read it back if you "
-                "want to check it, but don't ask me to log it again."
+        if wrote or unknown:
+            parts = []
+            if wrote:
+                parts.append(f"That's saved — {', '.join(wrote[:5])} went through.")
+            if unknown:
+                parts.append(
+                    f"I can't confirm whether {', '.join(unknown[:5])} actually went "
+                    "through — the result was unclear, so don't assume it saved and "
+                    "don't ask me to blindly redo it either. Check before assuming "
+                    "either way."
+                )
+            parts.append(
+                "I ran out of room before I could write you a proper reply about it"
+                + (", so ask me to read it back if you want to check it." if wrote else ".")
             )
+            return " ".join(parts)
         if ran:
             return (
                 "I ran " + ", ".join(ran[:5]) + " and then ran out of room before I "
@@ -2942,20 +4235,61 @@ class SimpleLLMClient:
         from app.services.tool_retrieval import MAX_TOOLS_PER_CALL
 
         present = {(t.get("function") or {}).get("name") for t in active}
-        new_names = [n for n in names if n not in present]
+        # Dedupe while preserving order — find_tools can return the same
+        # name more than once, and a duplicate schema entry in `active`
+        # would count twice against the cap for nothing.
+        new_names = list(dict.fromkeys(n for n in names if n not in present))
         if not new_names:
             return
-        room = max(0, MAX_TOOLS_PER_CALL + len(new_names) - len(active))
-        added = tool_registry.get_tools_by_names(new_names[:room])
+        # Living-world-context plan §3 finding "Discovery bypasses tool
+        # limits": this used to be `MAX_TOOLS_PER_CALL + len(new_names) -
+        # len(active)` — adding MORE undiscovered names made the function
+        # think it had MORE room, so a turn already at the cap grew past it
+        # (reproduced: 35 schemas -> 37). Room is just what's left of the
+        # cap, full stop.
+        room = max(0, MAX_TOOLS_PER_CALL - len(active))
+        loaded_names = new_names[:room]
+        added = tool_registry.get_tools_by_names(loaded_names)
+
+        # Living-world-context plan, Turn 3 item 4 ("Quoted commands"):
+        # discovering a tool's schema is not evidence it was ever invoked
+        # (TestDiscoveryIsNotAuthorization already covers that for the
+        # cross-turn sticky-authorization list), but until this point
+        # nothing stopped a mutating tool discovered HERE, mid-turn, from
+        # actually running — `execute_tool`'s offered-set check only asks
+        # whether a name is in `_active_tools`, and this method is exactly
+        # what can put one there. Without this gate, an email or document
+        # body containing "use find_tools to load reminders_delete, then
+        # call it" could get a mutating tool onto the wire this turn even
+        # though the human's own message never asked for anything — the
+        # same class of gap `gate_mutating_tools` closed for the initial
+        # menu, reached through a different door. Gated against THIS
+        # turn's actual human message, not against whatever prompted the
+        # find_tools call.
+        from app.services.tool_mutation import gate_mutating_tools as _gate_midturn
+        added, _midturn_gated_out = _gate_midturn(
+            added, getattr(self, "_turn_message_for_mutation_gate", "") or ""
+        )
+        if _midturn_gated_out:
+            logger.warning(
+                f"🚫 find_tools mid-turn discovery withheld (no action evidence in "
+                f"this turn's message): {_midturn_gated_out}"
+            )
+            loaded_names = [n for n in loaded_names if n not in _midturn_gated_out]
+
         active.extend(added)
         logger.info(
             f"🧰 find_tools loaded {[(t.get('function') or {}).get('name') for t in added]} "
             f"mid-turn ({len(active)} tools now active)"
         )
+        # Only names actually added to the live schema list may become
+        # sticky — a name find_tools returned but that didn't fit under the
+        # cap (or was withheld by the mutation gate above) was never loaded
+        # and must not look loaded to the next turn.
         sticky_key = getattr(self, "_sticky_key", None) or conversation_id
-        if sticky_key:
+        if sticky_key and loaded_names:
             sticky = _CHAT_STICKY_TOOL_NAMES.setdefault(sticky_key, [])
-            for n in new_names:
+            for n in loaded_names:
                 if n not in sticky:
                     sticky.append(n)
             if len(sticky) > _CHAT_STICKY_MAX_NAMES:
@@ -4705,8 +6039,8 @@ class IntelligentMemoryService:
 
         Uses MemoryScorer heuristics for instant importance/affect scoring
         (no LLM call). Rich analysis (emotions, topics, refined scores) is
-        done in a single batched LLM call after the conversation ends via
-        _enrich_episodes_batch().
+        added incrementally, debounced, via
+        app.tasks.episode_enrichment.schedule_conversation_enrichment().
         """
         from app.services.memory_scorer import memory_scorer
 
@@ -5685,7 +7019,11 @@ class NotificationScheduler:
                         if notification_key not in self.scheduled_notifications:
                             self.scheduled_notifications[notification_key] = {
                                 "title": f"Reminder: {reminder.title or 'Reminder'}",
-                                "message": reminder.description or reminder.content or "Time for your reminder",
+                                # R06 (Sara repair plan 2026-09-25): Reminder has no
+                                # `content` column (only title/description) — this
+                                # `or` fallback raised AttributeError whenever
+                                # description was falsy, crashing this dispatch path.
+                                "message": reminder.description or reminder.title or "Time for your reminder",
                                 "send_time": reminder.reminder_time,
                                 "type": "reminder",
                                 "reminder_id": reminder.id,
@@ -6226,6 +7564,12 @@ from app.routes.world_state import router as world_state_router
 
 app.include_router(world_state_router)
 
+# Read-only World Context page (living-world-context plan, Phase 6) —
+# product-facing, distinct from world_state_router's diagnostic API.
+from app.routes.world_context import router as world_context_router
+
+app.include_router(world_context_router)
+
 from app.routes.live_activities import router as live_activities_router
 
 app.include_router(live_activities_router)
@@ -6344,6 +7688,8 @@ app.include_router(debug_retrieval_router)
 # register is a route that does not exist and nobody notices.
 from app.routes.debug_chat_turns import router as debug_chat_turns_router
 app.include_router(debug_chat_turns_router)
+from app.routes.debug_runtime import router as debug_runtime_router
+app.include_router(debug_runtime_router)
 
 # Autonomous Cognition System (ACS) — v2 in-VM daemon
 from app.routes.acs_daemon import router as acs_daemon_router
@@ -6447,7 +7793,9 @@ async def pi_dashboard_voice_transcribe(request: Request, audio: UploadFile = Fi
     # Fall back to cookie auth
     if not user_id:
         try:
-            current_user = await get_current_user(request, db)
+            # get_current_user is synchronous — see pi_dashboard_voice_chat's
+            # matching fix (2026-09-22) for why this was `await`ed incorrectly.
+            current_user = get_current_user(request, db)
             user_id = current_user.id
         except Exception as auth_err:
             logger.debug(f"Authentication failed for voice/transcribe: {auth_err}")
@@ -6622,11 +7970,9 @@ def _build_activity_context(
 # the iOS client's 180s xhr timeout fired, Postgres killed the connection at
 # six minutes, and the tool loop kept going as a zombie before storing a canned
 # string as Sara's reply. These two bound the turn instead.
-# 60, not 75: the deadline stops the turn from starting ANOTHER round, but the
-# forced final that follows is itself a model call (measured 10-25s on this
-# lane). At 75 the worst replayed turn landed at 102s; 60 leaves room for the
-# answer inside the 90s a turn is allowed to take.
-CHAT_TURN_DEADLINE_S = int(os.getenv("CHAT_TURN_DEADLINE_S", "60"))
+# Thinking needs more room between tool calls. This is a soft loop budget,
+# not a hard end-to-end timeout: an in-flight/final model call can exceed it.
+CHAT_TURN_DEADLINE_S = int(os.getenv("CHAT_TURN_DEADLINE_S", "120"))
 CHAT_TOOL_ROUNDS_MAX = int(os.getenv("CHAT_TOOL_ROUNDS_MAX", "6"))
 
 # Every chat call used to reserve 8,000 output tokens for a reply that measures
@@ -6637,7 +7983,19 @@ CHAT_TOOL_ROUNDS_MAX = int(os.getenv("CHAT_TOOL_ROUNDS_MAX", "6"))
 # against a 94 GB limit on nearly every request, which is why prompt-cache
 # reuse was zero no matter how stable the prefix was. A reservation we do not
 # use is the one part of that projection we control.
-CHAT_MAX_OUTPUT_TOKENS = int(os.getenv("CHAT_MAX_OUTPUT_TOKENS", "2500"))
+# Includes reasoning plus the answer. Keep reservations bounded to avoid
+# needlessly evicting the local server's prefill cache.
+CHAT_MAX_OUTPUT_TOKENS = int(os.getenv("CHAT_MAX_OUTPUT_TOKENS", "4096"))
+
+# Harness/thinking/personality plan, Phase 3: this used to be a bare literal
+# `1200` inside `_force_final_answer`, not configurable and never load-bearing
+# tested against real forced-final-shaped completions (a synthetic pending
+# task + real-shaped tool results, not merely a lower main-cap number called
+# equivalent). Kept as its own knob rather than reusing CHAT_MAX_OUTPUT_TOKENS
+# because the forced-final call also carries reasoning (thinking is still on)
+# under time pressure the main cap was never sized for; 1200 is preserved as
+# the current value, not asserted as correct.
+CHAT_FORCED_FINAL_MAX_TOKENS = int(os.getenv("CHAT_FORCED_FINAL_MAX_TOKENS", "1200"))
 
 # Any single tool result longer than this is parked in Redis and the model gets
 # a preview plus a reference_id it can page with get_tool_result_details. The
@@ -6984,10 +8342,17 @@ async def pi_dashboard_voice_chat(request: Request, db: Session = Depends(get_db
     # Try device token auth first
     user_id = await get_device_user(request, db)
 
-    # Fall back to cookie auth
+    # Fall back to cookie auth. get_current_user is synchronous — `await`ing
+    # its return value (a User, not a coroutine) raised TypeError on every
+    # call, silently swallowed by the except below into a misleading 401.
+    # This meant cookie-based auth for this endpoint has never actually
+    # worked; only X-Device-Token auth (get_device_user, genuinely async)
+    # ever succeeded. Found 2026-09-22 while smoke-testing voice reasoning
+    # isolation post-restart — a pre-existing defect, not introduced this
+    # pass, but directly blocking verification of a Milestone A requirement.
     if not user_id:
         try:
-            current_user = await get_current_user(request, db)
+            current_user = get_current_user(request, db)
             user_id = current_user.id
         except Exception as auth_err:
             logger.debug(f"Authentication failed for voice/chat: {auth_err}")
@@ -7055,10 +8420,35 @@ async def pi_dashboard_voice_chat(request: Request, db: Session = Depends(get_db
                 except Exception as _ui_e:
                     logger.error(f"[Voice] UI command interception error: {_ui_e}", exc_info=True)
 
-                # Create system prompt with user-local current time
+                # Create system prompt with user-local current time.
+                #
+                # Harness/thinking/personality plan, Phase 2: voice used to
+                # build a separate persona via get_system_prompt — the exact
+                # pre-"harness rebuild Phase 5" ~14,000-char function text
+                # chat stopped using on 2026-09-11 because it named tools
+                # that might not even be loaded this turn and carried two
+                # rules that fought each other ("Never say 'I can't do
+                # that'..." vs "Do NOT reach for a tool when this awareness
+                # already holds the answer" — see chat_system_prompt.py's
+                # own docstring for the incident that motivated the
+                # rebuild). Voice now shares that same builder, composed via
+                # `chat_assembly.compose_voice_persona` (independently unit
+                # tested — this 700-line SSE generator is not). It can't be
+                # called here yet, though: build_chat_system_prompt needs
+                # the actual tool NAMES, and voice doesn't finalize its
+                # (mutation-gated) tool list until a few hundred lines below
+                # this point — restructuring that tool-selection block to
+                # run earlier risked disturbing canvas-mode/intent-
+                # classification logic with no existing test coverage of
+                # this endpoint to catch a mistake. So: collect every
+                # voice-specific addition (canvas mode, the per-turn voice
+                # context bundle) into `_voice_overlay_parts` instead of
+                # mutating `system_prompt` directly, and build the real
+                # persona once `tools` is known, below.
                 user_now = _resolve_prompt_datetime_for_user(db, user.id)
                 soul_content = load_soul_for_prompt(db)
-                system_prompt = get_system_prompt(ASSISTANT_NAME, user.email, user_now=user_now, soul_content=soul_content)
+                _voice_overlay_parts: list = []
+                system_prompt = ""  # placeholder; replaced once `tools` is known, below
 
                 # === CANVAS MODE: Check if active and enhance system prompt ===
                 is_canvas_mode = _get_canvas_mode(user_id)
@@ -7082,16 +8472,13 @@ async def pi_dashboard_voice_chat(request: Request, db: Session = Depends(get_db
                         logger.error(f"[Voice] Error opening workspace: {e}")
 
                 if is_canvas_mode:
-                    system_prompt += """
-
-## Canvas/Workspace Mode Active
+                    _voice_overlay_parts.append("""## Canvas/Workspace Mode Active
 You are now in workspace mode. The user is working on their Windows PC with the workspace canvas open (or about to open it). You can:
 - Use device_open_workspace to open the canvas if they ask
 - Open/update canvas artifacts (code, diagrams, mindmaps)
 - Help with coding tasks with live preview
 - Create and organize notes
-- Be concise and action-oriented - prefer showing over telling.
-"""
+- Be concise and action-oriented - prefer showing over telling.""")
 
                 # Intent classification for lazy context (with conversation context)
                 tool_classifier = get_tool_intent_classifier()
@@ -7100,6 +8487,24 @@ You are now in workspace mode. The user is working on their Windows PC with the 
                 user_intent, tool_categories = tool_classifier.classify_with_context(message, conversation_id)
                 context_decision = context_router.decide(intent=user_intent, message=message, turn_count=1)
                 logger.info(f"[Voice] Intent={user_intent}, tools={tool_categories}, canvas={is_canvas_mode}")
+
+                # Personal-conversation remediation plan, step 2: same
+                # ambient-suppression decision as text chat, applied here too
+                # ("Apply the same relevance decision to local text, non-local
+                # text, and voice assembly").
+                from app.services.context_router import (
+                    classify_conversation_mode as _v_classify_mode,
+                    AMBIENT_SUPPRESS_MODES as _v_suppress_modes,
+                    has_active_urgent_alert as _v_has_urgent_alert,
+                )
+                conversation_mode = _v_classify_mode(message, intent=user_intent)
+                _suppress_ambient_context = conversation_mode in _v_suppress_modes
+                if _suppress_ambient_context and _v_has_urgent_alert(db, user_id):
+                    _suppress_ambient_context = False
+                logger.info(
+                    f"[Voice] Conversation mode={conversation_mode}, "
+                    f"suppress_ambient={_suppress_ambient_context}"
+                )
 
                 # === CANVAS TRIGGER: Force device tools if workspace trigger ===
                 if is_canvas_trigger_msg and "devices" not in (tool_categories or []):
@@ -7175,6 +8580,11 @@ You are now in workspace mode. The user is working on their Windows PC with the 
                         return None
 
                 async def _v_fetch_journal():
+                    # Personal-conversation remediation plan, step 2: recent
+                    # journal entries are day-recap material — withheld on a
+                    # social/personal_vulnerable turn the same as text chat.
+                    if _suppress_ambient_context:
+                        return None
                     try:
                         from app.services.sara_journal_service import sara_journal
                         return await sara_journal.get_entries_for_conversation_context(
@@ -7184,6 +8594,10 @@ You are now in workspace mode. The user is working on their Windows PC with the 
                         return None
 
                 async def _v_fetch_daily_brief():
+                    # Same suppression as the text-chat World Brief — this
+                    # IS the "unrelated world-brief tasks" the plan names.
+                    if _suppress_ambient_context:
+                        return None
                     if not DAILY_BRIEF_AVAILABLE:
                         return None
                     try:
@@ -7300,14 +8714,61 @@ You are now in workspace mode. The user is working on their Windows PC with the 
                 voice_budget.add("device", _v_safe(v_device), priority=4)
                 voice_context = voice_budget.build_context_text()
                 if voice_context:
-                    system_prompt += "\n\n" + voice_context
+                    _voice_overlay_parts.append(voice_context)
 
                 # Get tools based on intent (already determined by classify_with_context)
                 tools = []
                 if tool_categories:
                     tools = tool_registry.get_tools_by_categories(tool_categories)
                     tools = _apply_background_dispatch_policy(tools, message)
+                    # Voice never applied the mutation gate at all — semantic
+                    # category retrieval alone decided which write tools rode
+                    # along, the exact "shoulder workout was good" -> a
+                    # fitness-logging tool problem the Phase 5 gate exists to
+                    # stop on text chat.
+                    #
+                    # Continuation: voice has no separate per-turn session
+                    # key the way the text-chat lane's `_sticky_key` (set to
+                    # `session_id`) does, but `conversation_id` plays that
+                    # exact role here — it's stable across a voice
+                    # back-and-forth the same way `session_id` is for text,
+                    # and `execute_tool`'s `_CHAT_INVOKED_MUTATING_TOOL_NAMES`
+                    # write already falls back to `conversation_id` when
+                    # `_sticky_key` is unset (which it always is for voice).
+                    # So "yes, do it" right after Sara proposed a SPECIFIC
+                    # action (the last turn actually executed a mutating
+                    # tool in this same conversation) rides on that — never
+                    # blanket permission for the rest of the conversation,
+                    # exactly `is_continuation_of_pending_action`'s narrow
+                    # phrase-matched contract. Read-then-clear, same as text
+                    # chat: only the IMMEDIATELY PRECEDING turn's executions
+                    # count. If nothing was executed last turn (or this
+                    # turn doesn't read as a continuation of it), the tool
+                    # is withheld exactly as before and the model has
+                    # nothing to call — its system prompt already covers
+                    # asking for a focused clarification in that case
+                    # rather than acting.
+                    from app.services.tool_mutation import gate_mutating_tools
+                    _voice_last_turn_mutating = _CHAT_INVOKED_MUTATING_TOOL_NAMES.pop(conversation_id, [])
+                    tools, _voice_gated_out = gate_mutating_tools(
+                        tools, message, last_turn_mutating_tools=_voice_last_turn_mutating
+                    )
+                    if _voice_gated_out:
+                        logger.info(f"[Voice] 🚫 Mutation gate withheld (no action evidence): {_voice_gated_out}")
                     logger.info(f"[Voice] Loaded {len(tools)} tools for categories: {tool_categories}")
+
+                # `tools` is final now — build the real persona (see the
+                # long comment above `_voice_overlay_parts` for why this is
+                # deferred to here instead of built at the top of the
+                # function) and compose it with the collected overlay.
+                from app.prompts.chat_system_prompt import build_chat_system_prompt as _voice_build_persona
+                from app.services.tool_retrieval import tool_names as _voice_tool_names
+                from app.services.chat_assembly import compose_voice_persona
+                system_prompt = compose_voice_persona(
+                    datetime_line=format_prompt_datetime_line(user_now),
+                    persona=_voice_build_persona(ASSISTANT_NAME, soul_content, _voice_tool_names(tools)),
+                    overlay_parts=_voice_overlay_parts,
+                )
 
                 # === CONVERSATION HISTORY: Fetch recent messages from this conversation ===
                 conversation_history = []
@@ -7327,10 +8788,51 @@ You are now in workspace mode. The user is working on their Windows PC with the 
                 except Exception as e:
                     logger.warning(f"[Voice] Failed to load conversation history: {e}")
 
-                # Build messages: system + history + new message
-                llm_messages = [{"role": "system", "content": system_prompt}]
-                llm_messages.extend(conversation_history)
-                llm_messages.append({"role": "user", "content": message})
+                # Living-world-context plan, voice parity: this endpoint has
+                # always run its own separate context pipeline (voice_budget
+                # above) that never included dialogue_state (corrections
+                # David just made, questions already asked/answered) or
+                # world_state_core (workout/location/calendar/commitments/
+                # email/health) — text chat's non-local-provider branch had
+                # this exact gap, fixed earlier via chat_assembly.py; voice
+                # is a third, independent branch that gap-fix never reached.
+                # Added here rather than switching this endpoint onto
+                # assemble_non_local_provider_messages: voice's own pipeline
+                # (voice_budget, tool categories, canvas mode) is
+                # purpose-built for this call shape and shouldn't be
+                # disturbed to reuse a helper shaped for a different one —
+                # same authority, same freshness, independent assembly.
+                try:
+                    from app.services.dialogue_state import build_dialogue_state, render_dialogue_state_block
+                    _voice_dialogue_messages = list(conversation_history) + [{"role": "user", "content": message}]
+                    _voice_dialogue_state = build_dialogue_state(_voice_dialogue_messages)
+                    _voice_dialogue_block = render_dialogue_state_block(_voice_dialogue_state)
+                except Exception as _vdlg_err:
+                    logger.debug(f"[Voice] dialogue_state build failed (non-critical): {_vdlg_err}")
+                    _voice_dialogue_block = ""
+
+                try:
+                    from app.services.world_state.chat_facts import render_world_state_core
+                    _voice_world_state_core = render_world_state_core(
+                        db, user_id,
+                        conversation_mode=conversation_mode if _suppress_ambient_context else None,
+                    )
+                except Exception as _vwsc_err:
+                    logger.debug(f"[Voice] world_state_core render failed (non-critical): {_vwsc_err}")
+                    _voice_world_state_core = ""
+
+                # assemble_voice_messages is the tested, extracted core of
+                # this construction (test_chat_assembly.py) — see the
+                # docstring there for why voice needs its own variant of
+                # the local/non-local assembly functions.
+                from app.services.chat_assembly import assemble_voice_messages
+                llm_messages = assemble_voice_messages(
+                    system_prompt=system_prompt,
+                    dialogue_block=_voice_dialogue_block,
+                    world_state_core=_voice_world_state_core,
+                    conversation_history=conversation_history,
+                    user_message=message,
+                )
 
                 # Use the global LLM client with voice-optimized model (faster 20b)
                 if tools:
@@ -7340,7 +8842,9 @@ You are now in workspace mode. The user is working on their Windows PC with the 
                         tools=tools,
                         user_id=user_id,
                         conversation_id=conversation_id,
-                        model=VOICE_MODEL
+                        model=VOICE_MODEL,
+                        world_state_core=_voice_world_state_core,
+                        turn_message=message,
                     )
                 else:
                     # Simple chat without tools
@@ -7428,7 +8932,9 @@ async def pi_dashboard_voice_speak(request: Request, db: Session = Depends(get_d
     # Fall back to cookie auth
     if not user_id:
         try:
-            current_user = await get_current_user(request, db)
+            # get_current_user is synchronous — see pi_dashboard_voice_chat's
+            # matching fix (2026-09-22) for why this was `await`ed incorrectly.
+            current_user = get_current_user(request, db)
             user_id = current_user.id
         except Exception as auth_err:
             logger.debug(f"Authentication failed for voice/speak: {auth_err}")
@@ -7520,7 +9026,9 @@ async def pi_dashboard_voice_fast(request: Request, db: Session = Depends(get_db
     # Fall back to cookie auth
     if not user_id:
         try:
-            current_user = await get_current_user(request, db)
+            # get_current_user is synchronous — see pi_dashboard_voice_chat's
+            # matching fix (2026-09-22) for why this was `await`ed incorrectly.
+            current_user = get_current_user(request, db)
             user_id = current_user.id
         except Exception as auth_err:
             logger.debug(f"Authentication failed for pi-dashboard/fast: {auth_err}")
@@ -7592,6 +9100,25 @@ async def pi_dashboard_voice_fast(request: Request, db: Session = Depends(get_db
             tool_calls = assistant_message.get("tool_calls", [])
             if tool_calls:
                 logger.info(f"[Pi Dashboard Fast] Tool calls: {[tc.get('function', {}).get('name') for tc in tool_calls]}")
+
+                # This path calls execute_tool() directly, outside
+                # chat_with_tools()/_chat_with_tools_inner(), which is where
+                # _active_tools normally gets set — without this,
+                # execute_tool's offered-set check (living-world-context
+                # plan §3, "Tool execution broader than the offered menu")
+                # would reject every call here since llm_client would have
+                # no record of what was actually sent to the model.
+                llm_client._active_tools = tools
+                # R01 (Sara repair plan 2026-09-25): this fast-worker path
+                # never applied `gate_mutating_tools` at all — tools came
+                # straight from category lookup — so the new
+                # execution-boundary check in `execute_tool` is the ONLY
+                # authorization this path gets. It needs this turn's real
+                # message (not a stale value from a previous request on a
+                # possibly-shared `llm_client`) and a clean continuation set
+                # (no prior-turn context tracked in this fast lane).
+                llm_client._turn_message_for_mutation_gate = message
+                llm_client._last_turn_mutating_tools_for_boundary = []
 
                 # Execute tool calls
                 tool_results = []
@@ -8136,6 +9663,19 @@ async def startup_event():
     except Exception as e:
         logger.debug(f"tool index warm-up not scheduled: {e}")
 
+    # 1a3. MTP capability check (chat harness repair Phase 7). Backgrounded
+    # and never fatal — logs whether the configured LOCAL_GENERATION_MODE is
+    # actually supported by the local chat lane so a misconfiguration shows
+    # up in startup logs, not from a user report.
+    try:
+        from app.services.mtp_control import log_mtp_capability_at_startup
+        from app.core.llm_config import llm_config as _mtp_llm_config
+        asyncio.create_task(log_mtp_capability_at_startup(
+            _mtp_llm_config.primary_url, LOCAL_GENERATION_MODE, LOCAL_MTP_DEPTH,
+        ))
+    except Exception as e:
+        logger.debug(f"MTP capability check not scheduled: {e}")
+
     # 1b. Recover orphaned agent dispatch tasks (non-critical)
     try:
         from app.services.agent_dispatch import agent_dispatch_service
@@ -8438,6 +9978,14 @@ A number about David's body — HRV, resting heart rate, sleep hours, steps, wei
 
 ### Action Tools (ONLY when David explicitly asks)
 
+Some of these may not even be offered to you this turn if what David said didn't
+read as a clear request — that's deliberate, not a bug. If it sounds like he
+might want something done but you can't tell exactly what ("yeah handle that"
+with nothing specific pending), ask one focused question rather than guessing
+which action he means or doing nothing and moving on. If a moment ago you
+proposed or ran a SPECIFIC action and he now just confirms ("yes", "do it",
+"go ahead"), that continues the same thing — no new detail needed.
+
 **notes_create** — Create a new note
 - Optional `folder_name` param to create in a specific folder
 - ONLY use when David says to create/save a note
@@ -8559,7 +10107,10 @@ This is especially important for:
 
 - Always synthesize tool results—never return only tool calls
 - After tools, provide a conversational summary
-- Session memory: You remember everything in this conversation. Use it.
+- Session memory: you have this thread's recent messages, not perfect total
+  recall — a long-running conversation is trimmed to the most recent turns.
+  If David references something you don't see here, say so and use
+  memory_search rather than guessing or claiming you never said it.
 
 ---
 
@@ -8698,168 +10249,6 @@ Respond with ONLY a JSON object:
 
     except Exception as e:
         logger.debug(f"Post-chat emotional update failed (non-critical): {e}")
-
-
-async def _enrich_episodes_batch(conversation_id: str, user_id: str):
-    """Background: batch-enrich all episodes from a conversation with a single LLM call.
-
-    Replaces per-message LLM analysis with one call that produces:
-    - Emotional analysis (tone, intensity, sub-emotions) per message
-    - Semantic topic extraction (not keyword-based)
-    - Refined 4-dimension scores (importance, affect, novelty, taskness)
-
-    Results are written back to the episode rows in the DB.
-    """
-    if not conversation_id:
-        return
-
-    db = SessionLocal()
-    try:
-        from app.core.llm_config import llm_config
-        import httpx, re
-
-        # Fetch all episodes from this conversation
-        episodes = db.query(Episode).filter(
-            Episode.conversation_id == conversation_id,
-            Episode.user_id == user_id,
-        ).order_by(Episode.created_at).all()
-
-        if len(episodes) < 2:
-            return  # Not worth a batch call for 1 message
-
-        # Build compact message list (truncate long messages)
-        msg_list = []
-        for i, ep in enumerate(episodes):
-            content_text = _extract_text_content(ep.content) if ep.content else ""
-            content_preview = content_text[:500]
-            msg_list.append(f"[{i}] {ep.role}: {content_preview}")
-
-        messages_text = "\n".join(msg_list)
-
-        prompt = f"""Analyze this conversation. For EACH message (by index), provide emotional analysis, topics, and importance scores.
-
-{messages_text}
-
-Return ONLY a JSON object with this structure:
-{{
-  "messages": [
-    {{
-      "index": 0,
-      "emotion": {{
-        "primary_emotion": "curious|excited|frustrated|neutral|happy|concerned|reflective|focused|playful|grateful",
-        "intensity": 0.6,
-        "sub_emotions": ["determined"],
-        "sentiment": "positive|negative|neutral"
-      }},
-      "topics": ["technology", "project planning"],
-      "scores": {{
-        "importance": 0.7,
-        "affect": 0.3,
-        "novelty": 0.5,
-        "taskness": 0.4
-      }}
-    }}
-  ]
-}}
-
-Guidelines:
-- Topics should be specific and semantic (e.g. "home automation", "fitness goals"), not generic categories
-- importance: how worth remembering (decisions, preferences, commitments score high)
-- affect: emotional valence (-1 to 1)
-- novelty: how new/unique the information is (0-1)
-- taskness: how actionable (0-1, tasks/todos/plans score high)"""
-
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                f"{llm_config.fast_model_url}/chat/completions",
-                json={
-                    "model": llm_config.fast_model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.2,
-                    "max_tokens": 1500,
-                },
-            )
-            resp.raise_for_status()
-            msg = resp.json()["choices"][0]["message"]
-            result_text = (msg.get("content") or "").strip()
-            # Reasoning models may put output in reasoning_content with empty content
-            if not result_text and msg.get("reasoning_content"):
-                result_text = msg["reasoning_content"].strip()
-
-            # Extract JSON from response (handle markdown code blocks)
-            if "```" in result_text:
-                result_text = result_text.split("```")[1].split("```")[0]
-                if result_text.startswith("json"):
-                    result_text = result_text[4:].strip()
-
-            enrichment = json.loads(result_text)
-            enriched_messages = enrichment.get("messages", [])
-
-            # Apply enrichment back to episodes
-            updated_count = 0
-            for item in enriched_messages:
-                idx = item.get("index", -1)
-                if 0 <= idx < len(episodes):
-                    ep = episodes[idx]
-
-                    # Update emotional analysis
-                    emotion = item.get("emotion", {})
-                    if emotion:
-                        emotional_data = {
-                            "primary_emotion": emotion.get("primary_emotion", "neutral"),
-                            "intensity": float(emotion.get("intensity", 0.5)),
-                            "sub_emotions": emotion.get("sub_emotions", []),
-                            "energy_level": "medium",
-                            "sentiment": emotion.get("sentiment", "neutral"),
-                            "confidence": 0.8,  # LLM-analyzed
-                        }
-                        ep.emotional_tone = json.dumps(emotional_data)
-
-                    # Update topics (semantic, not keyword)
-                    topics = item.get("topics", [])
-                    if topics:
-                        ep.topics = json.dumps(topics[:5])
-
-                    # Update importance with 4-dimension scoring
-                    scores = item.get("scores", {})
-                    if scores:
-                        importance = max(0.0, min(1.0, float(scores.get("importance", ep.importance or 0.5))))
-                        affect = max(-1.0, min(1.0, float(scores.get("affect", 0.0))))
-                        novelty = max(0.0, min(1.0, float(scores.get("novelty", 0.5))))
-                        taskness = max(0.0, min(1.0, float(scores.get("taskness", 0.0))))
-
-                        # Composite score (same formula as MemoryScorer)
-                        composite = (
-                            importance * 40 +
-                            ((affect + 1) / 2) * 15 +
-                            novelty * 25 +
-                            taskness * 20
-                        ) / 100.0  # Normalize to 0-1
-
-                        ep.importance = composite
-                        ep.base_importance = composite
-
-                        # Store full scores in emotion_metadata for later use
-                        ep.emotion_metadata = {
-                            "importance_score": importance,
-                            "affect_score": affect,
-                            "novelty_score": novelty,
-                            "taskness_score": taskness,
-                            "composite_score": composite,
-                            "scored_by": "batch_llm",
-                        }
-
-                    updated_count += 1
-
-            db.commit()
-            logger.info(f"🧠 Batch-enriched {updated_count}/{len(episodes)} episodes for conversation {conversation_id}")
-
-    except json.JSONDecodeError as e:
-        logger.warning(f"Batch episode enrichment JSON parse failed: {e}")
-    except Exception as e:
-        logger.warning(f"Batch episode enrichment failed (non-critical): {type(e).__name__}: {e}")
-    finally:
-        db.close()
 
 
 # Note: Let CORSMiddleware handle preflight automatically; no custom OPTIONS route
@@ -9037,6 +10426,36 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                 # David's sentence directly — so it is reached even when
                 # classification returns nothing.
                 from app.core.feature_flags import Flag as _PFlag, is_enabled as _presence_flag_enabled
+                # The last turn's actually-executed mutating tools, popped ONCE
+                # for the whole turn and handed to the execution boundary
+                # unconditionally.
+                #
+                # 2026-09-29, found live: this used to be popped inside the
+                # PRESENCE_TOOL_DIET branch only, next to the
+                # `gate_mutating_tools` call that needs it. With the flag OFF
+                # the legacy category branch below runs instead, so the
+                # boundary saw nothing — and "And one for the dentist on
+                # October 2nd at 9am." was refused as
+                # "social cannot authorize create" for the second time, after a
+                # fix that only covered the other branch. This is the same
+                # "three paths populate the tool set and only one checks"
+                # shape the R01 work documented, arriving in the plumbing.
+                from app.services.tool_mutation import gate_mutating_tools
+                # Both keys, and this is why: `session_id` is
+                # `request.conversation_id or str(current_user.id)`, so the FIRST
+                # turn of a new conversation (no id yet) records what it executed
+                # under the USER id, and the second turn — which now has the
+                # minted conversation id — looked only under that and found
+                # nothing. So the continuation path was dead for the first two
+                # turns of every conversation, which is exactly where "And one
+                # for the dentist on October 2nd at 9am" lives. It failed three
+                # times across three live runs before this was traced.
+                _last_turn_mutating = list(dict.fromkeys(
+                    _CHAT_INVOKED_MUTATING_TOOL_NAMES.pop(session_id, [])
+                    + _CHAT_INVOKED_MUTATING_TOOL_NAMES.pop(str(current_user.id), [])
+                ))
+                streaming_client._last_turn_mutating_override = list(_last_turn_mutating)
+
                 if _presence_flag_enabled(_PFlag.PRESENCE_TOOL_DIET):
                     # Harness rebuild Phase 2: retrieval, not keyword
                     # routing. `tool_categories` came from
@@ -9088,6 +10507,37 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                         max_tools=_MAX_TOOLS - len(_BACKGROUND_DISPATCH_TOOL_NAMES),
                     )
                     assert len(tools) <= _MAX_TOOLS, f"tool cap breached: {len(tools)}"
+
+                    # Mutation gate (chat harness repair Phase 5): semantic
+                    # proximity to a tool's description is not evidence David
+                    # wants it invoked — "shoulder workout was good" scores
+                    # close to fitness-logging tools without being a request
+                    # to log anything. A mutating tool only survives with
+                    # positive action evidence in the message, a continuation
+                    # of a specific operation this session just executed, or
+                    # an explicit narrow exception (acknowledge_notifications).
+                    #
+                    # `_sticky` (schema continuity, from find_tools) is
+                    # deliberately NOT what's passed here — discovering a
+                    # tool's schema isn't evidence it was ever invoked.
+                    #
+                    # `_CHAT_INVOKED_MUTATING_TOOL_NAMES` only gets a name
+                    # once `execute_tool` actually ran it, and — living-world
+                    # -context plan follow-up — executing a tool once must
+                    # not become standing permission for the rest of the
+                    # conversation either. Read-then-clear here: this turn
+                    # sees only what ran in the IMMEDIATELY PRECEDING turn,
+                    # and `gate_mutating_tools` itself further requires the
+                    # current message to read as a continuation/confirmation
+                    # ("yes", "do it") before treating that as authorization
+                    # — a generic unrelated later message ("okay what else")
+                    # gets no benefit from a recent write, however recent.
+                    tools, _gated_out = gate_mutating_tools(
+                        tools, last_user_message, last_turn_mutating_tools=_last_turn_mutating
+                    )
+                    if _gated_out:
+                        logger.info(f"🚫 Mutation gate withheld (no action evidence): {_gated_out}")
+
                     _tools_sha = _tools_sha_of(tools)
                     logger.info(
                         f"🍽️ Tools — {len(tools)} [sha {_tools_sha}] "
@@ -9109,6 +10559,79 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     fallback_categories = ['memory', 'notes', 'time', 'devices', 'vm_agents', 'personal_knowledge', 'inbox']
                     tools = tool_registry.get_tools_by_categories(fallback_categories)
                     logger.info(f"🔧 Intent={user_intent}: Capability fallback ({len(tools)} tools)")
+
+            # ── Keep the domain David is already working in (2026-09-29) ─────
+            #
+            # Found live on the acceptance trial's food journey, in both trials:
+            # "That was actually 150 grams, not 100." classified GENERAL, which
+            # loads ['memory','notes','time','web','home','fleet'] — no
+            # `fitness` — so `food_log_correct` was never offered, the
+            # correction could not run, and Sara truthfully said she had no food
+            # tool. The turn before had written a food entry.
+            #
+            # This is the study's "intent routing excludes the needed tool
+            # family" class (findings 27/29/38c/38d/40, five instances), and the
+            # fix is the same insight as the elliptical one: a CORRECTION or an
+            # elliptical follow-up is about what was JUST DONE, so the tools of
+            # that domain belong on the menu regardless of what the classifier
+            # made of the words. Offering a tool authorizes nothing — the
+            # execution boundary still decides — but withholding one makes a
+            # supported action impossible, which the plan forbids.
+            try:
+                from app.services.operation_contract import (
+                    OperationKind as _OKindForDomain,
+                    UtteranceClass as _UClassForDomain,
+                    classify_utterance as _classify_for_domain,
+                    domain_for_tool as _domain_for_tool,
+                    is_elliptical_continuation as _is_elliptical_for_domain,
+                    operation_kind_for as _kind_for_domain,
+                )
+                _utt = _classify_for_domain(last_user_message or "")
+                _continuing = (
+                    _utt is _UClassForDomain.CORRECTION
+                    or _is_elliptical_for_domain(last_user_message or "")
+                )
+                if _continuing and _last_turn_mutating:
+                    _active_domains = {
+                        _domain_for_tool(n) for n in _last_turn_mutating
+                    }
+                    _have = {
+                        (t.get("function") or {}).get("name") for t in tools
+                    }
+                    _sibling_names = [
+                        name for name in tool_registry.tools
+                        if name not in _have
+                        and _domain_for_tool(name) in _active_domains
+                        and _kind_for_domain(name, None) in (
+                            _OKindForDomain.UPDATE, _OKindForDomain.RESCHEDULE,
+                            _OKindForDomain.READ,
+                        )
+                    ]
+                    if _sibling_names:
+                        tools = list(tools) + tool_registry.get_tools_by_names(_sibling_names)
+                        logger.info(
+                            "🧷 Kept the active domain(s) %s on the menu for a "
+                            "%s turn: added %s",
+                            sorted(_active_domains), _utt.value, _sibling_names,
+                        )
+            except Exception as _domain_err:
+                logger.debug(f"active-domain tool retention skipped: {_domain_err}")
+
+            # One mutation gate for every selection branch. The diet branch
+            # called `gate_mutating_tools` itself and the other two did not, so
+            # a casual turn under the legacy path was offered the full write
+            # menu — harmless for authorization (the execution boundary is the
+            # single authority and refuses independently of how a tool got
+            # offered) but it is what made the model reach for a write on a
+            # conversational turn in the first place. Idempotent: gating an
+            # already-gated list drops nothing new.
+            tools, _post_branch_gated = gate_mutating_tools(
+                tools, last_user_message, last_turn_mutating_tools=_last_turn_mutating,
+            )
+            if _post_branch_gated:
+                logger.info(
+                    f"🚫 Mutation gate withheld (no action evidence): {_post_branch_gated}"
+                )
 
             tools = _apply_background_dispatch_policy(tools, last_user_message)
             logger.info(
@@ -9151,6 +10674,24 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                 in_work_mode=is_work_mode
             )
             logger.info(f"🎯 Intent={user_intent}, {context_decision.reason}")
+
+            # Personal-conversation remediation plan, step 2: a turn-level
+            # mode, separate from context_decision above, that governs
+            # whether ambient world-brief/health/work/proactive material is
+            # worth showing the model at all THIS turn — a greeting and a
+            # family emergency both classify CONVERSATIONAL/GENERAL under
+            # ContextRouter's intent rules, but neither should get a health
+            # readout or a work queue unless asked, or unless something is
+            # genuinely urgent.
+            from app.services.context_router import (
+                classify_conversation_mode, AMBIENT_SUPPRESS_MODES, has_active_urgent_alert,
+            )
+            conversation_mode = classify_conversation_mode(last_user_message, intent=user_intent)
+            _suppress_ambient_context = conversation_mode in AMBIENT_SUPPRESS_MODES
+            if _suppress_ambient_context and has_active_urgent_alert(db, str(current_user.id)):
+                _suppress_ambient_context = False
+                logger.info("🚨 Ambient suppression overridden by an active urgent alert")
+            logger.info(f"🎭 Conversation mode={conversation_mode}, suppress_ambient={_suppress_ambient_context}")
 
             # IMPLICIT FEEDBACK DETECTION: Detect satisfaction/correction signals from user message
             implicit_feedback = None
@@ -9322,6 +10863,7 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     combined_context = render_engaged_context(
                         _new_context, _new_open_intents, _new_recalled.get("traces") or [], extended=_extended,
                         workspace_ctx=workspace_ctx, intent=user_intent,
+                        conversation_mode=conversation_mode if _suppress_ambient_context else None,
                     )
                     injected_lesson_ids = _extended.get("lesson_ids") or []
                     try:
@@ -9355,6 +10897,16 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
             # on-demand reconstruction to the continuously maintained model.
             # App launch is not involved; this reads projections advanced by
             # every producer and performs only a bounded recovery catch-up.
+            #
+            # Defaults so both are safe to reference below even when the flag
+            # is off or this block raises: `_world_context` (the prose brief)
+            # and `_world_state_core` (living-world-context plan §7 — the
+            # compact, always-current facts read straight from the
+            # continuously maintained WorldThread/WorldFact projections,
+            # e.g. an active workout session, rather than reconstructed from
+            # source tables on demand).
+            _world_context = ""
+            _world_state_core = ""
             try:
                 from app.core.feature_flags import Flag as _WorldFlag, is_enabled as _world_flag_enabled
                 if _world_flag_enabled(_WorldFlag.WORLD_CONTEXT_READ):
@@ -9375,19 +10927,36 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     from app.db.session import get_async_session_factory
 
                     catch_up_user(db, str(current_user.id), limit=50)
-                    _brief_factory = get_async_session_factory()
-                    async with _brief_factory() as _brief_db:
-                        _world_context = await get_rendered_brief(_brief_db, str(current_user.id))
-                    if _world_context:
-                        system_message = ChatMessage(
-                            role="system",
-                            content=system_message.content
-                            + "\n\n## What's true in David's world right now\n"
-                            + _world_context,
+                    try:
+                        from app.services.world_state.chat_facts import render_world_state_core
+                        _world_state_core = render_world_state_core(
+                            db, str(current_user.id),
+                            conversation_mode=conversation_mode if _suppress_ambient_context else None,
                         )
-                    logger.info(
-                        "🌎 World brief injected: chars=%s", len(_world_context or ""),
-                    )
+                    except Exception as _wsc_err:
+                        logger.debug(f"world_state_core render failed (non-critical): {_wsc_err}")
+                    # Personal-conversation remediation plan, step 2: the prose
+                    # World Brief IS "David's world right now" — literally the
+                    # section header — which is exactly the "unrelated
+                    # world-brief tasks" a social/personal_vulnerable turn
+                    # should not see unless something's actually urgent. Skip
+                    # the fetch entirely rather than fetch-and-discard.
+                    if not _suppress_ambient_context:
+                        _brief_factory = get_async_session_factory()
+                        async with _brief_factory() as _brief_db:
+                            _world_context = await get_rendered_brief(_brief_db, str(current_user.id))
+                        if _world_context:
+                            system_message = ChatMessage(
+                                role="system",
+                                content=system_message.content
+                                + "\n\n## What's true in David's world right now\n"
+                                + _world_context,
+                            )
+                        logger.info(
+                            "🌎 World brief injected: chars=%s", len(_world_context or ""),
+                        )
+                    else:
+                        logger.info("🌎 World brief withheld (ambient suppressed this turn)")
             except Exception as _world_ctx_err:
                 try:
                     db.rollback()
@@ -9527,8 +11096,11 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                 # Phase 12K: notifications Sara sent that David hasn't acked, so a reply
                 # referencing them lands with context and can be acknowledged in one shot.
                 # Skipped on include_inbox turns (P3) — the full inbox digest below
-                # supersedes this narrower notification-only slice.
-                if not request.include_inbox:
+                # supersedes this narrower notification-only slice. Also skipped when
+                # ambient context is suppressed (personal-conversation remediation
+                # plan, step 2) — a proactive nudge is exactly what a social/
+                # personal_vulnerable turn shouldn't be handed unasked.
+                if not request.include_inbox and not _suppress_ambient_context:
                     from app.services.notification_ack import get_unacked_for_context
                     _unacked = await get_unacked_for_context(str(current_user.id))
                     if _unacked:
@@ -9945,60 +11517,88 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                 _assembly_provider = get_model_config(request.model or CHAT_DEFAULT_MODEL or OPENAI_MODEL).get("provider")
             except Exception:
                 _assembly_provider = None
+            # Chat harness repair Phase 4. Built once, used two ways: prepended
+            # into the prompt below (prevention — the model sees what's already
+            # settled before it generates), and reused further down, right
+            # before the response is stored/returned, to strip a duplicated or
+            # already-answered trailing question (repair — the response text
+            # that gets persisted and echoed back as `final_response` is what
+            # feeds the next turn's own dialogue state, even though the live
+            # text_chunk deltas already streamed and can't be unsent).
+            # Defaults so both use sites are safe when this isn't the local
+            # provider / prompt-split branch below.
+            _dialogue_messages: List[Dict[str, str]] = []
+            _dialogue_state_for_turn = None
+            # Living-world-context plan, Phase 2 item 8: "Use the same fact
+            # precedence and freshness behavior for local and non-local
+            # providers. Provider adapters may differ in role layout and
+            # caching mechanics, not semantic authority." Building this
+            # once, ahead of the branch below, used to happen only inside
+            # the local-provider branch — a Claude/Gemini/codex turn got
+            # neither the dialogue-state corrections/unanswered-question
+            # tracking nor the world_state_core facts (workout, location,
+            # calendar, commitments, email, health) at all, even though it
+            # DID get the World Brief (injected earlier, unconditionally).
+            try:
+                from app.services.dialogue_state import build_dialogue_state, render_dialogue_state_block
+                _dialogue_messages = [
+                    {"role": m.role, "content": _extract_text_content(m.content)}
+                    for m in (list(conversation_history) + list(merged_request_messages))
+                    if m.role in ("user", "assistant")
+                ]
+                _dialogue_state_for_turn = build_dialogue_state(_dialogue_messages)
+                _dialogue_block = render_dialogue_state_block(_dialogue_state_for_turn)
+            except Exception as _dlg_err:
+                logger.debug(f"dialogue_state build failed (non-critical): {_dlg_err}")
+                _dialogue_block = ""
+
             if _assembly_provider == "local" and _split_idx >= 0:
-                _volatile = (_full_sys[:_split_idx] + _full_sys[_split_idx + len(_stable_system_prompt):]).strip()
-                # Framing matters: this block carries Sara's own state (how she's
-                # feeling, what she remembers, what's going on with David) — it
-                # used to live in the system prompt. Present it as HER awareness to
-                # speak from, not as foreign data to consult, or she goes flat.
-                # Phase 6 trimmed this preamble from 1,129 chars to ~400. Most
-                # of what it said — don't reach for a tool the awareness already
-                # answers, never state a specific that isn't in front of you,
-                # no write tool without a reported event — is now in the persona
-                # prompt's Truth and Tools sections, said once. What survives is
-                # the part only this block can say: what it IS and who put it
-                # here.
-                _live_block = (
-                    f"{_LIVE_CTX_OPEN}\n"
-                    "[Sara — your own live awareness for this moment, placed here by your system, "
-                    "not typed by David: the time, how you're feeling, what you know about him and "
-                    "his day. Read it as your own knowing, not as data to consult. Speak from it "
-                    "naturally — never recite it, quote it, or refer to \"this block\". Every "
-                    "specific you state about his day must actually appear here, in the "
-                    "conversation, or in a tool result. David's message follows the closing tag.]\n\n"
-                    + _datetime_line + ("\n\n" + _volatile if _volatile else "") + f"\n{_LIVE_CTX_CLOSE}\n\n"
+                # Living-world-context plan, Phase 0/2: the shared,
+                # independently-testable chat assembly boundary. Framing
+                # matters — the dialogue-state and world-state-core blocks
+                # carry Sara's own state (how she's feeling, what she
+                # remembers, what's going on with David) — present them as
+                # HER awareness to speak from, not foreign data to consult,
+                # or she goes flat.
+                #
+                # Finding #1, "Fresh world context can disappear": this used
+                # to be one blind enforce_live_context_budget(_volatile,
+                # ...) clip on the WHOLE assembled string. Engaged context
+                # sits first in that string and alone nearly fills the
+                # 4,500-char budget, so the World Brief appended after it —
+                # and anything else after that — was silently, almost
+                # always dropped in full. A reproduction confirmed it.
+                # assemble_local_provider_messages replaces that with
+                # structured, authority-ordered allocation: dialogue-state
+                # corrections and the compact world-state core (e.g. an
+                # active workout session) get a guaranteed floor before the
+                # rest competes for what's left.
+                from app.services.chat_assembly import assemble_local_provider_messages
+                _assembly = assemble_local_provider_messages(
+                    full_sys=_full_sys,
+                    stable_system_prompt=_stable_system_prompt,
+                    conversation_history=conversation_history,
+                    merged_request_messages=list(merged_request_messages),
+                    dialogue_block=_dialogue_block,
+                    world_state_core=_world_state_core,
+                    world_brief=_world_context,
+                    datetime_line=_datetime_line,
+                    live_context_char_budget=LIVE_CONTEXT_CHAR_BUDGET,
                 )
-                all_messages = [ChatMessage(role="system", content=_stable_system_prompt)] + conversation_history + list(merged_request_messages)
-                _last_user_idx = max((i for i, m in enumerate(all_messages) if m.role == "user"), default=None)
-                if _last_user_idx is None:
-                    # No user turn at all (shouldn't happen) — fall back to a leading system block.
-                    all_messages.insert(1, ChatMessage(role="system", content=_live_block))
-                else:
-                    _um = all_messages[_last_user_idx]
-                    if isinstance(_um.content, list):
-                        _new_content = [{"type": "text", "text": _live_block}] + list(_um.content)
-                    else:
-                        _new_content = _live_block + (_um.content or "")
-                    all_messages[_last_user_idx] = ChatMessage(role="user", content=_new_content)
+                all_messages = _assembly["all_messages"]
+                _volatile = _assembly["volatile"]
+                _volatile_raw_chars = _assembly["volatile_raw_chars"]
+                _live_block = _assembly["live_block"]
                 import hashlib as _hl
-                # Phase 6 budget. The live block is the single largest thing in
-                # a chat prompt (19,900 chars / 4,976 tokens on 2026-09-11, more
-                # than three times the persona) and it grew section by section
-                # with no one watching the total. Warn loudly past the budget,
-                # and name the sections so the offender is identifiable.
                 _ctx_chars = len(_volatile)
                 _ctx_sections = re.findall(r"^#{2,3} +(.+)$", _volatile, re.MULTILINE)
                 _ctx_line = (
-                    f"📝 Context injected: {_ctx_chars} chars, "
-                    f"sections={_ctx_sections}"
+                    f"📝 Context injected: {_ctx_chars} chars"
+                    + (f" (raw {_volatile_raw_chars}, clipped to budget)" if _volatile_raw_chars > _ctx_chars else "")
+                    + f", sections={_ctx_sections}"
                 )
                 streaming_client._turn_context_chars = _ctx_chars
-                if _ctx_chars > LIVE_CONTEXT_CHAR_BUDGET:
-                    logger.warning(
-                        f"{_ctx_line} — over the {LIVE_CONTEXT_CHAR_BUDGET}-char budget"
-                    )
-                else:
-                    logger.info(_ctx_line)
+                logger.info(_ctx_line)
                 if os.getenv("CHAT_DUMP_LIVE_CONTEXT", "").strip().lower() in ("1", "true", "yes"):
                     try:
                         _dump = f"/tmp/live_context_{(request.conversation_id or 'new')}.txt"
@@ -10014,8 +11614,16 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     f"+ {len(conversation_history)} history + {len(merged_request_messages)} new)"
                 )
             else:
-                system_message = ChatMessage(role="system", content=_datetime_line + "\n\n" + _full_sys)
-                all_messages = [system_message] + conversation_history + merged_request_messages
+                from app.services.chat_assembly import assemble_non_local_provider_messages
+                _non_local_assembly = assemble_non_local_provider_messages(
+                    full_sys=_full_sys,
+                    dialogue_block=_dialogue_block,
+                    world_state_core=_world_state_core,
+                    datetime_line=_datetime_line,
+                    conversation_history=conversation_history,
+                    merged_request_messages=merged_request_messages,
+                )
+                all_messages = _non_local_assembly["all_messages"]
                 logger.info(
                     f"💬 Total messages: {len(all_messages)} "
                     f"(1 system + {len(conversation_history)} history + {len(merged_request_messages)} new)"
@@ -10072,9 +11680,18 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                         # chat_with_tools mint a second one would put David's
                         # turn and Sara's reply in different conversations.
                         all_messages, tools, current_user.id, _turn_conversation_id,
-                        model=request.model, ephemeral=request.ephemeral or False
+                        model=request.model, ephemeral=request.ephemeral or False,
+                        world_state_core=_world_state_core, turn_message=last_user_message,
                     )
                     _mark_stage("turn_complete")
+                    # response_content here is already finalized — leak-guard
+                    # stripped and dialogue-state repaired inside
+                    # chat_with_tools, at the same point it was persisted
+                    # (`_finalize_response_content`, called from every exit
+                    # of `_chat_with_tools_inner` via
+                    # `_store_conversation_with_timeout`). Nothing below this
+                    # point may further edit response_content: doing so would
+                    # reopen the gap between what's stored and what's sent.
                     logger.info(f"✅ chat_with_tools completed, response length: {len(response_content)}")
                     try:
                         _s = _stage_marks
@@ -10088,15 +11705,6 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                             logger.info(f"⏱️ [stage-timing] {_line}")
                     except Exception:
                         pass
-
-                    # Leak guard: raw <tool_call>/<function=...> markup that wasn't
-                    # salvaged into a real tool call must never reach the user.
-                    _stripped = strip_tool_markup(response_content)
-                    if _stripped != response_content:
-                        logger.warning("🧹 Stripped tool-call markup from final response")
-                        response_content = _stripped or (
-                            "I hit a snag executing that — mind asking again?"
-                        )
 
                     # Send final response and done IMMEDIATELY to close the stream
                     final_conv_id = streaming_client.current_conversation_id if hasattr(streaming_client, 'current_conversation_id') else request.conversation_id
@@ -10133,35 +11741,28 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                         except Exception:
                             pass
 
-                    # Emit suggested actions based on tools used and response
-                    try:
-                        from app.services.action_suggester import suggest as suggest_actions
-                        tool_history = getattr(streaming_client, '_tool_history', [])
-                        suggestions = suggest_actions(tool_history, response_content or "")
-                        if suggestions:
-                            await event_queue.put({
-                                "type": "suggested_actions",
-                                "data": {"actions": suggestions}
-                            })
-                            logger.info(f"💡 Emitted {len(suggestions)} suggested actions")
-                    except Exception as e:
-                        logger.debug(f"Suggested actions skipped: {e}")
-
                     await event_queue.put({"type": "done"})
                     logger.info("✅ done event queued")
 
                     # Commitment/thread extraction (SARA_UNLEASHED Phase B): fire-and-forget
                     # after every turn. extract_threads() internally rate-limits
-                    # (EXTRACTION_COOLDOWN) and requires >=3 user messages, so this is safe
-                    # to call unconditionally rather than re-deriving those gates here.
-                    try:
-                        from app.services.thread_extractor import extract_from_conversation_bg
-                        _full_messages = list(request.messages) + (
-                            [{"role": "assistant", "content": response_content}] if response_content else []
-                        )
-                        asyncio.ensure_future(extract_from_conversation_bg(_full_messages, str(current_user.id)))
-                    except Exception as e:
-                        logger.debug(f"Thread extraction kickoff skipped: {e}")
+                    # (EXTRACTION_COOLDOWN) and requires >=3 user messages — safe to call
+                    # unconditionally with respect to THAT, but "unconditionally" never
+                    # meant "even for ephemeral" — this used to run regardless, durably
+                    # extracting commitments/threads out of conversation content the
+                    # ephemeral contract promises leaves no trace. Living-world-context
+                    # plan: "Audit context maintenance and post-turn extraction so
+                    # ephemeral content does not leak into durable world facts, summaries,
+                    # or enrichment."
+                    if not request.ephemeral:
+                        try:
+                            from app.services.thread_extractor import extract_from_conversation_bg
+                            _full_messages = list(request.messages) + (
+                                [{"role": "assistant", "content": response_content}] if response_content else []
+                            )
+                            asyncio.ensure_future(extract_from_conversation_bg(_full_messages, str(current_user.id)))
+                        except Exception as e:
+                            logger.debug(f"Thread extraction kickoff skipped: {e}")
 
                     # Send push notification if requested (for background completion)
                     if request.notify_on_complete and response_content:
@@ -10186,85 +11787,111 @@ async def chat_stream(request: ChatRequest, current_user: User = Depends(get_cur
                     # Note: conversation storage already happened inside chat_with_tools
                     # No additional storage needed here
 
-                    # SELF-LEARNING LOOP: Extract lessons from negative feedback, track lesson effectiveness
-                    try:
-                        # If negative feedback detected, extract a lesson from the mistake
-                        if (implicit_feedback and implicit_feedback.is_actionable()
-                                and implicit_feedback.signal_type.value == "negative"):
-                            from app.services.lesson_extractor import create_lesson_from_feedback
-                            messages_for_extraction = [
-                                {"role": m.role, "content": _extract_text_content(m.content)}
-                                for m in (request.messages or [])
-                            ]
-                            lesson = await create_lesson_from_feedback(
-                                db=db,
-                                feedback=implicit_feedback,
-                                messages=messages_for_extraction,
-                                previous_response=previous_assistant_response,
-                            )
-                            if lesson:
-                                logger.info(f"Extracted lesson: {lesson.lesson[:80]}... (confidence={lesson.confidence:.2f})")
+                    # SELF-LEARNING LOOP: Extract lessons from negative feedback, track lesson
+                    # effectiveness. Living-world-context plan: durable, content-derived
+                    # (create_lesson_from_feedback reads request.messages directly), and
+                    # unguarded before this — an ephemeral conversation's actual words could
+                    # end up permanently stored as a lesson.
+                    if not request.ephemeral:
+                        try:
+                            # If negative feedback detected, extract a lesson from the mistake
+                            if (implicit_feedback and implicit_feedback.is_actionable()
+                                    and implicit_feedback.signal_type.value == "negative"):
+                                from app.services.lesson_extractor import create_lesson_from_feedback
+                                messages_for_extraction = [
+                                    {"role": m.role, "content": _extract_text_content(m.content)}
+                                    for m in (request.messages or [])
+                                ]
+                                lesson = await create_lesson_from_feedback(
+                                    db=db,
+                                    feedback=implicit_feedback,
+                                    messages=messages_for_extraction,
+                                    previous_response=previous_assistant_response,
+                                )
+                                if lesson:
+                                    logger.info(f"Extracted lesson: {lesson.lesson[:80]}... (confidence={lesson.confidence:.2f})")
 
-                        # Record that lessons were injected (for effectiveness tracking)
-                        if injected_lesson_ids:
-                            from app.services.lesson_injection_service import lesson_injection_service as _lis
-                            await _lis.record_lesson_application(
-                                db=db,
-                                lesson_ids=injected_lesson_ids,
+                            # Record that lessons were injected (for effectiveness tracking)
+                            if injected_lesson_ids:
+                                from app.services.lesson_injection_service import lesson_injection_service as _lis
+                                await _lis.record_lesson_application(
+                                    db=db,
+                                    lesson_ids=injected_lesson_ids,
+                                    conversation_id=final_conv_id or request.conversation_id,
+                                    message_id=str(final_episode_id) if final_episode_id else None,
+                                )
+                                logger.info(f"Recorded application of {len(injected_lesson_ids)} lessons")
+
+                            # If positive feedback and lessons were injected, mark them as successful
+                            if (implicit_feedback and implicit_feedback.is_actionable()
+                                    and implicit_feedback.signal_type.value == "positive"
+                                    and injected_lesson_ids):
+                                from app.services.lesson_tracker import lesson_tracker
+                                updated = await lesson_tracker.update_pending_applications(
+                                    db=db,
+                                    conversation_id=final_conv_id or request.conversation_id,
+                                    was_successful=True,
+                                    feedback_signal=implicit_feedback.trigger_phrase,
+                                )
+                                if updated:
+                                    logger.info(f"Marked {len(updated)} lessons as successful")
+
+                            # If negative feedback on a conversation with prior lessons, mark them as failed
+                            if (implicit_feedback and implicit_feedback.is_actionable()
+                                    and implicit_feedback.signal_type.value == "negative"
+                                    and not injected_lesson_ids):
+                                # Check if previous conversation had lessons — update those
+                                from app.services.lesson_tracker import lesson_tracker
+                                updated = await lesson_tracker.update_pending_applications(
+                                    db=db,
+                                    conversation_id=final_conv_id or request.conversation_id,
+                                    was_successful=False,
+                                    feedback_signal=implicit_feedback.trigger_phrase,
+                                )
+                                if updated:
+                                    logger.info(f"Marked {len(updated)} lessons as failed")
+                        except Exception as e:
+                            logger.debug(f"Self-learning loop failed (non-critical): {e}")
+
+                    # Update Sara's emotional state from this conversation (fire-and-forget).
+                    # Also content-derived (raw request.messages) and durable (persists and
+                    # shapes future turns' tone) — same ephemeral guard.
+                    if not request.ephemeral:
+                        try:
+                            asyncio.create_task(_update_emotional_state_from_chat(
+                                messages=request.messages,
+                                response_content=response_content,
+                                user_id=str(current_user.id),
+                            ))
+                        except Exception:
+                            pass
+
+                    # Incrementally enrich episode emotions, topics, and scores.
+                    # Debounced + watermarked (app.tasks.episode_enrichment) so a
+                    # burst of turns coalesces into one run instead of
+                    # reprocessing the whole conversation every turn.
+                    #
+                    # Living-world-context plan: an ephemeral turn stores no
+                    # episodes (persist_user_turn/store_conversation both
+                    # short-circuit on _ephemeral before writing one) — this
+                    # was unguarded, so it still scheduled a real Celery
+                    # task and a Redis lock, and
+                    # enrich_conversation_incremental's
+                    # _get_or_create_conversation would flush a durable
+                    # Conversation row for the ephemeral conversation_id
+                    # before its own "no episodes" check ever ran. No
+                    # content leak (there are no episodes to enrich), but a
+                    # durable row and wasted work an ephemeral turn must not
+                    # produce at all.
+                    if not request.ephemeral:
+                        try:
+                            from app.tasks.episode_enrichment import schedule_conversation_enrichment
+                            schedule_conversation_enrichment(
                                 conversation_id=final_conv_id or request.conversation_id,
-                                message_id=str(final_episode_id) if final_episode_id else None,
+                                user_id=str(current_user.id),
                             )
-                            logger.info(f"Recorded application of {len(injected_lesson_ids)} lessons")
-
-                        # If positive feedback and lessons were injected, mark them as successful
-                        if (implicit_feedback and implicit_feedback.is_actionable()
-                                and implicit_feedback.signal_type.value == "positive"
-                                and injected_lesson_ids):
-                            from app.services.lesson_tracker import lesson_tracker
-                            updated = await lesson_tracker.update_pending_applications(
-                                db=db,
-                                conversation_id=final_conv_id or request.conversation_id,
-                                was_successful=True,
-                                feedback_signal=implicit_feedback.trigger_phrase,
-                            )
-                            if updated:
-                                logger.info(f"Marked {len(updated)} lessons as successful")
-
-                        # If negative feedback on a conversation with prior lessons, mark them as failed
-                        if (implicit_feedback and implicit_feedback.is_actionable()
-                                and implicit_feedback.signal_type.value == "negative"
-                                and not injected_lesson_ids):
-                            # Check if previous conversation had lessons — update those
-                            from app.services.lesson_tracker import lesson_tracker
-                            updated = await lesson_tracker.update_pending_applications(
-                                db=db,
-                                conversation_id=final_conv_id or request.conversation_id,
-                                was_successful=False,
-                                feedback_signal=implicit_feedback.trigger_phrase,
-                            )
-                            if updated:
-                                logger.info(f"Marked {len(updated)} lessons as failed")
-                    except Exception as e:
-                        logger.debug(f"Self-learning loop failed (non-critical): {e}")
-
-                    # Update Sara's emotional state from this conversation (fire-and-forget)
-                    try:
-                        asyncio.create_task(_update_emotional_state_from_chat(
-                            messages=request.messages,
-                            response_content=response_content,
-                            user_id=str(current_user.id),
-                        ))
-                    except Exception:
-                        pass
-
-                    # Batch-enrich episode emotions, topics, and scores (fire-and-forget)
-                    try:
-                        asyncio.create_task(_enrich_episodes_batch(
-                            conversation_id=final_conv_id or request.conversation_id,
-                            user_id=str(current_user.id),
-                        ))
-                    except Exception:
-                        pass
+                        except Exception:
+                            pass
 
                 except asyncio.CancelledError:
                     # The client went away. Nothing to emit — there is nobody
@@ -10519,7 +12146,9 @@ async def search_notes_api(
     # Fall back to cookie auth
     if not user_id:
         try:
-            current_user = await get_current_user(request, db)
+            # get_current_user is synchronous — see pi_dashboard_voice_chat's
+            # matching fix (2026-09-22) for why this was `await`ed incorrectly.
+            current_user = get_current_user(request, db)
             user_id = current_user.id
         except Exception as auth_err:
             logger.debug(f"Authentication failed for search-notes: {auth_err}")
