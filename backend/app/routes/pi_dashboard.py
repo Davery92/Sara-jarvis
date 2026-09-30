@@ -24,7 +24,7 @@ import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -481,4 +481,168 @@ async def get_pi_dashboard_timers(
         return {"timers": timer_list, "count": len(timer_list)}
     except Exception as e:
         logger.error(f"Error getting timers: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Pi voice: transcribe + speak (moved from main_simple.py 2026-09-30, plan 4.4)
+#
+# Paths unchanged. Both are pure transport to the off-box STT/TTS services with
+# device-token-or-session auth, and touch no chat machinery.
+#
+# /api/pi-dashboard/voice/chat and /voice/fast are deliberately NOT here — see
+# the blocked-on note left in main_simple.py at each of them.
+# ═══════════════════════════════════════════════════════════════════════════
+
+@router.post("/api/pi-dashboard/voice/transcribe")
+async def pi_dashboard_voice_transcribe(request: Request, audio: UploadFile = File(...), db: Session = Depends(get_db)):
+    """Transcribe audio for Pi dashboard (supports device token auth)"""
+    # Try device token auth first
+    user_id = await get_device_user(request, db)
+
+    # Fall back to cookie auth
+    if not user_id:
+        try:
+            # get_current_user is synchronous — see pi_dashboard_voice_chat's
+            # matching fix (2026-09-22) for why this was `await`ed incorrectly.
+            current_user = get_current_user(request, db)
+            user_id = current_user.id
+        except Exception as auth_err:
+            logger.debug(f"Authentication failed for voice/transcribe: {auth_err}")
+            raise HTTPException(status_code=401, detail="Not authenticated")
+
+    try:
+        # Save audio file temporarily
+        audio_content = await audio.read()
+        temp_audio_path = f"/tmp/voice_{uuid.uuid4()}.webm"
+
+        with open(temp_audio_path, "wb") as f:
+            f.write(audio_content)
+
+        # Known Whisper hallucinations on silence/noise
+        WHISPER_HALLUCINATIONS = {
+            "thank you", "thanks", "thanks for watching", "thank you for watching",
+            "please subscribe", "subscribe", "bye", "goodbye", "see you next time",
+            "you", "the", "i", "a", "", "so", "um", "uh", "hmm", "oh",
+            "thank you.", "thanks.", "bye.", "goodbye."
+        }
+
+        # Call Whisper STT service (same as voice-agent)
+        import httpx
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            with open(temp_audio_path, "rb") as audio_file:
+                files = {"file": ("audio.webm", audio_file, "audio/webm")}
+                data = {
+                    "model": "distil-small.en",
+                    "language": "en",
+                    "vad_filter": "true",
+                    "no_speech_threshold": "0.4",
+                    "compression_ratio_threshold": "2.0",
+                }
+                response = await client.post(
+                    "http://10.185.1.8:8585/v1/audio/transcriptions",
+                    files=files,
+                    data=data
+                )
+
+        # Clean up temp file
+        try:
+            os.remove(temp_audio_path)
+        except OSError as e:
+            logger.debug(f"Failed to remove temp audio file: {e}")
+
+        if response.status_code == 200:
+            result = response.json()
+            transcribed_text = result.get("text", "").strip()
+
+            # Filter out hallucinations
+            if transcribed_text.lower() in WHISPER_HALLUCINATIONS:
+                logger.info(f"[Pi Dashboard Voice] Filtered hallucination: '{transcribed_text}'")
+                return {"transcription": "", "filtered": True}
+
+            # Filter short hallucinations
+            if len(transcribed_text.split()) <= 2 and transcribed_text.lower().rstrip('.!?') in WHISPER_HALLUCINATIONS:
+                logger.info(f"[Pi Dashboard Voice] Filtered short hallucination: '{transcribed_text}'")
+                return {"transcription": "", "filtered": True}
+
+            logger.info(f"[Pi Dashboard Voice] Transcribed: {transcribed_text}")
+            return {"transcription": transcribed_text}
+        else:
+            logger.error(f"[Pi Dashboard Voice] Whisper error: {response.status_code} - {response.text}")
+            raise HTTPException(status_code=500, detail="Transcription failed")
+
+    except Exception as e:
+        logger.error(f"[Pi Dashboard Voice] Transcription error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/pi-dashboard/voice/speak")
+async def pi_dashboard_voice_speak(request: Request, db: Session = Depends(get_db)):
+    """
+    Text-to-speech for Pi dashboard with device token auth.
+    Returns audio blob.
+    """
+    # Try device token auth first
+    user_id = await get_device_user(request, db)
+
+    # Fall back to cookie auth
+    if not user_id:
+        try:
+            # get_current_user is synchronous — see pi_dashboard_voice_chat's
+            # matching fix (2026-09-22) for why this was `await`ed incorrectly.
+            current_user = get_current_user(request, db)
+            user_id = current_user.id
+        except Exception as auth_err:
+            logger.debug(f"Authentication failed for voice/speak: {auth_err}")
+            raise HTTPException(status_code=401, detail="Not authenticated")
+
+    try:
+        body = await request.json()
+        text = body.get("text", "")
+        response_format = body.get("response_format", "mp3")  # Default MP3 for browser
+
+        if not text:
+            raise HTTPException(status_code=400, detail="No text provided")
+
+        logger.info(f"[Pi Dashboard Voice] TTS for user {user_id}: {text[:50]}...")
+
+        # Call Kokoro TTS service
+        import httpx
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            tts_response = await client.post(
+                "http://10.185.1.9:8880/v1/audio/speech",
+                json={
+                    "input": text,
+                    "model": "kokoro",
+                    "voice": "af_sarah(1)+af_bella(1)",
+                    "response_format": response_format,
+                    "speed": 1.0
+                }
+            )
+
+            if tts_response.status_code != 200:
+                logger.error(f"[Pi Dashboard Voice] Kokoro TTS error: {tts_response.status_code}")
+                raise HTTPException(status_code=500, detail="TTS service error")
+
+            # Determine media type
+            media_type_map = {
+                "mp3": "audio/mpeg",
+                "wav": "audio/wav",
+                "opus": "audio/opus",
+                "flac": "audio/flac",
+                "pcm": "audio/pcm",
+                "m4a": "audio/mp4"
+            }
+            media_type = media_type_map.get(response_format, "audio/mpeg")
+
+            return Response(
+                content=tts_response.content,
+                media_type=media_type,
+                headers={
+                    "Content-Disposition": f"attachment; filename=speech.{response_format}"
+                }
+            )
+
+    except Exception as e:
+        logger.error(f"[Pi Dashboard Voice] TTS error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
