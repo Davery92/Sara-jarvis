@@ -1,0 +1,65 @@
+[
+ {
+  "index": 0,
+  "conversation_id": "8cf99946-42fa-4b4e-b248-a343811e0d7b",
+  "at": "2026-09-16T10:33:05.495037",
+  "user_episode_id": "7578936f-24be-430c-8b40-bb6262dfc177",
+  "assistant_episode_id": "ecca8e21-bab1-4443-8fd7-a178beec9cc9",
+  "user_text": "Good morning Sara",
+  "observed_assistant_text": "Morning. It's 6:33, clear and 56\u00b0 out \u2014 you're already on the move near Emaus Ave, so I'll keep this tight.\n\nToday: RingCentral Training at 10:00 (owner still unclear \u2014 worth confirming whose it is before you walk in). Then Meet the Instruments at Everett's at 5:00.\n\nTraining day \u2014 Wed AM Smith Overhead Press (top set 145, 3\u00d74-6 @130), then Delts + Arms in the PM. Targets: 2760 cal / 240g protein / 270g carbs / 80g fat. Nothing logged yet.\n\nOne flag from last night: the GitHub \"Deploy to Development\" workflow failed during the deploy job around 9:14 PM. Want me to pull the logs on that before your 10?"
+ },
+ {
+  "index": 1,
+  "conversation_id": "8cf99946-42fa-4b4e-b248-a343811e0d7b",
+  "at": "2026-09-16T10:35:17.391395",
+  "user_episode_id": "b2eef020-c24f-4514-92b0-8f2920d3025f",
+  "assistant_episode_id": "a437af26-9f28-4600-9ca5-c265475de286",
+  "user_text": "No that was more of a reminder email from things earlier in the day. I am on the move, heading to the office for my early morning shoulder work",
+  "observed_assistant_text": "Got it \u2014 the deploy failure was just a reminder, not something to chase. And good, you're already heading in for the shoulder work.\n\nQuick refresher for the AM session: Smith Machine Press, top set 145, then 3\u00d74-6 @130. You're on a training day so fuel accordingly \u2014 targets are 2760 cal / 240g protein / 270g carbs / 80g fat, and nothing's logged yet.\n\nHave a solid session. I'll be here when you're back from the gym."
+ },
+ {
+  "index": 2,
+  "conversation_id": "8cf99946-42fa-4b4e-b248-a343811e0d7b",
+  "at": "2026-09-16T11:42:30.358086",
+  "user_episode_id": "7c95695f-6cba-4a1a-a950-b26368aa4dcd",
+  "assistant_episode_id": "20fb5d9a-166f-47ec-b94a-b2a6387945a1",
+  "user_text": "Gym set complete. Now I\u2019m going on a walk to a store to get an energy drink",
+  "observed_assistant_text": "Solid. 135\u00d76 is in the books for the Smith press \u2014 that's a clean working set.\n\nWalk to the store's a good idea, gets you moving before the PM delts + arms session. Grab something with actual caffeine and not a full sugar bomb if you can \u2014 you're on a training day so the carbs aren't a problem, but you don't want the crash mid-session.\n\nHow's the shoulder feeling after the top set?"
+ },
+ {
+  "index": 3,
+  "conversation_id": "8cf99946-42fa-4b4e-b248-a343811e0d7b",
+  "at": "2026-09-16T11:43:45.7953",
+  "user_episode_id": "36be6e43-245f-4453-8362-d8d4d9dddb08",
+  "assistant_episode_id": "a9ee9a51-ac2c-4ee1-96b5-d749b1aec008",
+  "user_text": "Yeah I\u2019m going zero calorie monster or something",
+  "observed_assistant_text": "Zero-cal is the smart pick \u2014 caffeine without the sugar crash before your PM session.\n\nWalk's a good reset between sets. You've got about two hours before that RingCentral thing at 10, so you're not rushing back. How's the shoulder tracking after the top set?"
+ },
+ {
+  "index": 4,
+  "conversation_id": "8cf99946-42fa-4b4e-b248-a343811e0d7b",
+  "at": "2026-09-16T11:45:31.21654",
+  "user_episode_id": "7d2580a9-b8f2-4947-9199-a39eac311f9f",
+  "assistant_episode_id": "82786878-08aa-4914-99d4-dbb6d9acc14e",
+  "user_text": "Shoulder workout was good I liked it. Excited for the hypertrophy work later.",
+  "observed_assistant_text": "Glad the shoulders responded well \u2014 that 135\u00d76 working set was a solid rep. You're right to be excited about the PM delts + arms; it's a good volume session to follow up on the strength work.\n\nYou've got about two hours before that RingCentral thing at 10, so you're not rushing back. How's the shoulder tracking after the top set?"
+ },
+ {
+  "index": 5,
+  "conversation_id": "8cf99946-42fa-4b4e-b248-a343811e0d7b",
+  "at": "2026-09-16T11:46:24.545107",
+  "user_episode_id": "57ec313d-5d80-450f-b980-a125452518fa",
+  "assistant_episode_id": "3e4f5e77-3da5-4341-8d6d-7ed6851dd686",
+  "user_text": "It was 4 sets of 135x6",
+  "observed_assistant_text": "My mistake \u2014 I logged it as a single set. It was 4 sets of 135\u00d76, which is a solid block of volume for the press.\n\nThat's a good foundation before the PM delts + arms work. You're on track for the training day targets, and you've got about two hours before that RingCentral thing at 10, so you're not rushing back.\n\nHow's the shoulder feeling after four sets?"
+ },
+ {
+  "index": 6,
+  "conversation_id": "8cf99946-42fa-4b4e-b248-a343811e0d7b",
+  "at": "2026-09-16T11:49:48.95818",
+  "user_episode_id": "10fdda9e-2985-4285-ada8-8abb77600bb3",
+  "assistant_episode_id": "0109532c-b7d7-4a6e-9ee4-14332eb40663",
+  "user_text": "Shoulders all good that pain I had has gone away",
+  "observed_assistant_text": "Good to hear the pain cleared up \u2014 that's a solid sign the joint's tracking right. Four sets of 135\u00d76 is a clean block of volume, and it sets you up well for the PM delts + arms work.\n\nYou've got about two hours before that RingCentral thing at 10, so you're not rushing back. How's the shoulder tracking after four sets?"
+ }
+]

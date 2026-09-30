@@ -1,0 +1,83 @@
+{
+ "captured_at": "2026-09-23T14:57:59.652929+00:00",
+ "source_database": "sara_hub",
+ "user_id": "64f37c56-85cb-4590-8de9-adfc17d343ed",
+ "conversations": [
+  "d30a68bf-0973-48c9-810f-3d80508a435c",
+  "27ba7e0b-42b0-4630-88b4-02e8d6d8d3d2"
+ ],
+ "window": [
+  "2026-09-18",
+  "2026-09-24"
+ ],
+ "cutoff": "2026-09-23 11:20:00+00",
+ "as_of_capture_tables": [
+  "world_brief",
+  "world_thread",
+  "world_fact",
+  "life_fact",
+  "behavioral_pattern",
+  "daily_rhythm",
+  "standing_order",
+  "directive",
+  "reminder",
+  "timer",
+  "scratchpad_entry",
+  "user_profile",
+  "user_settings",
+  "calendar_event",
+  "correction",
+  "outbox_item"
+ ],
+ "tables": {
+  "app_user": 1,
+  "episode": 44,
+  "calendar_event": 20,
+  "food_log": 14,
+  "food_log_item": 0,
+  "workout_log": 30,
+  "workout_session": 52,
+  "active_workout_session": 84,
+  "health_metric": 309,
+  "life_fact": 10,
+  "sara_journal": 18,
+  "world_brief": 1,
+  "world_thread": 246,
+  "world_fact": 4072,
+  "standing_order": 6,
+  "directive": 2,
+  "scratchpad_entry": 1,
+  "correction": 2,
+  "reminder": 10,
+  "timer": 35,
+  "behavioral_pattern": 99,
+  "daily_rhythm": 19,
+  "attention_item": 163,
+  "world_attention_item": 34,
+  "outbox_item": 15,
+  "day_replay_cache": 5,
+  "user_profile": 1,
+  "user_settings": 1,
+  "note": 11
+ },
+ "turns": 3,
+ "brief_layers": [
+  "context.md",
+  "day.md",
+  "moment.md",
+  "stable.md"
+ ],
+ "redactions": [
+  "[\\w.+-]+@[\\w-]+\\.[\\w.-]+",
+  "(?<![\\w-])\\+?\\d{0,2}[\\s.-]?\\(?\\d{3}\\)?[\\s.-]?\\d{3}[\\s.-]\\d{4}(?![\\w-])",
+  "\\b\\d{1,5}\\s+[A-Z][a-z]+\\s+(Street|St|Road|Rd|Avenue|Ave|Lane|Ln|Drive|Dr|Way|Court|Ct)\\b",
+  "(?i)\\b(bearer|api[_-]?key|token|password)\\b\\s*[:=]\\s*\\S+"
+ ],
+ "notes": [
+  "Captured read-only from the live database; no row here was edited by hand.",
+  "Embeddings are dropped: they are large, and nothing in the replay reads them back (recall is exercised against the same text through the live embedder).",
+  "Captured for docs/plans/SARA_PERSONAL_CONVERSATION_REMEDIATION_PLAN_2026_09_23.md's evidence table: 'Good evening' -> unsolicited day recap, 'Just relaxing lol I'm tired' -> unsolicited HRV interpretation, the ER-visit turn -> proposed email/SSL/ACORD work and an invented wake time.",
+  "Health VALUES (HRV, etc.) are kept unredacted on purpose \u2014 the plan's failure is that Sara surfaced them unprompted, and a replay that scrubs the number cannot verify the fix. Third-party contact details and street addresses are still redacted.",
+  "Time-series tables are cut at `cutoff`, just after the last exchange, so a replay is never shown a row that did not exist yet. The tables in `as_of_capture_tables` hold current state with no history to rewind and are therefore as of `captured_at`, not as of the turn."
+ ]
+}

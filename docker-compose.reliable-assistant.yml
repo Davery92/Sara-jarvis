@@ -1,0 +1,164 @@
+##
+## Reliable-assistant live validation, 2026-09-28.
+##
+## Overlay on docker-compose.assistant-acceptance.yml. Three jobs:
+##
+##   1. Hold the upstream model budget for THIS TASK to 300 requests, enforced
+##      by the gateway itself — atomic reservation against an append-only
+##      ledger before every outbound attempt, proven (with a fake upstream, at
+##      zero model cost) by backend/tests/test_generation_budget_gateway.py.
+##      The ledger path is this task's own, so the convention task's 60-ceiling
+##      ledger and the 09-24 study's 1600-ceiling ledger neither credit nor
+##      debit it.
+##
+##   2. Point the api/worker at this task's frozen candidate rather than the
+##      live working tree, so nothing the containers do can land in the repo
+##      and so the validated bytes and the deployable bytes are the same bytes.
+##
+##   3. Route the chat lane through the gateway. `core/app_state.py` hardcodes
+##      the chat lane's base_url, so OPENAI_BASE_URL alone does NOT redirect it
+##      — that is how the 2026-09-27 convention run's first attempt reached the
+##      real model host while the ledger recorded zero reservations. Check the
+##      ledger, not the topology.
+##
+## Usage:
+##   export ASSISTANT_ACCEPTANCE_ARTDIR=$PWD/backend/tests/assistant_acceptance/artifacts/run_20260928_reliable
+##   export ASSISTANT_ACCEPTANCE_SNAPSHOT=/home/david/sara-candidate-20260928-reliable/backend
+##   mkdir -p "$ASSISTANT_ACCEPTANCE_ARTDIR"
+##   docker compose -f docker-compose.assistant-acceptance.yml \
+##                  -f docker-compose.reliable-assistant.yml \
+##                  -p sara-reliable-validation up -d --wait test-db test-redis test-embeddings gateway
+##
+## Teardown: same flags, `down -v --remove-orphans`. Every volume is tmpfs.
+## Never run an unqualified `compose down` here — that would resolve
+## docker-compose.yml and target production.
+##
+services:
+  gateway:
+    environment:
+      BUDGET_CEILING: "300"
+      LEDGER_PATH: "/ledger/reliable_assistant_ledger.jsonl"
+
+  api:
+    # The run's artifact directory, so a journey transcript is written to the
+    # host's evidence folder rather than into the frozen candidate snapshot.
+    volumes:
+      - ${ASSISTANT_ACCEPTANCE_ARTDIR:?set it}:/evidence
+    environment:
+      LOCAL_CHAT_BASE_URL: http://gateway:8082/v1
+      EMBEDDING_BASE_URL: http://test-embeddings:8100
+
+  shell:
+    environment:
+      LOCAL_CHAT_BASE_URL: http://gateway:8082/v1
+      EMBEDDING_BASE_URL: http://test-embeddings:8100
+
+  worker:
+    environment:
+      LOCAL_CHAT_BASE_URL: http://gateway:8082/v1
+      EMBEDDING_BASE_URL: http://test-embeddings:8100
+    command:
+      - celery
+      - -A
+      - app.celery_app
+      - worker
+      - --loglevel=info
+      - --concurrency=2
+      - -Q
+      - cognitive,health,input,maintenance,low_priority,reflection,dispatch
+      - -n
+      - general@%h
+
+  # ── Every worker on the SAME candidate bytes (correction gap 4) ───────────
+  #
+  # The acceptance stack shipped one generic `worker`, which listens on the
+  # default queue only. Production and dev both run five: celery-worker
+  # (cognitive/health/input/maintenance/low_priority/reflection/dispatch),
+  # celery-critical, celery-david-priority, celery-acs and celery-beat. A
+  # candidate validated with one of those five is a candidate whose background
+  # half was never exercised, and "pin the API and the workers to the same
+  # release candidate" means all of them — every service below mounts
+  # ${ASSISTANT_ACCEPTANCE_SNAPSHOT} at /app, exactly as `api` does, so there is
+  # one set of bytes in the stack and `readiness_probe.py` can say so.
+  #
+  # All are in the `isolated-worker` profile: nothing here starts on a plain
+  # `up`, and the disposable Redis is a distinct instance from production's, so
+  # a queue name cannot collide even in principle.
+  worker-critical:
+    extends:
+      file: docker-compose.assistant-acceptance.yml
+      service: worker
+    profiles: ["isolated-worker"]
+    environment:
+      LOCAL_CHAT_BASE_URL: http://gateway:8082/v1
+      EMBEDDING_BASE_URL: http://test-embeddings:8100
+    command:
+      - celery
+      - -A
+      - app.celery_app
+      - worker
+      - --loglevel=info
+      - --concurrency=2
+      - -Q
+      - critical
+      - -n
+      - critical@%h
+
+  worker-david-priority:
+    extends:
+      file: docker-compose.assistant-acceptance.yml
+      service: worker
+    profiles: ["isolated-worker"]
+    environment:
+      LOCAL_CHAT_BASE_URL: http://gateway:8082/v1
+      EMBEDDING_BASE_URL: http://test-embeddings:8100
+    command:
+      - celery
+      - -A
+      - app.celery_app
+      - worker
+      - --loglevel=info
+      - --concurrency=1
+      - -Q
+      - david_priority
+      - -n
+      - david_priority@%h
+
+  worker-acs:
+    extends:
+      file: docker-compose.assistant-acceptance.yml
+      service: worker
+    profiles: ["isolated-worker"]
+    environment:
+      LOCAL_CHAT_BASE_URL: http://gateway:8082/v1
+      EMBEDDING_BASE_URL: http://test-embeddings:8100
+    command:
+      - celery
+      - -A
+      - app.celery_app
+      - worker
+      - --loglevel=info
+      - --concurrency=1
+      - -Q
+      - acs
+      - -n
+      - acs@%h
+
+  beat:
+    extends:
+      file: docker-compose.assistant-acceptance.yml
+      service: worker
+    profiles: ["isolated-worker"]
+    environment:
+      LOCAL_CHAT_BASE_URL: http://gateway:8082/v1
+      EMBEDDING_BASE_URL: http://test-embeddings:8100
+    # `--schedule` into /tmp: the candidate snapshot is mounted read-write for
+    # the api's sake, and a beat schedule file written into it would change the
+    # very bytes the manifest hash certifies.
+    command:
+      - celery
+      - -A
+      - app.celery_app
+      - beat
+      - --loglevel=info
+      - --schedule=/tmp/celerybeat-schedule

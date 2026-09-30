@@ -102,6 +102,97 @@ def test_clock_freeze_reaches_render_when():
     assert "in 3h" in rendered, rendered
 
 
+@pytest.mark.asyncio
+async def test_persona_prompt_matches_the_current_production_builder():
+    """Harness/thinking/personality plan, Phase 0: this replay used to build
+    its persona half with `get_system_prompt`, the ~14,000-char function
+    production text chat stopped calling at the 2026-09-11 "harness rebuild
+    Phase 5". If this ever regresses back to the old builder (or a stray
+    second copy of the persona logic drifts from the real one), this
+    assertion — not just a prompt-length check — is what catches it: the
+    hash must match a FRESH call to the real function with the same inputs,
+    not merely "some string of a plausible size"."""
+    import hashlib
+
+    from app.prompts.chat_system_prompt import build_chat_system_prompt
+    from app.main_simple import ASSISTANT_NAME, load_soul_for_prompt
+    from app.db.base import SessionLocal
+
+    t = harness.turn(6)
+    assembled = await harness.assemble(t.user_text, t.at_et)
+
+    db = SessionLocal()
+    try:
+        soul = load_soul_for_prompt(db)
+    finally:
+        db.close()
+    expected = build_chat_system_prompt(ASSISTANT_NAME, soul, assembled.tools_offered)
+    assert assembled.stable_system_prompt == expected
+    assert assembled.stable_system_prompt_sha256 == hashlib.sha256(expected.encode()).hexdigest()
+    # A regression back to the ~14,000-char pre-Phase-5 get_system_prompt
+    # would blow well past build_chat_system_prompt's own cap.
+    from app.prompts.chat_system_prompt import MAX_PROMPT_CHARS
+    assert len(assembled.stable_system_prompt) <= MAX_PROMPT_CHARS
+
+
+@pytest.mark.asyncio
+async def test_outgoing_payload_has_the_production_role_order_and_shape():
+    """Mirrors `assemble_local_provider_messages`'s own contract
+    (backend/tests/test_chat_assembly.py covers that function in isolation
+    with synthetic inputs) but against the REAL replay inputs: the first
+    message is system/persona-only (the cache-stable prefix — no datetime,
+    no per-turn context mixed in), and the live-context envelope is folded
+    into the LAST message, which is the user turn, not a separate trailing
+    system message."""
+    t = harness.turn(6)
+    assembled = await harness.assemble(t.user_text, t.at_et)
+    messages = assembled.all_messages
+
+    assert len(messages) >= 2
+    assert messages[0].role == "system"
+    assert messages[0].content == assembled.stable_system_prompt
+    # The stable prefix must stay stable: no volatile per-turn content
+    # (the live-context tags, or the turn's own datetime string) leaks into
+    # the first message, or a real local-lane turn would lose its prompt-
+    # cache hit every time volatile content changed.
+    assert "<live_context>" not in messages[0].content
+
+    last = messages[-1]
+    assert last.role == "user"
+    assert "<live_context>" in last.content
+    assert "</live_context>" in last.content
+    assert t.user_text in last.content
+
+
+@pytest.mark.asyncio
+async def test_tool_schemas_are_real_function_specs_matching_the_offered_names():
+    t = harness.turn(6)
+    assembled = await harness.assemble(t.user_text, t.at_et)
+    assert assembled.tool_schemas, "expected at least one tool to be selected for this turn"
+    names = [s.get("function", {}).get("name") for s in assembled.tool_schemas]
+    assert names == assembled.tools_offered
+    for schema in assembled.tool_schemas:
+        assert schema.get("type") == "function"
+        assert schema.get("function", {}).get("name")
+        assert "parameters" in schema.get("function", {})
+
+
+@pytest.mark.asyncio
+async def test_stable_prefix_does_not_vary_with_the_volatile_clock():
+    """The whole point of the prompt-cache split: replaying the same message
+    at two different frozen times, with the same tool set, must produce an
+    IDENTICAL stable system message — only the live-context envelope in the
+    last message may change."""
+    t = harness.turn(6)
+    first = await harness.assemble(t.user_text, t.at_et, session_id="cache-split-probe")
+    later = await harness.assemble(
+        t.user_text, t.at_et + __import__("datetime").timedelta(hours=1),
+        session_id="cache-split-probe",
+    )
+    assert first.stable_system_prompt == later.stable_system_prompt
+    assert first.all_messages[0].content == later.all_messages[0].content
+
+
 def test_brief_layers_come_from_the_fixture_not_the_live_filesystem():
     """data/briefs/<user>/layers/*.md is a live directory mounted into the
     container. A replay reading it would be reading today."""

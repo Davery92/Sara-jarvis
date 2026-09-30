@@ -1,0 +1,80 @@
+{
+  "name": "Conversation acceptance — 12 short conversations drawn from the original evidence",
+  "conversations": [
+    {
+      "label": "C01_ordinary_observation_case17",
+      "turns": [
+        "Are breakfast foods better at night?",
+        "Right? There's something about it."
+      ]
+    },
+    {
+      "label": "C02_joke_unseen",
+      "turns": [
+        "My neighbour is out there with a leaf blower. One leaf. I watched him.",
+        "He has been at it four minutes now."
+      ]
+    },
+    {
+      "label": "C03_vent_no_advice_case06",
+      "turns": [
+        "No advice, I just need to vent for a second. The whole afternoon went to a meeting that could have been two sentences in an email.",
+        "And then they asked me to write it up."
+      ]
+    },
+    {
+      "label": "C04_vulnerable_disclosure_case09",
+      "turns": [
+        "My dad has tests tomorrow. He's being casual about it.",
+        "I don't really know what to do with that."
+      ]
+    },
+    {
+      "label": "C05_good_news_case08",
+      "turns": [
+        "We won the bid. The one I thought we'd lose.",
+        "Yeah, I'm still a bit stunned."
+      ]
+    },
+    {
+      "label": "C06_quiet_companionship_case30",
+      "turns": ["tired", "yeah", "mm"]
+    },
+    {
+      "label": "C07_disagreement_case12",
+      "turns": [
+        "I'm going to pull an all-nighter and just get the whole thing done.",
+        "I've done it before, it's fine."
+      ]
+    },
+    {
+      "label": "C08_explicit_topic_shift_case39",
+      "turns": [
+        "The new office chair is somehow worse than the old one.",
+        "Anyway. Tell me about that bakery that opened on Third."
+      ]
+    },
+    {
+      "label": "C09_callback_case35",
+      "turns": [
+        "Remember Greg? The cactus? He has a flower.",
+        "One flower. Enormous. Looks embarrassed about it."
+      ]
+    },
+    {
+      "label": "C10_simple_question_case24",
+      "turns": ["If a shelf takes four brackets, how many for three shelves?"]
+    },
+    {
+      "label": "C11_mixed_practical_unseen",
+      "turns": [
+        "The garage is a disaster and I keep not dealing with it. Put 'clear the garage' on my list for Saturday, and then tell me something that isn't about the garage.",
+        "Better. Thanks."
+      ]
+    },
+    {
+      "label": "C12_ending_case27",
+      "turns": ["Thanks, I'm heading out."]
+    }
+  ]
+}

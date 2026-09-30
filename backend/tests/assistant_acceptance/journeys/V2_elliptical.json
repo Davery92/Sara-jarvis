@@ -1,0 +1,12 @@
+{
+  "name": "Re-verify the elliptical follow-up after the branch-unification fix",
+  "conversations": [
+    {
+      "label": "elliptical",
+      "turns": [
+        "Set a reminder to call the vet at 5pm on October 1st.",
+        "And one for the dentist on October 2nd at 9am."
+      ]
+    }
+  ]
+}

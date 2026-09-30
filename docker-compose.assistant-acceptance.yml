@@ -1,0 +1,381 @@
+##
+## Sara full assistant acceptance study — disposable stack.
+##
+## A SEPARATE Compose project from both production (docker-compose.yml /
+## docker-compose.dev.yml) and the other disposable stack used by the
+## closed conversation-quality patch (docker-compose.test.yml, project
+## `sara-disposable-test`). Deliberately does not reuse that project name or
+## its fixed `sara_test_net` network name, so the two disposable stacks can
+## run concurrently without collision (per plan: "Avoid the base file's
+## fixed network name colliding with another disposable run").
+##
+## Source under test is the frozen snapshot at
+## backend/tests/assistant_acceptance/artifacts/<run_id>/source_snapshot —
+## NOT the live ./backend working tree, which keeps changing across
+## sessions. Rebuild/repoint this file's volumes at a new run's snapshot
+## rather than editing the run_id in place.
+##
+## Usage:
+##   docker compose -f docker-compose.assistant-acceptance.yml \
+##     -p sara-acceptance-study up -d --wait test-db test-redis test-embeddings gateway
+##   docker compose -f docker-compose.assistant-acceptance.yml \
+##     -p sara-acceptance-study run --rm api alembic upgrade head
+##   docker compose -f docker-compose.assistant-acceptance.yml \
+##     -p sara-acceptance-study up -d api
+##   docker compose -f docker-compose.assistant-acceptance.yml \
+##     -p sara-acceptance-study --profile isolated-worker up -d worker
+##   docker compose -f docker-compose.assistant-acceptance.yml \
+##     -p sara-acceptance-study down -v --remove-orphans
+##
+## No `name:` here (unlike docker-compose.test.yml) — always invoke with
+## `-p sara-acceptance-study` explicitly so the project name, and therefore
+## every auto-namespaced network/volume, stays predictable and distinct from
+## the other disposable stack.
+
+services:
+  test-db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: sara_hub_acceptance_test
+      POSTGRES_USER: sara_acceptance
+      POSTGRES_PASSWORD: disposable_acceptance_only_pw
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sara_acceptance -d sara_hub_acceptance_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    networks: [internal_net]
+
+  test-redis:
+    image: redis:7-alpine
+    tmpfs:
+      - /data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    networks: [internal_net]
+
+  test-embeddings:
+    image: jarvis-embeddings:latest
+    environment:
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8100/health', timeout=5)\""]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+      start_period: 30s
+    networks: [internal_net]
+
+  # Sole egress path out of the internal network. See gateway/gateway.py for
+  # the enforced host/path allowlist, budget ledger and concurrency=1 lock.
+  gateway:
+    build: ./backend/tests/assistant_acceptance/gateway
+    environment:
+      UPSTREAM_HOST: "100.104.68.115"
+      UPSTREAM_PORT: "8082"
+      LISTEN_PORT: "8082"
+      BUDGET_CEILING: "1600"
+      LEDGER_PATH: "/ledger/gateway_ledger.jsonl"
+      REQUEST_TIMEOUT_S: "180"
+    volumes:
+      - ${ASSISTANT_ACCEPTANCE_ARTDIR:?set to backend/tests/assistant_acceptance/artifacts/<run_id> before use}:/ledger
+    networks: [internal_net, egress_net]
+
+  # Recording adapter simulating Expo's push relay. Internal-only — this
+  # simulates an EXTERNAL system, so it deliberately has no egress_net
+  # attachment; nothing it does needs to leave the isolated network.
+  push-sink:
+    build: ./backend/tests/assistant_acceptance/adapters/push_sink
+    environment:
+      LISTEN_PORT: "8090"
+      LEDGER_PATH: "/ledger/push_sink_ledger.jsonl"
+    volumes:
+      - ${ASSISTANT_ACCEPTANCE_ARTDIR:?set to backend/tests/assistant_acceptance/artifacts/<run_id> before use}:/ledger
+    networks: [internal_net]
+
+  # Recording adapter simulating Home Assistant's REST API. Internal-only.
+  ha-sink:
+    build: ./backend/tests/assistant_acceptance/adapters/ha_sink
+    environment:
+      LISTEN_PORT: "8123"
+      LEDGER_PATH: "/ledger/ha_sink_ledger.jsonl"
+    volumes:
+      - ${ASSISTANT_ACCEPTANCE_ARTDIR:?set to backend/tests/assistant_acceptance/artifacts/<run_id> before use}:/ledger
+    networks: [internal_net]
+
+  # Controlled recording adapter simulating FatSecret's OAuth token + REST API.
+  fatsecret-sink:
+    build: ./backend/tests/assistant_acceptance/adapters/fatsecret_sink
+    environment:
+      LISTEN_PORT: "8095"
+      LEDGER_PATH: "/ledger/fatsecret_sink_ledger.jsonl"
+    volumes:
+      - ${ASSISTANT_ACCEPTANCE_ARTDIR:?set to backend/tests/assistant_acceptance/artifacts/<run_id> before use}:/ledger
+    networks: [internal_net]
+
+  # Controlled recording adapter simulating a SearXNG JSON search API.
+  searx-sink:
+    build: ./backend/tests/assistant_acceptance/adapters/searx_sink
+    environment:
+      LISTEN_PORT: "8096"
+      LEDGER_PATH: "/ledger/searx_sink_ledger.jsonl"
+    volumes:
+      - ${ASSISTANT_ACCEPTANCE_ARTDIR:?set to backend/tests/assistant_acceptance/artifacts/<run_id> before use}:/ledger
+    networks: [internal_net]
+
+  # Controlled recording adapter simulating Microsoft Graph's OAuth token +
+  # mail-read subset. No send/draft endpoint: no send/draft tool exists in
+  # this codebase to call one (verified by source search), so this adapter
+  # does not fabricate that capability either.
+  msgraph-sink:
+    build: ./backend/tests/assistant_acceptance/adapters/msgraph_sink
+    environment:
+      LISTEN_PORT: "8097"
+      LEDGER_PATH: "/ledger/msgraph_sink_ledger.jsonl"
+      FIXTURE_MAILBOX: "david.test.unknown_run@acceptance.invalid"
+      RUN_ID: "${RUN_ID:-run}"
+    volumes:
+      - ${ASSISTANT_ACCEPTANCE_ARTDIR:?set to backend/tests/assistant_acceptance/artifacts/<run_id> before use}:/ledger
+    networks: [internal_net]
+
+  # Real disposable object store (the actual open-source MinIO, not a
+  # recording stub — this is what F03/F04 document/artifact cases need to be
+  # genuine) — tmpfs-backed, own throwaway credentials, internal-only.
+  test-minio:
+    image: quay.io/minio/minio:latest
+    command: ["server", "/data"]
+    environment:
+      MINIO_ROOT_USER: acceptance_study_minio
+      MINIO_ROOT_PASSWORD: disposable_minio_only_pw
+    tmpfs:
+      - /data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    networks: [internal_net]
+
+  api:
+    image: jarvis-backend:latest
+    working_dir: /app
+    volumes:
+      - ${ASSISTANT_ACCEPTANCE_SNAPSHOT:?set snapshot dir}:/app
+      - ./docs:/docs:ro
+    environment:
+      SARA_TEST_ENV: disposable
+      DATABASE_URL: postgresql+psycopg://sara_acceptance:disposable_acceptance_only_pw@test-db:5432/sara_hub_acceptance_test
+      REDIS_URL: redis://test-redis:6379/0
+      EMBEDDING_BASE_URL: http://test-embeddings:8100
+      # The gateway IS the model endpoint as far as this container is
+      # concerned — it cannot reach the real host directly, only through
+      # the gateway, which is the point of the internal/egress network
+      # split below.
+      OPENAI_BASE_URL: http://gateway:8082/v1
+      ACCEPTANCE_STUDY_QWEN_CATALOG_BASE_URL: http://gateway:8082/v1
+      ACCEPTANCE_STUDY_EXPO_PUSH_URL: http://push-sink:8090/--/api/v2/push/send
+      MINIO_URL: http://test-minio:9000
+      MINIO_ACCESS_KEY: acceptance_study_minio
+      MINIO_SECRET_KEY: disposable_minio_only_pw
+      HA_HOST: ha-sink
+      HA_PORT: "8123"
+      HA_TOKEN: acceptance-study-fixture-token
+      ACCEPTANCE_STUDY_FATSECRET_TOKEN_URL: http://fatsecret-sink:8095/connect/token
+      ACCEPTANCE_STUDY_FATSECRET_API_BASE_URL: http://fatsecret-sink:8095/rest
+      FATSECRET_CLIENT_ID: acceptance-study-fixture-id
+      FATSECRET_CLIENT_SECRET: acceptance-study-fixture-secret
+      SEARCH_PROVIDER: searxng
+      SEARXNG_BASE_URL: http://searx-sink:8096
+      ACCEPTANCE_STUDY_GRAPH_TOKEN_URL: http://msgraph-sink:8097/{tenant_id}/oauth2/v2.0/token
+      ACCEPTANCE_STUDY_GRAPH_BASE_URL: http://msgraph-sink:8097
+      MSGRAPH_CLIENT_ID: acceptance-study-fixture-client
+      MSGRAPH_CLIENT_SECRET: acceptance-study-fixture-secret
+      MSGRAPH_TENANT_ID: acceptance-study-fixture-tenant
+      MSGRAPH_MAILBOXES: '["david.test.unknown_run@acceptance.invalid"]'
+      # Resumed session (2026-09-25) addition: get_owner_id() (app/core/config.py)
+      # hardcodes a solo-owner production UUID used by ~88 files including
+      # email_sync -- without this override, any owner-scoped background task
+      # (e.g. email sync) fails closed with a foreign-key violation against
+      # this disposable DB (the hardcoded ID doesn't exist here), rather than
+      # operating on the disposable david_test fixture user. Set to david_test's
+      # real fixture user_id so owner-scoped subsystems can be exercised.
+      ACS_OWNER_USER_ID: "317b39b4-e888-4a31-b8aa-cbf514e23aa8"
+      OPENAI_MODEL: qwen3.8-27b
+      AI_PROVIDER: openai
+      OPENAI_API_KEY: ""
+      # Verified by direct log inspection (2026-09-24, this run): these four
+      # settings fields default to REAL live hosts (100.104.68.115:8081, the
+      # production bg lane) completely independent of OPENAI_BASE_URL — an
+      # app.core.llm.LLMFailoverClient/BackgroundLLMClient instance reads
+      # them directly. Network isolation already blocks the connection
+      # either way (verified: OSError "Network is unreachable"), but routing
+      # them through the same gateway instead of leaving them to fail closed
+      # is what the plan requires ("single generation concurrency across
+      # foreground and background paths") — same ledger, same concurrency=1
+      # lock, same budget, instead of a silently-broken background lane.
+      LLM_PRIMARY_URL: http://gateway:8082/v1
+      LLM_FALLBACK_URL: http://gateway:8082/v1
+      LLM_FALLBACK_MODEL: qwen3.8-27b
+      BG_LLM_PRIMARY_URL: http://gateway:8082/v1
+      BG_LLM_PRIMARY_MODEL: qwen3.8-27b
+      RESEARCH_LLM_URL: http://gateway:8082/v1
+      # Deliberately NOT set/gatewayed — these default to a SECOND real host
+      # (10.185.1.8:8686, the GPU box "her" running Qwen3.5-35B-A3B) that is
+      # not "the already available model endpoint" the plan authorizes.
+      # Left to fail closed (network-isolated, confirmed unreachable) so any
+      # case that would depend on it surfaces as `blocked`, never a silent
+      # wrong-model substitution: BG_LLM_FALLBACK_URL, REFLEX_MODEL_URL,
+      # GPU_HOST_LLM_URL. Same treatment for SEARXNG_BASE_URL (real web
+      # search, needs a recording adapter before any K-category case can run)
+      # and MINIO_URL (no disposable object store stood up yet — needed
+      # before F03/F04 document/artifact cases).
+      WORLD_EVENTS_ENABLED: "0"
+      PYTHONDONTWRITEBYTECODE: "1"
+    depends_on:
+      test-db:
+        condition: service_healthy
+      test-redis:
+        condition: service_healthy
+      test-embeddings:
+        condition: service_healthy
+      gateway:
+        condition: service_started
+    # No `ports:` — verified empirically that `internal: true` blocks published
+    # ports too (DNAT never landed; `docker port`/host curl both came back
+    # empty), not just outbound egress. Matches docker-compose.test.yml's own
+    # convention. L1/L2 access to this service goes through the `shell`
+    # container on the same internal_net (container-DNS `api:8000`), not a
+    # host-published port. Real browser-based L3 access will need Chromium
+    # run *inside* internal_net (as production's own Playwright screenshot
+    # tooling already does) rather than a host port, to avoid opening a
+    # second, ungated egress path off this container.
+    command: ["uvicorn", "app.main_simple:app", "--host", "0.0.0.0", "--port", "8000"]
+    networks: [internal_net]
+
+  # Same image/env pattern as api, idle by default — for ad-hoc pytest runs
+  # (L1) and one-shot commands (e.g. `alembic upgrade head`) against this
+  # project's disposable DB, distinct from docker-compose.test.yml's own
+  # backend-test service/project.
+  shell:
+    image: jarvis-backend:latest
+    working_dir: /app
+    volumes:
+      - ${ASSISTANT_ACCEPTANCE_SNAPSHOT:?set snapshot dir}:/app
+      - ./docs:/docs:ro
+    environment:
+      SARA_TEST_ENV: disposable
+      DATABASE_URL: postgresql+psycopg://sara_acceptance:disposable_acceptance_only_pw@test-db:5432/sara_hub_acceptance_test
+      REDIS_URL: redis://test-redis:6379/0
+      EMBEDDING_BASE_URL: http://test-embeddings:8100
+      OPENAI_BASE_URL: http://gateway:8082/v1
+      ACCEPTANCE_STUDY_QWEN_CATALOG_BASE_URL: http://gateway:8082/v1
+      ACCEPTANCE_STUDY_EXPO_PUSH_URL: http://push-sink:8090/--/api/v2/push/send
+      MINIO_URL: http://test-minio:9000
+      MINIO_ACCESS_KEY: acceptance_study_minio
+      MINIO_SECRET_KEY: disposable_minio_only_pw
+      HA_HOST: ha-sink
+      HA_PORT: "8123"
+      HA_TOKEN: acceptance-study-fixture-token
+      ACCEPTANCE_STUDY_FATSECRET_TOKEN_URL: http://fatsecret-sink:8095/connect/token
+      ACCEPTANCE_STUDY_FATSECRET_API_BASE_URL: http://fatsecret-sink:8095/rest
+      FATSECRET_CLIENT_ID: acceptance-study-fixture-id
+      FATSECRET_CLIENT_SECRET: acceptance-study-fixture-secret
+      SEARCH_PROVIDER: searxng
+      SEARXNG_BASE_URL: http://searx-sink:8096
+      ACCEPTANCE_STUDY_GRAPH_TOKEN_URL: http://msgraph-sink:8097/{tenant_id}/oauth2/v2.0/token
+      ACCEPTANCE_STUDY_GRAPH_BASE_URL: http://msgraph-sink:8097
+      MSGRAPH_CLIENT_ID: acceptance-study-fixture-client
+      MSGRAPH_CLIENT_SECRET: acceptance-study-fixture-secret
+      MSGRAPH_TENANT_ID: acceptance-study-fixture-tenant
+      MSGRAPH_MAILBOXES: '["david.test.unknown_run@acceptance.invalid"]'
+      OPENAI_MODEL: qwen3.8-27b
+      AI_PROVIDER: openai
+      OPENAI_API_KEY: ""
+      LLM_PRIMARY_URL: http://gateway:8082/v1
+      LLM_FALLBACK_URL: http://gateway:8082/v1
+      LLM_FALLBACK_MODEL: qwen3.8-27b
+      BG_LLM_PRIMARY_URL: http://gateway:8082/v1
+      BG_LLM_PRIMARY_MODEL: qwen3.8-27b
+      RESEARCH_LLM_URL: http://gateway:8082/v1
+      WORLD_EVENTS_ENABLED: "0"
+      PYTHONDONTWRITEBYTECODE: "1"
+    depends_on:
+      test-db:
+        condition: service_healthy
+      test-redis:
+        condition: service_healthy
+      test-embeddings:
+        condition: service_healthy
+    command: ["sleep", "infinity"]
+    networks: [internal_net]
+
+  # Opt-in (`--profile isolated-worker`) real Celery worker, for journeys
+  # that specifically need background dispatch (N01-N05, O01-O05, P01-P03,
+  # etc). Not started by default — matches docker-compose.test.yml's own
+  # celery-test-worker convention.
+  worker:
+    image: jarvis-backend:latest
+    working_dir: /app
+    profiles: ["isolated-worker"]
+    volumes:
+      - ${ASSISTANT_ACCEPTANCE_SNAPSHOT:?set snapshot dir}:/app
+    environment:
+      SARA_TEST_ENV: disposable
+      DATABASE_URL: postgresql+psycopg://sara_acceptance:disposable_acceptance_only_pw@test-db:5432/sara_hub_acceptance_test
+      REDIS_URL: redis://test-redis:6379/0
+      EMBEDDING_BASE_URL: http://test-embeddings:8100
+      OPENAI_BASE_URL: http://gateway:8082/v1
+      ACCEPTANCE_STUDY_QWEN_CATALOG_BASE_URL: http://gateway:8082/v1
+      ACCEPTANCE_STUDY_EXPO_PUSH_URL: http://push-sink:8090/--/api/v2/push/send
+      MINIO_URL: http://test-minio:9000
+      MINIO_ACCESS_KEY: acceptance_study_minio
+      MINIO_SECRET_KEY: disposable_minio_only_pw
+      HA_HOST: ha-sink
+      HA_PORT: "8123"
+      HA_TOKEN: acceptance-study-fixture-token
+      ACCEPTANCE_STUDY_FATSECRET_TOKEN_URL: http://fatsecret-sink:8095/connect/token
+      ACCEPTANCE_STUDY_FATSECRET_API_BASE_URL: http://fatsecret-sink:8095/rest
+      FATSECRET_CLIENT_ID: acceptance-study-fixture-id
+      FATSECRET_CLIENT_SECRET: acceptance-study-fixture-secret
+      SEARCH_PROVIDER: searxng
+      SEARXNG_BASE_URL: http://searx-sink:8096
+      ACCEPTANCE_STUDY_GRAPH_TOKEN_URL: http://msgraph-sink:8097/{tenant_id}/oauth2/v2.0/token
+      ACCEPTANCE_STUDY_GRAPH_BASE_URL: http://msgraph-sink:8097
+      MSGRAPH_CLIENT_ID: acceptance-study-fixture-client
+      MSGRAPH_CLIENT_SECRET: acceptance-study-fixture-secret
+      MSGRAPH_TENANT_ID: acceptance-study-fixture-tenant
+      MSGRAPH_MAILBOXES: '["david.test.unknown_run@acceptance.invalid"]'
+      ACS_OWNER_USER_ID: "317b39b4-e888-4a31-b8aa-cbf514e23aa8"
+      OPENAI_MODEL: qwen3.8-27b
+      AI_PROVIDER: openai
+      OPENAI_API_KEY: ""
+      LLM_PRIMARY_URL: http://gateway:8082/v1
+      LLM_FALLBACK_URL: http://gateway:8082/v1
+      LLM_FALLBACK_MODEL: qwen3.8-27b
+      BG_LLM_PRIMARY_URL: http://gateway:8082/v1
+      BG_LLM_PRIMARY_MODEL: qwen3.8-27b
+      RESEARCH_LLM_URL: http://gateway:8082/v1
+      WORLD_EVENTS_ENABLED: "1"
+    depends_on:
+      test-db:
+        condition: service_healthy
+      test-redis:
+        condition: service_healthy
+      gateway:
+        condition: service_started
+    command: ["celery", "-A", "app.celery_app", "worker", "--loglevel=info", "--concurrency=1"]
+    networks: [internal_net]
+
+networks:
+  internal_net:
+    internal: true
+  egress_net: {}

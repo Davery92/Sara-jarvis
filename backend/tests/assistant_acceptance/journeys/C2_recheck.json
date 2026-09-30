@@ -1,0 +1,21 @@
+{
+  "name": "Re-verify the four conversations the grounding artifact contaminated",
+  "conversations": [
+    {
+      "label": "C02_joke_recheck",
+      "turns": ["My neighbour is out there with a leaf blower. One leaf. I watched him."]
+    },
+    {
+      "label": "C03_vent_recheck",
+      "turns": ["No advice, I just need to vent for a second. The whole afternoon went to a meeting that could have been two sentences in an email."]
+    },
+    {
+      "label": "C04_disclosure_recheck",
+      "turns": ["My dad has tests tomorrow. He's being casual about it."]
+    },
+    {
+      "label": "C09_callback_recheck",
+      "turns": ["One flower. Enormous. Looks embarrassed about it."]
+    }
+  ]
+}

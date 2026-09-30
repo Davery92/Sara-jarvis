@@ -1,0 +1,14 @@
+{
+  "name": "J5 background/documents: start -> inspect progress -> retrieve result -> challenge provenance -> honest failure",
+  "conversations": [
+    {
+      "label": "background",
+      "turns": [
+        "Look into how vector databases handle deletions and write up what you find - run it in the background, I don't need it now.",
+        "How's that going?",
+        "Where did that come from?",
+        "Search my documents for the lease agreement."
+      ]
+    }
+  ]
+}

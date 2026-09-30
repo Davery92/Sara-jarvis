@@ -1,0 +1,16 @@
+{
+  "name": "Targeted re-verification of the five defects the development pass found",
+  "conversations": [
+    {
+      "label": "fixes",
+      "turns": [
+        "Set a reminder to call the vet at 5pm on October 1st.",
+        "And one for the dentist on October 2nd at 9am.",
+        "Put 1 gallon of milk and rye bread on my grocery list.",
+        "Make that two gallons of milk, not one.",
+        "Got the bread.",
+        "Cancel the plant one."
+      ]
+    }
+  ]
+}

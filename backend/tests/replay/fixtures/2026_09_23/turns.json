@@ -1,0 +1,29 @@
+[
+ {
+  "index": 0,
+  "conversation_id": "d30a68bf-0973-48c9-810f-3d80508a435c",
+  "at": "2026-09-22T23:29:35.992598",
+  "user_episode_id": "06b6c49d-b255-4020-aea2-17e9d299b4c0",
+  "assistant_episode_id": "a3e39a3b-3e57-4172-8f3f-b6c941a3a448",
+  "user_text": "Good evening",
+  "observed_assistant_text": "Good evening. You're home and the workout's in the books \u2014 sounds like a solid day so far. What's on your mind?"
+ },
+ {
+  "index": 1,
+  "conversation_id": "d30a68bf-0973-48c9-810f-3d80508a435c",
+  "at": "2026-09-22T23:37:43.263414",
+  "user_episode_id": "b391af4d-1ddd-4fb1-bcae-0c484ece1bf8",
+  "assistant_episode_id": "ceba629c-22f1-47ea-842e-476865eebc2b",
+  "user_text": "Just relaxing lol I\u2019m tired",
+  "observed_assistant_text": "Tired + HRV 32 this morning (6 AM) actually lines up \u2014 your body was telling you today was a bank-it day. So relaxing now isn't laziness, it's the plan.\n\nNothing urgent sitting on your desk that needs tonight either. Enjoy it."
+ },
+ {
+  "index": 2,
+  "conversation_id": "27ba7e0b-42b0-4630-88b4-02e8d6d8d3d2",
+  "at": "2026-09-23T11:12:30.14246",
+  "user_episode_id": "28e62cd0-8f00-4da5-a370-efa5c6290e65",
+  "assistant_episode_id": "1cdd74d1-3a91-4176-a4f5-cbb51b8c64a4",
+  "user_text": "i had to take my dad to the er last night at 10 and got home at 2. im so tired",
+  "observed_assistant_text": "That's a long night, and a heavy one to boot. I'm sorry \u2014 I hope your dad's okay.\n\nYou're up at 7 after getting in at 2, so do what you can with that. I'm here if you want the boring stuff (email, the SSL cert that needs DNS validation, that ACORD pricing follow-up) to just sit for today \u2014 or if you'd rather run one of them now because it's actually urgent."
+ }
+]

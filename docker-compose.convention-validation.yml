@@ -1,0 +1,37 @@
+##
+## Convention-readiness live validation, 2026-09-27.
+##
+## Overlay on docker-compose.assistant-acceptance.yml. Two jobs:
+##   1. Hold the upstream model budget for THIS task to 60 requests, enforced
+##      by the gateway itself (atomic reservation against an append-only
+##      ledger, before every outbound attempt — not by convention).
+##   2. Point the api at the candidate snapshot at /home/david/sara-candidate-
+##      20260927/backend rather than the live working tree, so nothing the
+##      container writes can land in the repo.
+##
+## Usage:
+##   export ASSISTANT_ACCEPTANCE_ARTDIR=$PWD/backend/tests/assistant_acceptance/artifacts/run_20260927_convention
+##   export ASSISTANT_ACCEPTANCE_SNAPSHOT=/home/david/sara-candidate-20260927/backend
+##   docker compose -f docker-compose.assistant-acceptance.yml \
+##                  -f docker-compose.convention-validation.yml \
+##                  -p sara-convention-validation up -d --wait test-db test-redis test-embeddings gateway
+##
+## Teardown: same flags, `down -v --remove-orphans`. Every volume is tmpfs;
+## nothing durable exists to lose.
+##
+services:
+  gateway:
+    environment:
+      BUDGET_CEILING: "60"
+      LEDGER_PATH: "/ledger/convention_gateway_ledger.jsonl"
+
+  api:
+    environment:
+      # The model catalog in app_state hardcodes the chat lane's base_url, so
+      # OPENAI_BASE_URL alone does NOT redirect it — which is how this stack
+      # silently reached the real model host on its first run (gateway ledger:
+      # zero reservations). The snapshot carries a one-line env-gated shim for
+      # that field; this points it at the gateway. VALIDATION ONLY — the shim
+      # is not part of the deployable candidate.
+      LOCAL_CHAT_BASE_URL: http://gateway:8082/v1
+      EMBEDDING_BASE_URL: http://test-embeddings:8100

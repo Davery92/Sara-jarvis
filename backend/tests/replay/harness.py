@@ -11,6 +11,13 @@ What a replay does:
   half of these failures are about what "today" and "now" meant;
 * runs the actual context assembly the chat endpoint runs, and hands back
   the assembled text plus a per-section size account;
+* builds the REAL final outgoing payload through
+  `app.services.chat_assembly.assemble_local_provider_messages` — the same
+  pure function the local chat lane calls in production, not a harness
+  reimplementation of the prompt-cache-split shape (harness/thinking/
+  personality plan, Phase 0: this used to hand-concatenate one system-message
+  string and call `get_system_prompt`, the pre-"harness rebuild Phase 5"
+  persona builder production text chat has not used since 2026-09-11);
 * records every write anyone attempts — SQL DML and tool calls alike —
   instead of performing it.
 
@@ -18,10 +25,13 @@ What it is NOT: the whole `chat_stream` endpoint. That function is ~1,100
 lines of inline assembly with an HTTP request, an auth dependency and a
 streaming generator wrapped around it, and there is no seam to call it
 through yet. The harness reassembles the same blocks in the same order
-through the same functions (see `assemble`), and `SECTION_GAPS` records
-exactly which of the endpoint's later blocks are not covered, so the gap
-is written down rather than assumed away. Closing it is Phase 2 work —
-that phase has to extract a single assembly function anyway.
+through the same functions (see `assemble`), ending in the same final
+payload-boundary function `chat_stream` itself calls, and `SECTION_GAPS`
+records exactly which of the endpoint's other inputs are not covered, so the
+gap is written down rather than assumed away. Closing the remaining gap
+(calling `chat_stream` itself, end to end) is separate work — that requires
+extracting a single assembly function from the ~1,100-line handler, which
+this change does not attempt.
 """
 from __future__ import annotations
 
@@ -36,7 +46,12 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
-FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "2026_09_09"
+# SARA_REPLAY_FIXTURE picks which captured fixture to replay against — the
+# original Sept 9/10 conversations, or a later one (e.g. "2026_09_16", the
+# MTP repair plan's morning conversation). Defaults to the original so every
+# existing invocation is unchanged.
+FIXTURE_NAME = os.getenv("SARA_REPLAY_FIXTURE", "2026_09_09")
+FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / FIXTURE_NAME
 REPLAY_DB_NAME = "sara_replay"
 REPLAY_USER_ID = "64f37c56-85cb-4590-8de9-adfc17d343ed"
 
@@ -53,6 +68,12 @@ SECTION_GAPS = (
     "re-entry / last-conversation digest",
     "repeat-question flag",
     "unacked-notification slice",
+    "multi-turn conversation_history — every replay is a single isolated "
+    "turn (empty conversation_history, one user message); a real multi-round "
+    "thread's prior turns, and their effect on dialogue_state/token budget, "
+    "are not modeled",
+    "non-local provider path (assemble_non_local_provider_messages) — this "
+    "harness only exercises the local (MTPLX) chat lane's assembly function",
 )
 
 
@@ -538,7 +559,18 @@ class Assembled:
     seconds: float
     recall_traces: list[dict] = field(default_factory=list)
     tools_offered: list[str] = field(default_factory=list)
+    tool_schemas: list[dict] = field(default_factory=list)
     model: str = ""
+    # The actual outgoing payload, built by the SAME function
+    # (`app.services.chat_assembly.assemble_local_provider_messages`) the
+    # local-provider chat lane calls in production — not a harness
+    # reimplementation of it. See `assemble()`.
+    all_messages: list = field(default_factory=list)
+    stable_system_prompt: str = ""
+    stable_system_prompt_sha256: str = ""
+    # Personal-conversation remediation plan, step 2.
+    conversation_mode: str = ""
+    suppress_ambient: bool = False
 
     @property
     def sizes(self) -> dict[str, int]:
@@ -564,15 +596,33 @@ async def assemble(
     at: datetime,
     *,
     user_id: str = REPLAY_USER_ID,
+    session_id: Optional[str] = None,
     include_world_brief: bool = True,
     rewind: bool = True,
 ) -> Assembled:
-    """Reassemble a turn's context through the real functions.
+    """Reassemble a turn's context through the real functions, ending in the
+    REAL outgoing payload — not a harness reimplementation of it.
 
-    Mirrors chat_stream's order: stable system prompt, the singular-context
-    block (snapshot + intent graph + extended signals + recall), the world
-    brief, then the per-turn slices (life facts, directives, scratchpad,
-    interoception, recency floor). `SECTION_GAPS` lists what is left out.
+    Harness-plan Phase 0 correction: this used to build the persona half with
+    `get_system_prompt`, the ~14,000-char pre-"harness rebuild Phase 5"
+    function, and then hand-concatenate every section into one system-message
+    string. Production's local chat lane has not built its payload that way
+    since Phase 5 (persona) and the living-world-context plan (final
+    payload): it calls `build_chat_system_prompt` for a cache-stable persona
+    prefix, and `app.services.chat_assembly.assemble_local_provider_messages`
+    — a pure, independently-tested function — for the actual
+    `[stable system][live-context-wrapped last user turn]` message list. This
+    now calls both of those, so a replay's payload is the same shape a real
+    turn's payload is, not merely a same-length approximation of it.
+
+    Mirrors chat_stream's build order: tool selection, stable persona prompt
+    (now tool-name-aware, matching production), the singular-context block
+    (snapshot + intent graph + extended signals + recall), the world brief,
+    the per-turn slices (life facts, directives, scratchpad, interoception,
+    recency floor), world_state_core, and a dialogue-state block built from
+    this turn's own message (no multi-turn history is modeled by this
+    fixture format — see the module docstring and `SECTION_GAPS`, which
+    lists what chat_stream appends that this function still does not).
     """
     replay_database_url()
 
@@ -591,23 +641,65 @@ async def assemble(
     with frozen_clock(at) as now_et:
         db = SessionLocal()
         try:
+            import hashlib as _hashlib
+
             from app.main_simple import (
-                ASSISTANT_NAME, get_system_prompt, load_soul_for_prompt,
-                format_prompt_datetime_line,
+                ASSISTANT_NAME, load_soul_for_prompt, format_prompt_datetime_line,
+                LIVE_CONTEXT_CHAR_BUDGET,
             )
+            from app.prompts.chat_system_prompt import build_chat_system_prompt
+            from app.services.tool_retrieval import tool_names as _names_of_tools
             from app.services.context_snapshot import (
                 get_context_snapshot_cached, get_extended_signals,
                 render_engaged_context, should_skip_recall,
             )
             from app.services.memory_recall import recall as memory_recall, ALL_KINDS
             from app.services.intent_graph_projection import get_intent_graph
-
-            sections["system_prompt"] = get_system_prompt(
-                ASSISTANT_NAME, "david@avery.cloud",
-                user_now=now_et, soul_content=load_soul_for_prompt(db),
-                include_datetime=False,
+            from app.services.world_state.chat_facts import render_world_state_core
+            from app.services.dialogue_state import build_dialogue_state, render_dialogue_state_block
+            from app.services.chat_assembly import assemble_local_provider_messages, WORLD_BRIEF_MARKER
+            from app.schemas.chat import ChatMessage
+            from app.services.context_router import (
+                classify_conversation_mode, AMBIENT_SUPPRESS_MODES, has_active_urgent_alert,
             )
-            sections["datetime_line"] = format_prompt_datetime_line(now_et)
+
+            # Personal-conversation remediation plan (2026-09-23), step 2 —
+            # mirrors chat_stream's own conversation_mode gate so a replay
+            # shows the same suppressed/unsuppressed payload production
+            # would build, not the pre-fix unconditional one.
+            conversation_mode = classify_conversation_mode(message)
+            suppress_ambient = conversation_mode in AMBIENT_SUPPRESS_MODES
+            if suppress_ambient and has_active_urgent_alert(db, user_id):
+                suppress_ambient = False
+            sections["conversation_mode"] = (
+                f"[replay: conversation_mode={conversation_mode}, "
+                f"suppress_ambient={suppress_ambient}]"
+            )
+
+            # `select_tools` classifies via `get_tool_intent_classifier()`, a
+            # module-level singleton that remembers "sticky" categories per
+            # session_id across calls (by design — a real conversation's
+            # tool selection should drift, not reset every turn). Each
+            # fixture Turn is an INDEPENDENT moment, not a continuation of
+            # the previous Turn replayed in the same test run, so reusing
+            # one constant session_id across `assemble()` calls (as an
+            # earlier version of this function did implicitly, by never
+            # calling select_tools at all before persona-prompt time) would
+            # leak one turn's classified categories into the next one's tool
+            # list and, downstream, into `build_chat_system_prompt`'s tool
+            # names. Deriving a per-(message, at) id keeps a given turn
+            # reproducible across repeated calls while never sharing state
+            # with a different turn — verified via the sticky-category
+            # regression this caused before the derivation was added.
+            _session_id = session_id or f"replay-{_hashlib.sha1((message + at.isoformat()).encode()).hexdigest()[:16]}"
+            tools = select_tools(message, _session_id)
+            soul_content = load_soul_for_prompt(db)
+            stable_system_prompt = build_chat_system_prompt(
+                ASSISTANT_NAME, soul_content, _names_of_tools(tools),
+            )
+            sections["system_prompt"] = stable_system_prompt
+            datetime_line = format_prompt_datetime_line(now_et)
+            sections["datetime_line"] = datetime_line
 
             snapshot = await get_context_snapshot_cached(db, user_id)
             open_intents = get_intent_graph(db, user_id)["total"]
@@ -623,22 +715,77 @@ async def assemble(
 
             sections["engaged_context"] = render_engaged_context(
                 snapshot, open_intents, traces, extended=extended,
+                conversation_mode=conversation_mode if suppress_ambient else None,
             )
 
-            if include_world_brief:
+            world_brief = ""
+            if include_world_brief and not suppress_ambient:
                 try:
                     from app.services.world_brief import get_rendered_brief
                     factory = get_async_session_factory()
                     async with factory() as adb:
-                        sections["world_brief"] = await get_rendered_brief(adb, user_id) or ""
+                        world_brief = await get_rendered_brief(adb, user_id) or ""
                 except Exception as e:  # a missing brief is data, not a crash
+                    world_brief = ""
                     sections["world_brief"] = f"[replay: world brief unavailable — {e}]"
+            sections.setdefault("world_brief", world_brief)
 
             for name, loader in _PER_TURN_SLICES.items():
                 try:
                     sections[name] = await loader(db, user_id) or ""
                 except Exception as e:
                     sections[name] = f"[replay: {name} unavailable — {e}]"
+
+            try:
+                world_state_core = render_world_state_core(
+                    db, user_id,
+                    conversation_mode=conversation_mode if suppress_ambient else None,
+                )
+            except Exception as e:
+                world_state_core = ""
+                sections["world_state_core"] = f"[replay: world_state_core unavailable — {e}]"
+            else:
+                sections["world_state_core"] = world_state_core
+
+            # No multi-turn history is modeled by this fixture format (see
+            # the module docstring): dialogue_state is built from just this
+            # turn's own message, same as it would be for the first turn of
+            # a real conversation.
+            dialogue_messages = [{"role": "user", "content": message}]
+            dialogue_state = build_dialogue_state(dialogue_messages)
+            dialogue_block = render_dialogue_state_block(dialogue_state)
+            sections["dialogue_block"] = dialogue_block
+
+            # Build `full_sys` the way chat_stream does: stable prompt, then
+            # engaged context, then the world brief under its production
+            # marker, then the remaining per-turn slices. The exact byte
+            # order of the appended-after-persona sections does not change
+            # the final payload — `assemble_local_provider_messages` locates
+            # `stable_system_prompt` and the WORLD_BRIEF_MARKER-prefixed
+            # brief as substrings and reallocates everything else through
+            # `allocate_live_context_sections` regardless of where it sat.
+            full_sys = stable_system_prompt + "\n\n" + sections["engaged_context"]
+            if world_brief:
+                full_sys += WORLD_BRIEF_MARKER + world_brief
+            for name in ("life_facts", "directives", "scratchpad", "interoception", "recency_floor"):
+                body = sections.get(name) or ""
+                if body:
+                    full_sys += "\n\n" + body
+
+            conversation_history: list[ChatMessage] = []
+            merged_request_messages = [ChatMessage(role="user", content=message)]
+
+            result = assemble_local_provider_messages(
+                full_sys=full_sys,
+                stable_system_prompt=stable_system_prompt,
+                conversation_history=conversation_history,
+                merged_request_messages=merged_request_messages,
+                dialogue_block=dialogue_block,
+                world_state_core=world_state_core,
+                world_brief=world_brief,
+                datetime_line=datetime_line,
+                live_context_char_budget=LIVE_CONTEXT_CHAR_BUDGET,
+            )
         finally:
             db.close()
 
@@ -646,6 +793,13 @@ async def assemble(
     return Assembled(
         text=text, sections=sections, seconds=time.monotonic() - started,
         recall_traces=traces,
+        tools_offered=[t.get("function", {}).get("name") for t in tools],
+        tool_schemas=tools,
+        all_messages=result["all_messages"],
+        stable_system_prompt=stable_system_prompt,
+        stable_system_prompt_sha256=_hashlib.sha256(stable_system_prompt.encode()).hexdigest(),
+        conversation_mode=conversation_mode,
+        suppress_ambient=suppress_ambient,
     )
 
 
@@ -715,8 +869,7 @@ async def respond(
     it say so and repeat themselves.
     """
     replay_database_url()
-    assembled = await assemble(message, at, user_id=user_id)
-    tools = select_tools(message, conversation_id or "replay")
+    assembled = await assemble(message, at, user_id=user_id, session_id=conversation_id or "replay")
 
     started = time.monotonic()
     with frozen_clock(at):
@@ -724,19 +877,18 @@ async def respond(
             with intercepted_tools(canned_tools) as tool_log:
                 from app.main_simple import SimpleLLMClient
                 client = SimpleLLMClient()
-                messages = [
-                    {"role": "system", "content": assembled.text},
-                    {"role": "user", "content": message},
-                ]
+                # The exact payload `assemble()` built via
+                # `assemble_local_provider_messages` — same function, same
+                # shape production sends on the local chat lane.
+                messages = assembled.all_messages
                 # ephemeral=False on purpose: the episode/memory writes a real
                 # turn performs are part of what a replay is meant to show,
                 # and they land in the disposable replay database where the
                 # ledger can count them.
                 text = await client.chat_with_tools(
-                    messages, tools, user_id,
+                    messages, assembled.tool_schemas, user_id,
                     conversation_id=conversation_id, model=model, ephemeral=False,
                 )
-    assembled.tools_offered = [t.get("function", {}).get("name") for t in tools]
     return Response(text=text or "", assembled=assembled, tools=tool_log,
                     writes=writes, seconds=time.monotonic() - started)
 

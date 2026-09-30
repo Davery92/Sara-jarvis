@@ -104,3 +104,14 @@ backend/VERSION
 
 # DB backups — contain real personal data, never belong in git history
 backend/backups/
+
+# Acceptance/eval RUN EVIDENCE — per-run transcripts plus full frozen source
+# snapshots (50M+ and growing, one copy of the tree per run). It is recorded
+# evidence for a study that already happened, not source: pytest.ini already
+# refuses to collect it (norecursedirs), and committing it would put another
+# copy of main_simple.py in history for every run. Kept on disk, out of git.
+backend/tests/assistant_acceptance/artifacts/
+backend/tests/conversation_eval/artifacts/
+docs/plans/incidents/repair_baseline_2026_09_25/
+docs/plans/incidents/live_validation_*/
+docs/plans/incidents/logs/

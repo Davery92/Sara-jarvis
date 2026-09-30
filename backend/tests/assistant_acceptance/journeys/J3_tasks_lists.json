@@ -1,0 +1,15 @@
+{
+  "name": "J3 lists: add -> inspect -> correct -> complete the named target -> unrelated unchanged",
+  "conversations": [
+    {
+      "label": "grocery",
+      "turns": [
+        "Put 1 gallon of milk, rye bread and eggs on my grocery list.",
+        "What's on the grocery list?",
+        "Make that two gallons of milk, not one.",
+        "Got the bread.",
+        "What's left on the groceries list?"
+      ]
+    }
+  ]
+}

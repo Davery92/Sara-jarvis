@@ -1,0 +1,13 @@
+{
+  "name": "J4 food: log -> correct quantity -> inspect totals -> no duplicate",
+  "conversations": [
+    {
+      "label": "lunch",
+      "turns": [
+        "Log 100g of chicken breast for lunch - 165 calories, 31g protein.",
+        "That was actually 150 grams, not 100.",
+        "What have I eaten today?"
+      ]
+    }
+  ]
+}

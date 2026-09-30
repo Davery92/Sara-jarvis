@@ -1,0 +1,16 @@
+{
+  "name": "J6 mixed day: casual -> action -> ambiguous reference -> correction -> ending",
+  "conversations": [
+    {
+      "label": "mixed",
+      "turns": [
+        "morning",
+        "breakfast food tastes better at night, right?",
+        "Add a reminder to water the plants tonight at 8.",
+        {"say": "Cancel the plant one.", "follow_up_if": "which", "then_say": "The watering one."},
+        "Actually make it nine, not eight.",
+        "Thanks, heading out."
+      ]
+    }
+  ]
+}

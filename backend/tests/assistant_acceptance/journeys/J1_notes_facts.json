@@ -1,0 +1,20 @@
+{
+  "name": "J1 notes/facts: capture -> natural correction -> fresh-conversation retrieval -> challenge",
+  "conversations": [
+    {
+      "label": "capture_and_correct",
+      "turns": [
+        "Remember that I met Priya Raghavan from Globex today - she runs their data platform and is leading their migration off Oracle.",
+        "Marcus Iyer at Contoso is hiring two SREs, wants an intro from me next week.",
+        "Actually Priya is at Initech now, not Globex."
+      ]
+    },
+    {
+      "label": "fresh_conversation_readback",
+      "turns": [
+        "Who is Priya and where does she work?",
+        "Are you sure? You didn't just make that up?"
+      ]
+    }
+  ]
+}
