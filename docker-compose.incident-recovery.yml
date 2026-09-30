@@ -1,38 +1,72 @@
 ##
-## Production incident recovery pin — 2026-09-29.
+## Production pin — generation 2, cut 2026-09-30.
+##
+## Generation 1 (2026-09-29, sara-reliable-candidate:20260929, frozen at
+## /home/david/sara-candidate-20260928-reliable) was the incident exit: those
+## bytes were already in production because a reboot put them there, and pinning
+## them was the safe move, not a deployment decision. Its source was never in
+## git — the working tree it came from was uncommitted.
+##
+## Generation 2 is the first pin cut from a COMMITTED tree (git c3cc16dc.. on
+## feat/sara-mind-v2), after the 2026-09-30 codebase cleanup. Same schema: the
+## cleanup added no migrations, so 158_reminder_delivery_state is unchanged and
+## no migration ran at cutover. Verified before cutover by
+## backend/scripts/rehearse_reliable_release.sh on disposable databases —
+## release path, recovery destination, and the four-capability readiness probe
+## (READY) — plus the full pytest suite and tests/replay diffed against
+## generation 1 for regressions.
+##
+## The tag ends in 'b' because the first build of this generation FAILED the
+## rehearsal: llm_broker.resolve() ignored the environment, so an isolated stack
+## could not reach its own embeddings host and the probe could not write a note.
+## Fixed in c3cc16dc; the pre-fix image was deleted rather than left lying
+## around one character away from this one.
 ##
 ## Overlay on docker-compose.dev.yml. It exists because a reboot restarted
 ## `backend` over its `./backend:/app` bind mount and thereby put the MUTABLE
 ## working tree into production against schema 154, which that code cannot run
-## on (`_is_revoked` fails closed -> every authenticated request 401s).
+## on (`_is_revoked` fails closed -> every authenticated request 401s). The
+## overlay only applies when it is NAMED, which is why `scripts/sara-prod` is
+## the only supported way to operate this stack.
 ##
 ## This pins the API and every worker to ONE immutable artifact whose code was
 ## hashed against its manifest from inside the container:
 ##
-##   image  sara-reliable-candidate:20260929   (sha256:68ab3e3f4443…)
-##   code   916/916 files == CANDIDATE_MANIFEST.sha256, hash 27932826…
-##   schema 158_reminder_delivery_state, migrated from the same image
+##   image  sara-cleanup-candidate:20260930b
+##          sha256:f33a5f0f4e965fbdebf554e7c88c2ea2abcefb41a7e2a21f27048a34ccfe44f9
+##   code   912/912 files == CANDIDATE_MANIFEST.sha256
+##          hash 88f105380e9f839dd7833c44fbdef9b07de7ae7545fec8e45cc8d9bcd3e92514
+##   schema 158_reminder_delivery_state — UNCHANGED from generation 1, so
+##          nothing was migrated at cutover and there is no schema step to undo
 ##
-## It is not a feature deployment: manifests/live_vs_candidate.diff is empty, so
-## these bytes are byte-for-byte what the reboot had already put into production.
-## What changes is that they are now immutable and the schema matches them.
+## Unlike generation 1, this IS a deliberate deployment of changed code: 912
+## files against generation 1's 916, with the cleanup's deletions, renames and
+## route extractions in them. The bytes were never in production before. That
+## is why it was gated by a full rehearsal rather than simply pinned.
+##
+## Rollback, should it be needed: generation 1 is still intact — image
+## sara-reliable-candidate:20260929 and frozen tree
+## /home/david/sara-candidate-20260928-reliable — and runs on this SAME schema,
+## so reverting is this file's two values plus `scripts/sara-prod up`, with no
+## migration in either direction. That is the first rollback this project has
+## had that does not require a database change.
 ##
 ## Usage (BOTH -f flags, in this order, every time):
 ##   docker compose -f docker-compose.dev.yml -f docker-compose.incident-recovery.yml up -d <svc>
 services:
   backend:
-    image: sara-reliable-candidate:20260929
+    image: sara-cleanup-candidate:20260930b
     volumes:
       # Replaces `./backend:/app`. The application code now comes from the
       # image; nothing maps the working tree over it any more.
-      - /home/david/sara-candidate-20260928-reliable/backend/app:/app/app:ro
-      - /home/david/sara-candidate-20260928-reliable/backend/alembic:/app/alembic:ro
+      - /home/david/sara-candidate-20260930-cleanup/backend/app:/app/app:ro
+      - /home/david/sara-candidate-20260930-cleanup/backend/alembic:/app/alembic:ro
 
   celery-worker: &pinned
-    image: sara-reliable-candidate:20260929
+    image: sara-cleanup-candidate:20260930b
     volumes:
-      - /home/david/sara-candidate-20260928-reliable/backend/app:/app/app:ro
-      - /home/david/sara-candidate-20260928-reliable/backend/alembic:/app/alembic:ro
+      - /home/david/sara-candidate-20260930-cleanup/backend/app:/app/app:ro
+      - /home/david/sara-candidate-20260930-cleanup/backend/alembic:/app/alembic:ro
 
   celery-critical: *pinned
   celery-david-priority: *pinned

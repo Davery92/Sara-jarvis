@@ -22,6 +22,7 @@
 #   scripts/sara-prod config        # print the resolved configuration
 #   scripts/sara-prod ps | logs [svc] | stats
 #   scripts/sara-prod up [svc...]   # verify first, then up -d
+#   scripts/sara-prod cutover       # move onto a NEW generation (see below)
 #   scripts/sara-prod restart [svc...]
 #   scripts/sara-prod stop [svc...]
 #   scripts/sara-prod readiness     # the four-capability probe (it writes + cleans up)
@@ -31,10 +32,28 @@
 set -uo pipefail
 
 # ── the pinned pair. Change these only with a new verified artifact. ──────────
-EXPECT_IMAGE="${SARA_PROD_IMAGE:-sara-reliable-candidate:20260929}"
-EXPECT_IMAGE_ID="${SARA_PROD_IMAGE_ID:-sha256:68ab3e3f444371ea3b5ded7b27575ded2278f8ea5d52a237491c00d22c852ee5}"
-FROZEN="${SARA_PROD_FROZEN:-/home/david/sara-candidate-20260928-reliable}"
-EXPECT_MANIFEST_HASH="${SARA_PROD_MANIFEST_HASH:-27932826a312cba3eaf541ff2c0c8ca898c8328260b3f5cba437e32cdbf6bf3d}"
+#
+# GENERATION 2 — cut 2026-09-30 from committed git (feat/sara-mind-v2, c3cc16dc..),
+# after the codebase cleanup. Gated by backend/scripts/rehearse_reliable_release.sh
+# (release path + recovery destination + readiness probe READY) on disposable
+# databases, with the full pytest suite and tests/replay diffed against
+# generation 1 for regressions.
+#
+# The schema did NOT change: the cleanup added no migrations. So generation 1
+# remains a valid rollback target on this same schema — set the four
+# SARA_PROD_* variables below to its values and run `sara-prod up`:
+#
+#   SARA_PROD_IMAGE=sara-reliable-candidate:20260929
+#   SARA_PROD_IMAGE_ID=sha256:68ab3e3f444371ea3b5ded7b27575ded2278f8ea5d52a237491c00d22c852ee5
+#   SARA_PROD_FROZEN=/home/david/sara-candidate-20260928-reliable
+#   SARA_PROD_MANIFEST_HASH=27932826a312cba3eaf541ff2c0c8ca898c8328260b3f5cba437e32cdbf6bf3d
+#
+# (docker-compose.incident-recovery.yml also names the image and frozen path, so
+# a rollback edits that file too — or passes these as environment overrides.)
+EXPECT_IMAGE="${SARA_PROD_IMAGE:-sara-cleanup-candidate:20260930b}"
+EXPECT_IMAGE_ID="${SARA_PROD_IMAGE_ID:-sha256:f33a5f0f4e965fbdebf554e7c88c2ea2abcefb41a7e2a21f27048a34ccfe44f9}"
+FROZEN="${SARA_PROD_FROZEN:-/home/david/sara-candidate-20260930-cleanup}"
+EXPECT_MANIFEST_HASH="${SARA_PROD_MANIFEST_HASH:-88f105380e9f839dd7833c44fbdef9b07de7ae7545fec8e45cc8d9bcd3e92514}"
 EXPECT_SCHEMA="${SARA_PROD_SCHEMA:-158_reminder_delivery_state}"
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -123,6 +142,10 @@ PY
   done
 
   head_ "running containers (if any)"
+  if [ "${SKIP_RUNNING_CHECK:-0}" = 1 ]; then
+    warn "skipped — a cutover is CHANGING these on purpose (see \`cutover\`)"
+    printf '\n'
+  else
   local any=0
   for svc in "${APP_SERVICES[@]}"; do
     local name="${PROJECT}-${svc}-1"
@@ -140,6 +163,7 @@ PY
     fi
   done
   [ "$any" = 1 ] || warn "no application container is running"
+  fi
 
   head_ "schema"
   local at
@@ -176,6 +200,32 @@ case "$cmd" in
   stats)         docker stats --no-stream $(docker ps --format '{{.Names}}' | grep "^${PROJECT}-" | tr '\n' ' ') ;;
   logs)          dc logs "$@" ;;
   up)            gate; dc up -d "$@" ;;
+  cutover)       # Deliberately move production onto a NEW generation.
+                 #
+                 # `up` cannot do this: it gates on full verify, and verify
+                 # compares the RUNNING containers against EXPECT_IMAGE — which
+                 # a cutover is changing on purpose, so it always fails. That
+                 # left `docker compose up` as the only way to change
+                 # generation, which is the one thing this wrapper exists to
+                 # prevent. So: same script, one check relaxed, everything else
+                 # enforced.
+                 #
+                 # Still enforced before anything is touched: both compose files
+                 # present, the image exists with the expected id, the frozen
+                 # source matches its manifest, every service resolves to that
+                 # image with read-only frozen mounts, the schema is the
+                 # expected revision, and no disposable stack is running.
+                 # Afterwards it re-runs the FULL verify, running containers
+                 # included, and reports non-zero if the new state is wrong.
+                 printf '\033[1mcutover — pre-flight (running-container check relaxed)\033[0m\n'
+                 SKIP_RUNNING_CHECK=1 verify >&2 || {
+                   printf '\naborted: pre-flight failed, so no change was made.\n' >&2; exit 1; }
+                 printf '\n\033[1mrecreating application services onto %s\033[0m\n' "$EXPECT_IMAGE"
+                 dc up -d "$@" || { printf '\ncompose up failed\n' >&2; exit 1; }
+                 printf '\n\033[1mcutover — post-flight (full verify)\033[0m\n'
+                 FAIL=0
+                 verify
+                 ;;
   restart)       gate; dc restart "$@" ;;
   stop)          dc stop "$@" ;;
   readiness)     docker exec -w /app -e PYTHONPATH=/app "${PROJECT}-backend-1" \
