@@ -9,7 +9,7 @@ import { useState, useRef, useCallback, useEffect } from 'react';
 import { Alert } from 'react-native';
 import * as Haptics from 'expo-haptics';
 import { Message } from '../types/api';
-import { ContentCard as ContentCardType, SuggestedAction, ToolStatus } from '../types/cards';
+import { ContentCard as ContentCardType, ToolStatus } from '../types/cards';
 import { chatService } from '../services/chat';
 import { voiceService } from '../services/voice';
 import { ImageAttachment } from '../services/imagePicker';
@@ -29,7 +29,6 @@ export function useSaraChat(options?: UseSaraChatOptions) {
   const [streamingMessage, setStreamingMessage] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
   const [pendingCards, setPendingCards] = useState<ContentCardType[]>([]);
-  const [suggestedActions, setSuggestedActions] = useState<SuggestedAction[]>([]);
   const [activeToolStatus, setActiveToolStatus] = useState<ToolStatus | null>(null);
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
@@ -106,7 +105,6 @@ export function useSaraChat(options?: UseSaraChatOptions) {
 
   const sendMessage = useCallback(
     async (messageText: string, images?: ImageAttachment[], inboxItemId?: string) => {
-      setSuggestedActions([]);
       setPendingCards([]);
       pendingCardsRef.current = [];
       setActiveToolStatus(null);
@@ -144,9 +142,6 @@ export function useSaraChat(options?: UseSaraChatOptions) {
           onToolStatus: (status: ToolStatus) => {
             setActiveToolStatus(status.status === 'executing' ? status : null);
           },
-          onSuggestedActions: (actions: SuggestedAction[]) => {
-            setSuggestedActions(actions);
-          },
           onUiCommand: (command: SaraUiCommand) => {
             if (options?.onUiCommand) {
               options.onUiCommand(command);
@@ -159,13 +154,22 @@ export function useSaraChat(options?: UseSaraChatOptions) {
           streamingMessageRef.current += chunk;
           setStreamingMessage(streamingMessageRef.current);
         },
-        (newConversationId: string, episodeId?: string) => {
+        (newConversationId: string, episodeId?: string, finalText?: string) => {
           try { Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success); } catch {}
+
+          // The server's final_response is authoritative and may be shorter,
+          // different from, or (legitimately) shorter than the concatenated
+          // stream — e.g. a bounded repair stripped a duplicated trailing
+          // question after storage. Prefer it over the raw streamed text
+          // whenever the server actually sent one, including an intentional
+          // empty string; fall back to the stream only if no final event
+          // carried a content field at all (e.g. a dropped connection).
+          const finalContent = finalText !== undefined ? finalText : streamingMessageRef.current;
 
           const assistantMessage: Message = {
             id: `assistant-${Date.now()}`,
             role: 'assistant',
-            content: streamingMessageRef.current,
+            content: finalContent,
             created_at: new Date().toISOString(),
             episode_id: episodeId,
             cards: [...pendingCardsRef.current],
@@ -229,7 +233,6 @@ export function useSaraChat(options?: UseSaraChatOptions) {
     streamingMessage,
     isStreaming,
     pendingCards,
-    suggestedActions,
     activeToolStatus,
     conversationId,
     isLoadingHistory,
@@ -242,6 +245,5 @@ export function useSaraChat(options?: UseSaraChatOptions) {
     handleVoiceMessage,
     clearChat,
     setMessages,
-    setSuggestedActions,
   };
 }

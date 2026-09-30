@@ -50,7 +50,6 @@ export interface ChatOptions {
   currentScreen?: string;  // Current iOS screen for context-aware tool loading
   onContentCard?: (card: any) => void;  // Content card callback
   onToolStatus?: (status: { tool: string; status: string }) => void;  // Tool execution status
-  onSuggestedActions?: (actions: any[]) => void;  // Suggested follow-up actions
   onAssistantActivity?: (activity: AssistantActivity) => void;  // Canonical assistant lifecycle
   onUiCommand?: (command: any) => void;  // Jarvis-style navigation/overlay command ("open my inbox")
 }
@@ -237,7 +236,7 @@ class ApiClient {
   async streamChat(
     messages: any[],
     onChunk: (chunk: string) => void,
-    onComplete: (conversationId?: string, episodeId?: string) => void,
+    onComplete: (conversationId?: string, episodeId?: string, finalText?: string) => void,
     onError: (error: Error) => void,
     sessionId?: string,
     options?: ChatOptions
@@ -252,6 +251,14 @@ class ApiClient {
         let lastProcessedIndex = 0;
         let receivedConversationId: string | undefined = undefined;
         let receivedEpisodeId: string | undefined = undefined;
+        // The authoritative final text, once a final_response event carries
+        // one — distinct from `emittedText` (the streamed-chunk accumulator
+        // used only for the live typing display). A repaired reply can be
+        // shorter than, different from, or (legitimately) empty compared to
+        // what streamed, so completion must hand back this value rather than
+        // making the caller trust the concatenated chunks.
+        let hasFinalText = false;
+        let receivedFinalText = '';
         let emittedText = '';
         let completed = false;
         let sawAnyStreamBytes = false;
@@ -285,6 +292,46 @@ class ApiClient {
           }, 60000);
         };
 
+        // Single parser for a `final_response` event's data, shared by the
+        // live onprogress handler and the onload leftover-buffer handler so
+        // the two paths can't drift out of sync with each other again.
+        const applyFinalResponseData = (data: any) => {
+          // Presence, not truthiness: an explicit empty string is a valid
+          // final answer and must not be treated as "no final text arrived".
+          const hasContentField = data && (
+            Object.prototype.hasOwnProperty.call(data, 'content')
+            || (data.data && Object.prototype.hasOwnProperty.call(data.data, 'content'))
+          );
+          if (hasContentField) {
+            const rawContent = data.data?.content ?? data.content ?? '';
+            hasFinalText = true;
+            receivedFinalText = String(rawContent);
+            // Keep the live typing animation moving to the true final text
+            // when it extends (or replaces empty) streamed output. When the
+            // final text is shorter/different, don't emit a garbled partial
+            // delta — the caller gets the authoritative replacement via
+            // onComplete's finalText argument instead.
+            if (receivedFinalText.startsWith(emittedText)) {
+              const delta = receivedFinalText.slice(emittedText.length);
+              if (delta) {
+                emittedText += delta;
+                onChunk(delta);
+                schedulePostTextFinalizeWatchdog();
+              }
+            } else if (!emittedText && receivedFinalText) {
+              emittedText = receivedFinalText;
+              onChunk(receivedFinalText);
+              schedulePostTextFinalizeWatchdog();
+            }
+          }
+          if (data.data?.conversation_id) {
+            receivedConversationId = data.data.conversation_id;
+          }
+          if (data.data?.episode_id) {
+            receivedEpisodeId = data.data.episode_id;
+          }
+        };
+
         const completeOnce = () => {
           if (completed) return;
           completed = true;
@@ -294,7 +341,7 @@ class ApiClient {
           } else {
             console.warn('[API] ⚠️ Stream complete but NO conversation_id received!');
           }
-          onComplete(receivedConversationId, receivedEpisodeId);
+          onComplete(receivedConversationId, receivedEpisodeId, hasFinalText ? receivedFinalText : undefined);
           // Any dispatch row Sara created during this turn exists by now —
           // reconcile the task indicator immediately instead of waiting out the
           // poll interval.
@@ -309,14 +356,9 @@ class ApiClient {
 
         xhr.open('POST', `${API_URL}/chat/stream`, true);
         xhr.setRequestHeader('Content-Type', 'application/json');
-        // Vision prompt evaluation is materially slower than text (a real
-        // iPhone photo took 168s on the local Qwen lane). Keep text bounded at
-        // three minutes, but leave enough headroom for image turns.
-        const hasImageContent = messages.some(
-          (message) => Array.isArray(message?.content)
-            && message.content.some((part: any) => part?.type === 'image' || part?.type === 'image_url')
-        );
-        xhr.timeout = hasImageContent ? 300000 : 180000;
+        // Allow hidden reasoning plus the 120s tool-loop budget and final
+        // synthesis. The separate startup watchdog still catches no stream.
+        xhr.timeout = 300000;
         if (token) {
           xhr.setRequestHeader('Authorization', `Bearer ${token}`);
         }
@@ -380,32 +422,11 @@ class ApiClient {
                   // Final response event - extract conversation_id and episode_id
                   console.log('[API] Received final_response event');
                   console.log('[API] Full final_response data:', JSON.stringify(parsed.data));
-                  const finalContent = parsed.data?.content || parsed.content || '';
-                  if (finalContent) {
-                    const finalText = String(finalContent);
-                    if (finalText.startsWith(emittedText)) {
-                      const delta = finalText.slice(emittedText.length);
-                      if (delta) {
-                        emittedText += delta;
-                        onChunk(delta);
-                        schedulePostTextFinalizeWatchdog();
-                      }
-                    } else if (!emittedText) {
-                      emittedText = finalText;
-                      onChunk(finalText);
-                      schedulePostTextFinalizeWatchdog();
-                    }
-                  }
-                  if (parsed.data?.conversation_id) {
-                    receivedConversationId = parsed.data.conversation_id;
-                    console.log('[API] ✅ Got conversation_id:', receivedConversationId);
-                  } else {
+                  applyFinalResponseData(parsed);
+                  if (!receivedConversationId) {
                     console.warn('[API] ⚠️ No conversation_id in final_response!');
                   }
-                  if (parsed.data?.episode_id) {
-                    receivedEpisodeId = parsed.data.episode_id;
-                    console.log('[API] ✅ Got episode_id:', receivedEpisodeId);
-                  } else {
+                  if (!receivedEpisodeId) {
                     console.warn('[API] ⚠️ No episode_id in final_response!');
                   }
                   completeOnce();
@@ -426,8 +447,6 @@ class ApiClient {
                   const tool = parsed.data?.tool;
                   options?.onToolStatus?.({ tool, status: 'completed' });
                   options?.onAssistantActivity?.({ phase: 'tool_complete', tool, round: parsed.data?.round });
-                } else if (parsed.type === 'suggested_actions' && options?.onSuggestedActions) {
-                  options.onSuggestedActions(parsed.data?.actions || []);
                 } else if (parsed.type === 'ui_command' && options?.onUiCommand) {
                   options.onUiCommand(parsed.data);
                 } else if (parsed.content) {
@@ -464,30 +483,7 @@ class ApiClient {
                     schedulePostTextFinalizeWatchdog();
                   }
                 } else if (parsed.type === 'final_response') {
-                    const finalContent = parsed.data?.content || parsed.content || '';
-                    if (finalContent) {
-                      const finalText = String(finalContent);
-                      if (finalText.startsWith(emittedText)) {
-                        const delta = finalText.slice(emittedText.length);
-                        if (delta) {
-                          emittedText += delta;
-                          onChunk(delta);
-                          schedulePostTextFinalizeWatchdog();
-                        }
-                      } else if (!emittedText) {
-                        emittedText = finalText;
-                        onChunk(finalText);
-                        schedulePostTextFinalizeWatchdog();
-                      }
-                    }
-                    if (parsed.data?.conversation_id) {
-                      receivedConversationId = parsed.data.conversation_id;
-                      console.log('[API] ✅ Got conversation_id from final buffer:', receivedConversationId);
-                    }
-                    if (parsed.data?.episode_id) {
-                      receivedEpisodeId = parsed.data.episode_id;
-                      console.log('[API] ✅ Got episode_id from final buffer:', receivedEpisodeId);
-                    }
+                    applyFinalResponseData(parsed);
                     completeOnce();
                   } else if (parsed.type === 'done') {
                     completeOnce();

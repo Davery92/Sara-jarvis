@@ -22,7 +22,7 @@ import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { HealthAlertContext, NudgeContext, QuickReplyContext, HeartbeatContext, NotificationContext, NoteContext } from '../../types/navigation';
 import { Message } from '../../types/api';
-import { AssistantActivity, ContentCard as ContentCardType, SuggestedAction } from '../../types/cards';
+import { AssistantActivity, ContentCard as ContentCardType } from '../../types/cards';
 import { assistantAnalytics } from '../../services/assistantAnalytics';
 import { chatService, createClientConversationId, newClientMessageId } from '../../services/chat';
 import { surfacesService } from '../../services/surfaces';
@@ -34,7 +34,6 @@ import MessageBubble from '../../components/chat/MessageBubble';
 import StreamingIndicator from '../../components/chat/StreamingIndicator';
 import ChatInput from '../../components/chat/ChatInput';
 import ContentCard from '../../components/cards/ContentCard';
-import SuggestedActions from '../../components/chat/SuggestedActions';
 import AssistantActivityIndicator from '../../components/chat/AssistantActivityIndicator';
 import { borderRadius, colors, fontSizes, shadows, spacing } from '../../styles/theme';
 import { apiClient, ChatModel, ChatModelsResponse } from '../../services/api';
@@ -97,9 +96,8 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [streamingMessage, setStreamingMessage] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
-  // Content cards and suggested actions state
+  // Content cards state
   const [pendingCards, setPendingCards] = useState<ContentCardType[]>([]);
-  const [suggestedActions, setSuggestedActions] = useState<SuggestedAction[]>([]);
   const [assistantActivity, setAssistantActivity] = useState<AssistantActivity | null>(null);
   const [isPlayingAudio, setIsPlayingAudio] = useState(false);
   const [voiceInitialized, setVoiceInitialized] = useState(false);
@@ -791,8 +789,7 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
     const resolvedInboxItemId = inboxItemId || activeConversationContext?.inboxItemId;
     const resolvedNoteId = noteId || activeConversationContext?.noteId;
 
-    // Clear previous suggestions when sending new message
-    setSuggestedActions([]);
+    // Clear previous cards when sending new message
     setPendingCards([]);
     pendingCardsRef.current = [];
     setAssistantActivity(null);
@@ -863,9 +860,6 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
         },
         onAssistantActivity: (activity: AssistantActivity) => {
           setAssistantActivity(activity);
-        },
-        onSuggestedActions: (actions: SuggestedAction[]) => {
-          setSuggestedActions(actions);
         },
         onUiCommand: handleSaraUiCommand,
       },
@@ -1328,7 +1322,6 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
             setConversationId(null);
             setStreamingMessage('');
             setConversationContext(null);
-            setSuggestedActions([]);
             setPendingCards([]);
             pendingCardsRef.current = [];
             setAssistantActivity(null);
@@ -1384,27 +1377,6 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
       };
       handleSendMessage(action.message);
     }
-  }, [navigation]);
-
-  // Handle suggested action tap
-  const handleSuggestedAction = useCallback((action: SuggestedAction) => {
-    assistantAnalytics.track('assistant.suggested_action_tapped', {
-      label: action.label,
-      action: action.action || (action.message ? 'message' : 'unknown'),
-      target: action.target || null,
-      has_message: Boolean(action.message),
-    });
-    if (action.action === 'navigate' && action.target && navigation) {
-      navigation.navigate(action.target);
-    } else if (action.message) {
-      pendingMessageSourceRef.current = {
-        entryPoint: 'suggested_action',
-        label: action.label,
-        target: action.target || undefined,
-      };
-      handleSendMessage(action.message);
-    }
-    setSuggestedActions([]);
   }, [navigation]);
 
   const handleConversationContextAction = useCallback(() => {
@@ -1696,15 +1668,6 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
           </View>
         )}
 
-        {/* Suggested Actions */}
-        {suggestedActions.length > 0 && !isStreaming && (
-          <SuggestedActions
-            actions={suggestedActions}
-            onAction={handleSuggestedAction}
-            onDismiss={() => setSuggestedActions([])}
-          />
-        )}
-
         {/* Inbox chip (Phase 12K.4) — pull pending items into the chat */}
         {inboxCount > 0 && !isStreaming && (
           <TouchableOpacity
@@ -1729,11 +1692,6 @@ function ChatScreenInner(props: Props, ref: React.Ref<any>) {
         <ChatInput
           onSend={handleSendMessage}
           onVoiceMessage={handleVoiceMessage}
-          onTextChange={(text) => {
-            if (text.length > 0 && suggestedActions.length > 0) {
-              setSuggestedActions([]);
-            }
-          }}
           onHoldToTalkStart={() => {
             assistantAnalytics.track('assistant.voice_hold_to_talk_started', {
               screen: isEmbedded ? 'sara_embedded' : 'chat',

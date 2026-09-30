@@ -50,7 +50,6 @@ export interface SendMessageParams {
   currentScreen?: string;  // Current screen for context-aware tool loading
   onContentCard?: (card: any) => void;
   onToolStatus?: (status: { tool: string; status: string }) => void;
-  onSuggestedActions?: (actions: any[]) => void;
   onAssistantActivity?: (activity: AssistantActivity) => void;
   onUiCommand?: (command: any) => void;
 }
@@ -67,7 +66,7 @@ class ChatService {
   async sendMessage(
     params: SendMessageParams,
     onChunk: (chunk: string) => void,
-    onComplete: (conversationId: string, episodeId?: string) => void,
+    onComplete: (conversationId: string, episodeId?: string, finalText?: string) => void,
     onError: (error: Error) => void
   ): Promise<void> {
     // Format messages for API - send full conversation history
@@ -152,9 +151,6 @@ class ChatService {
       if (params.onAssistantActivity) {
         chatOptions.onAssistantActivity = params.onAssistantActivity;
       }
-      if (params.onSuggestedActions) {
-        chatOptions.onSuggestedActions = params.onSuggestedActions;
-      }
       if (params.onUiCommand) {
         chatOptions.onUiCommand = params.onUiCommand;
       }
@@ -162,9 +158,9 @@ class ChatService {
       await apiClient.streamChat(
         formattedMessages,
         onChunk,
-        (conversationId, episodeId) => {
+        (conversationId, episodeId, finalText) => {
           // Use the conversation_id from backend if provided, otherwise use the one we sent
-          onComplete(conversationId || params.conversationId || '', episodeId);
+          onComplete(conversationId || params.conversationId || '', episodeId, finalText);
         },
         onError,
         params.conversationId,  // Pass session_id to maintain conversation history

@@ -8,7 +8,6 @@ export type AssistantAnalyticsEventType =
   | 'assistant.message_sent'
   | 'assistant.proactive_context_opened'
   | 'assistant.proactive_context_prompt_used'
-  | 'assistant.suggested_action_tapped'
   | 'assistant.voice_hands_free_toggled'
   | 'assistant.voice_hold_to_talk_started';
 
