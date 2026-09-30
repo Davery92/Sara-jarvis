@@ -160,7 +160,7 @@ All services use systemd with:
 - Environment variables for database and LLM access
 
 <!-- BEGIN GENERATED -->
-_Regenerated 2026-09-11 by truth-maintenance._
+_Regenerated 2026-09-30 by truth-maintenance._
 
 ## Scheduled Jobs
 
@@ -220,7 +220,6 @@ These are the jobs actually enabled in `scheduled_job` right now — not a remem
 | **consolidation-watcher** | `every 1 min` | critical | Checks every minute if a quiet period has been reached, then triggers consolidation |
 | **context-refresh** | `every 1 min` | critical | Refreshes the working memory context window every minute |
 | **system-heartbeat** | `every 5 min` | health | Health monitoring ping every 5 minutes |
-| **meeting-research-scan** | `every 60 min` | cognitive | Pre-research the counterparty of upcoming business meetings so findings are ready beforeha |
 | **fleet-offline-sweep** | `every 5 min` | health | Fires/resolves host_offline for agent-equipped machines that stopped reporting |
 | **health-anomaly-detect** | `*/30 6-23 * * *` | health | Compares latest readings against 7-day baselines (z-score) and writes alerts/insights for  |
 | **health-baseline-recompute** | `15 2 * * *` | health | Recomputes 7-day and 30-day rolling baselines (avg, std, min, max) for every tracked healt |

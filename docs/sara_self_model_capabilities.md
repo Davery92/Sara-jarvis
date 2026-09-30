@@ -296,11 +296,16 @@ All tools are defined in `backend/app/tools/` and registered in `backend/app/too
 **Total Tools: 107+** across 19 categories
 
 <!-- BEGIN GENERATED -->
-_Regenerated 2026-09-11 by truth-maintenance._
+_Regenerated 2026-09-30 by truth-maintenance._
 
 ## Tools You Actually Have
 
 Derived from the live tool registry.
+
+### action_verification
+Check the real record of an action before confirming or denying it happened — use when David asks "did you actually do that?", challenges something you said you did, or you're about to state an action completed and aren't certain from the conversation alone.
+
+`verify_action`
 
 ### agents
 Inspect background worker agents and tasks, hand off multi-day work to the autonomous daemon, and create/check structured research plans
@@ -353,14 +358,14 @@ Standing rules David gives Sara ('never bring up X', 'always use ET', 'don't pin
 `save_directive`, `list_directives`, `remove_directive`
 
 ### email
-Search, read, and get summaries of emails from synced mailboxes
+Search, read, and get summaries of emails from synced mailboxes, and file their attachments into the Studio as downloadable files
 
-`email_search`, `email_read`, `email_recent`, `email_attachment_read`
+`email_search`, `email_read`, `email_recent`, `email_attachment_read`, `files_to_studio`
 
 ### fitness
 Track and manage fitness, nutrition, workouts, recovery, training programs and phases
 
-`fitness_summary`, `fitness_note_create`, `fitness_note_search`, `fitness_note_edit`, `food_search_and_log`, `food_log_create`, `food_log_search`, `food_log_summary`, `workout_list`, `workout_log_create`, `workout_details`, `workout_stats`, `recovery_log_create`, `recovery_log_get`, `recovery_log_recent`, `template_list`, `template_get`, `template_create`, `template_update`, `template_delete`, `program_list`, `program_get`, `program_create`, `program_update`, `program_activate`, `program_delete`, `phase_list`, `phase_get`, `phase_create`, `phase_update`, `phase_activate`, `phase_delete`, `training_schedule`, `workout_suggest`, `start_workout`, `end_workout`, `workout_mode_log`, `workout_history`
+`fitness_summary`, `fitness_note_create`, `fitness_note_search`, `fitness_note_edit`, `food_search_and_log`, `food_log_create`, `food_log_correct`, `food_log_search`, `food_log_summary`, `workout_list`, `workout_log_create`, `workout_log_correct`, `workout_details`, `workout_stats`, `recovery_log_create`, `recovery_log_get`, `recovery_log_recent`, `template_list`, `template_get`, `template_create`, `template_update`, `template_delete`, `program_list`, `program_get`, `program_create`, `program_update`, `program_activate`, `program_delete`, `phase_list`, `phase_get`, `phase_create`, `phase_update`, `phase_activate`, `phase_delete`, `training_schedule`, `workout_suggest`, `start_workout`, `end_workout`, `workout_mode_log`, `workout_history`
 
 ### fleet
 Check the health of David's machines (his fleet) and run read-only diagnostics on any agent-equipped box — CPU/memory/disk/temp, open alerts, and safe commands like df/journalctl/top
@@ -410,7 +415,7 @@ Manage learning topics, sources, study notes, autonomous research, personalized 
 ### lists
 Personal lists — grocery, packing, gift ideas, etc.
 
-`list_add`, `list_view`, `list_check`, `list_remove`
+`list_add`, `list_view`, `list_check`, `list_correct_item`, `list_remove`
 
 ### location
 Save named places (home, work, gym, client sites) and set location-triggered reminders that fire when David arrives at or leaves a place — 'remind me to X when I get home/leave here'.
@@ -427,10 +432,15 @@ Search personal knowledge across notes, documents, episodes, and summaries
 
 `memory_search`, `documents_search`
 
-### notes
-Create, edit, search, list, and delete notes and folders in the knowledge garden
+### meta
+Find tools that aren't currently loaded, and page through a tool result that was too big to show in full.
 
-`notes_create`, `notes_search`, `notes_edit`, `notes_delete`, `notes_list`, `notes_list_folders`, `notes_create_folder`, `find_similar_notes`, `merge_notes`
+`find_tools`, `get_tool_result_details`
+
+### notes
+Create, correct, edit, search, list, and delete notes and folders in the knowledge garden. A FACT CORRECTION uses notes_correct_fact.
+
+`notes_create`, `notes_search`, `notes_correct_fact`, `notes_edit`, `notes_delete`, `notes_list`, `notes_list_folders`, `notes_create_folder`, `find_similar_notes`, `merge_notes`
 
 ### notifications
 Read the notifications Sara has sent David, acknowledge his replies, and CLEAR inbox items he addresses (attention items, clarifications, captures, notifications). Use when David asks "what's the notification?"/"did I miss anything?", opens his inbox, or responds to items ('saw your messages', 'yes to the first two, skip the gym thing', 'handle these').
@@ -448,9 +458,9 @@ Answer questions about who David has been interacting with — who he's overdue 
 `list_people`
 
 ### personal_knowledge
-Query and store personal knowledge about David — preferences, routines, goals, interests, health, relationships, and places.
+Query personal knowledge about David — preferences, routines, goals, interests, health, relationships, and places.
 
-`query_david_knowledge`, `remember_about_david`
+`query_david_knowledge`
 
 ### projects
 Track software development projects, tasks, commits, and development progress
@@ -505,7 +515,7 @@ Close an open thread David says is finished — "we already had that meeting", "
 ### time
 Manage reminders, timers, calendar events, and daily tasks
 
-`reminders_create`, `reminders_list`, `reminders_cancel`, `daily_task_create`, `daily_task_list`, `daily_task_complete`, `timers_start`, `timers_status`, `timers_cancel`, `calendar_list`, `calendar_create`, `calendar_set_recurring`, `meeting_prep`
+`reminders_create`, `reminders_list`, `reminders_reschedule`, `reminders_update`, `reminders_cancel`, `daily_task_create`, `daily_task_list`, `daily_task_complete`, `timers_start`, `timers_status`, `timers_cancel`, `calendar_list`, `calendar_create`, `calendar_set_recurring`, `calendar_find_availability`, `meeting_prep`
 
 ### vm_agents
 Dispatch background tasks (research, code, setup) to agents, check status, resume sessions, and propose candidate skills. Use dispatch_and_monitor for tasks where David should be notified on completion.
