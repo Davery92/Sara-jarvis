@@ -1,5 +1,5 @@
 ##
-## Production pin — generation 2, cut 2026-09-30.
+## Production pin — generation 3, cut 2026-09-30.
 ##
 ## Generation 1 (2026-09-29, sara-reliable-candidate:20260929, frozen at
 ## /home/david/sara-candidate-20260928-reliable) was the incident exit: those
@@ -7,7 +7,16 @@
 ## them was the safe move, not a deployment decision. Its source was never in
 ## git — the working tree it came from was uncommitted.
 ##
-## Generation 2 is the first pin cut from a COMMITTED tree (git c3cc16dc.. on
+## Generation 2 was the first pin cut from a COMMITTED tree, and it shipped 13
+## imports the monolith extraction had dropped: /api/health/sync-recovery 500'd
+## in production with "name 'local_today' is not defined", and
+## /analytics/dashboard and pi-dashboard voice/transcribe carried the same defect
+## latently. Generation 3 is that fix (34c68408) plus the static gate that would
+## have caught it, backend/scripts/check_extracted_route_names.py, and an
+## execution pass that actually calls every extracted endpoint. Both generations
+## sit on the SAME schema, so this was a source-only roll-forward.
+##
+## Generation 3 is cut from a COMMITTED tree (git 34c68408 on
 ## feat/sara-mind-v2), after the 2026-09-30 codebase cleanup. Same schema: the
 ## cleanup added no migrations, so 158_reminder_delivery_state is unchanged and
 ## no migration ran at cutover. Verified before cutover by
@@ -32,10 +41,10 @@
 ## This pins the API and every worker to ONE immutable artifact whose code was
 ## hashed against its manifest from inside the container:
 ##
-##   image  sara-cleanup-candidate:20260930b
-##          sha256:f33a5f0f4e965fbdebf554e7c88c2ea2abcefb41a7e2a21f27048a34ccfe44f9
+##   image  sara-cleanup-candidate:20260930c
+##          sha256:3392120f0d9ae1f34a38d745b8c4d51a83bc9497a118e3b64710a8499238aa9e
 ##   code   912/912 files == CANDIDATE_MANIFEST.sha256
-##          hash 88f105380e9f839dd7833c44fbdef9b07de7ae7545fec8e45cc8d9bcd3e92514
+##          hash 5fa0da0cc448fe7205a8f8439daa7a398f320fc4c7e33fb98a14dafa15702f9a
 ##   schema 158_reminder_delivery_state — UNCHANGED from generation 1, so
 ##          nothing was migrated at cutover and there is no schema step to undo
 ##
@@ -55,18 +64,18 @@
 ##   docker compose -f docker-compose.dev.yml -f docker-compose.incident-recovery.yml up -d <svc>
 services:
   backend:
-    image: sara-cleanup-candidate:20260930b
+    image: sara-cleanup-candidate:20260930c
     volumes:
       # Replaces `./backend:/app`. The application code now comes from the
       # image; nothing maps the working tree over it any more.
-      - /home/david/sara-candidate-20260930-cleanup/backend/app:/app/app:ro
-      - /home/david/sara-candidate-20260930-cleanup/backend/alembic:/app/alembic:ro
+      - /home/david/sara-candidate-20261001-fix/backend/app:/app/app:ro
+      - /home/david/sara-candidate-20261001-fix/backend/alembic:/app/alembic:ro
 
   celery-worker: &pinned
-    image: sara-cleanup-candidate:20260930b
+    image: sara-cleanup-candidate:20260930c
     volumes:
-      - /home/david/sara-candidate-20260930-cleanup/backend/app:/app/app:ro
-      - /home/david/sara-candidate-20260930-cleanup/backend/alembic:/app/alembic:ro
+      - /home/david/sara-candidate-20261001-fix/backend/app:/app/app:ro
+      - /home/david/sara-candidate-20261001-fix/backend/alembic:/app/alembic:ro
 
   celery-critical: *pinned
   celery-david-priority: *pinned

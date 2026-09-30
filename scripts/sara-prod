@@ -33,27 +33,35 @@ set -uo pipefail
 
 # ── the pinned pair. Change these only with a new verified artifact. ──────────
 #
-# GENERATION 2 — cut 2026-09-30 from committed git (feat/sara-mind-v2, c3cc16dc..),
+# GENERATION 3 — cut 2026-09-30 from committed git (feat/sara-mind-v2, 34c68408),
 # after the codebase cleanup. Gated by backend/scripts/rehearse_reliable_release.sh
 # (release path + recovery destination + readiness probe READY) on disposable
 # databases, with the full pytest suite and tests/replay diffed against
-# generation 1 for regressions.
+# generation 1 for regressions, plus
+# backend/scripts/check_extracted_route_names.py and an execution pass over
+# every extracted endpoint.
 #
-# The schema did NOT change: the cleanup added no migrations. So generation 1
-# remains a valid rollback target on this same schema — set the four
-# SARA_PROD_* variables below to its values and run `sara-prod up`:
+# Generation 2 (sara-cleanup-candidate:20260930b) is NOT a rollback target: it
+# shipped 13 dropped imports and 500'd /api/health/sync-recovery. Skip it.
+#
+# EVERY generation so far sits on schema 158 — the cleanup added no migrations —
+# so rolling back is source-only, with no database change in either direction.
+# To return to generation 1, the last artifact validated independently of this
+# work, set these and run `sara-prod cutover`:
 #
 #   SARA_PROD_IMAGE=sara-reliable-candidate:20260929
 #   SARA_PROD_IMAGE_ID=sha256:68ab3e3f444371ea3b5ded7b27575ded2278f8ea5d52a237491c00d22c852ee5
 #   SARA_PROD_FROZEN=/home/david/sara-candidate-20260928-reliable
 #   SARA_PROD_MANIFEST_HASH=27932826a312cba3eaf541ff2c0c8ca898c8328260b3f5cba437e32cdbf6bf3d
 #
-# (docker-compose.incident-recovery.yml also names the image and frozen path, so
-# a rollback edits that file too — or passes these as environment overrides.)
-EXPECT_IMAGE="${SARA_PROD_IMAGE:-sara-cleanup-candidate:20260930b}"
-EXPECT_IMAGE_ID="${SARA_PROD_IMAGE_ID:-sha256:f33a5f0f4e965fbdebf554e7c88c2ea2abcefb41a7e2a21f27048a34ccfe44f9}"
-FROZEN="${SARA_PROD_FROZEN:-/home/david/sara-candidate-20260930-cleanup}"
-EXPECT_MANIFEST_HASH="${SARA_PROD_MANIFEST_HASH:-88f105380e9f839dd7833c44fbdef9b07de7ae7545fec8e45cc8d9bcd3e92514}"
+# docker-compose.incident-recovery.yml also names the image and the frozen path,
+# so a rollback either edits that file too or passes both as environment
+# overrides to the compose invocation. `cutover`, not `up`: `up` gates on the
+# running containers already matching, which a generation change does not.
+EXPECT_IMAGE="${SARA_PROD_IMAGE:-sara-cleanup-candidate:20260930c}"
+EXPECT_IMAGE_ID="${SARA_PROD_IMAGE_ID:-sha256:3392120f0d9ae1f34a38d745b8c4d51a83bc9497a118e3b64710a8499238aa9e}"
+FROZEN="${SARA_PROD_FROZEN:-/home/david/sara-candidate-20261001-fix}"
+EXPECT_MANIFEST_HASH="${SARA_PROD_MANIFEST_HASH:-5fa0da0cc448fe7205a8f8439daa7a398f320fc4c7e33fb98a14dafa15702f9a}"
 EXPECT_SCHEMA="${SARA_PROD_SCHEMA:-158_reminder_delivery_state}"
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
