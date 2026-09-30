@@ -1,4 +1,8 @@
 from typing import Dict, Any
+# A timer's start/end are naive `timestamp` columns holding UTC; every
+# readback goes through civil_time so it is spoken in David's clock (see
+# finding 23, and the reminders_list readback that was four hours out).
+from app.services.civil_time import as_utc, describe_instant
 from app.tools.base import BaseTool, ToolResult
 from app.db.session import get_db
 from sqlalchemy import Column, String, DateTime, Integer, Boolean, func
@@ -15,11 +19,35 @@ class Timer(Base):
     user_id = Column(String, nullable=False)
     title = Column(String, nullable=False)
     duration_minutes = Column(Integer, nullable=False)
+    # R05 (Sara repair plan 2026-09-25, evidence
+    # D04_TIMERS_STATUS_CRASHES_NAIVE_AWARE_DATETIME): the REAL `timer`
+    # table (verified directly against the schema: `\d timer`) has genuinely
+    # naive `timestamp without time zone` columns — not a Python-type
+    # mismatch with an aware column, as first suspected. `timezone=True`
+    # here would not change what the driver hands back for an actual
+    # naive-typed column, and would misdescribe the real schema. The naive
+    # value IS a UTC instant (TimersStartTool always writes
+    # `datetime.now(timezone.utc)`) — it just has no tzinfo attached. Fixed
+    # at the comparison site instead (`_as_utc` below), not here.
     start_time = Column(DateTime, nullable=False)
     end_time = Column(DateTime, nullable=False)
     is_active = Column(Boolean, default=True)
     is_completed = Column(Boolean, default=False)
     created_at = Column(DateTime, server_default=func.now())
+
+
+def _as_utc(value: datetime) -> datetime:
+    """A value read back from `timer.start_time`/`end_time` is a naive
+    datetime whose WALL-CLOCK VALUE is already UTC (every writer in this
+    file stores `datetime.now(timezone.utc)` into these naive columns) —
+    attach the tzinfo the value already implicitly has, rather than
+    comparing it against an aware `datetime.now(timezone.utc)` and raising
+    "can't subtract offset-naive and offset-aware datetimes". A value that
+    somehow already carries tzinfo (e.g. after a future migration to a real
+    timestamptz column) passes through unchanged."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
 
 
 class TimersStartTool(BaseTool):
@@ -105,10 +133,11 @@ class TimersStartTool(BaseTool):
                 data={
                     "timer_id": str(timer.id),
                     "title": timer.title,
-                    "end_time": timer.end_time.isoformat(),
+                    "end_time": as_utc(timer.end_time).isoformat(),
+                    "ends": describe_instant(timer.end_time),
                     "duration_minutes": timer.duration_minutes,
                     "is_active": timer.is_active,
-                    "created_at": timer.created_at.isoformat()
+                    "created_at": as_utc(timer.created_at).isoformat() if timer.created_at else None
                 },
                 message=message
             )
@@ -182,7 +211,7 @@ class TimersStatusTool(BaseTool):
                 is_expired = False
 
                 if timer.is_active and not timer.is_completed:
-                    remaining_seconds = (timer.end_time - now).total_seconds()
+                    remaining_seconds = (_as_utc(timer.end_time) - now).total_seconds()
                     if remaining_seconds <= 0:
                         is_expired = True
                         # Auto-complete expired timers
@@ -199,10 +228,11 @@ class TimersStatusTool(BaseTool):
                 timer_data = {
                     "timer_id": str(timer.id),
                     "title": timer.title,
-                    "end_time": timer.end_time.isoformat(),
+                    "end_time": as_utc(timer.end_time).isoformat(),
+                    "ends": describe_instant(timer.end_time),
                     "is_active": timer.is_active,
                     "is_completed": timer.is_completed,
-                    "created_at": timer.created_at.isoformat(),
+                    "created_at": as_utc(timer.created_at).isoformat() if timer.created_at else None,
                     "time_remaining": time_remaining,
                     "is_expired": is_expired
                 }
@@ -302,7 +332,8 @@ class TimersCancelTool(BaseTool):
                 data={
                     "timer_id": str(timer.id),
                     "title": timer.title,
-                    "end_time": timer.end_time.isoformat(),
+                    "end_time": as_utc(timer.end_time).isoformat(),
+                    "ends": describe_instant(timer.end_time),
                     "is_active": timer.is_active,
                     "is_completed": timer.is_completed
                 },

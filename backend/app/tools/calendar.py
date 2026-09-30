@@ -1,4 +1,5 @@
 from typing import Dict, Any
+from app.services.civil_time import TIME_PARAMETER_CONTRACT
 from app.tools.base import BaseTool, ToolResult
 from app.db.session import get_db
 from app.db.base import Base
@@ -259,11 +260,11 @@ class CalendarCreateTool(BaseTool):
                 },
                 "starts_at": {
                     "type": "string",
-                    "description": "Event start time (ISO 8601 datetime format, e.g., '2024-01-15T14:30:00'). Times without timezone are assumed to be in user's local timezone (EST/EDT)."
+                    "description": "Event start time. " + TIME_PARAMETER_CONTRACT
                 },
                 "ends_at": {
                     "type": "string",
-                    "description": "Event end time (ISO 8601 datetime format, e.g., '2024-01-15T15:30:00'). Times without timezone are assumed to be in user's local timezone (EST/EDT)."
+                    "description": "Event end time. " + TIME_PARAMETER_CONTRACT
                 },
                 "location": {
                     "type": "string",

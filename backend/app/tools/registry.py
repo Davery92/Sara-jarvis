@@ -5,8 +5,12 @@ from app.tools.documents import DocumentsSearchTool
 from app.tools.notes import (
     NotesCreateTool, NotesSearchTool, NotesEditTool, NotesDeleteTool, NotesListTool,
     NotesFindSimilarTool, NotesMergeTool, NotesListFoldersTool, NotesCreateFolderTool,
+    NotesCorrectFactTool,
 )
-from app.tools.reminders import RemindersCreateTool, RemindersListTool, RemindersCancelTool
+from app.tools.reminders import (
+    RemindersCreateTool, RemindersListTool, RemindersCancelTool,
+    RemindersRescheduleTool, RemindersUpdateTool,
+)
 from app.tools.location import (
     LocationReminderCreateTool, LocationReminderListTool, LocationReminderCancelTool,
     PlacesSaveTool, PlacesListTool, PlacesDeleteTool,
@@ -14,6 +18,7 @@ from app.tools.location import (
 from app.tools.daily_tasks import DailyTaskCreateTool, DailyTaskListTool, DailyTaskCompleteTool
 from app.tools.timers import TimersStartTool, TimersStatusTool, TimersCancelTool
 from app.tools.calendar import CalendarListTool, CalendarCreateTool, CalendarSetRecurringTool
+from app.tools.calendar_availability import CalendarAvailabilityTool
 from app.tools.knowledge_graph import (
     KnowledgeGraphSearchTool, 
     ConnectionFinderTool, 
@@ -32,6 +37,7 @@ from app.tools.fitness.fitness_notes import (
 )
 from app.tools.fitness.food_log import (
     FoodLogCreateTool,
+    FoodLogCorrectTool,
     FoodLogSearchTool,
     FoodLogSummaryTool
 )
@@ -39,6 +45,7 @@ from app.tools.fitness.food_search_log import FoodSearchAndLogTool
 from app.tools.fitness.workout_log import (
     WorkoutListTool,
     WorkoutLogCreateTool,
+    WorkoutLogCorrectTool,
     WorkoutDetailsTool,
     WorkoutStatsTool
 )
@@ -159,6 +166,7 @@ from app.tools.quiet import QUIET_TOOLS
 from app.tools.directives import DIRECTIVE_TOOLS
 from app.tools.notification_ack import NOTIFICATION_ACK_TOOLS
 from app.tools.threads import THREAD_TOOLS
+from app.tools.action_verification import ACTION_VERIFICATION_TOOLS
 from app.tools.shell import SHELL_TOOLS
 from app.tools.recipes import RECIPE_TOOLS
 from app.tools.people import ListPeopleTool
@@ -187,10 +195,14 @@ class ToolRegistry:
             ]
         },
         'notes': {
-            'description': 'Create, edit, search, list, and delete notes and folders in the knowledge garden',
+            'description': (
+                'Create, correct, edit, search, list, and delete notes and folders in the '
+                'knowledge garden. A FACT CORRECTION uses notes_correct_fact.'
+            ),
             'tools': [
                 'notes_create',
                 'notes_search',
+                'notes_correct_fact',
                 'notes_edit',
                 'notes_delete',
                 'notes_list',
@@ -205,6 +217,8 @@ class ToolRegistry:
             'tools': [
                 'reminders_create',
                 'reminders_list',
+                'reminders_reschedule',
+                'reminders_update',
                 'reminders_cancel',
                 'daily_task_create',
                 'daily_task_list',
@@ -215,6 +229,7 @@ class ToolRegistry:
                 'calendar_list',
                 'calendar_create',
                 'calendar_set_recurring',
+                'calendar_find_availability',
                 'meeting_prep'
             ]
         },
@@ -224,6 +239,7 @@ class ToolRegistry:
                 'list_add',
                 'list_view',
                 'list_check',
+                'list_correct_item',
                 'list_remove'
             ]
         },
@@ -241,8 +257,10 @@ class ToolRegistry:
             'tools': [
                 'fitness_summary',
                 'fitness_note_create', 'fitness_note_search', 'fitness_note_edit',
-                'food_search_and_log', 'food_log_create', 'food_log_search', 'food_log_summary',
-                'workout_list', 'workout_log_create', 'workout_details', 'workout_stats',
+                'food_search_and_log', 'food_log_create', 'food_log_correct',
+                'food_log_search', 'food_log_summary',
+                'workout_list', 'workout_log_create', 'workout_log_correct',
+                'workout_details', 'workout_stats',
                 'recovery_log_create', 'recovery_log_get', 'recovery_log_recent',
                 'template_list', 'template_get', 'template_create', 'template_update', 'template_delete',
                 'program_list', 'program_get', 'program_create', 'program_update', 'program_activate', 'program_delete',
@@ -396,8 +414,21 @@ class ToolRegistry:
             'tools': ['route_behavior', 'show_behavior_config']
         },
         'personal_knowledge': {
-            'description': "Query and store personal knowledge about David — preferences, routines, goals, interests, health, relationships, and places.",
-            'tools': ['query_david_knowledge', 'remember_about_david']
+            # `remember_about_david` removed from the offered set 2026-09-27.
+            # Live-measured 0 for 4 across two validation conversations (2
+            # refused at the execution boundary, 2 `action_receipt`
+            # status=failed). Worse than useless: because it reads as the
+            # obvious "remember this" tool, the model reached for it on both
+            # capture and correction turns, burned the round, persisted
+            # nothing, and never tried `notes_create`/`notes_edit` — which
+            # both work. Removing the option is what makes a correction
+            # actually select notes_edit.
+            #
+            # Reads are unaffected: `query_david_knowledge` still answers from
+            # whatever the PKG already holds. Restore the write tool here once
+            # its own failure is diagnosed and it has a passing test.
+            'description': "Query personal knowledge about David — preferences, routines, goals, interests, health, relationships, and places.",
+            'tools': ['query_david_knowledge']
         },
         'standing_orders': {
             'description': "Manage standing orders — pre-authorized autonomous actions Sara can execute without asking. Also view/undo recent autonomous actions.",
@@ -417,6 +448,10 @@ class ToolRegistry:
         'threads': {
             'description': "Close an open thread David says is finished — \"we already had that meeting\", \"I answered them\", \"stop bringing this up\". Resolving a thread also drops anything queued to say about it. Use it whenever David indicates something is handled; agreeing without calling it changes nothing.",
             'tools': ['resolve_thread']
+        },
+        'action_verification': {
+            'description': "Check the real record of an action before confirming or denying it happened — use when David asks \"did you actually do that?\", challenges something you said you did, or you're about to state an action completed and aren't certain from the conversation alone.",
+            'tools': ['verify_action']
         },
         'diagnostics': {
             'description': "Read-only self-diagnostics — Sara's own health. Failing background tasks, error events, an explanation of any single event, and a handoff report for Claude Code. Use when David asks \"what's broken?\", \"are you okay?\", \"why did that fail?\", or \"is anything failing?\"",
@@ -497,6 +532,7 @@ class ToolRegistry:
             NotesCreateTool(),
             NotesSearchTool(),
             NotesEditTool(),
+            NotesCorrectFactTool(),
             NotesDeleteTool(),
             NotesListTool(),
             NotesFindSimilarTool(),
@@ -508,6 +544,8 @@ class ToolRegistry:
             RemindersCreateTool(),
             RemindersListTool(),
             RemindersCancelTool(),
+            RemindersRescheduleTool(),
+            RemindersUpdateTool(),
 
             # Location — location-triggered reminders + saved places
             LocationReminderCreateTool(),
@@ -531,6 +569,7 @@ class ToolRegistry:
             CalendarListTool(),
             CalendarCreateTool(),
             CalendarSetRecurringTool(),
+            CalendarAvailabilityTool(),
 
             # Knowledge Graph
             KnowledgeGraphSearchTool(),
@@ -554,10 +593,12 @@ class ToolRegistry:
             FoodLogCreateTool(),
             FoodLogSearchTool(),
             FoodLogSummaryTool(),
+            FoodLogCorrectTool(),
 
             # Workout Tools
             WorkoutListTool(),
             WorkoutLogCreateTool(),
+            WorkoutLogCorrectTool(),
             WorkoutDetailsTool(),
             WorkoutStatsTool(),
 
@@ -747,6 +788,9 @@ class ToolRegistry:
             # Close a thread David says is finished — the closer for invariant 3
             *THREAD_TOOLS,
 
+            # R03: ground confirmations/challenges in the real action_receipt record
+            *ACTION_VERIFICATION_TOOLS,
+
             # Research Plan Tools (delegate research to dedicated agent)
             CreateResearchPlanTool(),
             ResearchPlanStatusTool(),
@@ -792,7 +836,8 @@ class ToolRegistry:
         """Get fitness-specific tools only"""
         fitness_tool_names = [
             'fitness_note_create', 'fitness_note_search', 'fitness_note_edit',
-            'food_log_create', 'food_log_search', 'food_log_summary',
+            'food_log_create', 'food_log_correct', 'food_log_search', 'food_log_summary',
+            'workout_log_correct',
             'workout_list', 'workout_log_create', 'workout_stats',
             'template_list', 'template_get'
         ]
@@ -982,13 +1027,73 @@ class ToolRegistry:
 
         try:
             result = await tool.execute(user_id, **parameters)
+            # Return-contract check (reliable-assistant plan F: "audit
+            # registered tools for schema/signature/return-contract
+            # mismatches"). Finding 4: `start_workout` was COMPLETELY
+            # non-functional because it returned a plain dict and this line
+            # did `result.success` on it — every invocation died with
+            # "'dict' object has no attribute 'success'", surfaced to David
+            # as an opaque failure, and the cause sat undiagnosed across
+            # multiple studies because nothing here distinguished "the tool
+            # failed" from "the tool does not honor the contract".
+            #
+            # A dict that already looks like a ToolResult is adapted (the
+            # tool did its work; only its wrapper is wrong) and logged loudly
+            # so it gets fixed. Anything else is a real contract violation and
+            # is reported as one, not as a mystery AttributeError.
+            if not isinstance(result, ToolResult):
+                if isinstance(result, dict) and "success" in result:
+                    logger.error(
+                        f"⚠️ Tool '{name}' returned a plain dict, not a ToolResult — "
+                        f"adapting it, but this is a contract bug in the tool"
+                    )
+                    result = ToolResult(
+                        success=bool(result.get("success")),
+                        message=str(result.get("message") or ""),
+                        data=result.get("data"),
+                        citations=list(result.get("citations") or []),
+                    )
+                else:
+                    logger.error(
+                        f"⚠️ Tool '{name}' returned {type(result).__name__}, "
+                        f"which is not a ToolResult — refusing to guess what it meant"
+                    )
+                    return ToolResult(
+                        success=False,
+                        message=(
+                            f"{name} did not return a usable result "
+                            f"({type(result).__name__}). Nothing it may have done can be "
+                            "confirmed, so do not describe it as done."
+                        ),
+                    )
             if result.success:
                 logger.info(f"Tool '{name}' executed successfully: {result.message}")
             else:
                 logger.warning(f"Tool '{name}' executed but returned failure: {result.message}")
             return result
+        except TypeError as e:
+            # A signature mismatch — the second half of finding 4 ("got
+            # multiple values for argument 'template_id'"). Distinguished from
+            # a generic failure because the fix is a code fix, not a retry.
+            logger.error(
+                f"Tool '{name}' signature mismatch: {type(e).__name__}: {e}",
+                exc_info=True,
+            )
+            return ToolResult(
+                success=False,
+                message=(
+                    f"{name} could not be called with those arguments and did not run. "
+                    "Do not describe it as done."
+                ),
+            )
         except Exception as e:
-            logger.error(f"Tool '{name}' execution failed with exception: {e}")
+            # Log the real exception CLASS before the catch-all returns a
+            # generic failure — otherwise the funnel only ever sees
+            # "Tool execution failed" and the actual defect stays invisible.
+            logger.error(
+                f"Tool '{name}' execution failed with {type(e).__name__}: {e}",
+                exc_info=True,
+            )
             return ToolResult(
                 success=False,
                 message=f"Tool execution failed: {str(e)}"

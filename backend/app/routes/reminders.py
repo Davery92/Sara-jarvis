@@ -61,6 +61,25 @@ async def create_reminder(
         reminder_time=reminder_dt
     )
     db.add(reminder)
+    db.flush()  # resolve reminder.id's Column default before it's referenced below
+
+    # Same producer contract as tools/reminders.py's RemindersCreateTool —
+    # this is a separate mutation surface (direct app UI) for the same
+    # domain, so it needs its own emission rather than relying on the
+    # chat tool's.
+    from app.services.world_state.writer import append_world_event
+    append_world_event(
+        db, user_id=str(current_user.id), kind="reminder.created", source="reminders_api",
+        source_ref=f"reminder:{reminder.id}", aggregate_type="reminder", aggregate_id=str(reminder.id),
+        actor_type="user", actor_id=str(current_user.id), correlation_id=str(reminder.id),
+        dedupe_key=f"reminder-created:{reminder.id}",
+        occurred_at=reminder_dt,
+        payload={
+            "reminder_id": str(reminder.id), "title": reminder_data.title,
+            "due_at": reminder_dt.isoformat(), "description": reminder_data.description,
+        },
+    )
+
     db.commit()
     db.refresh(reminder)
 
@@ -130,6 +149,15 @@ async def delete_reminder(
     if not reminder:
         raise HTTPException(status_code=404, detail="Reminder not found")
 
+    from app.services.world_state.writer import append_world_event
+    append_world_event(
+        db, user_id=str(current_user.id), kind="reminder.cancelled", source="reminders_api",
+        source_ref=f"reminder:{reminder.id}", aggregate_type="reminder", aggregate_id=str(reminder.id),
+        actor_type="user", actor_id=str(current_user.id), correlation_id=str(reminder.id),
+        dedupe_key=f"reminder-cancelled:{reminder.id}",
+        payload={"reminder_id": str(reminder.id), "title": reminder.title},
+    )
+
     db.delete(reminder)
     db.commit()
 
@@ -153,6 +181,16 @@ async def complete_reminder(
 
     reminder.is_completed = True
     reminder.updated_at = local_now()
+
+    from app.services.world_state.writer import append_world_event
+    append_world_event(
+        db, user_id=str(current_user.id), kind="reminder.completed", source="reminders_api",
+        source_ref=f"reminder:{reminder.id}", aggregate_type="reminder", aggregate_id=str(reminder.id),
+        actor_type="user", actor_id=str(current_user.id), correlation_id=str(reminder.id),
+        dedupe_key=f"reminder-completed:{reminder.id}",
+        payload={"reminder_id": str(reminder.id), "title": reminder.title},
+    )
+
     db.commit()
 
     return {"message": f"Marked reminder '{reminder.title}' as completed"}

@@ -1,6 +1,11 @@
 """
-Meeting research & prep — figure out *who* David is meeting with and get him
-ready for it.
+Meeting prep — figure out *who* David is meeting with and get him ready for it.
+
+This module never starts background research. The autonomous "meeting research
+scan" (hourly, 7-day lookahead) was removed on 2026-09-15 after it researched a
+training-session counterparty three times in one morning: David cancelled the
+plan twice and the dedup guard ignored cancelled plans, so the next hourly scan
+recreated it. Prep is now a pure read: counterparty, last email thread, PKG.
 
 iOS-synced calendar events carry no attendee list (the model has only title /
 description / location), so the counterparty is recovered from two signals:
@@ -11,9 +16,8 @@ description / location), so the counterparty is recovered from two signals:
      (sender + to/cc), so their non-David domains reveal the external company.
 
 Gating is strict: only David's OWN events (via calendar_ownership) that look
-like a business meeting are ever researched. Gym templates, pay-day markers,
-birthdays and family events are excluded, so Sara never burns a research run
-on "Athena's Birthday Party".
+like a business meeting get counterparty enrichment. Gym templates, pay-day
+markers, birthdays and family events are excluded.
 
 The module is intentionally synchronous (plain Session) so it can be called
 from both the chat tool and the Celery prep task.
@@ -22,7 +26,6 @@ from both the chat tool and the Celery prep task.
 import logging
 import re
 from datetime import datetime, timedelta
-from app.core.timezone import naive_utc_now
 from typing import Optional
 
 from sqlalchemy import text
@@ -218,33 +221,10 @@ def is_business_meeting(
     return any(k in lowered for k in _MEETING_KEYWORDS)
 
 
-def recent_research(db: Session, user_id: str, company: str, days: int = 21) -> Optional[dict]:
-    """An existing research_plan for this company within `days` (dedup guard)."""
-    row = db.execute(
-        text("""
-            SELECT id, title, status, findings_summary, created_at
-            FROM research_plan
-            WHERE user_id = :uid
-              AND created_at > :since
-              AND status NOT IN ('failed', 'cancelled')
-              AND (title ILIKE :like OR objective ILIKE :like)
-            ORDER BY created_at DESC
-            LIMIT 1
-        """),
-        {
-            "uid": user_id,
-            "since": naive_utc_now() - timedelta(days=days),
-            "like": f"%{company}%",
-        },
-    ).mappings().first()
-    return dict(row) if row else None
-
-
 def build_prep(db: Session, user_id: str, event: dict) -> dict:
     """
-    Assemble a prep brief for one event: counterparty, last email thread,
-    PKG facts, and any ready research findings. Pure read — never triggers
-    research itself (callers decide that).
+    Assemble a prep brief for one event: counterparty, last email thread and
+    PKG facts. Pure read.
     """
     title = event.get("title") or ""
     description = event.get("description") or ""
@@ -263,7 +243,6 @@ def build_prep(db: Session, user_id: str, event: dict) -> dict:
         "is_business_meeting": business,
         "companies": companies,
         "last_email": None,
-        "research": [],
         "pkg": None,
     }
 
@@ -274,127 +253,9 @@ def build_prep(db: Session, user_id: str, event: dict) -> dict:
             "summary": related.get("summary"),
         }
 
-    # Surface any research we already have for each company candidate.
-    for company in companies[:3]:
-        r = recent_research(db, user_id, company)
-        if r:
-            prep["research"].append({
-                "company": company,
-                "status": r["status"],
-                "summary": r.get("findings_summary"),
-            })
-
     # PKG ("what we know") is async, so it's filled in by the caller
     # (the chat tool) after build_prep returns — see meeting.py.
     return prep
-
-
-def trigger_company_research_sync(
-    db: Session, user_id: str, company: str, event_title: str
-) -> bool:
-    """
-    Autonomously hand a company to the research agent (origin 'sara_internal',
-    cognitive queue — chat-initiated research keeps its david_priority lane).
-    Deduped: returns False if we've already researched this company recently.
-    """
-    if recent_research(db, user_id, company):
-        return False
-
-    import json
-    import uuid as _uuid
-    from app.core.config import settings
-
-    plan_id = str(_uuid.uuid4())
-    steps = [
-        {"title": "Company overview",
-         "description": f"What does {company} do — industry, size, products, business model. Find their website/domain.",
-         "instructions": f"Identify {company}'s industry, size, products, and business model; find their website.",
-         "status": "pending", "findings": {}},
-        {"title": "Leadership & people",
-         "description": f"Key executives and decision-makers at {company}.",
-         "instructions": f"Find key executives and decision-makers at {company}.",
-         "status": "pending", "findings": {}},
-        {"title": "Recent news",
-         "description": f"News, funding, or announcements about {company} in the last 6 months.",
-         "instructions": f"Find recent news, funding, or announcements about {company} in the last 6 months.",
-         "status": "pending", "findings": {}},
-    ]
-
-    db.execute(
-        text("""
-            INSERT INTO research_plan
-                (id, user_id, title, objective, steps, model_id, created_by, origin, status)
-            VALUES (:id, :uid, :title, :obj, CAST(:steps AS jsonb),
-                    :model, 'sara', 'sara_internal', 'draft')
-        """),
-        {
-            "id": plan_id,
-            "uid": user_id,
-            "title": f"{company} — meeting prep",
-            "obj": (
-                f"Brief David before his upcoming meeting ('{event_title}') with {company}: "
-                f"what they do, leadership, recent news, and anything relevant to a sales "
-                f"or partnership conversation."
-            ),
-            "steps": json.dumps(steps),
-            "model": getattr(settings, "research_llm_model", None) or "default",
-        },
-    )
-    db.commit()
-
-    # david_priority is the single-flight research lane (--concurrency=1).
-    # Autonomous prep used to go to `cognitive` (concurrency 4), where it could
-    # land on the LLM lane alongside a chat-initiated plan — the concurrency
-    # that OOM'd the Mac Studio on 2026-09-01. Queued here it simply waits.
-    from app.tasks.research import run_research_plan
-    async_result = run_research_plan.apply_async(
-        args=[plan_id, user_id], queue="david_priority"
-    )
-    db.execute(
-        text("UPDATE research_plan SET celery_task_id = :tid WHERE id = :id"),
-        {"tid": async_result.id, "id": plan_id},
-    )
-    db.commit()
-    logger.info("Auto-triggered meeting research for %s (plan %s)", company, plan_id)
-    return True
-
-
-def research_upcoming_meetings(user_id: str, lookahead_hours: int = 168) -> list:
-    """
-    Scan upcoming events and pre-research the counterparty of any business
-    meeting in the next `lookahead_hours` (default 7 days, so demos get real
-    lead time), so findings are ready before David asks. Conservative: only the
-    single top company per meeting, deduped. Returns (event_title, company)
-    pairs actually triggered.
-    """
-    from app.core.timezone import now as local_now
-    from app.db.session import SessionLocal
-
-    now = local_now().replace(tzinfo=None)
-    triggered: list = []
-    with SessionLocal() as db:
-        rows = db.execute(
-            text("""
-                SELECT id, title, description, location, start_time, ios_calendar_name
-                FROM calendar_event
-                WHERE user_id = :uid
-                  AND start_time > :now
-                  AND start_time < :end
-                ORDER BY start_time ASC
-                LIMIT 50
-            """),
-            {"uid": user_id, "now": now, "end": now + timedelta(hours=lookahead_hours)},
-        ).mappings().all()
-
-        for r in rows:
-            related = find_related_invite(db, user_id, r["title"], r["start_time"])
-            if not is_business_meeting(r["title"], r["ios_calendar_name"], related):
-                continue
-            companies = company_candidates(r["title"], r["description"], related)
-            if companies and trigger_company_research_sync(db, user_id, companies[0], r["title"]):
-                triggered.append((r["title"], companies[0]))
-
-    return triggered
 
 
 def format_prep(prep: dict) -> str:
@@ -413,12 +274,4 @@ def format_prep(prep: dict) -> str:
         lines.append(f"Last thread — “{le['subject']}” from {le['from']}: {le.get('summary') or '(no summary)'}")
     if prep["pkg"]:
         lines.append(f"What we know: {prep['pkg']}")
-    if prep["research"]:
-        for r in prep["research"]:
-            if r.get("summary"):
-                lines.append(f"Research on {r['company']} ({r['status']}): {r['summary']}")
-            else:
-                lines.append(f"Research on {r['company']}: {r['status']} (no summary yet)")
-    elif prep["companies"]:
-        lines.append("No background research yet.")
     return "\n".join(lines)

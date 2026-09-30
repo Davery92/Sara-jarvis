@@ -86,15 +86,41 @@ class DocumentsSearchTool(BaseTool):
             query_embedding = await embedding_service.generate_embedding(query)
             if query_embedding:
                 try:
+                    # R07 review remediation round 4 (2026-09-27): schema
+                    # investigation confirmed `document_chunk.embedding` is
+                    # a TEXT column (never `vector`), and the ingestion
+                    # path (`app/routes/documents.py::_legacy_chunk_document`)
+                    # stores it as Python `str(embedding)` — e.g.
+                    # "[0.1, 0.2, 0.3]" — which is byte-for-byte a valid
+                    # pgvector text literal. Verified directly against the
+                    # real pgvector extension: `CAST('[0.1, 0.2, 0.3]' AS
+                    # vector)` parses that exact format successfully, so a
+                    # QUERY-SIDE cast on the column (no schema migration,
+                    # no backfill) is sufficient — confirmed end-to-end by
+                    # `test_document_search_vector_fallback.py`'s paraphrase
+                    # retrieval case, which finds a chunk with ZERO literal
+                    # word overlap with the query, purely via this cast
+                    # cosine-distance path.
+                    #
+                    # NOT verified: whether every row in an already-
+                    # populated PRODUCTION table holds this same clean
+                    # format (a historical malformed value, a dimension
+                    # mismatch between differently-embedded rows, or a
+                    # value written by some other, unaudited path could
+                    # still raise here) — this is exactly why the
+                    # surrounding try/except plus the rollback fix below
+                    # remain in place: a single bad row degrades this turn
+                    # to lexical-only rather than crashing the tool, but
+                    # does not retroactively prove every row is clean.
                     similarity_query = text("""
                         SELECT dc.chunk_text, d.original_filename,
-                               (dc.embedding <=> CAST(:query_embedding AS vector)) as distance
+                               (CAST(dc.embedding AS vector) <=> CAST(:query_embedding AS vector)) as distance
                         FROM document_chunk dc
                         JOIN document d ON dc.document_id = d.id
                         WHERE dc.user_id = :user_id
                           AND dc.embedding IS NOT NULL
                           AND d.is_processed = 'true'
-                        ORDER BY dc.embedding <=> CAST(:query_embedding AS vector)
+                        ORDER BY CAST(dc.embedding AS vector) <=> CAST(:query_embedding AS vector)
                         LIMIT 8
                     """)
                     rows = db.execute(similarity_query, {
@@ -111,6 +137,26 @@ class DocumentsSearchTool(BaseTool):
                             })
                 except Exception as e:
                     logger.warning(f"pgvector document search failed, using text search only: {e}")
+                    # R07 (Sara repair plan 2026-09-25,
+                    # F03_DOCUMENT_SEARCH_PGVECTOR_TYPE_ERROR_CASCADES):
+                    # a raw DB-level failure here (confirmed live —
+                    # document_chunk.embedding is a TEXT column, not
+                    # `vector`, so `<=>` raises "operator does not exist"
+                    # on every attempt regardless of content) leaves this
+                    # session's transaction ABORTED. Without a rollback,
+                    # every subsequent statement on `db` — including the
+                    # lexical ILIKE fallback just below, in the SAME
+                    # session — fails immediately with
+                    # InFailedSqlTransaction, an unhandled exception that
+                    # crashes the whole tool and throws away a fallback
+                    # that would otherwise have found a real match. This
+                    # is the actual "cascades" in the evidence id: the
+                    # vector failure was already isolated by the try/except
+                    # above; the TRANSACTION it left behind was not.
+                    try:
+                        db.rollback()
+                    except Exception as rollback_err:
+                        logger.warning(f"document search: rollback after vector failure also failed: {rollback_err}")
 
             text_results = []
             for doc in documents:
