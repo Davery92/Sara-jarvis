@@ -15,7 +15,8 @@ from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.main_simple import get_current_user, get_db
+from app.db.session import get_db
+from app.core.deps import get_current_user_sync as get_current_user
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/model-of-you", tags=["model-of-you"])

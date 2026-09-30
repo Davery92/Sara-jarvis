@@ -35,7 +35,8 @@ from app.db.session import get_db
 # get_current_user and Timer/User live in main_simple.py until Phase 3
 # extraction progresses further. Import is top-level because main_simple
 # registers this router after defining them.
-from app.main_simple import Timer, User, get_current_user  # noqa: E402
+from app.core.deps import get_current_user_sync as get_current_user  # noqa: E402
+from app.main_simple import Timer, User  # noqa: E402  (models; see the monolith's two-Base note)
 
 logger = logging.getLogger(__name__)
 

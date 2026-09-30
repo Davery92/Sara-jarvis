@@ -25,7 +25,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.main_simple import get_current_user  # noqa: E402 — sync dep from god-file
+from app.core.deps import get_current_user_sync as get_current_user  # noqa: E402 — sync dep from god-file
 
 logger = logging.getLogger(__name__)
 

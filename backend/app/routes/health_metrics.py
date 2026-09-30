@@ -43,11 +43,12 @@ async def _log_validation_error(request: Request, exc: RequestValidationError):
     return JSONResponse(status_code=400, content={"detail": exc.errors()})
 
 
-# Import get_current_user from main_simple (deferred to avoid circular imports)
-def get_current_user(request: Request, db: Session = Depends(get_db)):
-    """Get current user from JWT token - delegates to main_simple implementation."""
-    from app.main_simple import get_current_user as _get_current_user
-    return _get_current_user(request, db)
+# The same sync implementation this used to reach into main_simple for, now
+# imported from core.deps (2026-09-30). Deliberately the *_sync variant, not
+# core.deps.get_current_user: that one also accepts an X-Device-Token, and
+# broadening auth on the health-sync endpoints is not something a refactor
+# should do silently. See core/deps.py for the full difference.
+from app.core.deps import get_current_user_sync as get_current_user
 
 
 # ====================

@@ -24,7 +24,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import httpx
 
-from app.main_simple import get_current_user
+from app.core.deps import get_current_user_sync as get_current_user
 from app.db.session import get_db
 from sqlalchemy.orm import Session
 from app.services.voice.control_plane import update_service_heartbeat

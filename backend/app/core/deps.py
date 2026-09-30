@@ -111,3 +111,53 @@ async def get_current_user_optional(
         return await get_current_user(request, access_token, db)
     except HTTPException:
         return None
+
+# ───────────────────────────────────────────────────────────────────────────
+# The monolith's SYNC variant (moved here 2026-09-30, cleanup plan 4.9/4.10).
+#
+# This is `main_simple.get_current_user` verbatim. It is NOT merged into
+# `get_current_user` above, because the two are not interchangeable and the
+# plan's own instruction was to report the difference rather than merge:
+#
+#   1. It is SYNC. `get_current_user` is async, so anything that CALLS the
+#      dependency directly rather than declaring it — `/api/notes/search`, the
+#      pi-dashboard voice routes — would get a coroutine and fail on the
+#      attribute access. (That exact bug was fixed on 2026-09-22.)
+#   2. It has NO device-token fallback. `get_current_user` also accepts
+#      `X-Device-Token`. Swapping it in would BROADEN authentication on every
+#      route that uses this one — a security-relevant change that does not
+#      belong in a refactor.
+#   3. It calls `verify_token(token)` without a session, so the revocation
+#      check opens its own connection. The async one passes `db=db` and
+#      reuses the request's session (R11 remediation).
+#
+# Route modules import this instead of reaching into `app.main_simple`, which
+# is the only change: same function, same behavior, no god-file dependency.
+# Converting those routes to the async dependency is a separate, deliberate
+# decision per route, not a side effect of deleting an import.
+# ───────────────────────────────────────────────────────────────────────────
+
+def get_current_user_sync(request: Request, db: Session = Depends(get_db)) -> User:
+    """Synchronous JWT auth: cookie first, then a Bearer header. No device token."""
+    # Try to get token from cookie first (for web UI)
+    access_token = request.cookies.get("access_token")
+
+    # If no cookie, try Authorization header (for programmatic access)
+    if not access_token:
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            access_token = auth_header[7:]  # Remove "Bearer " prefix
+
+    if not access_token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    payload = verify_token(access_token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    user_id = payload.get("sub")
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+
+    return user

@@ -9,7 +9,8 @@ from datetime import datetime
 import logging
 
 from sqlalchemy.orm import Session
-from app.main_simple import get_db, get_current_user
+from app.db.session import get_db
+from app.core.deps import get_current_user_sync as get_current_user
 from app.services.token_usage_service import (
     get_token_stats,
     reset_token_stats,

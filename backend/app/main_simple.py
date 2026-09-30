@@ -661,36 +661,21 @@ from app.schemas.ai_settings import AISettingsResponse, AISettingsUpdate
 # pwd_context, create_access_token, verify_token, get_cookie_domain imported at top
 
 # Dependencies
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-def get_current_user(request: Request, db: Session = Depends(get_db)):
-    # Try to get token from cookie first (for web UI)
-    access_token = request.cookies.get("access_token")
-    
-    # If no cookie, try Authorization header (for programmatic access)
-    if not access_token:
-        auth_header = request.headers.get("Authorization")
-        if auth_header and auth_header.startswith("Bearer "):
-            access_token = auth_header[7:]  # Remove "Bearer " prefix
-    
-    if not access_token:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    
-    payload = verify_token(access_token)
-    if not payload:
-        raise HTTPException(status_code=401, detail="Invalid token")
-    
-    user_id = payload.get("sub")
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=401, detail="User not found")
-    
-    return user
+# Cleanup plan 4.10 (2026-09-30). Both of these used to be defined here, and
+# 13 route modules imported them straight out of this file.
+#
+# `get_db` was a verbatim duplicate of `app.db.session.get_db` — same body, and
+# the same `SessionLocal` from `app.db.base`, so the same engine and pool. It
+# is now that function, not a copy of it.
+#
+# `get_current_user` is NOT merged into `core.deps.get_current_user`. The plan
+# said to report the difference rather than merge if the bodies differ, and
+# they differ in three ways that matter (sync vs async, no device-token
+# fallback, no session passed to the revocation check). The body moved to
+# `core.deps.get_current_user_sync` unchanged and this is that same function,
+# so every existing caller keeps its exact behavior.
+from app.db.session import get_db  # noqa: E402
+from app.core.deps import get_current_user_sync as get_current_user  # noqa: E402
 
 # LLM Client
 class SimpleLLMClient:

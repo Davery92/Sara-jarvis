@@ -16,7 +16,8 @@ from sqlalchemy.orm import Session
 
 from app.models.workspace_job import WorkspaceJob
 from app.core.config import settings
-from app.main_simple import get_db, get_current_user
+from app.db.session import get_db
+from app.core.deps import get_current_user_sync as get_current_user
 
 router = APIRouter(prefix="/api/workspace", tags=["workspace-jobs"])
 logger = logging.getLogger(__name__)

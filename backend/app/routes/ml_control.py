@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.main_simple import get_current_user
+from app.core.deps import get_current_user_sync as get_current_user
 from app.services.ml.control_plane import (
     ML_EVENT_TYPES,
     ML_MODEL_FAMILIES,

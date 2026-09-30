@@ -17,7 +17,7 @@ from datetime import datetime
 import logging
 
 # Import from main_simple for auth and database
-from app.main_simple import get_current_user
+from app.core.deps import get_current_user_sync as get_current_user
 
 # Import services
 from app.services.sara_identity_service import sara_identity_service
