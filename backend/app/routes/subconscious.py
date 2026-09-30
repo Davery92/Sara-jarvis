@@ -244,3 +244,11 @@ async def nudge_stream(
             "X-Accel-Buffering": "no",  # disables proxy buffering
         },
     )
+
+
+# Moved out of main_simple.py 2026-09-30 (cleanup plan 4.8). Path unchanged;
+# this router carries no prefix, so the full path stays on the decorator.
+@router.get("/shadow/active")
+async def get_shadow_active():
+    """Stub — shadow mode was removed. Returns null to silence stale polling."""
+    return {"active_session": None}

@@ -15,6 +15,7 @@ from sqlalchemy import select
 from redis import Redis
 
 from app.core.deps import get_current_user
+from app.core.deps import get_current_user_sync
 from app.core.config import settings
 from app.db.session import get_db
 from app.models.user import User
@@ -336,3 +337,41 @@ async def get_partner_thoughts(
         "generated_at": now.isoformat(),
         "thoughts": thoughts,
     }
+
+
+# Moved out of main_simple.py 2026-09-30 (cleanup plan 4.8). The decorator lost
+# the /api/workspace prefix this router already carries, so the path is
+# unchanged.
+#
+# Bound to get_current_user_sync, NOT this module's async get_current_user: in
+# the monolith it resolved to the sync dependency, which has no X-Device-Token
+# fallback. Keeping it sync preserves exactly the auth this endpoint had.
+@router.get("/pending-commands")
+async def get_pending_workspace_commands(current_user: User = Depends(get_current_user_sync)):
+    """
+    Get pending workspace commands from voice/non-SSE sources.
+    Canvas should poll this endpoint to receive workspace commands from voice interactions.
+    Commands are removed after being fetched.
+    """
+    try:
+        from app.core.redis import get_redis_sync
+        redis = get_redis_sync()
+
+        commands = []
+        user_id = str(current_user.id)
+        key = f"workspace_commands:{user_id}"
+
+        # Get all pending commands and clear the list
+        while True:
+            cmd = redis.rpop(key)
+            if cmd is None:
+                break
+            try:
+                commands.append(json.loads(cmd))
+            except json.JSONDecodeError:
+                pass
+
+        return {"commands": commands, "count": len(commands)}
+    except Exception as e:
+        logger.warning(f"Failed to get pending workspace commands: {e}")
+        return {"commands": [], "count": 0}

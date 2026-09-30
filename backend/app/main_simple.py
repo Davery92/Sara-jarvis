@@ -7742,10 +7742,7 @@ async def call_llm_simple(messages: list, temperature: float = 0.7, max_tokens: 
 logger.info("✅ Phase 4 intelligence routes loaded successfully")
 
 # ===================== SHADOW MODE STUB (removed feature) =====================
-@app.get("/shadow/active")
-async def get_shadow_active():
-    """Stub — shadow mode was removed. Returns null to silence stale polling."""
-    return {"active_session": None}
+# /shadow/active moved to app/routes/subconscious.py on 2026-09-30.
 
 
 # ===================== SUBCONSCIOUS ROUTES =====================
@@ -8293,35 +8290,7 @@ def _in_inbox_review(conversation_key: str) -> bool:
         return False
 
 
-@app.get("/api/workspace/pending-commands")
-async def get_pending_workspace_commands(current_user: User = Depends(get_current_user)):
-    """
-    Get pending workspace commands from voice/non-SSE sources.
-    Canvas should poll this endpoint to receive workspace commands from voice interactions.
-    Commands are removed after being fetched.
-    """
-    try:
-        from app.core.redis import get_redis_sync
-        redis = get_redis_sync()
-
-        commands = []
-        user_id = str(current_user.id)
-        key = f"workspace_commands:{user_id}"
-
-        # Get all pending commands and clear the list
-        while True:
-            cmd = redis.rpop(key)
-            if cmd is None:
-                break
-            try:
-                commands.append(json.loads(cmd))
-            except json.JSONDecodeError:
-                pass
-
-        return {"commands": commands, "count": len(commands)}
-    except Exception as e:
-        logger.warning(f"Failed to get pending workspace commands: {e}")
-        return {"commands": [], "count": 0}
+# /api/workspace/pending-commands moved to app/routes/workspace.py on 2026-09-30.
 
 
 @app.post("/api/pi-dashboard/voice/chat")
@@ -11740,139 +11709,7 @@ MODEL_MIME_TYPES = {
 # ==================== EPISODE-BASED CONVERSATION ENDPOINTS ====================
 
 # Knowledge Graph Endpoints
-@app.get("/analytics/dashboard")
-async def get_analytics_dashboard(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Get comprehensive analytics dashboard data"""
-    try:
-        # Database size and health
-        try:
-            # Simplified database size query
-            db_size_query = text("SELECT pg_size_pretty(pg_database_size(current_database())) as size")
-            db_size_result = db.execute(db_size_query).fetchone()
-            db_size = db_size_result.size if db_size_result else "Unknown"
-            
-            # Get connection count
-            conn_query = text("SELECT count(*) as connections FROM pg_stat_activity WHERE datname = current_database()")
-            conn_result = db.execute(conn_query).fetchone()
-            db_connections = conn_result.connections if conn_result else 0
-        except Exception as e:
-            logger.error(f"Database query error: {e}")
-            db_size = "Unknown"
-            db_connections = 0
-        
-        # Total messages and conversations
-        total_conversations = db.query(Conversation).filter(Conversation.user_id == current_user.id).count()
-        total_messages = db.query(ConversationTurn).filter(ConversationTurn.user_id == current_user.id).count()
-        
-        # Memory/archival counts
-        messages_with_embeddings = db.query(ConversationTurn).filter(
-            ConversationTurn.user_id == current_user.id,
-            ConversationTurn.embedding.isnot(None)
-        ).count()
-        
-        # System health checks
-        try:
-            # Test embedding service
-            embedding_test = await embedding_service.generate_embedding("test")
-            embedding_health = len(embedding_test) == EMBEDDING_DIM
-        except Exception as e:
-            logger.debug(f"Embedding health check failed: {e}")
-            embedding_health = False
-            
-        # Database health
-        try:
-            db.execute(text("SELECT 1"))
-            db_health = True
-            logger.info("Database health check: PASS")
-        except Exception as e:
-            logger.error(f"Database health check failed: {e}")
-            db_health = False
-            
-        # AI system metrics (get from recent logs)
-        recent_chats = db.query(ConversationTurn).filter(
-            ConversationTurn.user_id == current_user.id,
-            ConversationTurn.role == "assistant",
-            ConversationTurn.created_at >= naive_local_now() - timedelta(days=7)
-        ).count()
-        
-        # Tool usage stats (simplified)
-        tool_calls_successful = recent_chats  # Approximation
-        
-        # User activity stats
-        notes_count = db.query(Note).filter(Note.user_id == current_user.id).count()
-        reminders_count = db.query(Reminder).filter(
-            Reminder.user_id == current_user.id,
-            Reminder.is_completed == False
-        ).count()
-        documents_count = db.query(Document).filter(Document.user_id == current_user.id).count()
-        active_timers = db.query(Timer).filter(
-            Timer.user_id == current_user.id,
-            Timer.is_active == True
-        ).count()
-        
-        # Recent activity
-        last_conversation = db.query(Conversation).filter(
-            Conversation.user_id == current_user.id
-        ).order_by(Conversation.updated_at.desc()).first()
-        
-        last_activity = last_conversation.updated_at if last_conversation else None
-        
-        # Reconcile against the canonical body-state projection (SINGULAR_SARA
-        # §13 item 3) instead of trusting this endpoint's own live probes in
-        # isolation — those probes only check 2 components at *this instant*,
-        # while the projection reflects what /api/metrics and /api/sara/brief
-        # already agree on. A live probe still runs above so this endpoint
-        # keeps working even before any heartbeat has ever recorded a
-        # component (canonical component missing -> fall back to the probe).
-        body_state_projection = None
-        try:
-            from app.services.body_state_projection import get_body_state_projection, get_component
-            body_state_projection = await get_body_state_projection(str(current_user.id))
-            db_component = await get_component("database", str(current_user.id))
-            embed_component = await get_component("embeddings", str(current_user.id))
-            if db_component is not None:
-                db_health = db_component.status.value == "ok"
-            if embed_component is not None:
-                embedding_health = embed_component.status.value == "ok"
-        except Exception as e:
-            logger.debug(f"Analytics dashboard body_state reconciliation failed: {e}")
-
-        return {
-            "database": {
-                "size": db_size,
-                "connections": db_connections,
-                "health": db_health
-            },
-            "memory": {
-                "total_conversations": total_conversations,
-                "total_messages": total_messages,
-                "archived_count": messages_with_embeddings,
-                "archival_percentage": round((messages_with_embeddings / max(total_messages, 1)) * 100, 1)
-            },
-            "ai_system": {
-                "embedding_service_health": embedding_health,
-                "successful_responses_7d": recent_chats,
-                "tool_calls_successful_7d": tool_calls_successful,
-                "last_activity": last_activity.isoformat() if last_activity else None
-            },
-            "user_data": {
-                "notes": notes_count,
-                "active_reminders": reminders_count,
-                "documents": documents_count,
-                "active_timers": active_timers
-            },
-            "system_health": {
-                "overall": db_health and embedding_health,
-                "database": db_health,
-                "ai_services": embedding_health,
-                "status": "healthy" if (db_health and embedding_health) else "degraded"
-            },
-            "body_state": body_state_projection.model_dump(mode="json") if body_state_projection else None,
-        }
-        
-    except Exception as e:
-        logger.error(f"Analytics dashboard error: {e}")
-        raise HTTPException(status_code=500, detail=f"Analytics failed: {str(e)}")
+# /analytics/dashboard moved to app/routes/assistant_analytics.py on 2026-09-30.
 
 # Settings endpoints
 @app.get("/settings/ai")
