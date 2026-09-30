@@ -1,276 +1,216 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code working in this repository. The audit is a map; the code
+is the truth. If this file disagrees with the tree, the tree wins — fix this file.
 
-## Development Commands
+## 1. What Sara is
 
-### Docker Container Management
-```bash
-# Start all data services (recommended for development)
-docker compose up -d db neo4j minio redis
+A personal AI with persistent memory, autonomous cognition, and presence on
+several surfaces at once. She is not a chat wrapper: background cognition runs
+whether or not anyone is looking, and it can decide to speak first.
 
-# Start complete application stack
-docker compose up -d
+Monorepo: `backend/` (FastAPI), `frontend/` (React+Vite web), `ios-app/`
+(Expo/React Native + Watch + native modules), `sara-desktop/`, `jetson/`
+(voice+vision), `pi-dashboard/`, `workbench-canvas/`, `sara-agent/` (fleet
+agent), `acs-daemon/` + `acs-tool-runner/` (autonomous compute), `embedding-service/`.
 
-# View logs for specific services
-docker compose logs -f db          # Database logs
-docker compose logs -f backend     # Backend API logs
-docker compose logs -f frontend    # Frontend dev server logs
+## 2. Commands
 
-# Stop all services
-docker compose down
-
-# Rebuild containers after code changes
-docker compose build --no-cache backend
-docker compose build --no-cache frontend
-```
-
-### Frontend (React + Vite + TypeScript)
-```bash
-# Running in Docker (recommended for development)
-# Frontend automatically starts in Docker container on port 3000
-# Access at: http://<dev-host>:3000
-
-# Local development (alternative)
-cd frontend
-npm run dev        # Start development server on port 3000
-npm run build      # Build for production (requires TypeScript fixes)
-npm run lint       # Run ESLint
-npm run preview    # Preview production build
-```
-
-### Backend (FastAPI + Python)
-**IMPORTANT: NEVER start the backend locally. Always use Docker Compose.**
+**Never start the backend locally. It runs only in Docker.** There is no
+`--reload` over the bind mount, so after editing code you must rebuild and
+restart before anything you observe at runtime means what you think.
 
 ```bash
-# Start backend in Docker (ALWAYS use this method)
-docker compose -f docker-compose.dev.yml up -d backend
+# Production is operated through ONE wrapper. Read RECOVERY.md first.
+scripts/sara-prod verify          # check, change nothing (default)
+scripts/sara-prod ps | logs [svc]
+scripts/sara-prod up | restart [svc...]
 
-# View backend logs
+# Dev stack (NOT for production — see §3 and the header of docker-compose.dev.yml)
+docker compose -f docker-compose.dev.yml up -d db neo4j redis minio embeddings
+docker compose -f docker-compose.dev.yml build backend
 docker compose -f docker-compose.dev.yml logs -f backend
 
-# Rebuild backend after code changes
-docker compose -f docker-compose.dev.yml build backend
-docker compose -f docker-compose.dev.yml up -d backend
+# Frontend
+cd frontend && npm run dev        # port 3000
+cd frontend && npm run build      # npm run lint, npm run preview
+
+# Database (credentials in .env, never in docs)
+docker compose -f docker-compose.dev.yml exec db psql -U sara -d sara_hub
 ```
 
-### Database Operations
+Tests — all pytest runs must go through a disposable stack; `tests/env_guard.py`
+aborts collection otherwise (see §7):
+
 ```bash
-# Connect to PostgreSQL
-psql "$DATABASE_URL"   # credentials live in .env, never in docs
-
-# Run migration scripts
-python3 backend/migrate_users.py        # Migrate from SQLite to PostgreSQL
-python3 backend/add_folder_column.py    # Update database schema
-python3 backend/add_note_connections.py # Add knowledge garden connections table
+docker compose -f docker-compose.test.yml up -d --wait test-db test-redis
+./backend/scripts/provision_test_schema.sh
+cd backend && python -m pytest                      # testpaths = tests
+cd backend && python -m pytest tests/replay         # conversation replay harness
+node ios-app/scripts/check-workout-contract-parity.mjs   # workout wire contract, 4 copies
+python backend/tests/assistant_acceptance/readiness_probe.py   # run INSIDE the api container
 ```
 
-## Architecture Overview
+That readiness probe — not `/health` — is the deploy gate. It writes to the
+database, discloses every row it creates, and removes what it created.
 
-### System Design
-Sara is a personal AI hub with human-like memory built as a full-stack application:
+## 3. Runtime topology
 
-- **Frontend**: React SPA using App.tsx as main entry point
-- **Backend**: FastAPI server with main_simple.py as primary implementation
-- **Database**: PostgreSQL 16 with pgvector extension for semantic search
-- **Storage**: MinIO for document uploads
-- **LLM**: any OpenAI-compatible endpoint; roles/models resolved via the model broker, endpoints set in `.env`
+14 compose services in `docker-compose.dev.yml`: `backend`, `db` (pgvector/pg16),
+`neo4j`, `redis`, `minio`, `embeddings`, `frontend`, `canvas`,
+`acs-tool-runner`, and five celery services. `docker-compose.yml` (prod) declares
+only 10 and **lags dev** — it has no `acs-tool-runner`, no `embeddings`, and none
+of the split celery lanes, but does have `pi-dashboard`. Neither file is
+authoritative on its own; see the headers.
 
-### Docker Container Architecture
+Celery lanes (queues are the contract, not the service names):
 
-The application uses a hybrid containerized architecture optimized for development:
+| service | concurrency | queues |
+|---|---|---|
+| `celery-worker` | 4 | cognitive, health, input, maintenance, low_priority, reflection, dispatch |
+| `celery-critical` | 2 | critical |
+| `celery-acs` | 2 | acs |
+| `celery-david-priority` | 1 | david_priority |
+| `celery-beat` | — | `app.celery_beat:DBScheduler` |
 
-#### Current Running Containers
-```bash
-docker compose ps
-# Shows:
-# jarvis-db-1              - PostgreSQL 16 with pgvector (port 5432)
-# jarvis-neo4j-1           - Neo4j graph database (ports 7474/7687)
-# jarvis-redis-1           - Redis cache (port 6379)
-# jarvis-frontend-dev-1    - Vite dev server (port 3000)
-```
+Beat reads the `scheduled_job` table (101 rows, 99 enabled), not a Python
+schedule dict. Crontabs there are **ET**. `DBScheduler` marks
+`last_status='success'` at DISPATCH time, so a green row does not mean the task
+succeeded — see `app/celery_signals.py`.
 
-#### Container Details
+Off-box: Mac Studio LLM host via MTPLX (chat lane :8082, background :8081), GPU
+host `her` at 10.185.1.8 (embeddings/ASR/TTS), Jetson (voice+vision, separate
+repo), Sara VM daemon at 10.185.1.176, and two **bare systemd services on this
+host** running from the working tree — `sara-ha-listener.service` and
+`sara-scheduled-home.service` (`app/workers/ha_listener.py`,
+`app/workers/scheduled_home_worker.py`). Nothing imports those two and no compose
+file names them, so an import/compose grep will wrongly conclude they are dead.
+They have `Restart=always`.
 
-**Data Layer (Containerized)**
-- **PostgreSQL (`jarvis-db-1`)**: Primary database with pgvector extension
-  - Image: `pgvector/pgvector:pg16`
-  - Port: `<dev-host>:5432`
-  - Persistent volume: `postgres_data`
-  
-- **Neo4j (`jarvis-neo4j-1`)**: Knowledge graph database
-  - Image: `neo4j:5.15-community`
-  - Ports: `<dev-host>:7474` (HTTP), `<dev-host>:7687` (Bolt)
-  - Persistent volumes: `neo4j_data`, `neo4j_logs`, `neo4j_import`, `neo4j_plugins`
-  
-- **Redis (`jarvis-redis-1`)**: Caching layer
-  - Image: `redis:7-alpine`
-  - Port: `0.0.0.0:6379`
-  
-- **MinIO (`jarvis-minio-1`)**: Object storage for documents
-  - Image: `quay.io/minio/minio`
-  - Ports: `<dev-host>:9000` (API), `<dev-host>:9001` (Console)
-  - Persistent volume: `minio_data`
+### Production is pinned
 
-**Application Layer**
-- **Frontend (`jarvis-frontend-dev-1`)**: React development server
-  - Image: `node:20-alpine`
-  - Port: `0.0.0.0:3000`
-  - Volume mounted: Live code reloading
-  - Command: Vite dev server with hot module replacement
+`docker-compose.incident-recovery.yml` pins the API and all five celery services
+to `sara-reliable-candidate:20260929` with `app/` and `alembic/` mounted
+**read-only** from a frozen tree outside this repo. The pin lives in an overlay,
+and an overlay only applies when it is named — any `docker compose -f
+docker-compose.dev.yml up -d` typed without it puts the mutable working tree into
+production, which is what the 2026-09-29 incident was. Use `scripts/sara-prod`.
 
-- **Backend (`jarvis-backend-1`)**: FastAPI server (ALWAYS run in Docker)
-  - Use `docker compose -f docker-compose.dev.yml up -d backend`
-  - Port: `0.0.0.0:8000`
-  - Connects to containerized databases
+## 4. Backend architecture
 
-#### Container Networking
-- All containers use the `jarvis_default` Docker network
-- Services can communicate using container names (e.g., `db`, `neo4j`, `redis`)
-- Host networking for external access (frontend, API, databases)
+- `app/main_simple.py` — 13,098 lines, 29 `@app.` endpoints. What still lives
+  here: `/chat/stream` (the big one) and `/chat/models`, the Pi-dashboard and
+  voice-agent voice endpoints, Apple Health sync, settings + Codex OAuth,
+  `/analytics/dashboard`, `/api/notes/search`, and the startup/shutdown hooks.
+  Everything else has moved out.
+- `app/routes/` — 104 route modules, registered in `main_simple`.
+- `app/services/` — 356 modules. This is where the system actually is.
+- `app/tools/` — 263 registered tools across 46 categories in
+  `app/tools/registry.py`. `tool_retrieval.MAX_TOOLS_PER_CALL = 35` caps the per-turn
+  menu. `tool_mutation.gate_mutating_tools` filters mutating tools at the final
+  tool-schema boundary; it has several call sites (the post-branch chat call, the
+  voice path, and a mid-turn re-gate), so a change to one is not a change to all.
 
-#### Development Workflow
-1. **Data services** run in Docker containers for consistency
-2. **Frontend** runs in Docker with live reloading for rapid development
-3. **Backend** MUST run in Docker via `docker compose -f docker-compose.dev.yml up -d backend`
-4. **Hot reloading** enabled for frontend; rebuild backend container after code changes
+## 5. Cognitive systems
 
-### Key Components
+**Event spine → salience → deliberation.** Events land in the world-state
+pipeline, `salience` scores them (threshold 1.5), the observation log feeds
+deliberation, and a gate decides whether anything reaches David. Tables:
+`agent_run_log`, `notification_log`.
 
-#### Frontend Architecture
-- **Main App**: `App.tsx` is the app entry point
-- **Routing**: View-based state management, not React Router
-- **State**: Local React state with some TanStack Query for server state
-- **Styling**: Tailwind CSS with dark theme
-- **Features**: Chat, Notes (Obsidian-style), Documents, Timers, Reminders, Calendar
+**Execution boundary.** A mutating tool call has to get through four layers, and
+they are separate on purpose: `tool_mutation` (is there action evidence at all),
+`operation_contract` (which operation was actually requested — a reschedule
+request is not a cancellation authorization), `reference_resolution` /
+`target_authorization` (which owner-scoped row, resolved once and reused), and
+`action_receipt_service` (a durable row per call that executed, which
+`verify_action` reads back). `outcome_grounding` renders confirmations from
+committed outcomes, because a prompt rule cannot stop a model from claiming it
+did something.
 
-#### Backend Architecture
-- **Main Server**: `main_simple.py` contains all endpoints in single file
-- **Database**: SQLAlchemy ORM with PostgreSQL + pgvector
-- **AI Tools**: Tool-based system in `app/tools/` with registry pattern
-- **Memory System**: Episodic memory with importance scoring and compaction
-- **Authentication**: JWT-based with HTTP-only cookies
+**Mind V2** — judge → compose → review → deliver, with `say_candidate` as the
+single mouth. Review kills roughly 89% of candidates.
 
-### Critical Implementation Details
+**Kernel / One Mind** — the four-state consolidation absorbing deliberation,
+check-ins and ACS. Check new features against its six invariants before adding a
+parallel brain; there have been two before.
 
-#### Notes System (Knowledge Garden)
-- **Current UI**: Full Obsidian-style knowledge garden interface with multiple views:
-  - **Notes View**: Three-panel layout (sidebar + editor + context panel)
-  - **Graph View**: Interactive D3.js visualization of notes and connections
-  - **Timeline View**: Chronological exploration of notes and memories
-  - **Settings**: Memory management and knowledge garden configuration
-- **Backend**: Supports hierarchical folders with parent_id relationships
-- **Database**: Note model with folder_id + new note_connection table for bidirectional links
-- **API**: Full CRUD endpoints for notes, folders, and connections
-- **Knowledge Features**:
-  - **Bidirectional Linking**: `[[Note Title]]` syntax with auto-detection
-  - **Connection Types**: Reference (explicit links), Semantic (content similarity), Temporal
-  - **Auto-Connection Detection**: Automatically creates connections when notes are saved
-  - **Connection Suggestions**: Semantic similarity recommendations with manual approval
-  - **Memory Context**: Shows related episodic memories for each note
-  - **Backlinks & Related Notes**: Automatically detected relationships
+**Standing orders, directives, quiet mode** — user-set rules with a 5-minute
+undo. Directives are standing ("never bring up X"); ActivityPub is permanently
+blocked via `sara_interest.blocked`, not deleted.
 
-#### Memory & RAG System
-- **Episodes**: All interactions stored as episodes with importance scores
-- **Retrieval**: Composite scoring (similarity + recency + importance + frequency)
-- **Tools**: AI can use tools like memory search, note creation, timers, etc.
-- **Selective RAG**: Router decides when to retrieve context vs direct response
+## 6. Memory stack
 
-#### Authentication Flow
-- **Login**: POST /auth/login sets HTTP-only cookie
-- **Session**: JWT token in secure cookie with domain .sara.avery.cloud
-- **Protection**: All endpoints require authentication via get_current_user dependency
+- **Episodes** — pgvector with an HNSW index on `episode.embedding`, composite
+  retrieval (similarity + recency + importance + frequency), BGE reranker, Redis
+  working set, nightly consolidation. Enrichment is incremental behind each
+  conversation's `enriched_through_*` watermark.
+- **PKG** — Neo4j plus a `pkg_embedding` pgvector shadow. It **refuses to hold
+  body measurements**: `health_metric` is the only authority for David's numbers.
+- **Notes garden** — `[[Note Title]]` bidirectional links, `note_connection`
+  rows typed reference/semantic/temporal, auto-detected on save.
+- **World state** — continuously maintained `WorldThread` projections; chat reads
+  `app/services/world_state/chat_facts.py`, the World Context page reads the same renderer.
+- **Narrative** — diary into `day_replay_cache.summary`, dreams. The user-facing
+  journal is `journal_note`, not the internal `thought`.
 
-### Development Environment
+## 7. Critical gotchas
 
-#### Local Development
-- Frontend dev server: http://<dev-host>:3000
-- Backend API: http://<dev-host>:8000
-- Database: <dev-host>:5432
-- The frontend uses App.tsx for local development
+1. **The running container lags the working tree.** No `--reload`. Check the
+   startup timestamp (and `/debug/runtime`, which hashes modules at import and
+   compares against disk) before concluding anything about runtime behavior.
+2. **Restart safety is a (source, schema) pair.** Both halves, or the service
+   does not work. Gate on `readiness_probe.py`. Never `alembic downgrade` as a
+   recovery step — it is an outage, not a rollback. `/health` returns 200 for a
+   service nobody can log into.
+3. **Route registration must live OUTSIDE try/except.** A swallowed import error
+   silently drops an entire router.
+4. **Two `Base` instances:** `declarative_base()` is called in both
+   `app/db/base.py` and `app/main_simple.py:602`, so a model's table can be
+   registered on either metadata. Any model mapping to an already-registered
+   table needs `extend_existing=True` (50 modules do). Load-bearing until the
+   monolith refactor ends; do not "fix" it in passing. (An older note about two
+   competing `Document` models is stale — `app/models/doc.py` is now the only one
+   mapped to `document`.)
+5. **pgvector params:** `CAST(:param AS vector)`, never `:param::vector`.
+6. **redis is pinned <5.0.0:** `.close()`, not `.aclose()`.
+7. **All user-facing times are ET** via `app.core.timezone`. No bare
+   `datetime.now()` — in this container it lands 4-5h early. Celery crontabs are
+   ET. `scripts/check_naive_datetime.py` guards this.
+8. **Tests must run against a disposable stack.** `tests/env_guard.py` requires
+   `SARA_TEST_ENV=disposable`, non-production credentials and an allowlisted host,
+   and fails closed. Bring test stacks up via `backend/scripts/disposable_compose.sh`,
+   never with the default project name, which is production's.
+9. **Local-first LLM policy.** Qwen does all agentic and background work; Claude
+   is the chat persona only. Pass `enable_thinking: False` nested in
+   `chat_template_kwargs` or `content` comes back empty. Always set `max_tokens`.
+10. **Qwen3.8-27B + MTP speculative decoding corrupts tool-bearing replies.**
+    `LOCAL_GENERATION_MODE` defaults to `ar` deliberately.
 
-#### Production Configuration
-- Domain: sara.avery.cloud
-- SSL termination via nginx proxy manager
-- Docker Compose orchestration
-- CORS configured for production domain
+## 8. Where things live
 
-### Database Schema
-- **Users**: Authentication and user data
-- **Notes**: Content with optional folder organization
-- **Folders**: Hierarchical structure with parent_id
-- **NoteConnections**: Knowledge garden connections between notes
-  - source_note_id, target_note_id, connection_type (reference/semantic/temporal)
-  - strength (0-100), auto_generated flag, user_id for ownership
-- **Episodes**: Memory system with embeddings (vector column)
-- **Documents**: File uploads with MinIO storage
-- **Reminders/Timers**: Time-based features
-- **Calendar Events**: Scheduling system
+- **Schema filenames are not intuitive** (all under `backend/app/schemas/`):
+  `auth.py`, not user.py, holds `UserCreate`; `Timer*` is in `reminders.py`;
+  `UserSettings` is in `chat.py`; `UserProfile*` is in `insights.py`.
+- **Frontend views:** `frontend/src/navigation/views.ts` defines `AppView`;
+  `frontend/src/App.tsx` is the entry point and routing is view-state, not React
+  Router. API base URL is `frontend/src/config.ts`.
+- **Plans and audits:** `docs/plans/`. Incident records in
+  `docs/plans/incidents/`. `RECOVERY.md` at the root is the production procedure.
+- **Duplicated wire contracts:** the workout contract exists in four copies
+  (backend, web, iOS, Watch) — run the parity script in §2.
+- **Migration scripts** at `backend/migrate_users.py`, `add_folder_column.py`,
+  `add_note_connections.py` exist but are historical one-shots from the
+  SQLite→Postgres era. Schema changes go through alembic in
+  `backend/alembic/versions/` (head: `158_reminder_delivery_state`).
+  `DATABASE_URL` must be set explicitly; there is no default target.
 
-### AI Tool System
-Tools are registered in `app/tools/registry.py`:
-- **Memory**: Search episodic memory
-- **Notes**: Create, search, edit notes
-- **Reminders**: Create, list, cancel reminders  
-- **Timers**: Start, check status, cancel timers
-- **Calendar**: List events, create events
+## 9. Environment variables
 
-### Important Gotchas
-1. **API Base URL**: Uses dynamic configuration based on environment
-2. **Database**: Requires PostgreSQL with pgvector extension enabled
-3. **CORS**: Must include both development and production origins
-4. **Embeddings**: Uses bge-m3 model via OpenAI-compatible endpoint
-5. **Authentication**: Uses HTTP-only cookies, not localStorage tokens
-
-### Knowledge Garden Components
-
-#### Frontend Components
-- `frontend/src/components/NotesKnowledgeGarden.tsx`: Main knowledge garden interface
-- `frontend/src/components/KnowledgeGraph.tsx`: D3.js interactive graph visualization
-- `frontend/src/components/TimelineView.tsx`: Chronological memory/note timeline
-- `frontend/src/components/MemoryManager.tsx`: Memory curation and management tools
-
-#### Utilities & Services
-- `frontend/src/utils/linkParser.ts`: Bidirectional link parsing and detection
-- `frontend/src/utils/connectionDetector.ts`: Auto-connection detection and suggestions
-
-#### Backend APIs
-- `/notes/{id}/connections`: CRUD operations for note connections
-- `/notes/graph-data`: Graph visualization data endpoint
-- `/memory/episodes`: Memory management endpoints (list, update, delete)
-
-#### Key Features Implemented
-1. **Bidirectional Linking**: Auto-detects `[[Note Title]]` syntax and note title mentions
-2. **Connection Types**: Reference (explicit), Semantic (similarity), Temporal (time-based)
-3. **Auto-Detection**: Automatically creates connections when notes are saved
-4. **Visual Graph**: Interactive D3.js visualization with physics simulation
-5. **Timeline Exploration**: Chronological view of notes and memories
-6. **Memory Context**: Shows related episodes for each note
-7. **Connection Suggestions**: AI-powered similarity recommendations
-8. **Manual Curation**: Edit/delete memories, adjust importance scores
-9. **Search & Filter**: Full-text search across notes and memories
-10. **Settings Panel**: Knowledge garden management and statistics
-
-### File Structure Highlights
-- `frontend/src/App.tsx`: Main application component
-- `backend/app/main_simple.py`: Primary FastAPI server implementation
-- `backend/app/tools/`: AI tool implementations
-- `docker-compose.yml`: Complete service orchestration
-- `frontend/src/config.ts`: Dynamic API URL configuration
-
-### Environment Variables
-Key variables for development:
-- `DATABASE_URL`: PostgreSQL connection string
-- `OPENAI_BASE_URL`: LLM endpoint (OpenAI-compatible, set in .env)
-- `OPENAI_MODEL`: Primary model name (set in .env)
-- `EMBEDDING_MODEL`: Embedding model (bge-m3)
-- `ASSISTANT_NAME`: Branding (Sara)
-- `DOMAIN`: Target domain (sara.avery.cloud)
-
-### Sara's Autonomous Insight System
-Sara includes an autonomous insight system that analyzes conversation patterns and generates contextual suggestions:
-
-**Key Features:**
-- **Contextual Intelligence**: Memory-enhanced insights from conversation patterns
-- **Smart Notifications**: Respectful, duplicate-free notifications
-- **Background Sweeps**: Periodic analysis of habits, calendar, and patterns
+`DATABASE_URL`, `OPENAI_BASE_URL` / `OPENAI_MODEL` (chat lane; note the model
+catalog entry's own `base_url` overrides this — `LOCAL_CHAT_BASE_URL` exists so
+an isolated stack can actually isolate), `BG_LLM_PRIMARY_URL`/`_MODEL`,
+`EMBEDDING_MODEL` (bge-m3), `CHAT_ENABLE_THINKING`, `CHAT_TURN_DEADLINE_S`,
+`CHAT_MAX_OUTPUT_TOKENS`, `CHAT_FORCED_FINAL_MAX_TOKENS`, `ASSISTANT_NAME`,
+`DOMAIN`. Renaming a model means config/env **and** `app_settings` rows **and**
+the daemon's `ACS_LLM_MODEL`.
