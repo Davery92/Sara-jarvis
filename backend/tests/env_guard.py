@@ -48,6 +48,22 @@ _PROD_DB_USER = "sara"
 _PROD_DB_NAME = "sara_hub"
 _PROD_REDIS_HOST_MARKERS = frozenset({"jarvis-redis-1", "redis"})
 
+# Disposable databases whose names predate this guard and cannot carry a "test"
+# marker (2026-09-30). `tests/replay/harness.py` hard-requires the database to
+# be named exactly `sara_replay` — it refuses to run against anything else, as
+# its own protection against replaying over live data. That made the name rule
+# below and the replay suite mutually exclusive: `pytest tests/replay` could not
+# run on ANY host, which is how it was found.
+#
+# This exempts the NAME only. All three independent signals still apply to it:
+# SARA_TEST_ENV must be "disposable", the host must be on the test allowlist,
+# and the user must not be the production credential. Production remains
+# rejected three ways over (host `db`/10.185.1.180, user `sara`, name
+# `sara_hub`), and so does a replay pointed at the production server — which is
+# the real hazard here, since `tests/replay/provision.py` builds `sara_replay`
+# on the production Postgres by default.
+_KNOWN_DISPOSABLE_DB_NAMES = frozenset({"sara_replay"})
+
 # The isolated test stack's own compose network — see docker-compose.test.yml.
 _TEST_DB_HOST_ALLOW = re.compile(r"^(test-db|localhost|127\.0\.0\.1)$")
 _TEST_REDIS_HOST_ALLOW = re.compile(r"^(test-redis|localhost|127\.0\.0\.1)$")
@@ -111,9 +127,12 @@ def assert_disposable_test_environment() -> None:
                 problems.append(
                     f"DATABASE_URL database name {db['name']!r} matches the PRODUCTION database."
                 )
-            if db["name"] and "test" not in db["name"]:
+            if db["name"] and "test" not in db["name"] \
+                    and db["name"] not in _KNOWN_DISPOSABLE_DB_NAMES:
                 problems.append(
-                    f"DATABASE_URL database name {db['name']!r} carries no 'test' marker."
+                    f"DATABASE_URL database name {db['name']!r} carries no 'test' "
+                    f"marker and is not one of the known-disposable names "
+                    f"{sorted(_KNOWN_DISPOSABLE_DB_NAMES)}."
                 )
 
     if touches_real_redis:

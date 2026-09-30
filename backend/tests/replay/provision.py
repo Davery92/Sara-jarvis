@@ -27,10 +27,40 @@ REPO = Path(__file__).resolve().parents[3]
 FIXTURE_NAME = os.environ.get("SARA_REPLAY_FIXTURE", "2026_09_09")
 FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / FIXTURE_NAME
 
-DB_SERVICE = "db"
-DB_USER = "sara"
+# Where the replay database gets built (overridable 2026-09-30).
+#
+# The defaults are the historical behavior: the `db` service of the DEFAULT
+# compose project, as user `sara` — i.e. PRODUCTION's Postgres server. Note what
+# `recreate_database()` below then does there: `DROP DATABASE IF EXISTS
+# sara_replay WITH (FORCE)` followed by `CREATE DATABASE`. It only ever names
+# `sara_replay`, never `sara_hub`, but it is a DDL statement executed on the
+# production server with the production credential, by default, from a bare
+# `docker compose exec` that resolves the production compose project.
+#
+# These overrides let a replay be provisioned entirely inside a disposable stack
+# instead, which is what `tests/env_guard.py` requires of anything that then
+# runs against it:
+#
+#   SARA_REPLAY_COMPOSE_FILE=docker-compose.test.yml \
+#   SARA_REPLAY_COMPOSE_PROJECT=sara-replay-gate-test \
+#   SARA_REPLAY_DB_SERVICE=test-db \
+#   SARA_REPLAY_DB_USER=sara_test \
+#     python3 backend/tests/replay/provision.py
+DB_SERVICE = os.environ.get("SARA_REPLAY_DB_SERVICE", "db")
+DB_USER = os.environ.get("SARA_REPLAY_DB_USER", "sara")
+COMPOSE_FILE = os.environ.get("SARA_REPLAY_COMPOSE_FILE", "")
+COMPOSE_PROJECT = os.environ.get("SARA_REPLAY_COMPOSE_PROJECT", "")
 LIVE_DB = "sara_hub"
 REPLAY_DB = "sara_replay"
+
+
+def _compose_prefix() -> list[str]:
+    cmd = ["docker", "compose"]
+    if COMPOSE_FILE:
+        cmd += ["-f", COMPOSE_FILE]
+    if COMPOSE_PROJECT:
+        cmd += ["-p", COMPOSE_PROJECT]
+    return cmd
 
 # app_user first (everything references it); the rest follow in fixture
 # order. FK triggers are off during the load anyway — see load_rows.
@@ -67,7 +97,7 @@ REWINDABLE: dict[str, tuple[tuple[str, ...], str]] = {
 
 def psql(args: list[str], stdin: bytes | None = None, dbname: str = REPLAY_DB):
     return subprocess.run(
-        ["docker", "compose", "exec", "-T", DB_SERVICE,
+        [*_compose_prefix(), "exec", "-T", DB_SERVICE,
          "psql", "-U", DB_USER, "-d", dbname, *args],
         cwd=REPO, input=stdin, capture_output=True,
     )
