@@ -9,7 +9,7 @@ renaming one model means touching config, env, *and* multiple DB rows (see
 gotcha_model_rename_app_settings). Callers hard-code which key they read.
 
 The broker inverts that: callers declare a **capability class** (chat / kernel /
-utility / notification / embedding / vision / rpg) and the broker owns the
+utility / notification / embedding / vision) and the broker owns the
 model + endpoint + failover behind it. It reads the existing app_settings keys
 (no schema change, no runtime-resolution change — additive and safe), so
 callers can migrate onto `resolve(capability)` incrementally. And it provides
@@ -106,10 +106,6 @@ CAPABILITIES: Dict[str, Capability] = {
     "embedding_cognition": Capability(
         "embedding_cognition", "embedding_model", "embedding_cognition_base_url",
         default_model="bge-m3", default_url="http://embeddings:8100",
-    ),
-    "rpg": Capability(
-        "rpg", "temerant_rpg_model", None,
-        default_model="gpt-5.3-codex",
     ),
 }
 
