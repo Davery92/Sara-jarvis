@@ -3,13 +3,15 @@ Day Layer - Daily conversation accumulation
 Updates after conversation gaps and hourly during active hours.
 Uses 20B model for summarization.
 """
+import json
 import logging
 import os
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, List, Dict
 
-from app.core.timezone import now as local_now
+from app.core.timezone import now as local_now, USER_TIMEZONE
 
 from .prompts import DAY_LAYER_SUMMARIZE, DAY_LAYER_CONSOLIDATE
 from .status_tracker import brief_status_tracker
@@ -54,11 +56,42 @@ class DayLayer:
             return path.read_text()
         return ""
 
-    def _write_layer(self, user_id: str, content: str):
-        """Write day layer content."""
+    def _write_layer(self, user_id: str, content: str, effective_date: Optional[datetime] = None):
+        """Write day layer content and its freshness metadata sidecar.
+
+        `effective_date` is the local calendar day this content describes
+        (chat harness repair Phase 3). Defaults to "now" — callers that
+        archive/reset for a new day should pass the new day's timestamp
+        explicitly rather than relying on the default.
+        """
         path = self._get_layer_path(user_id)
         path.write_text(content)
+        self._write_meta(user_id, effective_date or local_now())
         logger.debug(f"📝 Wrote day layer for user {user_id[:8]}")
+
+    def _get_meta_path(self, user_id: str) -> Path:
+        return self._ensure_user_dir(user_id) / "day.meta.json"
+
+    def _write_meta(self, user_id: str, effective_date: datetime):
+        meta = {
+            "effective_date": effective_date.strftime("%Y-%m-%d"),
+            "generated_at": local_now().isoformat(),
+            "timezone": str(USER_TIMEZONE),
+        }
+        try:
+            self._get_meta_path(user_id).write_text(json.dumps(meta))
+        except Exception as e:
+            logger.warning(f"Failed to write day layer metadata for {user_id[:8]}: {e}")
+
+    def _read_meta(self, user_id: str) -> Optional[Dict]:
+        path = self._get_meta_path(user_id)
+        if not path.exists():
+            return None
+        try:
+            return json.loads(path.read_text())
+        except Exception as e:
+            logger.warning(f"Failed to read day layer metadata for {user_id[:8]}: {e}")
+            return None
 
     async def _call_llm(self, prompt: str) -> str:
         """Call 20B model for summarization."""
@@ -116,14 +149,15 @@ class DayLayer:
         current_day = self._read_layer(user_id)
         date_header = self._get_date_header(timestamp)
 
-        # Check if we need a new day (date changed)
-        current_date_str = self._extract_date_from_content(current_day)
-        new_date_str = timestamp.strftime('%A, %B %d')
+        # Check if we need a new day (date changed). Prefer the structured
+        # metadata sidecar; fall back to parsing the heading for files
+        # written before it existed.
+        is_new_day = self._is_new_day(user_id, current_day, timestamp)
 
         if not current_day:
             # Start fresh day layer
             new_content = f"{date_header}**{time_str}**\n{summary}\n"
-        elif current_date_str and current_date_str != new_date_str:
+        elif is_new_day:
             # New day - archive old and start fresh
             await self._archive_and_reset(user_id, current_day)
             new_content = f"{date_header}**{time_str}**\n{summary}\n"
@@ -131,9 +165,24 @@ class DayLayer:
             # Append to existing day
             new_content = f"{current_day}\n**{time_str}**\n{summary}\n"
 
-        self._write_layer(user_id, new_content)
+        self._write_layer(user_id, new_content, effective_date=timestamp)
         brief_status_tracker.record_event(user_id, "day_append", timestamp=timestamp)
         logger.info(f"📅 Appended session summary to day layer for user {user_id[:8]}")
+
+    def _is_new_day(self, user_id: str, current_day: str, timestamp: datetime) -> bool:
+        """True when `current_day`'s content describes a calendar day other
+        than `timestamp`'s. Structured metadata first; heading text as a
+        back-compat fallback for files written before the sidecar existed."""
+        if not current_day:
+            return True
+
+        meta = self._read_meta(user_id)
+        if meta and meta.get("effective_date"):
+            return meta["effective_date"] != timestamp.strftime("%Y-%m-%d")
+
+        current_date_str = self._extract_date_from_content(current_day)
+        new_date_str = timestamp.strftime('%A, %B %d')
+        return bool(current_date_str) and current_date_str != new_date_str
 
         # Check if consolidation needed
         if len(new_content) > CONSOLIDATION_THRESHOLD:
@@ -193,12 +242,23 @@ class DayLayer:
         try:
             consolidated = await self._call_llm(prompt)
 
-            # Preserve the date header
-            date_header = self._get_date_header()
+            # Preserve the day this content actually describes, not "now" —
+            # consolidation can run after the calendar day has rolled over.
+            meta = self._read_meta(user_id)
+            effective_date = local_now()
+            if meta and meta.get("effective_date"):
+                try:
+                    effective_date = datetime.strptime(
+                        meta["effective_date"], "%Y-%m-%d"
+                    ).replace(tzinfo=effective_date.tzinfo)
+                except ValueError:
+                    pass
+
+            date_header = self._get_date_header(effective_date)
             if not consolidated.startswith("##"):
                 consolidated = f"{date_header}{consolidated}"
 
-            self._write_layer(user_id, consolidated)
+            self._write_layer(user_id, consolidated, effective_date=effective_date)
             logger.info(f"✅ Consolidated day layer: {len(current_day)} -> {len(consolidated)} chars")
             return True
 
@@ -227,8 +287,75 @@ class DayLayer:
         return current_day
 
     def read(self, user_id: str) -> str:
-        """Read current day layer content."""
+        """Read current day layer content, with no freshness check.
+
+        Kept for callers that intentionally want the raw file (the archiver,
+        the scheduler's own rollover logic). Chat/context consumption should
+        use `read_fresh`/`read_fresh_text` instead so a stale "Today" heading
+        never reaches the model (chat harness repair Phase 3).
+        """
         return self._read_layer(user_id)
+
+    def read_fresh(self, user_id: str, now: Optional[datetime] = None) -> Dict:
+        """Freshness-checked read for chat/context consumption.
+
+        Returns {"content", "is_stale", "effective_date", "label"}:
+        - label="current": today's content, returned unchanged.
+        - label="historical": content from an earlier day. The heading is
+          rewritten to an explicit "As of <date> (historical)" label instead
+          of ever presenting yesterday's "## Today (...)" as today's.
+        - label="empty": nothing has been written yet.
+
+        This never mutates files or archives anything — rollover/archival
+        still happens lazily via append_session_summary when a new summary
+        actually lands. A read must be safe to call any number of times
+        without racing a concurrent writer.
+        """
+        now = now or local_now()
+        content = self._read_layer(user_id)
+        if not content:
+            return {"content": "", "is_stale": False, "effective_date": None, "label": "empty"}
+
+        meta = self._read_meta(user_id)
+        today_str = now.strftime("%Y-%m-%d")
+
+        if meta and meta.get("effective_date"):
+            effective_date = meta["effective_date"]
+            is_stale = effective_date != today_str
+        else:
+            # Back-compat: file predates the metadata sidecar. Fall back to
+            # parsing the heading; if it can't be parsed, assume current
+            # rather than mislabeling a file we can't actually date.
+            current_date_str = self._extract_date_from_content(content)
+            new_date_str = now.strftime('%A, %B %d')
+            is_stale = bool(current_date_str) and current_date_str != new_date_str
+            effective_date = None
+
+        if not is_stale:
+            return {
+                "content": content,
+                "is_stale": False,
+                "effective_date": effective_date or today_str,
+                "label": "current",
+            }
+
+        label_date = effective_date or "an earlier day"
+        relabeled = re.sub(
+            r'^##\s*Today\s*\([^)]*\)',
+            f"## As of {label_date} (historical — not today)",
+            content,
+            count=1,
+        )
+        if relabeled == content:
+            # No "## Today (...)" heading to rewrite; prefix an explicit
+            # label instead so the content still can't read as today's.
+            relabeled = f"*(As of {label_date} — historical, not today)*\n\n{content}"
+
+        return {"content": relabeled, "is_stale": True, "effective_date": effective_date, "label": "historical"}
+
+    def read_fresh_text(self, user_id: str, now: Optional[datetime] = None) -> str:
+        """Convenience wrapper: just the freshness-corrected content string."""
+        return self.read_fresh(user_id, now)["content"]
 
     def clear(self, user_id: str):
         """Clear day layer content after archival."""

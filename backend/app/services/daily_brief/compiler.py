@@ -65,7 +65,17 @@ class BriefCompiler:
         return len(content) // CHARS_PER_TOKEN
 
     def _read_layer(self, user_id: str, layer_name: str) -> str:
-        """Read a layer file, return empty string if not exists."""
+        """Read a layer file, return empty string if not exists.
+
+        The "day" layer gets a freshness check (chat harness repair Phase 3):
+        the file only rolls over when a new summary is appended, so a first
+        read on a new day — before anything has been appended yet — would
+        otherwise hand the model yesterday's content under a "Today" heading.
+        """
+        if layer_name == "day":
+            from .day_layer import day_layer
+            return day_layer.read_fresh_text(user_id)
+
         layer_path = self._get_layers_dir(user_id) / f"{layer_name}.md"
         if layer_path.exists():
             return layer_path.read_text()
