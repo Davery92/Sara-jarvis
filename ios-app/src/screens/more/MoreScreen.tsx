@@ -134,6 +134,13 @@ const menuSections: MenuSection[] = [
         screen: 'Knowledge',
         description: 'Structured memory, extracted facts, and PKG views.',
       },
+      {
+        name: 'WorldContext',
+        icon: 'globe-outline',
+        label: 'World Context',
+        screen: 'WorldContext',
+        description: 'What Sara currently understands about your world — read-only.',
+      },
     ],
   },
   {

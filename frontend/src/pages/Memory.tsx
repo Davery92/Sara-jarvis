@@ -11,6 +11,7 @@ const NotesPage = lazy(() => import('./Notes'))
 const DocumentsPage = lazy(() => import('./Documents'))
 const PersonalKnowledge = lazy(() => import('../components/PersonalKnowledge'))
 const LearningSection = lazy(() => import('../components/learning/LearningSection'))
+const WorldContextPage = lazy(() => import('./WorldContext'))
 
 function Loading() {
   return <div className="flex items-center justify-center h-64 text-gray-400">Loading…</div>
@@ -24,6 +25,7 @@ export default function Memory() {
         { key: 'documents', label: 'Documents', icon: 'description', content: <Suspense fallback={<Loading />}><DocumentsPage /></Suspense> },
         { key: 'knowledge', label: 'Facts & People', icon: 'psychology', content: <Suspense fallback={<Loading />}><PersonalKnowledge /></Suspense> },
         { key: 'learn', label: 'Learn', icon: 'school', content: <Suspense fallback={<Loading />}><LearningSection /></Suspense> },
+        { key: 'world-context', label: 'World Context', icon: 'public', content: <Suspense fallback={<Loading />}><WorldContextPage /></Suspense> },
       ]}
     />
   )

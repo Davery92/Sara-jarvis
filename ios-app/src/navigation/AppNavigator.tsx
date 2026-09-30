@@ -12,6 +12,7 @@ import AssistantAnalyticsScreen from '../screens/analytics/AssistantAnalyticsScr
 import AssistantInboxScreen from '../screens/inbox/AssistantInboxScreen';
 import InboxScreen from '../screens/inbox/InboxScreen';
 import KnowledgeScreen from '../screens/knowledge/KnowledgeScreen';
+import WorldContextScreen from '../screens/worldcontext/WorldContextScreen';
 import NotesListScreen from '../screens/notes/NotesListScreen';
 import AgentTasksScreen from '../screens/agents/AgentTasksScreen';
 import DailyTasksScreen from '../screens/tasks/DailyTasksScreen';
@@ -44,6 +45,7 @@ export type AppStackParamList = {
   AssistantInbox: { focus?: 'all' | 'waiting' | 'in_progress' | 'new' | 'done' | 'archived' } | undefined;
   Inbox: { tab?: 'content' | 'attention' } | undefined;
   Knowledge: undefined;
+  WorldContext: undefined;
   AgentTasks: undefined;
   DailyTasks: undefined;
   Automations: undefined;
@@ -154,6 +156,11 @@ export default function AppNavigator() {
         name="Knowledge"
         component={KnowledgeScreen}
         options={{ title: 'Knowledge' }}
+      />
+      <Stack.Screen
+        name="WorldContext"
+        component={WorldContextScreen}
+        options={{ title: 'World Context' }}
       />
       <Stack.Screen
         name="AgentTasks"
