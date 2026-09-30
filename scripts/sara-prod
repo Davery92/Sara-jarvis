@@ -1,0 +1,185 @@
+#!/usr/bin/env bash
+#
+# sara-prod — the ONE way to operate Sara's production stack.
+#
+# Why this exists
+# ---------------
+# On 2026-09-29 a host-wide OOM rebooted the machine. `jarvis-backend-1` came back
+# under its `unless-stopped` restart policy and loaded `./backend:/app` — the
+# MUTABLE working tree — against schema 154, which that code cannot run on:
+# `_is_revoked` fails closed, so every authenticated request 401s while /health
+# still returns 200 and the container reports (healthy).
+#
+# Production is now pinned to one immutable artifact. The pin lives in an OVERLAY,
+# and an overlay only applies when it is named. Any `docker compose -f
+# docker-compose.dev.yml up -d ...` typed without it recreates the containers onto
+# the working tree again. This wrapper removes the chance to forget: it always
+# passes both files, and it refuses to act on a configuration that does not match
+# the pinned artifact.
+#
+# Usage
+#   scripts/sara-prod verify        # check everything, change nothing (default)
+#   scripts/sara-prod config        # print the resolved configuration
+#   scripts/sara-prod ps | logs [svc] | stats
+#   scripts/sara-prod up [svc...]   # verify first, then up -d
+#   scripts/sara-prod restart [svc...]
+#   scripts/sara-prod stop [svc...]
+#   scripts/sara-prod readiness     # the four-capability probe (it writes + cleans up)
+#   scripts/sara-prod compose -- <raw args>   # escape hatch, still with both -f
+#
+# `verify` is also what `up` and `restart` run first; a failure there aborts them.
+set -uo pipefail
+
+# ── the pinned pair. Change these only with a new verified artifact. ──────────
+EXPECT_IMAGE="${SARA_PROD_IMAGE:-sara-reliable-candidate:20260929}"
+EXPECT_IMAGE_ID="${SARA_PROD_IMAGE_ID:-sha256:68ab3e3f444371ea3b5ded7b27575ded2278f8ea5d52a237491c00d22c852ee5}"
+FROZEN="${SARA_PROD_FROZEN:-/home/david/sara-candidate-20260928-reliable}"
+EXPECT_MANIFEST_HASH="${SARA_PROD_MANIFEST_HASH:-27932826a312cba3eaf541ff2c0c8ca898c8328260b3f5cba437e32cdbf6bf3d}"
+EXPECT_SCHEMA="${SARA_PROD_SCHEMA:-158_reminder_delivery_state}"
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BASE="$REPO/docker-compose.dev.yml"
+PIN="$REPO/docker-compose.incident-recovery.yml"
+PROJECT="jarvis"
+APP_SERVICES=(backend celery-worker celery-critical celery-david-priority celery-acs celery-beat)
+
+FAIL=0
+ok()   { printf '  \033[32mok\033[0m    %s\n' "$*"; }
+bad()  { printf '  \033[31mFAIL\033[0m  %s\n' "$*"; FAIL=1; }
+warn() { printf '  \033[33mwarn\033[0m  %s\n' "$*"; }
+head_() { printf '\n\033[1m%s\033[0m\n' "$*"; }
+
+dc() { docker compose -f "$BASE" -f "$PIN" -p "$PROJECT" "$@"; }
+
+# ── verification ──────────────────────────────────────────────────────────────
+verify() {
+  head_ "compose files"
+  [ -r "$BASE" ] && ok "base:    $BASE" || bad "base compose file missing: $BASE"
+  [ -r "$PIN" ]  && ok "overlay: $PIN"  || bad "PIN OVERLAY MISSING: $PIN — production would be recreated unpinned"
+  [ "$FAIL" = 0 ] || return 1
+
+  head_ "the artifact"
+  local got_id
+  got_id=$(docker image inspect "$EXPECT_IMAGE" --format '{{.Id}}' 2>/dev/null) || got_id=""
+  if [ -z "$got_id" ]; then
+    bad "image $EXPECT_IMAGE is NOT present on this host"
+  elif [ "$got_id" != "$EXPECT_IMAGE_ID" ]; then
+    bad "image $EXPECT_IMAGE is $got_id, expected $EXPECT_IMAGE_ID (tag was moved)"
+  else
+    ok "image $EXPECT_IMAGE == $EXPECT_IMAGE_ID"
+  fi
+
+  head_ "frozen source"
+  if [ -r "$FROZEN/CANDIDATE_MANIFEST.sha256" ]; then
+    local h; h=$(cat "$FROZEN/CANDIDATE_MANIFEST_HASH" 2>/dev/null || echo "")
+    [ "$h" = "$EXPECT_MANIFEST_HASH" ] && ok "manifest hash $h" \
+      || bad "manifest hash is ${h:-<none>}, expected $EXPECT_MANIFEST_HASH"
+    if ( cd "$FROZEN" && sha256sum -c --quiet CANDIDATE_MANIFEST.sha256 >/dev/null 2>&1 ); then
+      ok "frozen source verifies clean ($(wc -l < "$FROZEN/CANDIDATE_MANIFEST.sha256") files)"
+    else
+      bad "frozen source does NOT match its manifest — do not deploy from it"
+    fi
+  else
+    bad "no manifest at $FROZEN"
+  fi
+
+  head_ "resolved configuration (what compose WOULD create)"
+  local cfg; cfg=$(dc config 2>/dev/null) || { bad "\`compose config\` failed — configuration is invalid"; return 1; }
+  local svc
+  for svc in "${APP_SERVICES[@]}"; do
+    local report
+    report=$(CFG="$cfg" SVC="$svc" IMG="$EXPECT_IMAGE" FRZ="$FROZEN" python3 - <<'PY'
+import os, sys, yaml
+d = yaml.safe_load(os.environ["CFG"]); svc = os.environ["SVC"]
+s = (d.get("services") or {}).get(svc)
+if s is None:
+    print("MISSING|service not present in the resolved configuration"); sys.exit()
+problems = []
+if s.get("image") != os.environ["IMG"]:
+    problems.append(f"image is {s.get('image')!r}, expected {os.environ['IMG']!r}")
+frz = os.environ["FRZ"].rstrip("/")
+want = {f"{frz}/backend/app": "/app/app", f"{frz}/backend/alembic": "/app/alembic"}
+seen = {}
+for v in s.get("volumes") or []:
+    if isinstance(v, dict):
+        seen[(v.get("source"), v.get("target"))] = bool(v.get("read_only"))
+for src, tgt in want.items():
+    if (src, tgt) not in seen:
+        problems.append(f"missing mount {src} -> {tgt}")
+    elif not seen[(src, tgt)]:
+        problems.append(f"mount {tgt} is NOT read-only")
+# the working tree must not be the source of importable code
+for (src, tgt), ro in seen.items():
+    if tgt in ("/app/app", "/app/alembic") and src and not src.startswith(frz):
+        problems.append(f"{tgt} comes from {src}, not the frozen source")
+print(("OK|pinned" if not problems else "BAD|" + "; ".join(problems)))
+PY
+)
+    case "$report" in
+      OK\|*)      ok "$svc: image + read-only frozen mounts" ;;
+      MISSING\|*) bad "$svc: ${report#*|}" ;;
+      *)          bad "$svc: ${report#*|}" ;;
+    esac
+  done
+
+  head_ "running containers (if any)"
+  local any=0
+  for svc in "${APP_SERVICES[@]}"; do
+    local name="${PROJECT}-${svc}-1"
+    docker inspect "$name" >/dev/null 2>&1 || { warn "$svc: not created"; continue; }
+    local state; state=$(docker inspect "$name" --format '{{.State.Status}}')
+    [ "$state" = running ] || { warn "$svc: $state"; continue; }
+    any=1
+    local img ro
+    img=$(docker inspect "$name" --format '{{.Config.Image}}')
+    ro=$(docker exec "$name" sh -c 'grep -m1 " /app/app " /proc/self/mountinfo | grep -c "\bro\b"' 2>/dev/null || echo 0)
+    if [ "$img" = "$EXPECT_IMAGE" ] && [ "${ro:-0}" -ge 1 ]; then
+      ok "$svc: running $img, /app/app is read-only"
+    else
+      bad "$svc: running image=$img, /app/app read-only=${ro:-0}"
+    fi
+  done
+  [ "$any" = 1 ] || warn "no application container is running"
+
+  head_ "schema"
+  local at
+  at=$(docker exec "${PROJECT}-db-1" psql -U sara -d sara_hub -tAc \
+        'select version_num from alembic_version' 2>/dev/null | tr -d '[:space:]') || at=""
+  if [ -z "$at" ]; then
+    warn "could not read alembic_version (is ${PROJECT}-db-1 up?)"
+  elif [ "$at" = "$EXPECT_SCHEMA" ]; then
+    ok "alembic_version = $at"
+  else
+    bad "alembic_version is $at, expected $EXPECT_SCHEMA — this pair cannot serve (see RECOVERY.md)"
+  fi
+
+  head_ "disposable stacks must stay stopped"
+  local stray
+  stray=$(docker ps --format '{{.Names}}' | grep -cE 'sara-disposable-test|sara-reliable-validation|incident-|rehearsal-' || true)
+  [ "${stray:-0}" = 0 ] && ok "none running" || bad "$stray disposable container(s) running — stop them"
+
+  printf '\n'
+  if [ "$FAIL" = 0 ]; then printf '\033[32mVERIFIED\033[0m — configuration matches the pinned artifact\n'; return 0; fi
+  printf '\033[31mREFUSING\033[0m — configuration does not match the pinned artifact\n'
+  printf 'Nothing was changed. Fix the mismatch above, or use a NEW verified artifact\n'
+  printf 'and update the EXPECT_* values at the top of this script deliberately.\n'
+  return 1
+}
+
+gate() { verify >&2 || { printf '\naborted: verify failed, so no change was made.\n' >&2; exit 1; }; }
+
+cmd="${1:-verify}"; shift || true
+case "$cmd" in
+  verify|check)  verify ;;
+  config)        dc config ;;
+  ps)            dc ps ;;
+  stats)         docker stats --no-stream $(docker ps --format '{{.Names}}' | grep "^${PROJECT}-" | tr '\n' ' ') ;;
+  logs)          dc logs "$@" ;;
+  up)            gate; dc up -d "$@" ;;
+  restart)       gate; dc restart "$@" ;;
+  stop)          dc stop "$@" ;;
+  readiness)     docker exec -w /app -e PYTHONPATH=/app "${PROJECT}-backend-1" \
+                   python tests/assistant_acceptance/readiness_probe.py "$@" ;;
+  compose)       [ "${1:-}" = "--" ] && shift; dc "$@" ;;
+  *) sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac

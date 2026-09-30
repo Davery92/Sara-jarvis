@@ -1,3 +1,21 @@
+##
+## ⚠  DO NOT bring this file up on its own. (added 2026-09-29, incident recovery)
+##
+## `backend` here bind-mounts ./backend -> /app **rw**, so bringing these services
+## up with this file ALONE puts the mutable working tree into production. On
+## 2026-09-29 a reboot did exactly that against schema 154 and every authenticated
+## request 401'd while /health still returned 200.
+##
+## Production is pinned by docker-compose.incident-recovery.yml, and an overlay
+## only applies when it is named. Use the wrapper, which always names it and
+## refuses an inconsistent configuration:
+##
+##     scripts/sara-prod verify      # check, change nothing
+##     scripts/sara-prod up          # verify, then up -d
+##     scripts/sara-prod restart
+##
+## Background and the recovery procedure: RECOVERY.md
+##
 services:
   redis:
     image: redis:7-alpine

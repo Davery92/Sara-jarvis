@@ -5,6 +5,37 @@
 
 set -e  # Exit on any error
 
+# ─────────────────────────────────────────────────────────────────────────────
+# REFUSAL GUARD — added 2026-09-29 during production incident recovery.
+#
+# This script targets 10.185.1.188 with `docker compose -f docker-compose.yml
+# -f docker-compose.prod.yml ... up -d`, and docker-compose.yml declares
+# `build:` for backend. On THIS host that combination would:
+#
+#   * rebuild the backend image from the MUTABLE working tree, and
+#   * recreate the containers WITHOUT docker-compose.incident-recovery.yml,
+#
+# i.e. undo the pin that recovery put in place and reproduce the 2026-09-29
+# incident (working-tree code against whatever schema happens to be live —
+# `_is_revoked` fails closed, every authenticated request 401s, /health still 200).
+#
+# Production is operated through `scripts/sara-prod` only. See RECOVERY.md.
+# If you genuinely intend to run this legacy deployment, set the variable:
+#
+#   SARA_ALLOW_LEGACY_DEPLOY=1 scripts/deploy_production.sh
+#
+if [ "${SARA_ALLOW_LEGACY_DEPLOY:-0}" != "1" ]; then
+  echo "REFUSING: this legacy deploy script would rebuild from the working tree and" >&2
+  echo "          recreate production without docker-compose.incident-recovery.yml," >&2
+  echo "          undoing the 2026-09-29 recovery pin." >&2
+  echo "" >&2
+  echo "  operate production with:  scripts/sara-prod verify | up | restart" >&2
+  echo "  background:               RECOVERY.md" >&2
+  echo "  to override deliberately: SARA_ALLOW_LEGACY_DEPLOY=1 $0" >&2
+  exit 1
+fi
+# ─────────────────────────────────────────────────────────────────────────────
+
 echo "🚀 Starting Sara/Jarvis Production Deployment for 10.185.1.188"
 echo "================================================================"
 

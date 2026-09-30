@@ -1,0 +1,40 @@
+##
+## Production incident recovery pin — 2026-09-29.
+##
+## Overlay on docker-compose.dev.yml. It exists because a reboot restarted
+## `backend` over its `./backend:/app` bind mount and thereby put the MUTABLE
+## working tree into production against schema 154, which that code cannot run
+## on (`_is_revoked` fails closed -> every authenticated request 401s).
+##
+## This pins the API and every worker to ONE immutable artifact whose code was
+## hashed against its manifest from inside the container:
+##
+##   image  sara-reliable-candidate:20260929   (sha256:68ab3e3f4443…)
+##   code   916/916 files == CANDIDATE_MANIFEST.sha256, hash 27932826…
+##   schema 158_reminder_delivery_state, migrated from the same image
+##
+## It is not a feature deployment: manifests/live_vs_candidate.diff is empty, so
+## these bytes are byte-for-byte what the reboot had already put into production.
+## What changes is that they are now immutable and the schema matches them.
+##
+## Usage (BOTH -f flags, in this order, every time):
+##   docker compose -f docker-compose.dev.yml -f docker-compose.incident-recovery.yml up -d <svc>
+services:
+  backend:
+    image: sara-reliable-candidate:20260929
+    volumes:
+      # Replaces `./backend:/app`. The application code now comes from the
+      # image; nothing maps the working tree over it any more.
+      - /home/david/sara-candidate-20260928-reliable/backend/app:/app/app:ro
+      - /home/david/sara-candidate-20260928-reliable/backend/alembic:/app/alembic:ro
+
+  celery-worker: &pinned
+    image: sara-reliable-candidate:20260929
+    volumes:
+      - /home/david/sara-candidate-20260928-reliable/backend/app:/app/app:ro
+      - /home/david/sara-candidate-20260928-reliable/backend/alembic:/app/alembic:ro
+
+  celery-critical: *pinned
+  celery-david-priority: *pinned
+  celery-acs: *pinned
+  celery-beat: *pinned
