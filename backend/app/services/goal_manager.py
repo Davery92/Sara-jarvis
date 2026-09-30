@@ -103,20 +103,37 @@ class GoalManager:
                 "auto_tracking": goal.auto_tracking
             })
 
-            self.db.commit()
-
             goal_id = result.fetchone()[0]
             goal.id = goal_id
 
-            logger.info(f"✅ Goal created: {goal_id} - {goal.title}")
+            # Living-world-context plan: this used to call
+            # self.event_bus.publish(<plain dict>) — record_legacy_event
+            # needs an Event with a real .event_type attribute, not a dict,
+            # so this raised AttributeError whenever event_bus was actually
+            # wired, and silently did nothing (self.event_bus defaults to
+            # None) the rest of the time. Direct append_world_event, same
+            # transaction as the goal row, matching every other producer.
+            from app.services.world_state.writer import append_world_event
+            # goal.target_date is a plain `date` (no time component), not a
+            # `datetime` — event.occurred_at must stay the actual creation
+            # moment (a date alone isn't "when this was observed"); the
+            # target date belongs only in the payload, for the reducer's
+            # due_at.
+            append_world_event(
+                self.db, user_id=str(goal.user_id), kind="goal.created", source="goal_manager",
+                source_ref=f"goal:{goal_id}", aggregate_type="goal", aggregate_id=str(goal_id),
+                actor_type="user", actor_id=str(goal.user_id), correlation_id=str(goal_id),
+                dedupe_key=f"goal-created:{goal_id}",
+                payload={
+                    "goal_id": goal_id, "title": goal.title, "goal_type": goal.goal_type,
+                    "due_at": goal.target_date.isoformat() if goal.target_date else None,
+                    "priority": goal.priority,
+                },
+            )
 
-            # Emit event
-            if self.event_bus:
-                await self.event_bus.publish({
-                    "event_type": "goal.created",
-                    "user_id": goal.user_id,
-                    "payload": {"goal_id": goal_id, "title": goal.title}
-                })
+            self.db.commit()
+
+            logger.info(f"✅ Goal created: {goal_id} - {goal.title}")
 
             return goal_id
 
@@ -360,7 +377,7 @@ class GoalManager:
         """Check if goal has reached target and mark as completed"""
         try:
             query = text("""
-                SELECT current_value, target_value, status
+                SELECT user_id, title, current_value, target_value, status
                 FROM goal
                 WHERE id = :goal_id
             """)
@@ -381,17 +398,23 @@ class GoalManager:
                     """)
 
                     self.db.execute(update_query, {"goal_id": goal_id})
+
+                    # Same fix as create_goal: a real producer, same
+                    # transaction, instead of the broken event_bus.publish
+                    # (the old dict payload also referenced row.user_id from
+                    # a SELECT that never fetched that column).
+                    from app.services.world_state.writer import append_world_event
+                    append_world_event(
+                        self.db, user_id=str(row.user_id), kind="goal.completed", source="goal_manager",
+                        source_ref=f"goal:{goal_id}", aggregate_type="goal", aggregate_id=str(goal_id),
+                        actor_type="system", correlation_id=str(goal_id),
+                        dedupe_key=f"goal-completed:{goal_id}",
+                        payload={"goal_id": goal_id, "title": row.title},
+                    )
+
                     self.db.commit()
 
                     logger.info(f"🎉 Goal completed: {goal_id}")
-
-                    # Emit event
-                    if self.event_bus:
-                        await self.event_bus.publish({
-                            "event_type": "goal.completed",
-                            "user_id": row.user_id,
-                            "payload": {"goal_id": goal_id}
-                        })
 
         except Exception as e:
             logger.error(f"Error checking goal completion: {e}")
