@@ -16,7 +16,11 @@ import uuid
 from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
 from sqlalchemy.orm import Session
 
-from app.core.deps import get_current_user
+# get_current_user_sync, not get_current_user: in the monolith these two
+# endpoints resolved to the SYNC dependency, which has no X-Device-Token
+# fallback. Importing the async one here would have quietly broadened auth
+# on the voice endpoints as a side effect of moving them.
+from app.core.deps import get_current_user_sync as get_current_user
 from app.db.session import get_db
 from app.models.user import User
 
