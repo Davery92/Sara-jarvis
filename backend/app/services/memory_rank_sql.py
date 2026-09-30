@@ -1,4 +1,11 @@
-"""Shared scoring constants for episode retrieval.
+"""Shared SQL ranking constants and expressions for episode RETRIEVAL.
+
+Read path only. Renamed from `memory_scoring.py` on 2026-09-30 to stop it being
+confused with `memory_scorer.py`, which is the WRITE-path LLM scorer
+(importance/affect/novelty/taskness, computed once when an episode is stored).
+This module never calls a model; it supplies the SQL that ranks already-stored
+episodes at query time.
+
 
 MORNING_NOTIFICATIONS_PLAN_2026_08_18 Phase 6: memory_service.search_memory
 and main_simple.py's retrieve_episodes_with_window (SEMANTIC window) each

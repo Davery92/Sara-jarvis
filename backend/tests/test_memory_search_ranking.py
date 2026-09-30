@@ -19,7 +19,7 @@ from sqlalchemy import text
 
 from app.db.base import SessionLocal
 from app.services.memory_service import MemoryService
-from app.services.memory_scoring import MIN_SIMILARITY_FLOOR
+from app.services.memory_rank_sql import MIN_SIMILARITY_FLOOR
 
 
 def _unit(v: list) -> list:

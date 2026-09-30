@@ -574,7 +574,7 @@ class MemoryService:
             if "episodes" in scopes:
                 _t_ep_start = _time.monotonic()
                 from app.main_simple import Episode, PGVECTOR_AVAILABLE, DATABASE_URL
-                from app.services.memory_scoring import recency_sql, MIN_SIMILARITY_FLOOR, CANDIDATE_POOL_SIZE
+                from app.services.memory_rank_sql import recency_sql, MIN_SIMILARITY_FLOOR, CANDIDATE_POOL_SIZE
 
                 if PGVECTOR_AVAILABLE and DATABASE_URL.startswith("postgresql"):
                     # Similarity-led composite, re-ranked over a raw-similarity
