@@ -56,7 +56,7 @@ database, discloses every row it creates, and removes what it created.
 
 ## 3. Runtime topology
 
-14 compose services in `docker-compose.dev.yml`: `backend`, `db` (pgvector/pg16),
+**`docker-compose.dev.yml` is the authoritative topology.** 14 services: `backend`, `db` (pgvector/pg16),
 `neo4j`, `redis`, `minio`, `embeddings`, `frontend`, `canvas`,
 `acs-tool-runner`, and five celery services. `docker-compose.yml` (prod) declares
 only 10 and **lags dev** — it has no `acs-tool-runner`, no `embeddings`, and none
@@ -98,18 +98,28 @@ production, which is what the 2026-09-29 incident was. Use `scripts/sara-prod`.
 
 ## 4. Backend architecture
 
-- `app/main_simple.py` — 13,098 lines, 29 `@app.` endpoints. What still lives
-  here: `/chat/stream` (the big one) and `/chat/models`, the Pi-dashboard and
-  voice-agent voice endpoints, Apple Health sync, settings + Codex OAuth,
-  `/analytics/dashboard`, `/api/notes/search`, and the startup/shutdown hooks.
-  Everything else has moved out.
-- `app/routes/` — 104 route modules, registered in `main_simple`.
-- `app/services/` — 356 modules. This is where the system actually is.
+- `app/main_simple.py` — ~12,350 lines, 18 `@app.` endpoints. What still lives
+  here, and why: `/chat/stream` and `/chat/models`; the twelve settings and
+  Codex-OAuth endpoints, which REASSIGN the chat globals at runtime to
+  hot-reload the client and so cannot move until that config lives in
+  `app/core/app_state.py`; `/api/pi-dashboard/voice/chat` and `/voice/fast`,
+  which call chat-turn internals; and the startup/shutdown hooks. Each blocked
+  group carries a `blocked-on:` comment saying exactly what pins it.
+- `app/routes/` — 105 route modules, registered in `main_simple`. New
+  registrations go OUTSIDE any try/except (gotcha 3 below); the older ones are
+  wrapped, which is how a router can vanish silently.
+- `app/services/` — 355 modules. This is where the system actually is.
 - `app/tools/` — 263 registered tools across 46 categories in
   `app/tools/registry.py`. `tool_retrieval.MAX_TOOLS_PER_CALL = 35` caps the per-turn
   menu. `tool_mutation.gate_mutating_tools` filters mutating tools at the final
   tool-schema boundary; it has several call sites (the post-branch chat call, the
   voice path, and a mid-turn re-gate), so a change to one is not a change to all.
+- **Auth dependencies.** `core.deps` exports two: `get_current_user` (async,
+  and it also accepts an `X-Device-Token`) and `get_current_user_sync` (no
+  device token, opens its own connection for the revocation check). They are
+  not interchangeable, and picking the async one for a route that used the sync
+  one silently BROADENS that route's authentication. Route modules import
+  whichever they already used; nothing imports auth from `main_simple` any more.
 
 ## 5. Cognitive systems
 
@@ -197,6 +207,14 @@ blocked via `sara_interest.blocked`, not deleted.
   Router. API base URL is `frontend/src/config.ts`.
 - **Plans and audits:** `docs/plans/`. Incident records in
   `docs/plans/incidents/`. `RECOVERY.md` at the root is the production procedure.
+- **Near-twin module names** (renamed 2026-09-30 because they were one word
+  apart and unrelated): `activity_suggestions.py` is the pattern-based "you
+  usually gym on Thursdays" nudger — its persisted identity string is still
+  `"predictive_engine"`, deliberately, so habituation cooldowns keep matching —
+  while `prediction_engine.py` is the predictive-coding system.
+  `memory_rank_sql.py` is read-path ranking SQL; `memory_scorer.py` is the
+  write-path LLM scorer. `embeddings.py` is now a thin raise-on-failure facade
+  over `embedding_service.py`, which is the only engine.
 - **Duplicated wire contracts:** the workout contract exists in four copies
   (backend, web, iOS, Watch) — run the parity script in §2.
 - **Migration scripts** at `backend/migrate_users.py`, `add_folder_column.py`,
