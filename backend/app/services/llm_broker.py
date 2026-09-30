@@ -136,6 +136,61 @@ def _get_settings(keys: List[str]) -> Dict[str, str]:
         return {}
 
 
+# app_settings key -> the environment/`settings` attribute that carries the same
+# value as deployment configuration. Consulted BETWEEN the app_settings row and
+# the compiled default (2026-09-30).
+#
+# Why this exists: `resolve()` went straight from "no app_settings row" to a
+# COMPILED-IN host, so an isolated stack could not isolate. Setting
+# EMBEDDING_BASE_URL had no effect on any broker-based caller, and an
+# environment with no route to the GPU host silently tried to reach it anyway.
+# That is the same failure class as the chat-lane catalog entry overriding
+# OPENAI_BASE_URL (see app/core/app_state.py's LOCAL_CHAT_BASE_URL note): an
+# acceptance run appeared to execute while its gateway ledger recorded zero
+# requests.
+#
+# It surfaced on 2026-09-30 when `services/embeddings.py` became a delegate over
+# the broker-aware `embedding_service`: the release rehearsal's readiness probe
+# failed to write a note, because the 16 call sites that had been reading
+# `settings.embedding_base_url` (which DOES honor the env) moved onto the broker
+# (which did not).
+#
+# Ordering is deliberate. The app_settings row still wins, because that is the
+# runtime-tunable knob the settings UI writes and `rename_model` rewrites; the
+# environment is deployment config beneath it. In production both exist and
+# agree, so this changes nothing there.
+#
+# Caveat worth knowing: a disposable stack seeded from a PRODUCTION DUMP carries
+# the app_settings rows, so it would still resolve to production's hosts. Such a
+# stack must override the rows themselves, not just the environment.
+_ENV_SETTING_BY_KEY: Dict[str, str] = {
+    "embedding_base_url": "embedding_base_url",
+    "embedding_cognition_base_url": "embedding_cognition_base_url",
+    "embedding_model": "embedding_model",
+    "openai_base_url": "openai_base_url",
+    "openai_model": "openai_model",
+    "openai_notification_model": "openai_notification_model",
+    "bg_llm_primary_url": "bg_llm_primary_url",
+    "bg_llm_primary_model": "bg_llm_primary_model",
+    "bg_llm_fallback_url": "bg_llm_fallback_url",
+    "bg_llm_fallback_model": "bg_llm_fallback_model",
+}
+
+
+def _env_default(key: Optional[str]) -> Optional[str]:
+    """The deployment-configured value for an app_settings key, if any."""
+    attr = _ENV_SETTING_BY_KEY.get(key or "")
+    if not attr:
+        return None
+    try:
+        from app.core.config import settings
+        val = getattr(settings, attr, None)
+    except Exception:
+        return None
+    val = (val or "").strip() if isinstance(val, str) else val
+    return val or None
+
+
 def resolve(capability: str) -> Dict[str, Optional[str]]:
     """Resolve a capability class to its model + endpoint (+ failover).
 
@@ -151,8 +206,12 @@ def resolve(capability: str) -> Dict[str, Optional[str]]:
 
     return {
         "capability": cap.name,
-        "model": vals.get(cap.model_key) or cap.default_model,
-        "base_url": (vals.get(cap.url_key) if cap.url_key else None) or (cap.default_url or None),
+        "model": vals.get(cap.model_key) or _env_default(cap.model_key) or cap.default_model,
+        "base_url": (
+            (vals.get(cap.url_key) if cap.url_key else None)
+            or (_env_default(cap.url_key) if cap.url_key else None)
+            or (cap.default_url or None)
+        ),
         "fallback_model": vals.get(cap.fallback_model_key) if cap.fallback_model_key else None,
         "fallback_url": vals.get(cap.fallback_url_key) if cap.fallback_url_key else None,
     }
