@@ -106,6 +106,7 @@ celery_app = Celery(
         "app.tasks.mindv2_deliver",
         "app.tasks.mindv2_batch_flush",
         "app.tasks.world_state",
+        "app.tasks.episode_enrichment",
     ]
 )
 

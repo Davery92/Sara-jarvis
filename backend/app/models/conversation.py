@@ -18,6 +18,15 @@ class Conversation(Base):
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now())
 
+    # Incremental episode-enrichment watermark (SARA_CHAT_HARNESS_MTP_REPAIR
+    # Phase 6). See app.services.episode_enrichment.
+    enriched_through_episode_id = Column(String, nullable=True)
+    enriched_through_at = Column(DateTime(timezone=True), nullable=True)
+    enrichment_status = Column(String, default="idle")  # idle | processing | failed
+    enrichment_attempts = Column(Integer, default=0)
+    enrichment_last_error = Column(Text, nullable=True)
+    enrichment_updated_at = Column(DateTime(timezone=True), nullable=True)
+
 
 class ConversationTurn(Base):
     """Individual message in a conversation."""
