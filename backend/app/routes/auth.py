@@ -185,14 +185,63 @@ async def login(
 
 
 @router.post("/logout")
-async def logout(request: Request, response: Response):
-    """Log out the current user by clearing the access token cookie."""
+async def logout(request: Request, response: Response, db: Session = Depends(get_db)):
+    """Log out the current user: clears the cookie AND revokes the ACTIVE
+    session's token server-side (R11, evidence
+    A05_LOGOUT_DOES_NOT_REVOKE_TOKEN — and the 2026-09-25 review
+    remediation of the first version of this fix) so a bearer token
+    captured before logout (returned to mobile/API clients by `/auth/token`
+    on purpose) cannot keep authenticating afterward. Cookie clearing alone
+    was necessary but not sufficient — these JWTs are stateless and were
+    accepted purely on signature+exp.
+
+    Precedence matches `get_current_user` EXACTLY — cookie first, else the
+    Authorization header — and revokes ONLY that one token, not both. This
+    is a deliberate correction from the first version of this fix, which
+    revoked whichever of the two were present: if a browser tab's stale
+    cookie and a mobile client's unrelated bearer token both happened to
+    ride on the same request, revoking "whichever is present" could
+    invalidate a session this request was never actually authenticating
+    with. "Log out THIS session" means the one identity this request
+    itself would have resolved to via get_current_user, no more.
+
+    Reports truthfully whether a token was actually revoked, rather than
+    a blanket "Successfully logged out" regardless of outcome — a legacy
+    token with no `jti`, an already-expired token, or a revocation-store
+    failure are each surfaced distinctly.
+    """
+    from app.core.auth import revoke_token
+
+    token = request.cookies.get("access_token")
+    if not token:
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+
     cookie_domain = get_cookie_domain(request)
     if cookie_domain:
         response.delete_cookie(key="access_token", domain=cookie_domain)
     else:
         response.delete_cookie(key="access_token")
-    return {"message": "Successfully logged out"}
+
+    if not token:
+        return {"message": "No active session token found — cookie cleared.", "revoked": False, "reason": "no_token_presented"}
+
+    result = revoke_token(token, db=db)
+
+    if result.revoked:
+        return {"message": "Successfully logged out.", "revoked": True, "reason": "revoked"}
+
+    if result.reason == "no_jti_legacy_token":
+        message = "Logged out locally, but this session's token predates server-side revocation and cannot be individually invalidated — it will still expire on its own."
+    elif result.reason == "already_expired":
+        message = "Logged out — that token had already expired on its own."
+    elif result.reason == "invalid_token":
+        message = "Logged out locally — the presented token was not valid."
+    else:  # store_unavailable
+        message = "Logged out locally, but the token could NOT be revoked server-side (the revocation store is unavailable) — treat it as still valid elsewhere until this is resolved."
+
+    return {"message": message, "revoked": False, "reason": result.reason}
 
 
 @router.get("/me", response_model=UserResponse)

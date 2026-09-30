@@ -31,7 +31,10 @@ async def get_current_user(
 
     # If we have a JWT token, validate it
     if token:
-        payload = verify_token(token)
+        # R11 review remediation: pass this request's own already-open
+        # session so the revocation check doesn't open a second DB
+        # connection on every single authenticated request.
+        payload = verify_token(token, db=db)
         if payload is None:
             raise credentials_exception
 
