@@ -11579,6 +11579,34 @@ MODEL_MIME_TYPES = {
 # /analytics/dashboard moved to app/routes/assistant_analytics.py on 2026-09-30.
 
 # Settings endpoints
+# ═══════════════════════════════════════════════════════════════════════════
+# blocked-on: chat-globals extraction (cleanup plan 4.1 + 4.2, deferred 6.1).
+#
+# The cleanup plan classified the settings and Codex-OAuth endpoints as "not
+# dependent on chat globals" and therefore extractable. They are not. Verified
+# 2026-09-30:
+#
+#   PUT /settings/ai declares
+#     global AI_PROVIDER, OPENAI_API_KEY, ANTHROPIC_API_KEY, OPENAI_BASE_URL,
+#            OPENAI_MODEL, OPENAI_NOTIFICATION_MODEL, EMBEDDING_BASE_URL,
+#            EMBEDDING_MODEL, EMBEDDING_DIM, BG_LLM_*
+#   and the Codex OAuth handlers declare
+#     global AI_PROVIDER, OPENAI_BASE_URL, OPENAI_MODEL, CODEX_OAUTH_*
+#
+# These endpoints do not merely read the chat globals, they REASSIGN them at
+# runtime to hot-reload the chat client. A route module cannot do that without
+# importing main_simple and mutating its namespace, which is exactly the
+# dependency 4.9 removed from thirteen other route modules.
+#
+# The prerequisite is the deferred work: move this configuration into
+# `app/core/app_state.py` and have the chat path read it from there instead of
+# from module globals. Then these endpoints move for free. Until then, moving
+# them would be a regression dressed as a refactor.
+#
+# (GET /settings/ai only reads, so it looks movable on its own — but splitting
+# the pair across two files, with the writer still here, is worse than leaving
+# both.)
+# ═══════════════════════════════════════════════════════════════════════════
 @app.get("/settings/ai")
 async def get_ai_settings(current_user: User = Depends(get_current_user)):
     """Get current AI configuration settings"""
