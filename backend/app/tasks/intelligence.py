@@ -163,9 +163,9 @@ def _run_async(coro):
 
 @celery_app.task(name="app.tasks.intelligence.run_predictions", bind=True, max_retries=0)
 def run_predictions(self):
-    """Run the predictive engine to generate forward-looking suggestions."""
+    """Run activity_suggestions to generate forward-looking suggestions."""
     try:
-        from app.services.predictive_engine import send_predictions
+        from app.services.activity_suggestions import send_predictions
         _run_async(send_predictions(DEFAULT_USER_ID))
     except Exception as e:
         logger.warning(f"Predictive engine task failed: {e}")

@@ -578,7 +578,7 @@ def get_upcoming_rhythm_window(
     db: Session, user_id: str, now: Optional[Any] = None, within_minutes: int = 45
 ) -> Optional[Dict[str, Any]]:
     """The single nearest confident rhythm window opening within `within_minutes`,
-    for predictive_engine's forward-looking predictions. None if nothing's close."""
+    for activity_suggestions' forward-looking nudges. None if nothing's close."""
     from app.core.timezone import now as local_now
 
     now = now or local_now()

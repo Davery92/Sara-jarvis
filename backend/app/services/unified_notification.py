@@ -1163,7 +1163,7 @@ async def route_through_attention_queue(
     # other categories intentionally reuse a type-scoped (not instance-
     # scoped) dedupe_key across separate real occurrences — e.g.
     # standing_order_service's `security_action_failed:{action_type}` or
-    # predictive_engine's `prediction:{hash(title)}` — where a permanent
+    # activity_suggestions' `prediction:{hash(title)}` — where a permanent
     # block would wrongly silence a second, later, genuinely-new occurrence.
     if dedupe_key and category == "checkin":
         ever = await _db_execute(db, text("""

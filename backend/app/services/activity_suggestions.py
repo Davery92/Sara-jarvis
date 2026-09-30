@@ -1,10 +1,19 @@
-"""
-Predictive Engine — pattern-based predictions for upcoming activities.
+"""Activity suggestions — pattern-based nudges about upcoming activities.
 
-Analyzes behavioral patterns and calendar to generate forward-looking suggestions:
-  "You usually go to the gym on Thursdays"
+Analyzes behavioral patterns and the calendar to generate forward-looking
+suggestions: "You usually go to the gym on Thursdays". Runs as a Celery task
+(`app.tasks.intelligence.run_predictions`, scheduled_job key
+`predictive-engine`) every 30 minutes during waking hours.
 
-Runs as a Celery task every 30 minutes during waking hours.
+Renamed from `predictive_engine.py` on 2026-09-30. It was one letter away from
+`prediction_engine.py`, which is an entirely different feature — the §3.2
+predictive-coding system (generate/match/calibrate stated predictions, feeding
+salience on violation). Two modules whose names differ by "ive" and which do
+unrelated things is a trap; the names now say which is which.
+
+The persisted identity string stays `"predictive_engine"` on purpose — see
+GENERATOR below. Renaming a module is free; renaming a key that rows are
+already stored under is not.
 """
 
 import logging
@@ -13,6 +22,15 @@ from datetime import datetime
 from typing import List, Dict, Any
 
 logger = logging.getLogger(__name__)
+
+# The identity this module writes under, in `stimulus_habituation.generator`,
+# `notification_log.source` and say_candidate payloads. It deliberately still
+# reads "predictive_engine" after the 2026-09-30 module rename: those rows
+# already exist (habituation cooldowns and notification history keyed to this
+# exact string), and changing it would orphan every cooldown, so suggestions
+# this module had already habituated away would start firing again. A rename
+# is not worth a nag storm.
+GENERATOR = "predictive_engine"
 
 
 async def _should_generate(db, generator: str, stimulus_key: str) -> bool:
@@ -31,7 +49,7 @@ async def _write_silent_confirmation(user_id: str, count: int) -> None:
         from app.services.context_writer import update_fields
         await update_fields(
             user_id,
-            source="predictive_engine",
+            source=GENERATOR,
             last_anticipation_note=f"{count} routine prediction confirmation(s) suppressed; only deviations surface.",
         )
     except Exception as e:
@@ -125,7 +143,7 @@ async def generate_predictions(user_id: str) -> List[Dict[str, Any]]:
                 hours_until = (start_time.replace(tzinfo=None) - now_local_naive).total_seconds() / 3600
                 if desc and len(desc) > 20:
                     stimulus_key = f"prep:{event_id}"
-                    if not await _should_generate(db, "predictive_engine", stimulus_key):
+                    if not await _should_generate(db, GENERATOR, stimulus_key):
                         continue
                     predictions.append({
                         "type": "preparation_needed",
@@ -135,7 +153,7 @@ async def generate_predictions(user_id: str) -> List[Dict[str, Any]]:
                         "priority": "normal",
                         "prediction_grade": "novel",
                         "stimulus_key": stimulus_key,
-                        "generator": "predictive_engine",
+                        "generator": GENERATOR,
                     })
         except Exception as e:
             logger.debug(f"Event prep prediction failed: {e}")
@@ -164,7 +182,7 @@ async def generate_predictions(user_id: str) -> List[Dict[str, Any]]:
                         temp_outside = wm.get("temperature_outside")
                         if weather and any(w in weather.lower() for w in ["rain", "storm", "snow", "thunder"]):
                             stimulus_key = f"weather:{title}:{start_time.date() if start_time else 'unknown'}"
-                            if not await _should_generate(db, "predictive_engine", stimulus_key):
+                            if not await _should_generate(db, GENERATOR, stimulus_key):
                                 continue
                             predictions.append({
                                 "type": "weather_alert",
@@ -174,11 +192,11 @@ async def generate_predictions(user_id: str) -> List[Dict[str, Any]]:
                                 "priority": "normal",
                                 "prediction_grade": "deviation",
                                 "stimulus_key": stimulus_key,
-                                "generator": "predictive_engine",
+                                "generator": GENERATOR,
                             })
                         elif temp_outside is not None and (temp_outside > 95 or temp_outside < 25):
                             stimulus_key = f"temperature:{title}:{start_time.date() if start_time else 'unknown'}"
-                            if not await _should_generate(db, "predictive_engine", stimulus_key):
+                            if not await _should_generate(db, GENERATOR, stimulus_key):
                                 continue
                             predictions.append({
                                 "type": "weather_alert",
@@ -188,7 +206,7 @@ async def generate_predictions(user_id: str) -> List[Dict[str, Any]]:
                                 "priority": "low",
                                 "prediction_grade": "deviation",
                                 "stimulus_key": stimulus_key,
-                                "generator": "predictive_engine",
+                                "generator": GENERATOR,
                             })
                     except Exception:
                         pass
@@ -214,7 +232,7 @@ async def generate_predictions(user_id: str) -> List[Dict[str, Any]]:
                 hours_until = (start_time.replace(tzinfo=None) - now_local_naive).total_seconds() / 3600
                 if hours_until < 1.5:
                     stimulus_key = f"travel:{title}:{start_time.isoformat() if start_time else 'unknown'}"
-                    if not await _should_generate(db, "predictive_engine", stimulus_key):
+                    if not await _should_generate(db, GENERATOR, stimulus_key):
                         continue
                     predictions.append({
                         "type": "travel_reminder",
@@ -224,7 +242,7 @@ async def generate_predictions(user_id: str) -> List[Dict[str, Any]]:
                         "priority": "normal",
                         "prediction_grade": "novel",
                         "stimulus_key": stimulus_key,
-                        "generator": "predictive_engine",
+                        "generator": GENERATOR,
                     })
         except Exception as e:
             logger.debug(f"Travel prediction failed: {e}")
@@ -302,7 +320,7 @@ async def _dual_write_candidate(user_id: str, pred: Dict[str, Any], topic: str) 
         factory = get_async_session_factory()
         async with factory() as db:
             await create_candidate(
-                db, user_id=user_id, source=pred.get("source", "predictive_engine"),
+                db, user_id=user_id, source=pred.get("source", GENERATOR),
                 kind="inform", summary=pred["message"][:2000],
                 evidence=[{"prediction_type": pred.get("type"), "title": pred.get("title")}],
                 topic_entities=[topic],
@@ -311,7 +329,7 @@ async def _dual_write_candidate(user_id: str, pred: Dict[str, Any], topic: str) 
                 dedupe_key=topic,
             )
     except Exception as e:
-        logger.warning(f"[say_candidate] predictive_engine dual-write failed: {e}")
+        logger.warning(f"[say_candidate] activity_suggestions dual-write failed: {e}")
 
 
 async def send_predictions(user_id: str):
@@ -325,7 +343,7 @@ async def send_predictions(user_id: str):
             # send deleted. MOUTH_ONLY_PREDICTIVE_ENGINE ran flag-safe
             # long enough to confirm the say_candidate dual-write below
             # is the only path needed.
-            logger.info(f"[mouth-only] predictive_engine candidate queued: {topic}")
+            logger.info(f"[mouth-only] activity_suggestions candidate queued: {topic}")
             await _dual_write_candidate(user_id, pred, topic)
 
     # Inject predictions into daily brief context layer
