@@ -98,18 +98,29 @@ class LessonTracker:
     ) -> None:
         """Internal method to record an outcome and update effectiveness."""
         try:
-            # Update the most recent application record for this lesson/conversation
-            db.execute(
+            # Update the most recent application record for this lesson/conversation.
+            # PostgreSQL doesn't support UPDATE ... ORDER BY ... LIMIT directly, so
+            # select the target row id via a CTE and join back to it. This is also
+            # idempotent: re-running against a row that's no longer 'unknown' just
+            # updates zero rows instead of erroring.
+            result = db.execute(
                 text("""
-                    UPDATE lesson_applications
+                    WITH target AS (
+                        SELECT id
+                        FROM lesson_applications
+                        WHERE lesson_id = :lesson_id
+                          AND conversation_id = :conversation_id
+                          AND outcome = 'unknown'
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                    )
+                    UPDATE lesson_applications AS la
                     SET outcome = :outcome,
                         feedback_signal = :feedback_signal,
                         context_snippet = :context_snippet
-                    WHERE lesson_id = :lesson_id
-                      AND conversation_id = :conversation_id
-                      AND outcome = 'unknown'
-                    ORDER BY created_at DESC
-                    LIMIT 1
+                    FROM target
+                    WHERE la.id = target.id
+                    RETURNING la.id
                 """),
                 {
                     "lesson_id": lesson_id,
@@ -119,6 +130,17 @@ class LessonTracker:
                     "context_snippet": context_snippet[:500] if context_snippet else None
                 }
             )
+            updated_id = result.scalar()
+
+            if updated_id is None:
+                # Nothing pending for this lesson/conversation (already recorded,
+                # or never had an 'unknown' application). Not an error.
+                db.commit()
+                logger.debug(
+                    f"No pending lesson application for {lesson_id}/{conversation_id}; "
+                    f"skipping outcome={outcome}"
+                )
+                return
 
             # Update effectiveness score using EMA
             await self._update_effectiveness(db, lesson_id, outcome == "success")
@@ -234,45 +256,65 @@ class LessonTracker:
         Returns:
             List of lesson IDs that were updated
         """
+        outcome = "success" if was_successful else "failure"
+
         try:
-            # Find pending applications
+            # Set-based bulk update: every pending (outcome='unknown') application
+            # row for this conversation gets the same outcome/signal in one
+            # statement, instead of one UPDATE per lesson in a loop.
             result = db.execute(
                 text("""
-                    SELECT DISTINCT lesson_id
-                    FROM lesson_applications
+                    UPDATE lesson_applications
+                    SET outcome = :outcome,
+                        feedback_signal = :feedback_signal
                     WHERE conversation_id = :conversation_id
                       AND outcome = 'unknown'
+                    RETURNING lesson_id
                 """),
-                {"conversation_id": conversation_id}
-            ).fetchall()
+                {
+                    "conversation_id": conversation_id,
+                    "outcome": outcome,
+                    "feedback_signal": feedback_signal,
+                }
+            )
+            lesson_ids = [row.lesson_id for row in result.fetchall()]
+            db.commit()
 
-            if not result:
+            if not lesson_ids:
                 return []
 
-            lesson_ids = [row.lesson_id for row in result]
-
-            # Update each
-            for lesson_id in lesson_ids:
-                if was_successful:
-                    await self.record_success(
-                        db=db,
-                        lesson_id=lesson_id,
-                        conversation_id=conversation_id,
-                        feedback_signal=feedback_signal
-                    )
-                else:
-                    await self.record_failure(
-                        db=db,
-                        lesson_id=lesson_id,
-                        conversation_id=conversation_id,
-                        feedback_signal=feedback_signal
-                    )
-
-            return lesson_ids
-
         except Exception as e:
-            logger.error(f"Failed to update pending applications: {e}")
+            logger.error(f"Failed to update pending applications for conversation {conversation_id}: {e}")
+            db.rollback()
             return []
+
+        # Effectiveness updates are per-lesson EMA reads+writes and can't be
+        # expressed as one statement. Run them individually but aggregate
+        # failures into a single log line rather than one error per lesson.
+        updated_ids: List[str] = []
+        failed_ids: List[str] = []
+        for lesson_id in lesson_ids:
+            try:
+                await self._update_effectiveness(db, lesson_id, was_successful)
+                db.commit()
+                updated_ids.append(lesson_id)
+            except Exception as e:
+                logger.debug(f"Effectiveness update failed for lesson {lesson_id}: {e}")
+                db.rollback()
+                failed_ids.append(lesson_id)
+
+        if failed_ids:
+            logger.error(
+                f"Failed to update effectiveness for {len(failed_ids)}/{len(lesson_ids)} "
+                f"lessons in conversation {conversation_id}"
+            )
+
+        logger.info(
+            f"Recorded lesson outcome for conversation {conversation_id}: "
+            f"{outcome} on {len(updated_ids)} lesson(s) (signal: {feedback_signal})"
+        )
+
+        return lesson_ids
 
     async def get_lesson_stats(
         self,
