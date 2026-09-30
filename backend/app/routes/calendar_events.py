@@ -541,7 +541,7 @@ async def sync_ios_calendar_events(
 
             if attendees_list:
                 try:
-                    from app.services.person_service_sync import link_attendees_to_people
+                    from app.services.person_service import link_attendees_to_people
                     link_attendees_to_people(db, current_user.id, attendees_list, event_for_linkage.start_time)
                 except Exception as e:
                     logger.warning(f"Attendee person-linkage failed for event {event_data.ios_event_id}: {e}")
