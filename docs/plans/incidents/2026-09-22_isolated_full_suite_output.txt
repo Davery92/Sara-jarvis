@@ -1,0 +1,1349 @@
+============================= test session starts ==============================
+platform linux -- Python 3.11.16, pytest-9.1.1, pluggy-1.6.0
+rootdir: /app
+configfile: pytest.ini
+testpaths: tests
+plugins: asyncio-1.4.0, anyio-3.7.1
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 2342 items
+
+tests/replay/test_harness_smoke.py sssssssssssss                         [  0%]
+tests/replay/test_observed_failures.py ssssssssssssssssssssssss          [  1%]
+tests/test_acs_daemon_search_memory.py ...                               [  1%]
+tests/test_action_simulator_phase1.py .....................              [  2%]
+tests/test_activity_state_machine.py ................................... [  4%]
+.....                                                                    [  4%]
+tests/test_affect_appraisal.py ................                          [  4%]
+tests/test_agent_dispatch_compaction.py ......                           [  5%]
+tests/test_agent_dispatch_preamble.py .............                      [  5%]
+tests/test_arc3_1_wake_reason_and_senses.py .............                [  6%]
+tests/test_attention_dedup.py ........                                   [  6%]
+tests/test_attention_expiry.py ......                                    [  6%]
+tests/test_audit_fixes.py ....F..                                        [  7%]
+tests/test_autonomy.py F.FFF....F....F.                                  [  7%]
+tests/test_batch_digest.py ..........                                    [  8%]
+tests/test_behavior_router_broker_fix.py ...                             [  8%]
+tests/test_behavioral_pattern_dormant.py ...                             [  8%]
+tests/test_calendar_availability_tool.py ..........                      [  9%]
+tests/test_candidate_state_machine.py ...........                        [  9%]
+tests/test_chat_assembly.py ...............................              [ 10%]
+tests/test_chat_history_reconciliation.py ......                         [ 11%]
+tests/test_chat_intercepts.py ...............                            [ 11%]
+tests/test_chat_system_prompt.py ............................            [ 12%]
+tests/test_chat_thinking.py ............................................ [ 14%]
+..                                                                       [ 14%]
+tests/test_chat_tool_loop.py ........................................... [ 16%]
+................................                                         [ 18%]
+tests/test_chat_turn_notify.py ......                                    [ 18%]
+tests/test_chat_turn_trace.py ............                               [ 18%]
+tests/test_checkin_builder.py ...........FF.....F.                       [ 19%]
+tests/test_cognitive_phase1.py ...............................           [ 21%]
+tests/test_compose_decline_detection.py .......                          [ 21%]
+tests/test_compose_hedging_enforcement.py ....                           [ 21%]
+tests/test_confidence_ladder.py ..........                               [ 21%]
+tests/test_context_amnesia.py ..........                                 [ 22%]
+tests/test_context_budget_final_boundary.py .....                        [ 22%]
+tests/test_context_router.py ............F..FFF..F....................F  [ 24%]
+tests/test_core_redis_pool.py ...                                        [ 24%]
+tests/test_core_swallow.py ...                                           [ 24%]
+tests/test_corrections.py .................                              [ 25%]
+tests/test_curiosity_ambient_wiring.py ......                            [ 25%]
+tests/test_daemon_ambient_turn_endpoint.py ...                           [ 25%]
+tests/test_daily_brief_compiler.py ...                                   [ 25%]
+tests/test_daily_layer_freshness.py .........                            [ 26%]
+tests/test_daily_log_diary.py ....................                       [ 27%]
+tests/test_db_scheduler_beat_double_fire.py .....                        [ 27%]
+tests/test_deadline_preserves_writes.py ................................ [ 28%]
+.........................                                                [ 29%]
+tests/test_debug_runtime.py ...                                          [ 29%]
+tests/test_deliberation_gate_dedup.py ............                       [ 30%]
+tests/test_deliberation_gate_morning_anchor.py ....                      [ 30%]
+tests/test_deliberation_kernel_hands.py ........                         [ 30%]
+tests/test_delivery_flush_anchor.py .                                    [ 30%]
+tests/test_departure_brief.py ........                                   [ 31%]
+tests/test_dialogue_state.py ......................                      [ 32%]
+tests/test_dialogue_state_2026_09_16_fixture.py .........                [ 32%]
+tests/test_dream_consolidation.py EEEEEEEEEEEEEEEE                       [ 33%]
+tests/test_dst_midnight_correctness.py .........                         [ 33%]
+tests/test_email_world_state_integration_pg.py ....                      [ 33%]
+tests/test_env_guard.py .........                                        [ 34%]
+tests/test_ephemeral_extraction_guards.py ....                           [ 34%]
+tests/test_ephemeral_no_world_state_writes.py ...                        [ 34%]
+tests/test_episode_enrichment.py ...........                             [ 35%]
+tests/test_episode_storage.py ...................                        [ 35%]
+tests/test_episode_store_idempotent.py .............                     [ 36%]
+tests/test_execution_boundary_authorization.py .........                 [ 36%]
+tests/test_extended_signals.py ...                                       [ 36%]
+tests/test_files_to_studio.py ...............                            [ 37%]
+tests/test_fitness_system_prompt.py ...                                  [ 37%]
+tests/test_food_item_v2_contract.py ....                                 [ 37%]
+tests/test_food_log_world_event.py ........                              [ 38%]
+tests/test_food_search_log_grounding.py .........                        [ 38%]
+tests/test_food_world_state_integration_pg.py ...                        [ 38%]
+tests/test_ground_truth_followup.py sss................................. [ 40%]
+....................                                                     [ 41%]
+tests/test_ground_truth_phase1.py ...............                        [ 41%]
+tests/test_ground_truth_phase2.py .......................                [ 42%]
+tests/test_ground_truth_phase3.py ......ss.                              [ 43%]
+tests/test_ground_truth_phase4.py ............                           [ 43%]
+tests/test_ground_truth_phase5.py ............................           [ 44%]
+tests/test_ground_truth_phase6.py ................                       [ 45%]
+tests/test_ground_truth_phase7.py .............                          [ 46%]
+tests/test_ground_truth_phase8.py .....................                  [ 46%]
+tests/test_health_data_accuracy.py ..................................... [ 48%]
+..                                                                       [ 48%]
+tests/test_health_deltas_dedup.py ..                                     [ 48%]
+tests/test_health_metric_mirror.py ...................                   [ 49%]
+tests/test_health_world_state_integration_pg.py ...                      [ 49%]
+tests/test_hold_notification_sync_session.py ...                         [ 49%]
+tests/test_intent_classifier.py ........................................ [ 51%]
+.                                                                        [ 51%]
+tests/test_interest_lifecycle.py .........                               [ 51%]
+tests/test_internal_tool_agent_reliability.py ...                        [ 52%]
+tests/test_interoception_hygiene.py ....s......FF........                [ 52%]
+tests/test_interpretation_vs_correction_pg.py ..                         [ 52%]
+tests/test_interruptibility.py .............................             [ 54%]
+tests/test_interval_calc.py ............................................ [ 56%]
+...........................                                              [ 57%]
+tests/test_karma.py EEEEEEFFFF.                                          [ 57%]
+tests/test_kernel_hands.py ................                              [ 58%]
+tests/test_last_conversation_digest.py ...                               [ 58%]
+tests/test_learned_buzz_gate.py .........                                [ 58%]
+tests/test_lesson_tracker_pg.py ....                                     [ 59%]
+tests/test_life_facts_decay.py ....                                      [ 59%]
+tests/test_live_context_envelope.py .......                              [ 59%]
+tests/test_location_freshness.py .....                                   [ 59%]
+tests/test_location_world_state_integration_pg.py .....                  [ 59%]
+tests/test_long_conversation_history_recovery_pg.py ss                   [ 60%]
+tests/test_memory_recall.py ....................                         [ 60%]
+tests/test_memory_search_ranking.py sss                                  [ 61%]
+tests/test_memory_service.py FFFFFEFEFEFFFFFFF                           [ 61%]
+tests/test_mindv2_batch_flush.py .......                                 [ 62%]
+tests/test_mindv2_deliver.py ....                                        [ 62%]
+tests/test_mission_idempotency.py ..........                             [ 62%]
+tests/test_morning_proactive_mouth_only_regression.py .                  [ 62%]
+tests/test_mouth_only_write_freeze.py FF                                 [ 62%]
+tests/test_mtp_control.py .................                              [ 63%]
+tests/test_mtp_parity_live.py ssssssss                                   [ 63%]
+tests/test_nvidia_stack.py .....................sss                      [ 64%]
+tests/test_outbox_extract_entities_thinking.py .                         [ 64%]
+tests/test_personal_knowledge_graph_node_status.py .....                 [ 65%]
+tests/test_personal_knowledge_graph_promotion.py .....                   [ 65%]
+tests/test_personal_knowledge_graph_top_confidence.py ...                [ 65%]
+tests/test_personal_knowledge_graph_upsert_fact.py ..........            [ 65%]
+tests/test_personality_engine.py ......FFFFF..............FFFFFF......   [ 67%]
+tests/test_pkg_stale_context_regression.py ............                  [ 68%]
+tests/test_plan_adjust.py .........                                      [ 68%]
+tests/test_policy_engine.py .........................                    [ 69%]
+tests/test_presence_latency.py .F......                                  [ 69%]
+tests/test_presence_tool_diet.py ............                            [ 70%]
+tests/test_recency_buffer_diet.py ..........                             [ 70%]
+tests/test_recovery_score_hrv_outlier.py ..                              [ 70%]
+tests/test_reflection.py .....F...................                       [ 71%]
+tests/test_remember_about_david_tool.py ....                             [ 72%]
+tests/test_reminders_goals_world_state_integration_pg.py ....            [ 72%]
+tests/test_render_engaged_context.py ................................... [ 73%]
+.                                                                        [ 73%]
+tests/test_research_single_flight.py ...........                         [ 74%]
+tests/test_sara_brief_meal_timezone.py ......                            [ 74%]
+tests/test_sara_journal_service.py ..................................... [ 76%]
+......                                                                   [ 76%]
+tests/test_self_model_health_agreement.py ....                           [ 76%]
+tests/test_should_skip_recall.py .....                                   [ 76%]
+tests/test_singular_sara_body_capability.py ....                         [ 76%]
+tests/test_singular_sara_c0_flags.py ..........                          [ 77%]
+tests/test_singular_sara_c10_action_receipt.py ........                  [ 77%]
+tests/test_singular_sara_c10_verification.py ..........                  [ 78%]
+tests/test_singular_sara_c11_scheduler_diet.py .......                   [ 78%]
+tests/test_singular_sara_c5_fold_in.py .....                             [ 78%]
+tests/test_singular_sara_c6_dreaming.py ..                               [ 78%]
+tests/test_singular_sara_c7_focused.py ....                              [ 78%]
+tests/test_singular_sara_c8_recall.py ......                             [ 79%]
+tests/test_singular_sara_c9_attention.py ..................              [ 79%]
+tests/test_singular_sara_context_snapshot.py .............               [ 80%]
+tests/test_singular_sara_engaged_turn.py ...                             [ 80%]
+tests/test_singular_sara_event_envelope.py ...............               [ 81%]
+tests/test_singular_sara_intent_graph.py ...........                     [ 81%]
+tests/test_singular_sara_intent_graph_service.py .......                 [ 81%]
+tests/test_singular_sara_intent_graph_task.py ..                         [ 82%]
+tests/test_singular_sara_slice.py ................                       [ 82%]
+tests/test_source_outage_reconciliation_pg.py .....                      [ 82%]
+tests/test_standing_order_dedup.py .......                               [ 83%]
+tests/test_structured_plan_parser.py .......................             [ 84%]
+tests/test_subconscious_guardrails.py .........                          [ 84%]
+tests/test_system_wiring_check.py ...............................F       [ 85%]
+tests/test_text_utils_reasoning_log.py ..                                [ 86%]
+tests/test_thread_extractor.py .....................                     [ 86%]
+tests/test_tool_mutation.py ............................................ [ 88%]
+...................                                                      [ 89%]
+tests/test_tool_retrieval.py ..............                              [ 90%]
+tests/test_two_templates_per_day.py .....................                [ 91%]
+tests/test_two_user_isolation_pg.py ....                                 [ 91%]
+tests/test_unified_notification.py ........F....                         [ 91%]
+tests/test_verification_loop.py .....................                    [ 92%]
+tests/test_voice_linter.py ................                              [ 93%]
+tests/test_web_tool_cache_contract.py ......                             [ 93%]
+tests/test_worker_broker_recovery_pg.py ....                             [ 93%]
+tests/test_workout_approval_enforcement.py ............                  [ 94%]
+tests/test_workout_command_service.py ...............................    [ 95%]
+tests/test_workout_flexible_sets.py ........................             [ 96%]
+tests/test_workout_session_legacy_compat.py ................             [ 97%]
+tests/test_workout_world_state_integration_pg.py ......                  [ 97%]
+tests/test_world_brief_ahead_anchor.py ....                              [ 97%]
+tests/test_world_brief_diet.py .................                         [ 98%]
+tests/test_world_context_page_integration_pg.py ...                      [ 98%]
+tests/test_world_state_runtime.py .........                              [ 99%]
+tests/test_world_state_slices.py .....                                   [ 99%]
+tests/test_world_state_staleness.py .....                                [ 99%]
+tests/test_world_state_thread_kinds.py ...........                       [100%]
+
+==================================== ERRORS ====================================
+_________________ ERROR at setup of test_dream_pipeline_basic __________________
+file /app/tests/test_dream_consolidation.py, line 20
+  @pytest.mark.asyncio
+  async def test_dream_pipeline_basic(dream_service, db_session, test_user_id, sample_memory_traces):
+      """Test basic dream consolidation pipeline"""
+      yesterday = datetime.utcnow() - timedelta(days=1)
+
+      result = await dream_service.run_dream_pipeline(
+          db=db_session,
+          user_id=test_user_id,
+          day=yesterday
+      )
+
+      assert result["status"] == "success"
+      assert result["traces_processed"] == len(sample_memory_traces)
+      assert result["clusters_created"] > 0
+      assert result["summaries_generated"] > 0
+      assert result["edges_created"] > 0
+      # Insight generation may fail in SQLite (missing dev_project/workout_log tables)
+      assert result["insights_extracted"] >= 0
+E       fixture 'dream_service' not found
+>       available fixtures: _asyncio_loop_factory, _class_scoped_runner, _function_scoped_runner, _module_scoped_runner, _no_real_task_dispatch_by_default, _package_scoped_runner, _purge_orphan_world_rows, _session_scoped_runner, activity_machine, anyio_backend, anyio_backend_name, anyio_backend_options, assert_similar_embeddings, cache, capfd, capfdbinary, caplog, capsys, capsysbinary, capteesys, context_router, db_engine, db_session, db_session_factory, doctest_namespace, event_loop, event_loop_policy, make_signal, make_snapshot, make_snapshot_ctx, memory_service, memory_tables, mock_background_llm, mock_embedding_service, mock_llm_client, monkeypatch, notification_queue, pytestconfig, record_property, record_testsuite_property, record_xml_attribute, recwarn, redis_client, sample_memory_traces, subtests, test_user, test_user_id, tmp_path, tmp_path_factory, tmpdir, tmpdir_factory, tool_classifier, unused_tcp_port, unused_tcp_port_factory, unused_udp_port, unused_udp_port_factory
+>       use 'pytest --fixtures [testpath]' for help on them.
+
+/app/tests/test_dream_consolidation.py:20
+__________ ERROR at setup of test_dream_pipeline_insufficient_traces ___________
+file /app/tests/test_dream_consolidation.py, line 40
+  @pytest.mark.asyncio
+  async def test_dream_pipeline_insufficient_traces(dream_service, db_session, test_user_id, memory_tables):
+      """Test pipeline skips when too few traces"""
+      from app.main_simple import MemoryTrace
+
+      # Add only 2 traces (less than min_cluster_size of 3)
+      yesterday = datetime.utcnow() - timedelta(days=1)
+
+      for i in range(2):
+          trace = MemoryTrace(
+              id=f"trace-{i}",
+              user_id=test_user_id,
+              content=f"Trace {i}",
+              role="user",
+              created_at=yesterday + timedelta(minutes=i)
+          )
+          db_session.add(trace)
+
+      db_session.commit()
+
+      result = await dream_service.run_dream_pipeline(
+          db=db_session,
+          user_id=test_user_id,
+          day=yesterday
+      )
+
+      assert result["status"] == "skipped"
+      assert result["reason"] == "insufficient_traces"
+E       fixture 'dream_service' not found
+>       available fixtures: _asyncio_loop_factory, _class_scoped_runner, _function_scoped_runner, _module_scoped_runner, _no_real_task_dispatch_by_default, _package_scoped_runner, _purge_orphan_world_rows, _session_scoped_runner, activity_machine, anyio_backend, anyio_backend_name, anyio_backend_options, assert_similar_embeddings, cache, capfd, capfdbinary, caplog, capsys, capsysbinary, capteesys, context_router, db_engine, db_session, db_session_factory, doctest_namespace, event_loop, event_loop_policy, make_signal, make_snapshot, make_snapshot_ctx, memory_service, memory_tables, mock_background_llm, mock_embedding_service, mock_llm_client, monkeypatch, notification_queue, pytestconfig, record_property, record_testsuite_property, record_xml_attribute, recwarn, redis_client, sample_memory_traces, subtests, test_user, test_user_id, tmp_path, tmp_path_factory, tmpdir, tmpdir_factory, tool_classifier, unused_tcp_port, unused_tcp_port_factory, unused_udp_port, unused_udp_port_factory
+>       use 'pytest --fixtures [testpath]' for help on them.
+
+/app/tests/test_dream_consolidation.py:40
+________________ ERROR at setup of test_dream_pipeline_disabled ________________
+file /app/tests/test_dream_consolidation.py, line 70
+  @pytest.mark.asyncio
+  async def test_dream_pipeline_disabled(dream_service, db_session, test_user_id):
+      """Test pipeline respects enabled flag"""
+      dream_service.enabled = False
+
+      result = await dream_service.run_dream_pipeline(
+          db=db_session,
+          user_id=test_user_id
+      )
+
+      assert result["status"] == "disabled"
+E       fixture 'dream_service' not found
+>       available fixtures: _asyncio_loop_factory, _class_scoped_runner, _function_scoped_runner, _module_scoped_runner, _no_real_task_dispatch_by_default, _package_scoped_runner, _purge_orphan_world_rows, _session_scoped_runner, activity_machine, anyio_backend, anyio_backend_name, anyio_backend_options, assert_similar_embeddings, cache, capfd, capfdbinary, caplog, capsys, capsysbinary, capteesys, context_router, db_engine, db_session, db_session_factory, doctest_namespace, event_loop, event_loop_policy, make_signal, make_snapshot, make_snapshot_ctx, memory_service, memory_tables, mock_background_llm, mock_embedding_service, mock_llm_client, monkeypatch, notification_queue, pytestconfig, record_property, record_testsuite_property, record_xml_attribute, recwarn, redis_client, sample_memory_traces, subtests, test_user, test_user_id, tmp_path, tmp_path_factory, tmpdir, tmpdir_factory, tool_classifier, unused_tcp_port, unused_tcp_port_factory, unused_udp_port, unused_udp_port_factory
+>       use 'pytest --fixtures [testpath]' for help on them.
+
+/app/tests/test_dream_consolidation.py:70
+_________________ ERROR at setup of test_cluster_traces_basic __________________
+file /app/tests/test_dream_consolidation.py, line 87
+  @pytest.mark.asyncio
+  async def test_cluster_traces_basic(dream_service):
+      """Test basic trace clustering"""
+      traces = [
+          {"id": "1", "content": "Machine learning and AI research", "salience": 0.6, "created_at": datetime.utcnow()},
+          {"id": "2", "content": "Deep learning neural networks", "salience": 0.6, "created_at": datetime.utcnow()},
+          {"id": "3", "content": "Cooking pasta for dinner", "salience": 0.5, "created_at": datetime.utcnow()},
+          {"id": "4", "content": "Artificial intelligence models", "salience": 0.6, "created_at": datetime.utcnow()},
+          {"id": "5", "content": "Recipe for tomato sauce", "salience": 0.5, "created_at": datetime.utcnow()},
+      ]
+
+      clusters = await dream_service._cluster_traces(traces)
+
+      # Should create at least 1 cluster
+      assert len(clusters) > 0
+
+      # All traces should be in some cluster
+      all_trace_ids = set()
+      for cluster in clusters:
+          for trace in cluster:
+              all_trace_ids.add(trace["id"])
+
+      assert len(all_trace_ids) >= 3  # At least some traces clustered
+E       fixture 'dream_service' not found
+>       available fixtures: _asyncio_loop_factory, _class_scoped_runner, _function_scoped_runner, _module_scoped_runner, _no_real_task_dispatch_by_default, _package_scoped_runner, _purge_orphan_world_rows, _session_scoped_runner, activity_machine, anyio_backend, anyio_backend_name, anyio_backend_options, assert_similar_embeddings, cache, capfd, capfdbinary, caplog, capsys, capsysbinary, capteesys, context_router, db_engine, db_session, db_session_factory, doctest_namespace, event_loop, event_loop_policy, make_signal, make_snapshot, make_snapshot_ctx, memory_service, memory_tables, mock_background_llm, mock_embedding_service, mock_llm_client, monkeypatch, notification_queue, pytestconfig, record_property, record_testsuite_property, record_xml_attribute, recwarn, redis_client, sample_memory_traces, subtests, test_user, test_user_id, tmp_path, tmp_path_factory, tmpdir, tmpdir_factory, tool_classifier, unused_tcp_port, unused_tcp_port_factory, unused_udp_port, unused_udp_port_factory
+>       use 'pytest --fixtures [testpath]' for help on them.
+
+/app/tests/test_dream_consolidation.py:87
+________ ERROR at setup of test_cluster_traces_high_salience_singleton _________
+file /app/tests/test_dream_consolidation.py, line 112
+  @pytest.mark.asyncio
+  async def test_cluster_traces_high_salience_singleton(dream_service):
+      """Test that high-salience traces get their own cluster"""
+      traces = [
+          {"id": "1", "content": "Regular content", "salience": 0.5, "created_at": datetime.utcnow()},
+          {"id": "2", "content": "Very important urgent matter", "salience": 0.9, "created_at": datetime.utcnow()},
+          {"id": "3", "content": "Another regular item", "salience": 0.5, "created_at": datetime.utcnow()},
+      ]
+
+      clusters = await dream_service._cluster_traces(traces)
+
+      # High salience trace should be in a cluster
+      high_salience_cluster = None
+      for cluster in clusters:
+          if any(t["id"] == "2" for t in cluster):
+              high_salience_cluster = cluster
+              break
+
+      assert high_salience_cluster is not None
+E       fixture 'dream_service' not found
+>       available fixtures: _asyncio_loop_factory, _class_scoped_runner, _function_scoped_runner, _module_scoped_runner, _no_real_task_dispatch_by_default, _package_scoped_runner, _purge_orphan_world_rows, _session_scoped_runner, activity_machine, anyio_backend, anyio_backend_name, anyio_backend_options, assert_similar_embeddings, cache, capfd, capfdbinary, caplog, capsys, capsysbinary, capteesys, context_router, db_engine, db_session, db_session_factory, doctest_namespace, event_loop, event_loop_policy, make_signal, make_snapshot, make_snapshot_ctx, memory_service, memory_tables, mock_background_llm, mock_embedding_service, mock_llm_client, monkeypatch, notification_queue, pytestconfig, record_property, record_testsuite_property, record_xml_attribute, recwarn, redis_client, sample_memory_traces, subtests, test_user, test_user_id, tmp_path, tmp_path_factory, tmpdir, tmpdir_factory, tool_classifier, unused_tcp_port, unused_tcp_port_factory, unused_udp_port, unused_udp_port_factory
+>       use 'pytest --fixtures [testpath]' for help on them.
+
+/app/tests/test_dream_consolidation.py:112
+___________ ERROR at setup of test_cluster_traces_insufficient_size ____________
+file /app/tests/test_dream_consolidation.py, line 133
+  @pytest.mark.asyncio
+  async def test_cluster_traces_insufficient_size(dream_service):
+      """Test clustering with insufficient traces"""
+      traces = [
+          {"id": "1", "content": "Single trace", "salience": 0.5, "created_at": datetime.utcnow()}
+      ]
+
+      clusters = await dream_service._cluster_traces(traces)
+
+      # Should return single cluster with all traces
+      assert len(clusters) == 1
+      assert len(clusters[0]) == 1
+E       fixture 'dream_service' not found
+>       available fixtures: _asyncio_loop_factory, _class_scoped_runner, _function_scoped_runner, _module_scoped_runner, _no_real_task_dispatch_by_default, _package_scoped_runner, _purge_orphan_world_rows, _session_scoped_runner, activity_machine, anyio_backend, anyio_backend_name, anyio_backend_options, assert_similar_embeddings, cache, capfd, capfdbinary, caplog, capsys, capsysbinary, capteesys, context_router, db_engine, db_session, db_session_factory, doctest_namespace, event_loop, event_loop_policy, make_signal, make_snapshot, make_snapshot_ctx, memory_service, memory_tables, mock_background_llm, mock_embedding_service, mock_llm_client, monkeypatch, notification_queue, pytestconfig, record_property, record_testsuite_property, record_xml_attribute, recwarn, redis_client, sample_memory_traces, subtests, test_user, test_user_id, tmp_path, tmp_path_factory, tmpdir, tmpdir_factory, tool_classifier, unused_tcp_port, unused_tcp_port_factory, unused_udp_port, unused_udp_port_factory
+>       use 'pytest --fixtures [testpath]' for help on them.
+
+/app/tests/test_dream_consolidation.py:133
+______________ ERROR at setup of test_generate_summaries_with_llm ______________
+file /app/tests/test_dream_consolidation.py, line 151
+  @pytest.mark.asyncio
+  async def test_generate_summaries_with_llm(dream_service, mock_llm_client):
+      """Test LLM-based summary generation"""
+      clusters = [
+          [
+              {"id": "1", "content": "ML research", "role": "user", "created_at": datetime.utcnow()},
+              {"id": "2", "content": "AI models", "role": "assistant", "created_at": datetime.utcnow()},
+              {"id": "3", "content": "Neural nets", "role": "user", "created_at": datetime.utcnow()},
+          ]
+      ]
+
+      summaries = await dream_service._generate_summaries(clusters)
+
+      assert len(summaries) == 1
+      summary = summaries[0]
+
+      assert "summary" in summary
+      assert "key_points" in summary
+      assert "emotional_tone" in summary
+      assert "topics" in summary
+      assert summary["cluster_size"] == 3
+E       fixture 'dream_service' not found
+>       available fixtures: _asyncio_loop_factory, _class_scoped_runner, _function_scoped_runner, _module_scoped_runner, _no_real_task_dispatch_by_default, _package_scoped_runner, _purge_orphan_world_rows, _session_scoped_runner, activity_machine, anyio_backend, anyio_backend_name, anyio_backend_options, assert_similar_embeddings, cache, capfd, capfdbinary, caplog, capsys, capsysbinary, capteesys, context_router, db_engine, db_session, db_session_factory, doctest_namespace, event_loop, event_loop_policy, make_signal, make_snapshot, make_snapshot_ctx, memory_service, memory_tables, mock_background_llm, mock_embedding_service, mock_llm_client, monkeypatch, notification_queue, pytestconfig, record_property, record_testsuite_property, record_xml_attribute, recwarn, redis_client, sample_memory_traces, subtests, test_user, test_user_id, tmp_path, tmp_path_factory, tmpdir, tmpdir_factory, tool_classifier, unused_tcp_port, unused_tcp_port_factory, unused_udp_port, unused_udp_port_factory
+>       use 'pytest --fixtures [testpath]' for help on them.
+
+/app/tests/test_dream_consolidation.py:151
+____________ ERROR at setup of test_generate_summaries_llm_fallback ____________
+file /app/tests/test_dream_consolidation.py, line 174
+  @pytest.mark.asyncio
+  async def test_generate_summaries_llm_fallback(dream_service, monkeypatch):
+      """Test fallback to keyword-based summaries when LLM fails"""
+      # Mock LLM to return None (unavailable)
+      def mock_get_llm():
+E       fixture 'dream_service' not found
+>       available fixtures: _asyncio_loop_factory, _class_scoped_runner, _function_scoped_runner, _module_scoped_runner, _no_real_task_dispatch_by_default, _package_scoped_runner, _purge_orphan_world_rows, _session_scoped_runner, activity_machine, anyio_backend, anyio_backend_name, anyio_backend_options, assert_similar_embeddings, cache, capfd, capfdbinary, caplog, capsys, capsysbinary, capteesys, context_router, db_engine, db_session, db_session_factory, doctest_namespace, event_loop, event_loop_policy, make_signal, make_snapshot, make_snapshot_ctx, memory_service, memory_tables, mock_background_llm, mock_embedding_service, mock_llm_client, monkeypatch, notification_queue, pytestconfig, record_property, record_testsuite_property, record_xml_attribute, recwarn, redis_client, sample_memory_traces, subtests, test_user, test_user_id, tmp_path, tmp_path_factory, tmpdir, tmpdir_factory, tool_classifier, unused_tcp_port, unused_tcp_port_factory, unused_udp_port, unused_udp_port_factory
+>       use 'pytest --fixtures [testpath]' for help on them.
+
+/app/tests/test_dream_consolidation.py:174
+___________________ ERROR at setup of test_fallback_summary ____________________
+file /app/tests/test_dream_consolidation.py, line 200
+  @pytest.mark.asyncio
+  async def test_fallback_summary(dream_service):
+      """Test keyword-based fallback summary"""
+      cluster = [
+          {"id": "1", "content": "python programming language code", "created_at": datetime.utcnow()},
+          {"id": "2", "content": "python development tools", "created_at": datetime.utcnow()},
+          {"id": "3", "content": "python programming best practices", "created_at": datetime.utcnow()},
+      ]
+
+      summary = dream_service._fallback_summary(cluster)
+
+      assert summary["cluster_size"] == 3
+      assert "python" in summary["topics"] or "programming" in summary["topics"]
+      assert "summary" in summary
+      assert "time_span" in summary
+E       fixture 'dream_service' not found
+>       available fixtures: _asyncio_loop_factory, _class_scoped_runner, _function_scoped_runner, _module_scoped_runner, _no_real_task_dispatch_by_default, _package_scoped_runner, _purge_orphan_world_rows, _session_scoped_runner, activity_machine, anyio_backend, anyio_backend_name, anyio_backend_options, assert_similar_embeddings, cache, capfd, capfdbinary, caplog, capsys, capsysbinary, capteesys, context_router, db_engine, db_session, db_session_factory, doctest_namespace, event_loop, event_loop_policy, make_signal, make_snapshot, make_snapshot_ctx, memory_service, memory_tables, mock_background_llm, mock_embedding_service, mock_llm_client, monkeypatch, notification_queue, pytestconfig, record_property, record_testsuite_property, record_xml_attribute, recwarn, redis_client, sample_memory_traces, subtests, test_user, test_user_id, tmp_path, tmp_path_factory, tmpdir, tmpdir_factory, tool_classifier, unused_tcp_port, unused_tcp_port_factory, unused_udp_port, unused_udp_port_factory
+>       use 'pytest --fixtures [testpath]' for help on them.
+
+/app/tests/test_dream_consolidation.py:200
+________________ ERROR at setup of test_extract_edges_temporal _________________
+file /app/tests/test_dream_consolidation.py, line 221
+  @pytest.mark.asyncio
+  async def test_extract_edges_temporal(dream_service, db_session, test_user_id, memory_tables):
+      """Test temporal edge creation within clusters"""
+      from app.main_simple import MemoryEdge
+
+      traces = [
+          {"id": "1", "content": "Trace 1", "created_at": datetime.utcnow()},
+          {"id": "2", "content": "Trace 2", "created_at": datetime.utcnow()},
+          {"id": "3", "content": "Trace 3", "created_at": datetime.utcnow()},
+      ]
+
+      clusters = [traces]
+
+      edges_created = await dream_service._extract_edges(
+          db=db_session,
+          user_id=test_user_id,
+          traces=traces,
+          clusters=clusters
+      )
+
+      assert edges_created > 0
+
+      # Check temporal edges exist
+      temporal_edges = db_session.query(MemoryEdge).filter(
+          MemoryEdge.type == "temporal"
+      ).all()
+
+      assert len(temporal_edges) > 0
+E       fixture 'dream_service' not found
+>       available fixtures: _asyncio_loop_factory, _class_scoped_runner, _function_scoped_runner, _module_scoped_runner, _no_real_task_dispatch_by_default, _package_scoped_runner, _purge_orphan_world_rows, _session_scoped_runner, activity_machine, anyio_backend, anyio_backend_name, anyio_backend_options, assert_similar_embeddings, cache, capfd, capfdbinary, caplog, capsys, capsysbinary, capteesys, context_router, db_engine, db_session, db_session_factory, doctest_namespace, event_loop, event_loop_policy, make_signal, make_snapshot, make_snapshot_ctx, memory_service, memory_tables, mock_background_llm, mock_embedding_service, mock_llm_client, monkeypatch, notification_queue, pytestconfig, record_property, record_testsuite_property, record_xml_attribute, recwarn, redis_client, sample_memory_traces, subtests, test_user, test_user_id, tmp_path, tmp_path_factory, tmpdir, tmpdir_factory, tool_classifier, unused_tcp_port, unused_tcp_port_factory, unused_udp_port, unused_udp_port_factory
+>       use 'pytest --fixtures [testpath]' for help on them.
+
+/app/tests/test_dream_consolidation.py:221
+________________ ERROR at setup of test_extract_edges_semantic _________________
+file /app/tests/test_dream_consolidation.py, line 251
+  @pytest.mark.asyncio
+  async def test_extract_edges_semantic(dream_service, db_session, test_user_id, memory_tables):
+      """Test semantic edge creation between clusters"""
+      from app.main_simple import MemoryEdge
+
+      cluster1 = [{"id": "1", "content": "Cluster 1", "created_at": datetime.utcnow()}]
+      cluster2 = [{"id": "2", "content": "Cluster 2", "created_at": datetime.utcnow()}]
+
+      clusters = [cluster1, cluster2]
+      traces = cluster1 + cluster2
+
+      edges_created = await dream_service._extract_edges(
+          db=db_session,
+          user_id=test_user_id,
+          traces=traces,
+          clusters=clusters
+      )
+
+      assert edges_created > 0
+
+      # Check semantic edges exist
+      semantic_edges = db_session.query(MemoryEdge).filter(
+          MemoryEdge.type == "semantic"
+      ).all()
+
+      assert len(semantic_edges) > 0
+E       fixture 'dream_service' not found
+>       available fixtures: _asyncio_loop_factory, _class_scoped_runner, _function_scoped_runner, _module_scoped_runner, _no_real_task_dispatch_by_default, _package_scoped_runner, _purge_orphan_world_rows, _session_scoped_runner, activity_machine, anyio_backend, anyio_backend_name, anyio_backend_options, assert_similar_embeddings, cache, capfd, capfdbinary, caplog, capsys, capsysbinary, capteesys, context_router, db_engine, db_session, db_session_factory, doctest_namespace, event_loop, event_loop_policy, make_signal, make_snapshot, make_snapshot_ctx, memory_service, memory_tables, mock_background_llm, mock_embedding_service, mock_llm_client, monkeypatch, notification_queue, pytestconfig, record_property, record_testsuite_property, record_xml_attribute, recwarn, redis_client, sample_memory_traces, subtests, test_user, test_user_id, tmp_path, tmp_path_factory, tmpdir, tmpdir_factory, tool_classifier, unused_tcp_port, unused_tcp_port_factory, unused_udp_port, unused_udp_port_factory
+>       use 'pytest --fixtures [testpath]' for help on them.
+
+/app/tests/test_dream_consolidation.py:251
+____________ ERROR at setup of test_generate_insights_daily_summary ____________
+file /app/tests/test_dream_consolidation.py, line 283
+  @pytest.mark.asyncio
+  async def test_generate_insights_daily_summary(dream_service, db_session, test_user_id, memory_tables):
+      """Test daily summary insight generation"""
+      from app.main_simple import DreamInsight
+
+      yesterday = datetime.utcnow() - timedelta(days=1)
+
+      traces = [
+          {"id": "1", "content": "Trace 1", "salience": 0.5, "created_at": yesterday},
+          {"id": "2", "content": "Trace 2", "salience": 0.5, "created_at": yesterday + timedelta(minutes=10)},
+      ]
+
+      clusters = [traces]
+
+      summaries = [
+          {
+              "cluster_size": 2,
+              "topics": ["test", "mock"],
+              "summary": "Test summary",
+              "trace_ids": ["1", "2"]
+          }
+      ]
+
+      insights = await dream_service._generate_insights(
+          db=db_session,
+          user_id=test_user_id,
+          day=yesterday,
+          traces=traces,
+          clusters=clusters,
+          summaries=summaries
+      )
+
+      # Insights may include daily summary and/or LLM-generated insights
+      assert len(insights) >= 0
+
+      # Check daily summary exists (if generated)
+      daily_summary = db_session.query(DreamInsight).filter(
+          DreamInsight.insight_type == "summary"
+      ).first()
+
+      if daily_summary:
+          assert "Daily Summary" in daily_summary.title
+E       fixture 'dream_service' not found
+>       available fixtures: _asyncio_loop_factory, _class_scoped_runner, _function_scoped_runner, _module_scoped_runner, _no_real_task_dispatch_by_default, _package_scoped_runner, _purge_orphan_world_rows, _session_scoped_runner, activity_machine, anyio_backend, anyio_backend_name, anyio_backend_options, assert_similar_embeddings, cache, capfd, capfdbinary, caplog, capsys, capsysbinary, capteesys, context_router, db_engine, db_session, db_session_factory, doctest_namespace, event_loop, event_loop_policy, make_signal, make_snapshot, make_snapshot_ctx, memory_service, memory_tables, mock_background_llm, mock_embedding_service, mock_llm_client, monkeypatch, notification_queue, pytestconfig, record_property, record_testsuite_property, record_xml_attribute, recwarn, redis_client, sample_memory_traces, subtests, test_user, test_user_id, tmp_path, tmp_path_factory, tmpdir, tmpdir_factory, tool_classifier, unused_tcp_port, unused_tcp_port_factory, unused_udp_port, unused_udp_port_factory
+>       use 'pytest --fixtures [testpath]' for help on them.
+
+/app/tests/test_dream_consolidation.py:283
+__________ ERROR at setup of test_generate_insights_pattern_detection __________
+file /app/tests/test_dream_consolidation.py, line 327
+  @pytest.mark.asyncio
+  async def test_generate_insights_pattern_detection(dream_service, db_session, test_user_id, memory_tables):
+      """Test pattern detection insight for large clusters"""
+      from app.main_simple import DreamInsight
+
+      yesterday = datetime.utcnow() - timedelta(days=1)
+
+      # Large cluster (size >= 5 triggers pattern detection)
+      traces = [{"id": str(i), "content": f"Trace {i}", "salience": 0.5,
+                 "created_at": yesterday + timedelta(minutes=i*5)} for i in range(6)]
+      clusters = [traces]
+
+      summaries = [
+          {
+              "cluster_size": 6,
+              "topics": ["recurring", "theme"],
+              "summary": "Pattern detected",
+              "trace_ids": [t["id"] for t in traces]
+          }
+      ]
+
+      insights = await dream_service._generate_insights(
+          db=db_session,
+          user_id=test_user_id,
+          day=yesterday,
+          traces=traces,
+          clusters=clusters,
+          summaries=summaries
+      )
+
+      # Insights may be generated depending on LLM and SQLite table availability
+      assert isinstance(insights, list)
+E       fixture 'dream_service' not found
+>       available fixtures: _asyncio_loop_factory, _class_scoped_runner, _function_scoped_runner, _module_scoped_runner, _no_real_task_dispatch_by_default, _package_scoped_runner, _purge_orphan_world_rows, _session_scoped_runner, activity_machine, anyio_backend, anyio_backend_name, anyio_backend_options, assert_similar_embeddings, cache, capfd, capfdbinary, caplog, capsys, capsysbinary, capteesys, context_router, db_engine, db_session, db_session_factory, doctest_namespace, event_loop, event_loop_policy, make_signal, make_snapshot, make_snapshot_ctx, memory_service, memory_tables, mock_background_llm, mock_embedding_service, mock_llm_client, monkeypatch, notification_queue, pytestconfig, record_property, record_testsuite_property, record_xml_attribute, recwarn, redis_client, sample_memory_traces, subtests, test_user, test_user_id, tmp_path, tmp_path_factory, tmpdir, tmpdir_factory, tool_classifier, unused_tcp_port, unused_tcp_port_factory, unused_udp_port, unused_udp_port_factory
+>       use 'pytest --fixtures [testpath]' for help on them.
+
+/app/tests/test_dream_consolidation.py:327
+____________ ERROR at setup of test_generate_insights_forgotten_gem ____________
+file /app/tests/test_dream_consolidation.py, line 361
+  @pytest.mark.asyncio
+  async def test_generate_insights_forgotten_gem(dream_service, db_session, test_user_id, memory_tables):
+      """Test forgotten gem insight for high-salience traces"""
+      from app.main_simple import DreamInsight
+
+      yesterday = datetime.utcnow() - timedelta(days=1)
+
+      traces = [
+          {"id": "1", "content": "Regular trace", "salience": 0.5, "created_at": yesterday},
+          {"id": "2", "content": "Very important forgotten memory", "salience": 0.9, "created_at": yesterday + timedelta(minutes=10)},
+      ]
+
+      clusters = [traces]
+      summaries = [{"cluster_size": 2, "topics": ["test"], "summary": "Test", "trace_ids": ["1", "2"]}]
+
+      insights = await dream_service._generate_insights(
+          db=db_session,
+          user_id=test_user_id,
+          day=yesterday,
+          traces=traces,
+          clusters=clusters,
+          summaries=summaries
+      )
+
+      # Insights may be generated depending on LLM and SQLite table availability
+      assert isinstance(insights, list)
+E       fixture 'dream_service' not found
+>       available fixtures: _asyncio_loop_factory, _class_scoped_runner, _function_scoped_runner, _module_scoped_runner, _no_real_task_dispatch_by_default, _package_scoped_runner, _purge_orphan_world_rows, _session_scoped_runner, activity_machine, anyio_backend, anyio_backend_name, anyio_backend_options, assert_similar_embeddings, cache, capfd, capfdbinary, caplog, capsys, capsysbinary, capteesys, context_router, db_engine, db_session, db_session_factory, doctest_namespace, event_loop, event_loop_policy, make_signal, make_snapshot, make_snapshot_ctx, memory_service, memory_tables, mock_background_llm, mock_embedding_service, mock_llm_client, monkeypatch, notification_queue, pytestconfig, record_property, record_testsuite_property, record_xml_attribute, recwarn, redis_client, sample_memory_traces, subtests, test_user, test_user_id, tmp_path, tmp_path_factory, tmpdir, tmpdir_factory, tool_classifier, unused_tcp_port, unused_tcp_port_factory, unused_udp_port, unused_udp_port_factory
+>       use 'pytest --fixtures [testpath]' for help on them.
+
+/app/tests/test_dream_consolidation.py:361
+____________________ ERROR at setup of test_store_summaries ____________________
+file /app/tests/test_dream_consolidation.py, line 393
+  @pytest.mark.asyncio
+  async def test_store_summaries(dream_service, db_session, test_user_id, memory_tables):
+      """Test summary storage as memory traces"""
+      from app.main_simple import MemoryTrace, MemoryEdge
+
+      yesterday = datetime.utcnow() - timedelta(days=1)
+
+      summaries = [
+          {
+              "cluster_size": 3,
+              "trace_ids": ["1", "2", "3"],
+              "summary": "Test summary of the day",
+              "topics": ["test", "mock"],
+              "emotional_tone": "positive",
+              "key_points": ["point 1", "point 2"]
+          }
+      ]
+
+      summary_ids = await dream_service._store_summaries(
+          db=db_session,
+          user_id=test_user_id,
+          day=yesterday,
+          summaries=summaries
+      )
+
+      assert len(summary_ids) == 1
+
+      # Check summary trace exists
+      summary_trace = db_session.query(MemoryTrace).filter(
+          MemoryTrace.id == summary_ids[0]
+      ).first()
+
+      assert summary_trace is not None
+      assert summary_trace.role == "summary"
+      assert summary_trace.salience == 0.7
+      assert "Test summary" in summary_trace.content
+
+      # Check edges to constituent traces
+      edges = db_session.query(MemoryEdge).filter(
+          MemoryEdge.src == summary_ids[0],
+          MemoryEdge.type == "summary_of"
+      ).all()
+
+      assert len(edges) == 3  # One edge per trace
+E       fixture 'dream_service' not found
+>       available fixtures: _asyncio_loop_factory, _class_scoped_runner, _function_scoped_runner, _module_scoped_runner, _no_real_task_dispatch_by_default, _package_scoped_runner, _purge_orphan_world_rows, _session_scoped_runner, activity_machine, anyio_backend, anyio_backend_name, anyio_backend_options, assert_similar_embeddings, cache, capfd, capfdbinary, caplog, capsys, capsysbinary, capteesys, context_router, db_engine, db_session, db_session_factory, doctest_namespace, event_loop, event_loop_policy, make_signal, make_snapshot, make_snapshot_ctx, memory_service, memory_tables, mock_background_llm, mock_embedding_service, mock_llm_client, monkeypatch, notification_queue, pytestconfig, record_property, record_testsuite_property, record_xml_attribute, recwarn, redis_client, sample_memory_traces, subtests, test_user, test_user_id, tmp_path, tmp_path_factory, tmpdir, tmpdir_factory, tool_classifier, unused_tcp_port, unused_tcp_port_factory, unused_udp_port, unused_udp_port_factory
+>       use 'pytest --fixtures [testpath]' for help on them.
+
+/app/tests/test_dream_consolidation.py:393
+_____________ ERROR at setup of test_dream_pipeline_handles_errors _____________
+file /app/tests/test_dream_consolidation.py, line 443
+  @pytest.mark.asyncio
+  async def test_dream_pipeline_handles_errors(dream_service, db_session, test_user_id, memory_tables, monkeypatch):
+      """Test that pipeline handles errors gracefully"""
+      # Mock clustering to raise exception
+      async def mock_cluster_error(traces):
+          raise Exception("Clustering failed")
+
+      monkeypatch.setattr(dream_service, "_cluster_traces", mock_cluster_error)
+
+      # Add some traces
+      from app.main_simple import MemoryTrace
+      yesterday = datetime.utcnow() - timedelta(days=1)
+
+      for i in range(5):
+          trace = MemoryTrace(
+              id=f"trace-{i}",
+              user_id=test_user_id,
+              content=f"Trace {i}",
+              role="user",
+              created_at=yesterday + timedelta(minutes=i)
+          )
+          db_session.add(trace)
+
+      db_session.commit()
+
+      result = await dream_service.run_dream_pipeline(
+          db=db_session,
+          user_id=test_user_id,
+          day=yesterday
+      )
+
+      assert result["status"] == "error"
+      assert "error" in result
+E       fixture 'dream_service' not found
+>       available fixtures: _asyncio_loop_factory, _class_scoped_runner, _function_scoped_runner, _module_scoped_runner, _no_real_task_dispatch_by_default, _package_scoped_runner, _purge_orphan_world_rows, _session_scoped_runner, activity_machine, anyio_backend, anyio_backend_name, anyio_backend_options, assert_similar_embeddings, cache, capfd, capfdbinary, caplog, capsys, capsysbinary, capteesys, context_router, db_engine, db_session, db_session_factory, doctest_namespace, event_loop, event_loop_policy, make_signal, make_snapshot, make_snapshot_ctx, memory_service, memory_tables, mock_background_llm, mock_embedding_service, mock_llm_client, monkeypatch, notification_queue, pytestconfig, record_property, record_testsuite_property, record_xml_attribute, recwarn, redis_client, sample_memory_traces, subtests, test_user, test_user_id, tmp_path, tmp_path_factory, tmpdir, tmpdir_factory, tool_classifier, unused_tcp_port, unused_tcp_port_factory, unused_udp_port, unused_udp_port_factory
+>       use 'pytest --fixtures [testpath]' for help on them.
+
+/app/tests/test_dream_consolidation.py:443
+______ ERROR at setup of TestKarmaService.test_record_event_updates_score ______
+tests/test_karma.py:92: in karma_service
+    from app.services.karma.service import KarmaService
+E   ModuleNotFoundError: No module named 'app.services.karma.service'
+______ ERROR at setup of TestKarmaService.test_score_bounds_enforced_max _______
+tests/test_karma.py:92: in karma_service
+    from app.services.karma.service import KarmaService
+E   ModuleNotFoundError: No module named 'app.services.karma.service'
+______ ERROR at setup of TestKarmaService.test_score_bounds_enforced_min _______
+tests/test_karma.py:92: in karma_service
+    from app.services.karma.service import KarmaService
+E   ModuleNotFoundError: No module named 'app.services.karma.service'
+___________ ERROR at setup of TestKarmaService.test_get_agent_karma ____________
+tests/test_karma.py:92: in karma_service
+    from app.services.karma.service import KarmaService
+E   ModuleNotFoundError: No module named 'app.services.karma.service'
+_________ ERROR at setup of TestKarmaService.test_format_karma_context _________
+tests/test_karma.py:92: in karma_service
+    from app.services.karma.service import KarmaService
+E   ModuleNotFoundError: No module named 'app.services.karma.service'
+__________ ERROR at setup of TestKarmaService.test_score_to_threshold __________
+tests/test_karma.py:92: in karma_service
+    from app.services.karma.service import KarmaService
+E   ModuleNotFoundError: No module named 'app.services.karma.service'
+_________________ ERROR at setup of test_recall_from_database __________________
+/usr/local/lib/python3.11/site-packages/sqlalchemy/engine/base.py:1938: in _exec_single_context
+    self.dialect.do_executemany(
+/usr/local/lib/python3.11/site-packages/sqlalchemy/engine/default.py:919: in do_executemany
+    cursor.executemany(statement, parameters)
+E   sqlite3.OperationalError: no such table: episode
+
+The above exception was the direct cause of the following exception:
+/usr/local/lib/python3.11/site-packages/pytest_asyncio/plugin.py:558: in setup
+    return super().setup()
+           ^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/site-packages/pytest_asyncio/plugin.py:926: in pytest_fixture_setup
+    return (yield)
+            ^^^^^
+tests/conftest.py:403: in sample_memory_traces
+    db_session.commit()
+/usr/local/lib/python3.11/site-packages/sqlalchemy/orm/session.py:1969: in commit
+    trans.commit(_to_root=True)
+/usr/local/lib/python3.11/site-packages/sqlalchemy/orm/state_changes.py:139: in _go
+    ret_value = fn(self, *arg, **kw)
+                ^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/site-packages/sqlalchemy/orm/session.py:1256: in commit
+    self._prepare_impl()
+/usr/local/lib/python3.11/site-packages/sqlalchemy/orm/state_changes.py:139: in _go
+    ret_value = fn(self, *arg, **kw)
+                ^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/site-packages/sqlalchemy/orm/session.py:1231: in _prepare_impl
+    self.session.flush()
+/usr/local/lib/python3.11/site-packages/sqlalchemy/orm/session.py:4312: in flush
+    self._flush(objects)
+/usr/local/lib/python3.11/site-packages/sqlalchemy/orm/session.py:4447: in _flush
+    with util.safe_reraise():
+/usr/local/lib/python3.11/site-packages/sqlalchemy/util/langhelpers.py:146: in __exit__
+    raise exc_value.with_traceback(exc_tb)
+/usr/local/lib/python3.11/site-packages/sqlalchemy/orm/session.py:4408: in _flush
+    flush_context.execute()
+/usr/local/lib/python3.11/site-packages/sqlalchemy/orm/unitofwork.py:466: in execute
+    rec.execute(self)
+/usr/local/lib/python3.11/site-packages/sqlalchemy/orm/unitofwork.py:642: in execute
+    util.preloaded.orm_persistence.save_obj(
+/usr/local/lib/python3.11/site-packages/sqlalchemy/orm/persistence.py:93: in save_obj
+    _emit_insert_statements(
+/usr/local/lib/python3.11/site-packages/sqlalchemy/orm/persistence.py:1043: in _emit_insert_statements
+    result = connection.execute(
+/usr/local/lib/python3.11/site-packages/sqlalchemy/engine/base.py:1416: in execute
+    return meth(
+/usr/local/lib/python3.11/site-packages/sqlalchemy/sql/elements.py:516: in _execute_on_connection
+    return connection._execute_clauseelement(
+/usr/local/lib/python3.11/site-packages/sqlalchemy/engine/base.py:1639: in _execute_clauseelement
+    ret = self._execute_context(
+/usr/local/lib/python3.11/site-packages/sqlalchemy/engine/base.py:1848: in _execute_context
+    return self._exec_single_context(
+/usr/local/lib/python3.11/site-packages/sqlalchemy/engine/base.py:1988: in _exec_single_context
+    self._handle_dbapi_exception(
+/usr/local/lib/python3.11/site-packages/sqlalchemy/engine/base.py:2343: in _handle_dbapi_exception
+    raise sqlalchemy_exception.with_traceback(exc_info[2]) from e
+/usr/local/lib/python3.11/site-packages/sqlalchemy/engine/base.py:1938: in _exec_single_context
+    self.dialect.do_executemany(
+/usr/local/lib/python3.11/site-packages/sqlalchemy/engine/default.py:919: in do_executemany
+    cursor.executemany(statement, parameters)
+E   sqlalchemy.exc.OperationalError: (sqlite3.OperationalError) no such table: episode
+E   [SQL: INSERT INTO episode (id, conversation_id, user_id, role, content, importance, emotional_tone, topics, context_tags, access_count, last_accessed, memory_type, source, created_at, updated_at, meta, base_importance, importance_last_updated, user_rating, consolidated, embedding, rating_boost, exploration_bonus, recall_relevance_ema, client_message_id, reply_to_client_message_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)]
+E   [parameters: [('fcd230f8-aab1-4fc7-bdda-58b1248ea938', None, '378a83b1-fdb2-471a-a9c6-083e700695ea', 'user', 'Test memory trace 0: This is sample content about topic 0', 0.5, None, None, None, 0, None, 'conversation', 'chat', '2026-09-21 18:19:07.018418', None, '{}', None, None, None, None, None, None, None, 0.5, None, None), ('46908515-0e66-4172-9a13-01f854f879ba', None, '378a83b1-fdb2-471a-a9c6-083e700695ea', 'assistant', 'Test memory trace 1: This is sample content about topic 1', 0.6, None, None, None, 0, None, 'conversation', 'chat', '2026-09-21 18:29:07.018418', None, '{}', None, None, None, None, None, None, None, 0.5, None, None), ('f7132a10-4de3-48fd-81d1-ded0923d665e', None, '378a83b1-fdb2-471a-a9c6-083e700695ea', 'user', 'Test memory trace 2: This is sample content about topic 2', 0.7, None, None, None, 0, None, 'conversation', 'chat', '2026-09-21 18:39:07.018418', None, '{}', None, None, None, None, None, None, None, 0.5, None, None), ('20cf420a-c3ac-4fc0-bbda-8900585e0ad0', None, '378a83b1-fdb2-471a-a9c6-083e700695ea', 'assistant', 'Test memory trace 3: This is sample content about topic 0', 0.8, None, None, None, 0, None, 'conversation', 'chat', '2026-09-21 18:49:07.018418', None, '{}', None, None, None, None, None, None, None, 0.5, None, None), ('3cab65ed-0112-4faf-93e7-c6ce9567159f', None, '378a83b1-fdb2-471a-a9c6-083e700695ea', 'user', 'Test memory trace 4: This is sample content about topic 1', 0.9, None, None, None, 0, None, 'conversation', 'chat', '2026-09-21 18:59:07.018418', None, '{}', None, None, None, None, None, None, None, 0.5, None, None)]]
+E   (Background on this error at: https://sqlalche.me/e/20/e3q8)
+_________________ ERROR at setup of test_consolidate_day_basic _________________
+/usr/local/lib/python3.11/site-packages/sqlalchemy/engine/base.py:1938: in _exec_single_context
+    self.dialect.do_executemany(
+/usr/local/lib/python3.11/site-packages/sqlalchemy/engine/default.py:919: in do_executemany
+    cursor.executemany(statement, parameters)
+E   sqlite3.OperationalError: no such table: episode
+
+The above exception was the direct cause of the following exception:
+/usr/local/lib/python3.11/site-packages/pytest_asyncio/plugin.py:558: in setup
+    return super().setup()
+           ^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/site-packages/pytest_asyncio/plugin.py:926: in pytest_fixture_setup
+    return (yield)
+            ^^^^^
+tests/conftest.py:403: in sample_memory_traces
+    db_session.commit()
+/usr/local/lib/python3.11/site-packages/sqlalchemy/orm/session.py:1969: in commit
+    trans.commit(_to_root=True)
+/usr/local/lib/python3.11/site-packages/sqlalchemy/orm/state_changes.py:139: in _go
+    ret_value = fn(self, *arg, **kw)
+                ^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/site-packages/sqlalchemy/orm/session.py:1256: in commit
+    self._prepare_impl()
+/usr/local/lib/python3.11/site-packages/sqlalchemy/orm/state_changes.py:139: in _go
+    ret_value = fn(self, *arg, **kw)
+                ^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/site-packages/sqlalchemy/orm/session.py:1231: in _prepare_impl
+    self.session.flush()
+/usr/local/lib/python3.11/site-packages/sqlalchemy/orm/session.py:4312: in flush
+    self._flush(objects)
+/usr/local/lib/python3.11/site-packages/sqlalchemy/orm/session.py:4447: in _flush
+    with util.safe_reraise():
+/usr/local/lib/python3.11/site-packages/sqlalchemy/util/langhelpers.py:146: in __exit__
+    raise exc_value.with_traceback(exc_tb)
+/usr/local/lib/python3.11/site-packages/sqlalchemy/orm/session.py:4408: in _flush
+    flush_context.execute()
+/usr/local/lib/python3.11/site-packages/sqlalchemy/orm/unitofwork.py:466: in execute
+    rec.execute(self)
+/usr/local/lib/python3.11/site-packages/sqlalchemy/orm/unitofwork.py:642: in execute
+    util.preloaded.orm_persistence.save_obj(
+/usr/local/lib/python3.11/site-packages/sqlalchemy/orm/persistence.py:93: in save_obj
+    _emit_insert_statements(
+/usr/local/lib/python3.11/site-packages/sqlalchemy/orm/persistence.py:1043: in _emit_insert_statements
+    result = connection.execute(
+/usr/local/lib/python3.11/site-packages/sqlalchemy/engine/base.py:1416: in execute
+    return meth(
+/usr/local/lib/python3.11/site-packages/sqlalchemy/sql/elements.py:516: in _execute_on_connection
+    return connection._execute_clauseelement(
+/usr/local/lib/python3.11/site-packages/sqlalchemy/engine/base.py:1639: in _execute_clauseelement
+    ret = self._execute_context(
+/usr/local/lib/python3.11/site-packages/sqlalchemy/engine/base.py:1848: in _execute_context
+    return self._exec_single_context(
+/usr/local/lib/python3.11/site-packages/sqlalchemy/engine/base.py:1988: in _exec_single_context
+    self._handle_dbapi_exception(
+/usr/local/lib/python3.11/site-packages/sqlalchemy/engine/base.py:2343: in _handle_dbapi_exception
+    raise sqlalchemy_exception.with_traceback(exc_info[2]) from e
+/usr/local/lib/python3.11/site-packages/sqlalchemy/engine/base.py:1938: in _exec_single_context
+    self.dialect.do_executemany(
+/usr/local/lib/python3.11/site-packages/sqlalchemy/engine/default.py:919: in do_executemany
+    cursor.executemany(statement, parameters)
+E   sqlalchemy.exc.OperationalError: (sqlite3.OperationalError) no such table: episode
+E   [SQL: INSERT INTO episode (id, conversation_id, user_id, role, content, importance, emotional_tone, topics, context_tags, access_count, last_accessed, memory_type, source, created_at, updated_at, meta, base_importance, importance_last_updated, user_rating, consolidated, embedding, rating_boost, exploration_bonus, recall_relevance_ema, client_message_id, reply_to_client_message_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)]
+E   [parameters: [('24ccbd32-a16e-44c9-9848-dc93e2f602bc', None, '0dc60f21-e31d-4597-9425-ccc1b01ed03a', 'user', 'Test memory trace 0: This is sample content about topic 0', 0.5, None, None, None, 0, None, 'conversation', 'chat', '2026-09-21 18:19:08.520390', None, '{}', None, None, None, None, None, None, None, 0.5, None, None), ('72d9aad4-317b-4473-a921-2827bc8928a8', None, '0dc60f21-e31d-4597-9425-ccc1b01ed03a', 'assistant', 'Test memory trace 1: This is sample content about topic 1', 0.6, None, None, None, 0, None, 'conversation', 'chat', '2026-09-21 18:29:08.520390', None, '{}', None, None, None, None, None, None, None, 0.5, None, None), ('7eec7169-1b7d-4ffe-b2e8-7386aaf0a468', None, '0dc60f21-e31d-4597-9425-ccc1b01ed03a', 'user', 'Test memory trace 2: This is sample content about topic 2', 0.7, None, None, None, 0, None, 'conversation', 'chat', '2026-09-21 18:39:08.520390', None, '{}', None, None, None, None, None, None, None, 0.5, None, None), ('1ebf8711-16b8-4abf-8930-c7a9fc0d694b', None, '0dc60f21-e31d-4597-9425-ccc1b01ed03a', 'assistant', 'Test memory trace 3: This is sample content about topic 0', 0.8, None, None, None, 0, None, 'conversation', 'chat', '2026-09-21 18:49:08.520390', None, '{}', None, None, None, None, None, None, None, 0.5, None, None), ('e3464dd2-31bb-40e3-8737-d5c86cb998ac', None, '0dc60f21-e31d-4597-9425-ccc1b01ed03a', 'user', 'Test memory trace 4: This is sample content about topic 1', 0.9, None, None, None, 0, None, 'conversation', 'chat', '2026-09-21 18:59:08.520390', None, '{}', None, None, None, None, None, None, None, 0.5, None, None)]]
+E   (Background on this error at: https://sqlalche.me/e/20/e3q8)
+_____________ ERROR at setup of test_consolidate_day_creates_edges _____________
+/usr/local/lib/python3.11/site-packages/sqlalchemy/engine/base.py:1938: in _exec_single_context
+    self.dialect.do_executemany(
+/usr/local/lib/python3.11/site-packages/sqlalchemy/engine/default.py:919: in do_executemany
+    cursor.executemany(statement, parameters)
+E   sqlite3.OperationalError: no such table: episode
+
+The above exception was the direct cause of the following exception:
+/usr/local/lib/python3.11/site-packages/pytest_asyncio/plugin.py:558: in setup
+    return super().setup()
+           ^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/site-packages/pytest_asyncio/plugin.py:926: in pytest_fixture_setup
+    return (yield)
+            ^^^^^
+tests/conftest.py:403: in sample_memory_traces
+    db_session.commit()
+/usr/local/lib/python3.11/site-packages/sqlalchemy/orm/session.py:1969: in commit
+    trans.commit(_to_root=True)
+/usr/local/lib/python3.11/site-packages/sqlalchemy/orm/state_changes.py:139: in _go
+    ret_value = fn(self, *arg, **kw)
+                ^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/site-packages/sqlalchemy/orm/session.py:1256: in commit
+    self._prepare_impl()
+/usr/local/lib/python3.11/site-packages/sqlalchemy/orm/state_changes.py:139: in _go
+    ret_value = fn(self, *arg, **kw)
+                ^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/site-packages/sqlalchemy/orm/session.py:1231: in _prepare_impl
+    self.session.flush()
+/usr/local/lib/python3.11/site-packages/sqlalchemy/orm/session.py:4312: in flush
+    self._flush(objects)
+/usr/local/lib/python3.11/site-packages/sqlalchemy/orm/session.py:4447: in _flush
+    with util.safe_reraise():
+/usr/local/lib/python3.11/site-packages/sqlalchemy/util/langhelpers.py:146: in __exit__
+    raise exc_value.with_traceback(exc_tb)
+/usr/local/lib/python3.11/site-packages/sqlalchemy/orm/session.py:4408: in _flush
+    flush_context.execute()
+/usr/local/lib/python3.11/site-packages/sqlalchemy/orm/unitofwork.py:466: in execute
+    rec.execute(self)
+/usr/local/lib/python3.11/site-packages/sqlalchemy/orm/unitofwork.py:642: in execute
+    util.preloaded.orm_persistence.save_obj(
+/usr/local/lib/python3.11/site-packages/sqlalchemy/orm/persistence.py:93: in save_obj
+    _emit_insert_statements(
+/usr/local/lib/python3.11/site-packages/sqlalchemy/orm/persistence.py:1043: in _emit_insert_statements
+    result = connection.execute(
+/usr/local/lib/python3.11/site-packages/sqlalchemy/engine/base.py:1416: in execute
+    return meth(
+/usr/local/lib/python3.11/site-packages/sqlalchemy/sql/elements.py:516: in _execute_on_connection
+    return connection._execute_clauseelement(
+/usr/local/lib/python3.11/site-packages/sqlalchemy/engine/base.py:1639: in _execute_clauseelement
+    ret = self._execute_context(
+/usr/local/lib/python3.11/site-packages/sqlalchemy/engine/base.py:1848: in _execute_context
+    return self._exec_single_context(
+/usr/local/lib/python3.11/site-packages/sqlalchemy/engine/base.py:1988: in _exec_single_context
+    self._handle_dbapi_exception(
+/usr/local/lib/python3.11/site-packages/sqlalchemy/engine/base.py:2343: in _handle_dbapi_exception
+    raise sqlalchemy_exception.with_traceback(exc_info[2]) from e
+/usr/local/lib/python3.11/site-packages/sqlalchemy/engine/base.py:1938: in _exec_single_context
+    self.dialect.do_executemany(
+/usr/local/lib/python3.11/site-packages/sqlalchemy/engine/default.py:919: in do_executemany
+    cursor.executemany(statement, parameters)
+E   sqlalchemy.exc.OperationalError: (sqlite3.OperationalError) no such table: episode
+E   [SQL: INSERT INTO episode (id, conversation_id, user_id, role, content, importance, emotional_tone, topics, context_tags, access_count, last_accessed, memory_type, source, created_at, updated_at, meta, base_importance, importance_last_updated, user_rating, consolidated, embedding, rating_boost, exploration_bonus, recall_relevance_ema, client_message_id, reply_to_client_message_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)]
+E   [parameters: [('09792c47-7a9b-4e86-b64d-03b0c8504207', None, 'ed153f71-cac2-4958-9d4b-bc443df4cc3c', 'user', 'Test memory trace 0: This is sample content about topic 0', 0.5, None, None, None, 0, None, 'conversation', 'chat', '2026-09-21 18:19:10.444465', None, '{}', None, None, None, None, None, None, None, 0.5, None, None), ('8651c39c-001c-476a-8d9c-4ef2501fa9db', None, 'ed153f71-cac2-4958-9d4b-bc443df4cc3c', 'assistant', 'Test memory trace 1: This is sample content about topic 1', 0.6, None, None, None, 0, None, 'conversation', 'chat', '2026-09-21 18:29:10.444465', None, '{}', None, None, None, None, None, None, None, 0.5, None, None), ('ed009934-6e7c-418a-8f40-6bf519929cb7', None, 'ed153f71-cac2-4958-9d4b-bc443df4cc3c', 'user', 'Test memory trace 2: This is sample content about topic 2', 0.7, None, None, None, 0, None, 'conversation', 'chat', '2026-09-21 18:39:10.444465', None, '{}', None, None, None, None, None, None, None, 0.5, None, None), ('b8fea9d7-6770-49cd-af3f-164eaa5dea08', None, 'ed153f71-cac2-4958-9d4b-bc443df4cc3c', 'assistant', 'Test memory trace 3: This is sample content about topic 0', 0.8, None, None, None, 0, None, 'conversation', 'chat', '2026-09-21 18:49:10.444465', None, '{}', None, None, None, None, None, None, None, 0.5, None, None), ('1c8eb2c4-69f5-49d4-b69e-b4027c5abd94', None, 'ed153f71-cac2-4958-9d4b-bc443df4cc3c', 'user', 'Test memory trace 4: This is sample content about topic 1', 0.9, None, None, None, 0, None, 'conversation', 'chat', '2026-09-21 18:59:10.444465', None, '{}', None, None, None, None, None, None, None, 0.5, None, None)]]
+E   (Background on this error at: https://sqlalche.me/e/20/e3q8)
+=================================== FAILURES ===================================
+__________________ test_run_task_consumes_clarification_once ___________________
+tests/test_audit_fixes.py:229: in test_run_task_consumes_clarification_once
+    assert len(scheduled) == 2  # completion notification on each run
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   assert 0 == 2
+E    +  where 0 = len([])
+----------------------------- Captured stdout call -----------------------------
+2026-09-22 18:18:31 - app.services.background_task_service - INFO - Starting background task task-1: Find updates...
+2026-09-22 18:18:31 - app.services.background_task_service - INFO - Background task task-1 completed successfully
+2026-09-22 18:18:31 - app.services.background_task_service - ERROR - Background task task-1 exception
+Traceback (most recent call last):
+  File "/app/app/services/background_task_service.py", line 291, in run_task
+    "result_note_title": note.title if note else None,
+                         ^^^^^^^^^^
+AttributeError: 'types.SimpleNamespace' object has no attribute 'title'
+2026-09-22 18:18:31 - app.services.background_task_service - INFO - Starting background task task-1: Find updates...
+2026-09-22 18:18:31 - app.services.background_task_service - INFO - Background task task-1 completed successfully
+2026-09-22 18:18:31 - app.services.background_task_service - ERROR - Background task task-1 exception
+Traceback (most recent call last):
+  File "/app/app/services/background_task_service.py", line 291, in run_task
+    "result_note_title": note.title if note else None,
+                         ^^^^^^^^^^
+AttributeError: 'types.SimpleNamespace' object has no attribute 'title'
+------------------------------ Captured log call -------------------------------
+INFO     app.services.background_task_service:background_task_service.py:184 Starting background task task-1: Find updates...
+INFO     app.services.background_task_service:background_task_service.py:281 Background task task-1 completed successfully
+ERROR    app.services.background_task_service:background_task_service.py:305 Background task task-1 exception
+Traceback (most recent call last):
+  File "/app/app/services/background_task_service.py", line 291, in run_task
+    "result_note_title": note.title if note else None,
+                         ^^^^^^^^^^
+AttributeError: 'types.SimpleNamespace' object has no attribute 'title'
+INFO     app.services.background_task_service:background_task_service.py:184 Starting background task task-1: Find updates...
+INFO     app.services.background_task_service:background_task_service.py:281 Background task task-1 completed successfully
+ERROR    app.services.background_task_service:background_task_service.py:305 Background task task-1 exception
+Traceback (most recent call last):
+  File "/app/app/services/background_task_service.py", line 291, in run_task
+    "result_note_title": note.title if note else None,
+                         ^^^^^^^^^^
+AttributeError: 'types.SimpleNamespace' object has no attribute 'title'
+_ TestSaraInvocationService.test_invoke_for_decision_returns_structured_decision _
+tests/test_autonomy.py:44: in test_invoke_for_decision_returns_structured_decision
+    decision = await sara_service.invoke_for_decision(
+E   TypeError: SaraInvocationService.invoke_for_decision() got an unexpected keyword argument 'include_karma'
+____ TestSaraInvocationService.test_invoke_for_decision_handles_llm_errors _____
+tests/test_autonomy.py:77: in test_invoke_for_decision_handles_llm_errors
+    decision = await sara_service.invoke_for_decision(
+E   TypeError: SaraInvocationService.invoke_for_decision() got an unexpected keyword argument 'include_karma'
+__ TestSaraInvocationService.test_invoke_for_decision_parses_json_in_markdown __
+tests/test_autonomy.py:102: in test_invoke_for_decision_parses_json_in_markdown
+    decision = await sara_service.invoke_for_decision(
+E   TypeError: SaraInvocationService.invoke_for_decision() got an unexpected keyword argument 'include_karma'
+_____ TestSaraInvocationService.test_invoke_for_generation_returns_content _____
+tests/test_autonomy.py:119: in test_invoke_for_generation_returns_content
+    result = await sara_service.invoke_for_generation(
+E   TypeError: SaraInvocationService.invoke_for_generation() got an unexpected keyword argument 'include_karma'
+______ TestWeeklyDigestWithSara.test_weekly_digest_includes_karma_summary ______
+tests/test_autonomy.py:242: in test_weekly_digest_includes_karma_summary
+    with patch.object(service, '_get_karma_context', new_callable=AsyncMock) as mock_karma:
+/usr/local/lib/python3.11/unittest/mock.py:1446: in __enter__
+    original, local = self.get_original()
+                      ^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/unittest/mock.py:1419: in get_original
+    raise AttributeError(
+E   AttributeError: <app.services.autonomy.sara_invocation.SaraInvocationService object at 0x749133edd850> does not have the attribute '_get_karma_context'
+_________ TestAutonomyIntegration.test_sara_decision_affects_behavior __________
+tests/test_autonomy.py:352: in test_sara_decision_affects_behavior
+    decision = await service.invoke_for_decision(
+E   TypeError: SaraInvocationService.invoke_for_decision() got an unexpected keyword argument 'include_karma'
+___________ TestLearningReviewCheckin.test_learning_reviews_checkin ____________
+tests/test_checkin_builder.py:115: in test_learning_reviews_checkin
+    assert result is not None
+E   assert None is not None
+____________ TestLearningReviewCheckin.test_many_reviews_piling_up _____________
+tests/test_checkin_builder.py:121: in test_many_reviews_piling_up
+    assert result is not None
+E   assert None is not None
+__________________ TestReturnFormat.test_returns_dict_format ___________________
+tests/test_checkin_builder.py:163: in test_returns_dict_format
+    assert result is not None
+E   assert None is not None
+___________ TestDailyBriefInjection.test_daily_brief_in_normal_mode ____________
+tests/test_context_router.py:66: in test_daily_brief_in_normal_mode
+    assert d.inject_daily_brief is True
+E   AssertionError: assert False is True
+E    +  where False = ContextDecision(inject_memory=True, inject_cognitive=False, inject_insight=False, inject_daily_brief=False, inject_sou...ef=True, inject_lessons=True, inject_fitness=False, reason='Injecting: soul, memory, activity, changes_brief, lessons').inject_daily_brief
+----------------------------- Captured stdout call -----------------------------
+2026-09-22 18:18:37 - app.services.context_router - INFO - [ContextRouter] Intent=GENERAL, turns=1, has_q=False, work_mode=False -> Injecting: soul, memory, activity, changes_brief, lessons
+------------------------------ Captured log call -------------------------------
+INFO     app.services.context_router:context_router.py:224 [ContextRouter] Intent=GENERAL, turns=1, has_q=False, work_mode=False -> Injecting: soul, memory, activity, changes_brief, lessons
+____________ TestBodyStateInjection.test_body_state_in_normal_mode _____________
+tests/test_context_router.py:80: in test_body_state_in_normal_mode
+    assert d.inject_body_state is True
+           ^^^^^^^^^^^^^^^^^^^
+E   AttributeError: 'ContextDecision' object has no attribute 'inject_body_state'
+----------------------------- Captured stdout call -----------------------------
+2026-09-22 18:18:37 - app.services.context_router - INFO - [ContextRouter] Intent=GENERAL, turns=1, has_q=False, work_mode=False -> Injecting: soul, memory, activity, changes_brief, lessons
+------------------------------ Captured log call -------------------------------
+INFO     app.services.context_router:context_router.py:224 [ContextRouter] Intent=GENERAL, turns=1, has_q=False, work_mode=False -> Injecting: soul, memory, activity, changes_brief, lessons
+________ TestBodyStateInjection.test_body_state_suppressed_in_work_mode ________
+tests/test_context_router.py:84: in test_body_state_suppressed_in_work_mode
+    assert d.inject_body_state is False
+           ^^^^^^^^^^^^^^^^^^^
+E   AttributeError: 'ContextDecision' object has no attribute 'inject_body_state'
+----------------------------- Captured stdout call -----------------------------
+2026-09-22 18:18:37 - app.services.context_router - INFO - [ContextRouter] Intent=GENERAL, turns=1, has_q=False, work_mode=True -> [WORK MODE] Injecting: soul, memory, activity, changes_brief
+------------------------------ Captured log call -------------------------------
+INFO     app.services.context_router:context_router.py:224 [ContextRouter] Intent=GENERAL, turns=1, has_q=False, work_mode=True -> [WORK MODE] Injecting: soul, memory, activity, changes_brief
+_______ TestBodyStateInjection.test_body_state_in_work_mode_with_keyword _______
+tests/test_context_router.py:88: in test_body_state_in_work_mode_with_keyword
+    assert d.inject_body_state is True
+           ^^^^^^^^^^^^^^^^^^^
+E   AttributeError: 'ContextDecision' object has no attribute 'inject_body_state'
+----------------------------- Captured stdout call -----------------------------
+2026-09-22 18:18:37 - app.services.context_router - INFO - [ContextRouter] Intent=GENERAL, turns=3, has_q=False, work_mode=True -> [WORK MODE] Injecting: soul, memory, daily_brief, pkg, activity
+------------------------------ Captured log call -------------------------------
+INFO     app.services.context_router:context_router.py:224 [ContextRouter] Intent=GENERAL, turns=3, has_q=False, work_mode=True -> [WORK MODE] Injecting: soul, memory, daily_brief, pkg, activity
+_____________________ TestPKGInjection.test_pkg_first_turn _____________________
+tests/test_context_router.py:104: in test_pkg_first_turn
+    assert d.inject_pkg is True
+E   AssertionError: assert False is True
+E    +  where False = ContextDecision(inject_memory=True, inject_cognitive=True, inject_insight=False, inject_daily_brief=False, inject_soul...ject_lessons=True, inject_fitness=False, reason='Injecting: soul, memory, cognitive, activity, changes_brief, lessons').inject_pkg
+----------------------------- Captured stdout call -----------------------------
+2026-09-22 18:18:37 - app.services.context_router - INFO - [ContextRouter] Intent=CONVERSATIONAL, turns=0, has_q=False, work_mode=False -> Injecting: soul, memory, cognitive, activity, changes_brief, lessons
+------------------------------ Captured log call -------------------------------
+INFO     app.services.context_router:context_router.py:224 [ContextRouter] Intent=CONVERSATIONAL, turns=0, has_q=False, work_mode=False -> Injecting: soul, memory, cognitive, activity, changes_brief, lessons
+___________ TestWorkModeSuppression.test_work_mode_suppresses_extras ___________
+tests/test_context_router.py:208: in test_work_mode_suppresses_extras
+    assert d.inject_body_state is False
+           ^^^^^^^^^^^^^^^^^^^
+E   AttributeError: 'ContextDecision' object has no attribute 'inject_body_state'
+----------------------------- Captured stdout call -----------------------------
+2026-09-22 18:18:37 - app.services.context_router - INFO - [ContextRouter] Intent=GENERAL, turns=5, has_q=False, work_mode=True -> [WORK MODE] Injecting: soul, memory, activity
+------------------------------ Captured log call -------------------------------
+INFO     app.services.context_router:context_router.py:224 [ContextRouter] Intent=GENERAL, turns=5, has_q=False, work_mode=True -> [WORK MODE] Injecting: soul, memory, activity
+_________ TestInterpreterGivesUp.test_early_failures_retry_and_reraise _________
+tests/test_interoception_hygiene.py:227: in test_early_failures_retry_and_reraise
+    run_interpretation(db, "evt-1")
+app/services/world_state/interpreter.py:281: in run_interpretation
+    return asyncio.run(interpret(db, event_id))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/asyncio/runners.py:190: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/asyncio/base_events.py:654: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+app/services/world_state/interpreter.py:160: in interpret
+    sequence=event.sequence,
+             ^^^^^^^^^^^^^^
+E   AttributeError: 'types.SimpleNamespace' object has no attribute 'sequence'
+___ TestInterpreterGivesUp.test_final_failure_marks_failed_and_stops_raising ___
+tests/test_interoception_hygiene.py:242: in test_final_failure_marks_failed_and_stops_raising
+    result = run_interpretation(db, "evt-1")
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+app/services/world_state/interpreter.py:281: in run_interpretation
+    return asyncio.run(interpret(db, event_id))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/asyncio/runners.py:190: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/asyncio/base_events.py:654: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+app/services/world_state/interpreter.py:160: in interpret
+    sequence=event.sequence,
+             ^^^^^^^^^^^^^^
+E   AttributeError: 'types.SimpleNamespace' object has no attribute 'sequence'
+___________________ TestKarmaDecay.test_decay_toward_neutral ___________________
+tests/test_karma.py:211: in test_decay_toward_neutral
+    from app.services.karma.service import KarmaService
+E   ModuleNotFoundError: No module named 'app.services.karma.service'
+________________ TestKarmaTrend.test_trend_calculation_positive ________________
+tests/test_karma.py:255: in test_trend_calculation_positive
+    from app.services.karma.service import KarmaService, KarmaEvent
+E   ModuleNotFoundError: No module named 'app.services.karma.service'
+_________________ TestKarmaDashboard.test_get_karma_dashboard __________________
+tests/test_karma.py:294: in test_get_karma_dashboard
+    from app.services.karma.service import KarmaService
+E   ModuleNotFoundError: No module named 'app.services.karma.service'
+__________ TestKarmaIntegration.test_karma_context_format_for_prompt ___________
+tests/test_karma.py:331: in test_karma_context_format_for_prompt
+    from app.services.karma.service import KarmaService
+E   ModuleNotFoundError: No module named 'app.services.karma.service'
+____________________________ test_store_trace_basic ____________________________
+tests/test_memory_service.py:23: in test_store_trace_basic
+    trace_id = await memory_service.store_trace(
+app/services/memory_service.py:112: in store_trace
+    from app.main_simple import (
+E   ImportError: cannot import name 'MemoryTrace' from 'app.main_simple' (/app/app/main_simple.py)
+________________________ test_store_trace_with_metadata ________________________
+tests/test_memory_service.py:47: in test_store_trace_with_metadata
+    trace_id = await memory_service.store_trace(
+app/services/memory_service.py:112: in store_trace
+    from app.main_simple import (
+E   ImportError: cannot import name 'MemoryTrace' from 'app.main_simple' (/app/app/main_simple.py)
+_________________________ test_store_trace_redis_cache _________________________
+tests/test_memory_service.py:67: in test_store_trace_redis_cache
+    trace_id = await memory_service.store_trace(
+app/services/memory_service.py:112: in store_trace
+    from app.main_simple import (
+E   ImportError: cannot import name 'MemoryTrace' from 'app.main_simple' (/app/app/main_simple.py)
+________________________ test_store_trace_auto_salience ________________________
+tests/test_memory_service.py:86: in test_store_trace_auto_salience
+    from app.main_simple import MemoryTrace
+E   ImportError: cannot import name 'MemoryTrace' from 'app.main_simple' (/app/app/main_simple.py)
+____________________________ test_recall_from_redis ____________________________
+tests/test_memory_service.py:117: in test_recall_from_redis
+    trace_id = await memory_service.store_trace(
+app/services/memory_service.py:112: in store_trace
+    from app.main_simple import (
+E   ImportError: cannot import name 'MemoryTrace' from 'app.main_simple' (/app/app/main_simple.py)
+_________________________ test_recall_with_time_window _________________________
+tests/test_memory_service.py:156: in test_recall_with_time_window
+    from app.main_simple import MemoryTrace
+E   ImportError: cannot import name 'MemoryTrace' from 'app.main_simple' (/app/app/main_simple.py)
+________________________ test_consolidate_day_no_traces ________________________
+tests/test_memory_service.py:228: in test_consolidate_day_no_traces
+    result = await memory_service.consolidate_day(
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: 'MemoryService' object has no attribute 'consolidate_day'
+______________________________ test_forget_basic _______________________________
+tests/test_memory_service.py:265: in test_forget_basic
+    from app.main_simple import MemoryTrace
+E   ImportError: cannot import name 'MemoryTrace' from 'app.main_simple' (/app/app/main_simple.py)
+________________________ test_forget_removes_from_redis ________________________
+tests/test_memory_service.py:295: in test_forget_removes_from_redis
+    trace_id = await memory_service.store_trace(
+app/services/memory_service.py:112: in store_trace
+    from app.main_simple import (
+E   ImportError: cannot import name 'MemoryTrace' from 'app.main_simple' (/app/app/main_simple.py)
+___________________________ test_forget_unauthorized ___________________________
+tests/test_memory_service.py:320: in test_forget_unauthorized
+    from app.main_simple import MemoryTrace
+E   ImportError: cannot import name 'MemoryTrace' from 'app.main_simple' (/app/app/main_simple.py)
+______________________ test_forget_cascades_to_embeddings ______________________
+tests/test_memory_service.py:343: in test_forget_cascades_to_embeddings
+    from app.main_simple import MemoryTrace, MemoryEmbedding
+E   ImportError: cannot import name 'MemoryTrace' from 'app.main_simple' (/app/app/main_simple.py)
+__________________________ test_recall_empty_results ___________________________
+tests/test_memory_service.py:376: in test_recall_empty_results
+    results = await memory_service.recall(
+app/services/memory_service.py:223: in recall
+    from app.main_simple import (
+E   ImportError: cannot import name 'MemoryTrace' from 'app.main_simple' (/app/app/main_simple.py)
+__________________ test_store_trace_without_embedding_service __________________
+tests/test_memory_service.py:389: in test_store_trace_without_embedding_service
+    from app.main_simple import MemoryTrace
+E   ImportError: cannot import name 'MemoryTrace' from 'app.main_simple' (/app/app/main_simple.py)
+_________________________ test_redis_max_recent_limit __________________________
+tests/test_memory_service.py:416: in test_redis_max_recent_limit
+    await memory_service.store_trace(
+app/services/memory_service.py:112: in store_trace
+    from app.main_simple import (
+E   ImportError: cannot import name 'MemoryTrace' from 'app.main_simple' (/app/app/main_simple.py)
+_______ TestWriteFreezeFlagsExist.test_all_seven_sender_flags_registered _______
+tests/test_mouth_only_write_freeze.py:24: in test_all_seven_sender_flags_registered
+    assert name in ALL_FLAGS, f"{name} not registered"
+E   AssertionError: MOUTH_ONLY_CALENDAR_PREP not registered
+E   assert 'MOUTH_ONLY_CALENDAR_PREP' in ['SINGULAR_EVENT_ENVELOPE', 'SINGULAR_CONTEXT', 'SINGULAR_INTENTS', 'SINGULAR_KERNEL', 'SINGULAR_VM_BODY', 'SINGULAR_ATTENTION', ...]
+_______________ TestWriteFreezeFlagsExist.test_flags_default_off _______________
+tests/test_mouth_only_write_freeze.py:31: in test_flags_default_off
+    assert is_enabled(Flag.MOUTH_ONLY_CALENDAR_PREP) is False
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/enum.py:786: in __getattr__
+    raise AttributeError(name) from None
+E   AttributeError: MOUTH_ONLY_CALENDAR_PREP
+_____________ TestBodyStateModulation.test_high_stress_modulation ______________
+tests/test_personality_engine.py:45: in test_high_stress_modulation
+    ctx = build_personality_context(activity_state="active", stress_load=0.8)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: build_personality_context() got an unexpected keyword argument 'stress_load'
+____________ TestBodyStateModulation.test_low_alertness_modulation _____________
+tests/test_personality_engine.py:49: in test_low_alertness_modulation
+    ctx = build_personality_context(activity_state="active", alertness=0.2)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: build_personality_context() got an unexpected keyword argument 'alertness'
+____________ TestBodyStateModulation.test_high_alertness_modulation ____________
+tests/test_personality_engine.py:53: in test_high_alertness_modulation
+    ctx = build_personality_context(activity_state="active", alertness=0.9)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: build_personality_context() got an unexpected keyword argument 'alertness'
+___________ TestBodyStateModulation.test_low_blood_sugar_modulation ____________
+tests/test_personality_engine.py:57: in test_low_blood_sugar_modulation
+    ctx = build_personality_context(activity_state="active", blood_sugar=0.1)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: build_personality_context() got an unexpected keyword argument 'blood_sugar'
+__________________ TestBodyStateModulation.test_afternoon_dip __________________
+tests/test_personality_engine.py:61: in test_afternoon_dip
+    ctx = build_personality_context(activity_state="active", circadian_phase="afternoon_dip")
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: build_personality_context() got an unexpected keyword argument 'circadian_phase'
+___________ TestDefaultState.test_no_body_state_references_in_output ___________
+tests/test_personality_engine.py:146: in test_no_body_state_references_in_output
+    ctx = build_personality_context(
+E   TypeError: build_personality_context() got an unexpected keyword argument 'stress_load'
+______________ TestEmotionalModulation.test_high_energy_detected _______________
+tests/test_personality_engine.py:158: in test_high_energy_detected
+    result = _build_emotional_modulation("active", 0.2, 0.9, 0.7, "normal", None)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: _build_emotional_modulation() takes 2 positional arguments but 6 were given
+_______________ TestEmotionalModulation.test_low_energy_detected _______________
+tests/test_personality_engine.py:162: in test_low_energy_detected
+    result = _build_emotional_modulation("active", 0.3, 0.2, 0.2, "normal", None)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: _build_emotional_modulation() takes 2 positional arguments but 6 were given
+____________ TestEmotionalModulation.test_elevated_stress_detected _____________
+tests/test_personality_engine.py:166: in test_elevated_stress_detected
+    result = _build_emotional_modulation("active", 0.8, 0.5, 0.5, "normal", None)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: _build_emotional_modulation() takes 2 positional arguments but 6 were given
+________________ TestEmotionalModulation.test_relaxed_detected _________________
+tests/test_personality_engine.py:170: in test_relaxed_detected
+    result = _build_emotional_modulation("active", 0.1, 0.5, 0.5, "normal", None)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: _build_emotional_modulation() takes 2 positional arguments but 6 were given
+______________ TestEmotionalModulation.test_default_normal_state _______________
+tests/test_personality_engine.py:174: in test_default_normal_state
+    result = _build_emotional_modulation("active", 0.3, 0.5, 0.5, "normal", None)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: _build_emotional_modulation() takes 2 positional arguments but 6 were given
+___________ TestRecordFirstTokenLatency.test_over_budget_sets_breach ___________
+tests/test_presence_latency.py:43: in test_over_budget_sets_breach
+    mock_r.set.assert_awaited_once()
+/usr/local/lib/python3.11/unittest/mock.py:2283: in assert_awaited_once
+    raise AssertionError(msg)
+E   AssertionError: Expected set to have been awaited once. Awaited 0 times.
+----------------------------- Captured stdout call -----------------------------
+2026-09-22 18:19:13 - app.services.presence_latency - INFO - ⏱️ [three-speed] presence first-token: 3.50s
+------------------------------ Captured log call -------------------------------
+INFO     app.services.presence_latency:presence_latency.py:69 ⏱️ [three-speed] presence first-token: 3.50s
+_________________ TestProposalGeneration.test_submit_proposal __________________
+tests/test_reflection.py:174: in test_submit_proposal
+    with patch('app.services.reflection.proposal_generator.get_karma_service',
+/usr/local/lib/python3.11/unittest/mock.py:1446: in __enter__
+    original, local = self.get_original()
+                      ^^^^^^^^^^^^^^^^^^^
+/usr/local/lib/python3.11/unittest/mock.py:1419: in get_original
+    raise AttributeError(
+E   AttributeError: <module 'app.services.reflection.proposal_generator' from '/app/app/services/reflection/proposal_generator.py'> does not have the attribute 'get_karma_service'
+__________ TestAgainstTheRealSystem.test_the_check_is_quiet_right_now __________
+tests/test_system_wiring_check.py:425: in test_the_check_is_quiet_right_now
+    assert result["unscheduled"] == []
+E   AssertionError: assert ['app.tasks.a...tainers', ...] == []
+E     
+E     Left contains 98 more items, first extra item: 'app.tasks.appraisal.run_appraisal_cycle'
+E     Use -v to get more diff
+____________ TestCooldownDefaults.test_category_specific_cooldowns _____________
+tests/test_unified_notification.py:187: in test_category_specific_cooldowns
+    assert DEFAULT_COOLDOWNS["security"] == 0.0
+E   assert 0.25 == 0.0
+=========================== short test summary info ============================
+FAILED tests/test_audit_fixes.py::test_run_task_consumes_clarification_once
+FAILED tests/test_autonomy.py::TestSaraInvocationService::test_invoke_for_decision_returns_structured_decision
+FAILED tests/test_autonomy.py::TestSaraInvocationService::test_invoke_for_decision_handles_llm_errors
+FAILED tests/test_autonomy.py::TestSaraInvocationService::test_invoke_for_decision_parses_json_in_markdown
+FAILED tests/test_autonomy.py::TestSaraInvocationService::test_invoke_for_generation_returns_content
+FAILED tests/test_autonomy.py::TestWeeklyDigestWithSara::test_weekly_digest_includes_karma_summary
+FAILED tests/test_autonomy.py::TestAutonomyIntegration::test_sara_decision_affects_behavior
+FAILED tests/test_checkin_builder.py::TestLearningReviewCheckin::test_learning_reviews_checkin
+FAILED tests/test_checkin_builder.py::TestLearningReviewCheckin::test_many_reviews_piling_up
+FAILED tests/test_checkin_builder.py::TestReturnFormat::test_returns_dict_format
+FAILED tests/test_context_router.py::TestDailyBriefInjection::test_daily_brief_in_normal_mode
+FAILED tests/test_context_router.py::TestBodyStateInjection::test_body_state_in_normal_mode
+FAILED tests/test_context_router.py::TestBodyStateInjection::test_body_state_suppressed_in_work_mode
+FAILED tests/test_context_router.py::TestBodyStateInjection::test_body_state_in_work_mode_with_keyword
+FAILED tests/test_context_router.py::TestPKGInjection::test_pkg_first_turn - ...
+FAILED tests/test_context_router.py::TestWorkModeSuppression::test_work_mode_suppresses_extras
+FAILED tests/test_interoception_hygiene.py::TestInterpreterGivesUp::test_early_failures_retry_and_reraise
+FAILED tests/test_interoception_hygiene.py::TestInterpreterGivesUp::test_final_failure_marks_failed_and_stops_raising
+FAILED tests/test_karma.py::TestKarmaDecay::test_decay_toward_neutral - Modul...
+FAILED tests/test_karma.py::TestKarmaTrend::test_trend_calculation_positive
+FAILED tests/test_karma.py::TestKarmaDashboard::test_get_karma_dashboard - Mo...
+FAILED tests/test_karma.py::TestKarmaIntegration::test_karma_context_format_for_prompt
+FAILED tests/test_memory_service.py::test_store_trace_basic - ImportError: ca...
+FAILED tests/test_memory_service.py::test_store_trace_with_metadata - ImportE...
+FAILED tests/test_memory_service.py::test_store_trace_redis_cache - ImportErr...
+FAILED tests/test_memory_service.py::test_store_trace_auto_salience - ImportE...
+FAILED tests/test_memory_service.py::test_recall_from_redis - ImportError: ca...
+FAILED tests/test_memory_service.py::test_recall_with_time_window - ImportErr...
+FAILED tests/test_memory_service.py::test_consolidate_day_no_traces - Attribu...
+FAILED tests/test_memory_service.py::test_forget_basic - ImportError: cannot ...
+FAILED tests/test_memory_service.py::test_forget_removes_from_redis - ImportE...
+FAILED tests/test_memory_service.py::test_forget_unauthorized - ImportError: ...
+FAILED tests/test_memory_service.py::test_forget_cascades_to_embeddings - Imp...
+FAILED tests/test_memory_service.py::test_recall_empty_results - ImportError:...
+FAILED tests/test_memory_service.py::test_store_trace_without_embedding_service
+FAILED tests/test_memory_service.py::test_redis_max_recent_limit - ImportErro...
+FAILED tests/test_mouth_only_write_freeze.py::TestWriteFreezeFlagsExist::test_all_seven_sender_flags_registered
+FAILED tests/test_mouth_only_write_freeze.py::TestWriteFreezeFlagsExist::test_flags_default_off
+FAILED tests/test_personality_engine.py::TestBodyStateModulation::test_high_stress_modulation
+FAILED tests/test_personality_engine.py::TestBodyStateModulation::test_low_alertness_modulation
+FAILED tests/test_personality_engine.py::TestBodyStateModulation::test_high_alertness_modulation
+FAILED tests/test_personality_engine.py::TestBodyStateModulation::test_low_blood_sugar_modulation
+FAILED tests/test_personality_engine.py::TestBodyStateModulation::test_afternoon_dip
+FAILED tests/test_personality_engine.py::TestDefaultState::test_no_body_state_references_in_output
+FAILED tests/test_personality_engine.py::TestEmotionalModulation::test_high_energy_detected
+FAILED tests/test_personality_engine.py::TestEmotionalModulation::test_low_energy_detected
+FAILED tests/test_personality_engine.py::TestEmotionalModulation::test_elevated_stress_detected
+FAILED tests/test_personality_engine.py::TestEmotionalModulation::test_relaxed_detected
+FAILED tests/test_personality_engine.py::TestEmotionalModulation::test_default_normal_state
+FAILED tests/test_presence_latency.py::TestRecordFirstTokenLatency::test_over_budget_sets_breach
+FAILED tests/test_reflection.py::TestProposalGeneration::test_submit_proposal
+FAILED tests/test_system_wiring_check.py::TestAgainstTheRealSystem::test_the_check_is_quiet_right_now
+FAILED tests/test_unified_notification.py::TestCooldownDefaults::test_category_specific_cooldowns
+ERROR tests/test_dream_consolidation.py::test_dream_pipeline_basic
+ERROR tests/test_dream_consolidation.py::test_dream_pipeline_insufficient_traces
+ERROR tests/test_dream_consolidation.py::test_dream_pipeline_disabled
+ERROR tests/test_dream_consolidation.py::test_cluster_traces_basic
+ERROR tests/test_dream_consolidation.py::test_cluster_traces_high_salience_singleton
+ERROR tests/test_dream_consolidation.py::test_cluster_traces_insufficient_size
+ERROR tests/test_dream_consolidation.py::test_generate_summaries_with_llm
+ERROR tests/test_dream_consolidation.py::test_generate_summaries_llm_fallback
+ERROR tests/test_dream_consolidation.py::test_fallback_summary
+ERROR tests/test_dream_consolidation.py::test_extract_edges_temporal
+ERROR tests/test_dream_consolidation.py::test_extract_edges_semantic
+ERROR tests/test_dream_consolidation.py::test_generate_insights_daily_summary
+ERROR tests/test_dream_consolidation.py::test_generate_insights_pattern_detection
+ERROR tests/test_dream_consolidation.py::test_generate_insights_forgotten_gem
+ERROR tests/test_dream_consolidation.py::test_store_summaries
+ERROR tests/test_dream_consolidation.py::test_dream_pipeline_handles_errors
+ERROR tests/test_karma.py::TestKarmaService::test_record_event_updates_score
+ERROR tests/test_karma.py::TestKarmaService::test_score_bounds_enforced_max
+ERROR tests/test_karma.py::TestKarmaService::test_score_bounds_enforced_min
+ERROR tests/test_karma.py::TestKarmaService::test_get_agent_karma - ModuleNot...
+ERROR tests/test_karma.py::TestKarmaService::test_format_karma_context - Modu...
+ERROR tests/test_karma.py::TestKarmaService::test_score_to_threshold - Module...
+ERROR tests/test_memory_service.py::test_recall_from_database - sqlalchemy.ex...
+ERROR tests/test_memory_service.py::test_consolidate_day_basic - sqlalchemy.e...
+ERROR tests/test_memory_service.py::test_consolidate_day_creates_edges - sqla...
+= 53 failed, 2205 passed, 59 skipped, 81 warnings, 25 errors in 109.47s (0:01:49) =

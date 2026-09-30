@@ -10,6 +10,19 @@ from alembic import context
 # Add the parent directory to sys.path so we can import app modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# NOTE (2026-09-22 incident follow-up): unlike pytest (which routes through
+# tests/conftest.py's assert_disposable_test_environment() guard before any
+# app import), `alembic <command>` is a legitimate, deliberate way to run
+# migrations against the REAL production database — that guard must NOT be
+# applied here, or real migrations would become impossible. What IS fixed
+# here is narrower: `from app.main_simple import Base` below transitively
+# imports app.db.base, which creates its own SQLAlchemy engine from
+# DATABASE_URL at import time — so a genuinely unset DATABASE_URL still
+# fails here (via that import), just before reaching this file's own
+# _require_database_url() check further down. Both paths refuse to
+# silently default anywhere; neither can accidentally target production
+# by omission now that alembic.ini's hardcoded fallback is gone.
+
 # Import the Base and all models
 from app.main_simple import Base
 
@@ -32,6 +45,26 @@ target_metadata = Base.metadata
 # ... etc.
 
 
+class DatabaseURLNotConfigured(RuntimeError):
+    """Raised when neither DATABASE_URL nor alembic.ini's sqlalchemy.url is
+    set. 2026-09-22 incident follow-up: alembic.ini used to hardcode the
+    production credential as a fallback here, so a missing DATABASE_URL
+    silently ran migrations against production instead of failing. Now
+    DATABASE_URL must be set explicitly (alembic.ini's own sqlalchemy.url
+    is left blank) — an absent target is an error, not a silent default."""
+
+
+def _require_database_url() -> str:
+    url = os.getenv("DATABASE_URL") or config.get_main_option("sqlalchemy.url")
+    if not url:
+        raise DatabaseURLNotConfigured(
+            "DATABASE_URL is not set and alembic.ini's sqlalchemy.url is "
+            "blank. Set DATABASE_URL explicitly before running migrations — "
+            "there is no default target."
+        )
+    return url
+
+
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode.
 
@@ -44,7 +77,7 @@ def run_migrations_offline() -> None:
     script output.
 
     """
-    url = config.get_main_option("sqlalchemy.url")
+    url = _require_database_url()
     context.configure(
         url=url,
         target_metadata=target_metadata,
@@ -63,10 +96,8 @@ def run_migrations_online() -> None:
     and associate a connection with the context.
 
     """
-    # Use DATABASE_URL from environment if available
     configuration = config.get_section(config.config_ini_section, {})
-    if os.getenv("DATABASE_URL"):
-        configuration["sqlalchemy.url"] = os.getenv("DATABASE_URL")
+    configuration["sqlalchemy.url"] = _require_database_url()
 
     connectable = engine_from_config(
         configuration,

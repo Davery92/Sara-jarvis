@@ -1,0 +1,110 @@
+ M .env.example
+ M backend/app/celery_app.py
+ M backend/app/core/text_utils.py
+ M backend/app/main_simple.py
+ M backend/app/models/conversation.py
+ M backend/app/prompts/chat_system_prompt.py
+ M backend/app/routes/health_metrics.py
+ M backend/app/routes/reminders.py
+ D backend/app/services/action_suggester.py
+ M backend/app/services/agent_dispatch.py
+ M backend/app/services/calendar_prep.py
+ M backend/app/services/context_budget.py
+ M backend/app/services/context_snapshot.py
+ M backend/app/services/daily_brief/compiler.py
+ M backend/app/services/daily_brief/day_layer.py
+ M backend/app/services/goal_manager.py
+ M backend/app/services/internal_tool_agent.py
+ M backend/app/services/lesson_tracker.py
+ M backend/app/services/meeting_research.py
+ M backend/app/services/world_brief.py
+ M backend/app/services/world_state/interpreter.py
+ M backend/app/services/world_state/reducer.py
+ M backend/app/tasks/calendar_prep.py
+ M backend/app/tools/meeting.py
+ M backend/app/tools/mutating.py
+ M backend/app/tools/registry.py
+ M backend/app/tools/reminders.py
+ M backend/tests/replay/harness.py
+ M backend/tests/replay/provision.py
+ M backend/tests/replay/test_harness_smoke.py
+ D backend/tests/test_action_suggester.py
+ M backend/tests/test_chat_system_prompt.py
+ M backend/tests/test_chat_tool_loop.py
+ M backend/tests/test_daily_brief_compiler.py
+ M backend/tests/test_deadline_preserves_writes.py
+ M backend/tests/test_render_engaged_context.py
+ M docs/sara_self_model_autonomous.md
+ M docs/sara_self_model_capabilities.md
+ M frontend/src/pages/Memory.tsx
+ D ios-app/src/components/chat/SuggestedActions.tsx
+ M ios-app/src/hooks/useSaraChat.ts
+ M ios-app/src/navigation/AppNavigator.tsx
+ M ios-app/src/screens/chat/ChatScreen.tsx
+ M ios-app/src/screens/more/MoreScreen.tsx
+ M ios-app/src/services/api.ts
+ M ios-app/src/services/assistantAnalytics.ts
+ M ios-app/src/services/chat.ts
+?? backend/app/routes/debug_runtime.py
+?? backend/app/routes/world_context.py
+?? backend/app/services/chat_assembly.py
+?? backend/app/services/chat_reasoning.py
+?? backend/app/services/dialogue_state.py
+?? backend/app/services/episode_enrichment.py
+?? backend/app/services/interval_calc.py
+?? backend/app/services/mtp_control.py
+?? backend/app/services/tool_mutation.py
+?? backend/app/services/world_state/chat_facts.py
+?? backend/app/tasks/episode_enrichment.py
+?? backend/app/tools/calendar_availability.py
+?? backend/migrations/add_conversation_enrichment_watermark.py
+?? backend/tests/replay/capture_2026_09_16.py
+?? backend/tests/replay/fixtures/2026_09_16/
+?? backend/tests/test_calendar_availability_tool.py
+?? backend/tests/test_chat_assembly.py
+?? backend/tests/test_chat_thinking.py
+?? backend/tests/test_context_budget_final_boundary.py
+?? backend/tests/test_daily_layer_freshness.py
+?? backend/tests/test_debug_runtime.py
+?? backend/tests/test_dialogue_state.py
+?? backend/tests/test_dialogue_state_2026_09_16_fixture.py
+?? backend/tests/test_dst_midnight_correctness.py
+?? backend/tests/test_email_world_state_integration_pg.py
+?? backend/tests/test_ephemeral_extraction_guards.py
+?? backend/tests/test_ephemeral_no_world_state_writes.py
+?? backend/tests/test_episode_enrichment.py
+?? backend/tests/test_execution_boundary_authorization.py
+?? backend/tests/test_food_world_state_integration_pg.py
+?? backend/tests/test_health_world_state_integration_pg.py
+?? backend/tests/test_internal_tool_agent_reliability.py
+?? backend/tests/test_interpretation_vs_correction_pg.py
+?? backend/tests/test_interval_calc.py
+?? backend/tests/test_lesson_tracker_pg.py
+?? backend/tests/test_live_context_envelope.py
+?? backend/tests/test_location_world_state_integration_pg.py
+?? backend/tests/test_long_conversation_history_recovery_pg.py
+?? backend/tests/test_mtp_control.py
+?? backend/tests/test_mtp_parity_live.py
+?? backend/tests/test_reminders_goals_world_state_integration_pg.py
+?? backend/tests/test_source_outage_reconciliation_pg.py
+?? backend/tests/test_text_utils_reasoning_log.py
+?? backend/tests/test_tool_mutation.py
+?? backend/tests/test_two_user_isolation_pg.py
+?? backend/tests/test_worker_broker_recovery_pg.py
+?? backend/tests/test_workout_world_state_integration_pg.py
+?? backend/tests/test_world_context_page_integration_pg.py
+?? docs/plans/SARA_CHAT_HARNESS_MTP_REPAIR_PLAN_2026_09_16.md
+?? docs/plans/SARA_HARNESS_IMPLEMENTATION_STATUS.md
+?? docs/plans/SARA_HARNESS_PHASE3_FORCED_FINAL_HARD_RESULT.json
+?? docs/plans/SARA_HARNESS_PHASE3_FORCED_FINAL_PROBE_RESULTS.json
+?? docs/plans/SARA_HARNESS_PHASE5_TRUST_BOUNDARY_RESULTS.json
+?? docs/plans/SARA_HARNESS_ROLLOUT_RUNBOOK.md
+?? docs/plans/SARA_HARNESS_VALIDATION_REPORT.md
+?? docs/plans/SARA_LIVING_WORLD_CONTEXT_AND_CHAT_REPAIR_PLAN_2026_09_17.md
+?? docs/plans/SARA_LIVING_WORLD_CONTEXT_AND_CHAT_REPAIR_STATUS_2026_09_19.md
+?? docs/plans/SARA_QWEN_COMPREHENSIVE_EVALUATION_AGENT_INSTRUCTIONS.md
+?? docs/plans/SYSTEM_WIRING_CHECK_QUIET_PLAN_2026_09_13.md
+?? docs/plans/TWO_A_DAY_AM_SETS_AND_FOOD_REPEAT_PLAN_2026_09_18.md
+?? docs/plans/incidents/
+?? frontend/src/pages/WorldContext.tsx
+?? ios-app/src/screens/worldcontext/

@@ -18,12 +18,14 @@ from __future__ import annotations
 import argparse
 import gzip
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[3]
-FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "2026_09_09"
+FIXTURE_NAME = os.environ.get("SARA_REPLAY_FIXTURE", "2026_09_09")
+FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / FIXTURE_NAME
 
 DB_SERVICE = "db"
 DB_USER = "sara"

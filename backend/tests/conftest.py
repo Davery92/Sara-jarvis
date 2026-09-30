@@ -12,6 +12,15 @@ Provides test fixtures for:
 - Intent classifier / context router
 """
 
+# Fail-closed production guard — MUST run before any `app.*` import (2026-
+# 09-22 incident: `from app.main_simple import Base`, three lines below,
+# was already enough to start pulling in application modules before any
+# safety check existed at all). See tests/env_guard.py for what this
+# checks and why it never opens a connection to do so.
+from tests.env_guard import assert_disposable_test_environment
+
+assert_disposable_test_environment()
+
 import os
 import pytest
 import asyncio
@@ -80,10 +89,22 @@ def _purge_orphan_world_rows():
     "user-1" and those services now write world events through a real session.
     A row keyed to a user_id with no app_user is garbage by definition, so this
     can never touch real data.
+
+    2026-09-22 incident follow-up: this is a broad, table-wide DELETE — the
+    kind of statement that must never be reachable against production no
+    matter what else is true. The module-level `assert_disposable_test_
+    environment()` already aborted collection entirely if DATABASE_URL
+    were production-shaped, so simply reaching this line implies that
+    passed — but re-checking here directly, rather than trusting that
+    inference, is what "broad orphan deletion must never be available
+    against production" means as a standing invariant of this fixture
+    specifically, not just a property of the test run as a whole.
     """
     yield
     if not os.getenv("DATABASE_URL", "").startswith("postgresql"):
         return
+    from tests.env_guard import assert_disposable_test_environment
+    assert_disposable_test_environment()
     try:
         from sqlalchemy import text as _text
         from app.db.session import SessionLocal as _SessionLocal
@@ -97,6 +118,37 @@ def _purge_orphan_world_rows():
     except Exception:
         # Never fail a test run over cleanup.
         pass
+
+
+# ==========================================
+# BACKGROUND DISPATCH — OFF BY DEFAULT (2026-09-22 incident follow-up)
+# ==========================================
+
+@pytest.fixture(autouse=True)
+def _no_real_task_dispatch_by_default(monkeypatch):
+    """Every test gets `celery_app.send_task` neutralized to a no-op,
+    regardless of whether it touches the database at all.
+
+    Previously this was opt-in: 9 of 11 `*_pg.py` integration files
+    individually patched this themselves before enabling
+    WORLD_EVENTS_ENABLED, and the other 2 happened not to need it. That
+    meant safety depended on every future integration test file
+    remembering to add the same two lines. Making it the default inverts
+    that: a test that actually wants to prove something about real
+    dispatch to a real (isolated test) worker now has to explicitly
+    restore it — `monkeypatch.undo()` on this fixture's patch, or simply
+    `monkeypatch.setattr(celery_app, "send_task", <real or spy behavior>)`
+    again within that test, which layers correctly since monkeypatch
+    applies in call order and reverts in reverse order automatically.
+    `.delay()`/`.apply_async()` on a task bound to this same `celery_app`
+    both route through `send_task` internally, so patching this one
+    primitive covers both call styles.
+    """
+    try:
+        from app.celery_app import celery_app
+    except Exception:
+        return  # celery_app itself unimportable in this environment; nothing to patch
+    monkeypatch.setattr(celery_app, "send_task", lambda *a, **kw: None)
 
 
 # ==========================================

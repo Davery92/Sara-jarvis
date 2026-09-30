@@ -22,7 +22,15 @@ class AppState:
     def __init__(self):
         # ── Core identity ──
         self.assistant_name: str = os.getenv("ASSISTANT_NAME", "Sara")
-        self.database_url: str = os.getenv("DATABASE_URL", "postgresql+psycopg://sara:sara123@db:5432/sara_hub")
+        # 2026-09-22 credential-rotation follow-up: this fallback used to
+        # embed the real production password as a literal default. Never
+        # actually reached in the deployed containers (DATABASE_URL is
+        # always set via .env), but a hardcoded credential in an imported,
+        # live module is still an active exposure. A non-functional
+        # placeholder fails loudly (auth error) if DATABASE_URL is ever
+        # genuinely unset, instead of silently working against a real,
+        # guessable target.
+        self.database_url: str = os.getenv("DATABASE_URL", "postgresql+psycopg://CHANGEME:CHANGEME@localhost:5432/CHANGEME")
 
         # ── AI Provider ──
         self.ai_provider: str = os.getenv("AI_PROVIDER", "local")
@@ -105,7 +113,17 @@ class AppState:
             {"id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro", "provider": "google"},
             {"id": "gemini-2.5-flash", "name": "Gemini 2.5 Flash", "provider": "google"},
             {"id": "Qwen3.5-35B-A3B", "name": "Local 35B", "provider": "local"},
-            {"id": "qwen3.8-27b", "name": "Local Qwen3.8 27B (chat lane)", "provider": "local", "base_url": "http://100.104.68.115:8082/v1"},
+            # This catalog entry's own base_url OVERRIDES OPENAI_BASE_URL for the
+            # chat lane (see get_model_config: catalog_base_url wins). That is
+            # why an isolated acceptance stack — which sets OPENAI_BASE_URL to a
+            # budget gateway and has no route to the real host — silently talked
+            # to production's model host instead: on 2026-09-27 a full live run
+            # appeared to execute while the gateway ledger recorded ZERO
+            # requests, every turn failing with ConnectError. Made overridable
+            # so an isolated environment can actually isolate. Default unchanged,
+            # so production behaviour is identical with the variable unset.
+            {"id": "qwen3.8-27b", "name": "Local Qwen3.8 27B (chat lane)", "provider": "local",
+             "base_url": os.getenv("LOCAL_CHAT_BASE_URL", "http://100.104.68.115:8082/v1")},
             {"id": "nemotron-3-nano", "name": "Nemotron Nano", "provider": "local"},
         ]
 

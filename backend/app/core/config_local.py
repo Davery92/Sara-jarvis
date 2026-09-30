@@ -29,7 +29,11 @@ class LocalSettings(BaseSettings):
     cors_origins: List[str] = ["https://sara.avery.cloud", "http://localhost:3000", "http://10.185.1.180:3000"]
     
     # Database - IMPORTANT: Always use PostgreSQL, never SQLite
-    database_url: str = "postgresql+psycopg://sara:sara123@db:5432/sara_hub"
+    # 2026-09-22 credential-rotation follow-up: was a real hardcoded
+    # credential as the pydantic default — see app/core/app_state.py's
+    # matching fix for why a non-functional placeholder replaces it here
+    # too, rather than the (now-rotated) real value.
+    database_url: str = "postgresql+psycopg://CHANGEME:CHANGEME@localhost:5432/CHANGEME"
     
     # Storage - Local file system
     minio_url: str = "file://./uploads"

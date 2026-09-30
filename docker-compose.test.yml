@@ -1,0 +1,161 @@
+##
+## Disposable test stack — 2026-09-22 incident follow-up.
+##
+## A completely separate Compose project from the production stack
+## (docker-compose.yml / docker-compose.dev.yml): its own network, its own
+## Postgres and Redis with distinct credentials, no published host ports,
+## no named/persistent volumes (tmpfs — wiped whenever the container
+## stops), and it never loads `.env` (which carries production
+## credentials). It shares nothing with production except the backend
+## application image (code + dependencies, not state).
+##
+## Usage:
+##   docker compose -f docker-compose.test.yml up -d --wait test-db test-redis
+##   docker compose -f docker-compose.test.yml run --rm backend-test \
+##       pytest tests/ -q
+##   docker compose -f docker-compose.test.yml down -v
+##
+name: sara-disposable-test
+
+services:
+  test-db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: sara_hub_test
+      POSTGRES_USER: sara_test
+      POSTGRES_PASSWORD: disposable_test_only_pw
+    # tmpfs, not a named volume: the database exists only for the life of
+    # the container. Nothing here can outlive `docker compose down`, and
+    # there is no volume name that could ever be confused with
+    # production's `postgres_data`.
+    tmpfs:
+      - /var/lib/postgresql/data
+    # Deliberately no `ports:` — reachable only from other containers on
+    # this Compose project's own network, never from the host or from the
+    # production `jarvis_default` network.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sara_test -d sara_hub_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  test-redis:
+    image: redis:7-alpine
+    tmpfs:
+      - /data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # A REAL, isolated embedding instance — not a stub. Tests that need to
+  # prove genuine semantic behavior (e.g. paraphrase recall) require an
+  # actual model, and a hash-based stub would silently turn that into a
+  # test of nothing. This is the same already-built `jarvis-embeddings`
+  # image production uses (bge-m3 baked in at build time — no runtime
+  # download, no dependency on the real 10.185.1.8:8100 instance), run as
+  # its own disposable container reachable only on sara_test_net.
+  # Deterministic stubs remain appropriate for tests that only need a
+  # consistent vector shape (see test_memory_search_ranking.py, which
+  # constructs its own controlled vectors relative to whatever the query
+  # embeds to — the ranking FORMULA is what's under test there, not
+  # semantic quality) — those tests do not need this service and must not
+  # be described as validating real embedding behavior if they're ever
+  # pointed at a stub instead.
+  test-embeddings:
+    image: jarvis-embeddings:latest
+    environment:
+      # The model is baked into the image at build time, but
+      # sentence-transformers/huggingface_hub still probe the Hub for
+      # metadata at load time unless told not to — and this network's
+      # `internal: true` (correctly) blocks that probe, which crashed the
+      # container until these were set. Forces cache-only loading; no
+      # network call happens at all, which is the property this whole
+      # service exists to have.
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8100/health', timeout=5)\""]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+      start_period: 30s
+
+  backend-test:
+    image: jarvis-backend:latest
+    working_dir: /app
+    volumes:
+      # The actual source under test — intentionally the same bind-mount
+      # source path as the dev backend service, since this needs to run
+      # THIS worktree's code. Nothing about this mount is production
+      # state; it's the git working tree.
+      - ./backend:/app
+      # Matches the dev backend service's SELF_MODEL_DIR mount — some
+      # tools (get_self_knowledge) read these files directly.
+      - ./docs:/docs:ro
+    # No `env_file: .env` — that file carries the real DATABASE_URL and
+    # POSTGRES_PASSWORD. Every variable this container needs is listed
+    # explicitly below, pointing only at the disposable services above.
+    environment:
+      SARA_TEST_ENV: disposable
+      DATABASE_URL: postgresql+psycopg://sara_test:disposable_test_only_pw@test-db:5432/sara_hub_test
+      REDIS_URL: redis://test-redis:6379/0
+      EMBEDDING_BASE_URL: http://test-embeddings:8100
+      WORLD_EVENTS_ENABLED: "0"
+      PYTHONDONTWRITEBYTECODE: "1"
+    depends_on:
+      test-db:
+        condition: service_healthy
+      test-redis:
+        condition: service_healthy
+      test-embeddings:
+        condition: service_healthy
+    # Idle by default — invoked via `docker compose ... run --rm
+    # backend-test pytest ...`; nothing auto-starts a server or a worker.
+    command: ["sleep", "infinity"]
+
+  # Opt-in only (`--profile isolated-worker`): a real Celery worker bound
+  # to the disposable broker/backend above, for the rare test that wants
+  # to prove a task actually gets consumed by a worker rather than just
+  # asserting `send_task` was called. Not started by the default `up`
+  # above, and never shares a queue with production — `test-redis` is a
+  # distinct Redis instance, so there is no queue name collision possible
+  # even in principle.
+  celery-test-worker:
+    image: jarvis-backend:latest
+    working_dir: /app
+    profiles: ["isolated-worker"]
+    volumes:
+      - ./backend:/app
+    environment:
+      SARA_TEST_ENV: disposable
+      DATABASE_URL: postgresql+psycopg://sara_test:disposable_test_only_pw@test-db:5432/sara_hub_test
+      REDIS_URL: redis://test-redis:6379/0
+      WORLD_EVENTS_ENABLED: "1"
+    depends_on:
+      test-db:
+        condition: service_healthy
+      test-redis:
+        condition: service_healthy
+    command: ["celery", "-A", "app.celery_app", "worker", "--loglevel=info", "--concurrency=1"]
+
+networks:
+  default:
+    name: sara_test_net
+    # `internal: true` is the actual enforced network boundary (2026-09-22
+    # incident follow-up, part 2): being on a separate Compose network
+    # alone does NOT stop a container reaching the host's other published
+    # ports — verified directly, `backend-test` could still open a raw
+    # socket to production's host-forwarded 10.185.1.180:5432 despite
+    # being on this isolated network with no DNS route to jarvis-db-1.
+    # `internal: true` removes this network's route to the outside world
+    # entirely (no default gateway out) — containers on it can reach only
+    # each other, nothing on the host's other interfaces and nothing on
+    # the internet. Disposable dependencies (test-db, test-redis, the
+    # optional celery-test-worker) stay reachable because they're on this
+    # same internal network; production and everything external become
+    # unreachable, not merely unresolved by name.
+    internal: true
