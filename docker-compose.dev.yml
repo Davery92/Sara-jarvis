@@ -16,6 +16,12 @@
 ##
 ## Background and the recovery procedure: RECOVERY.md
 ##
+## This file IS the authoritative service topology — the 14 services and the
+## five celery lanes. docker-compose.yml is an older production definition that
+## has drifted behind it (see the header there for the exact gap) and nothing
+## runs from it. What production runs is this file plus
+## docker-compose.incident-recovery.yml.
+##
 services:
   redis:
     image: redis:7-alpine

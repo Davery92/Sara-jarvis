@@ -1,3 +1,35 @@
+##
+## ⚠  THIS FILE DOES NOT DESCRIBE THE RUNNING SYSTEM. (header added 2026-09-30)
+##
+## It is the older "production" definition and it has drifted behind
+## docker-compose.dev.yml. Production is actually operated as
+##   docker-compose.dev.yml + docker-compose.incident-recovery.yml
+## through `scripts/sara-prod` — see RECOVERY.md. Nothing runs from this file
+## today, and `scripts/deploy_production.sh`, which would use it, refuses by
+## default because doing so would rebuild from the working tree and drop the
+## recovery pin.
+##
+## Which file is authoritative for what:
+##   * service topology, celery lanes, images      -> docker-compose.dev.yml
+##   * what production actually runs (image + pin) -> docker-compose.incident-recovery.yml
+##   * this file                                   -> historical, unverified
+##
+## Known drift from dev, as of 2026-09-30 (NOT fixed here on purpose — adding
+## services to a production definition is David's call, not a cleanup's):
+##
+##   missing: acs-tool-runner, embeddings,
+##            celery-critical, celery-acs, celery-david-priority
+##   extra:   pi-dashboard  (dev has no pi-dashboard service)
+##
+## The missing celery lanes are the sharp edge. `celery-worker` here consumes
+## the same seven queues as dev (cognitive, health, input, maintenance,
+## low_priority, reflection, dispatch), so the `critical`, `acs` and
+## `david_priority` queues would have NO CONSUMER AT ALL under this file:
+## tasks routed to them enqueue and are never executed, silently. `celery-beat`
+## also omits dev's `-s /tmp/celerybeat-schedule`.
+##
+## Do not bring this up to "restore production". Use scripts/sara-prod.
+##
 services:
   redis:
     image: redis:7-alpine
