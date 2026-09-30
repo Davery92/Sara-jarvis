@@ -14,7 +14,7 @@
  * would otherwise reimplement slightly differently.
  */
 
-export const WORKOUT_SCHEMA_VERSION = 1;
+export const WORKOUT_SCHEMA_VERSION = 2;
 
 export type OriginDevice = 'phone' | 'watch' | 'web' | 'server';
 
@@ -24,6 +24,20 @@ export interface LastSessionSummary {
   weights?: number[];
   reps?: number[];
   avg_rpe?: number;
+}
+
+/**
+ * One entry of a plan-driven AM lift's resolved top/backoff set list
+ * (Part A2/A3). `reps` stays a free-text range like the rest of the
+ * contract — "2-4", "4-6", "4+".
+ */
+export interface ResolvedSetEntry {
+  index: number;
+  kind: 'warmup' | 'top' | 'backoff';
+  weight: number | null;
+  reps: string | null;
+  rpe_cap?: number | null;
+  rir?: string | null;
 }
 
 export interface ProjectionExercise {
@@ -38,6 +52,8 @@ export interface ProjectionExercise {
   prescribed_sets?: number | null;
   /** Drop segments logged under this exercise. Volume, not completion (§4.4). */
   completed_drop_segments?: number | null;
+  /** Warm-up sets logged under this exercise. Never counts toward target_sets. */
+  completed_warmup_sets?: number | null;
   /** Free text like "8-10" — the backend owns rep ranges, not the client. */
   target_reps: string | null;
   target_rpe: number | null;
@@ -54,6 +70,13 @@ export interface ProjectionExercise {
   superset_group?: string | null;
   set_technique?: string | null;
   rest_seconds?: number | null;
+  /** Plan-driven AM lifts only (Part A); null for every other exercise. */
+  set_plan?: ResolvedSetEntry[] | null;
+  /** The entry about to be performed — warm-ups first, then top, then backoffs. */
+  next_set?: ResolvedSetEntry | null;
+  effective_week?: number | null;
+  held?: boolean | null;
+  plan_note?: string | null;
 }
 
 export interface WorkoutProposal {
@@ -150,7 +173,9 @@ export type WorkoutCommandKind =
   | 'approve_proposal'
   | 'reject_proposal'
   | 'healthkit_state'
-  | 'set_policy';
+  | 'set_policy'
+  // A5 — "use week N anyway" override on a held plan-driven AM exercise.
+  | 'set_plan_week';
 
 export interface WorkoutCommand {
   schema_version: number;

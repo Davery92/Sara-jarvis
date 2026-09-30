@@ -198,6 +198,11 @@ def _normalize_exercise(ex: Dict[str, Any]) -> Dict[str, Any]:
         "rep_range_high": high,
         "superset_group": ex.get("superset_group"),
         "progression_rule": ex.get("progression_rule") or "LINEAR",
+        # Structured per-set (top/backoff) loading table — additive pass-through.
+        # The LLM extraction schema doesn't ask for this; it's set by hand via
+        # backend/scripts/plans/add_set_plan_two_a_day.py or a future importer
+        # that knows how to build one. See set_plan.py for the shape.
+        "set_plan": ex.get("set_plan") if isinstance(ex.get("set_plan"), dict) else None,
     }
 
 

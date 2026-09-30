@@ -21,7 +21,7 @@ import Foundation
 //  2. Nothing here mutates state. These are messages about state the backend
 //    owns; the projection is always the authority (§4.1).
 
-public let saraWorkoutSchemaVersion = 1
+public let saraWorkoutSchemaVersion = 2
 
 // MARK: - Minimal JSON value
 
@@ -134,6 +134,22 @@ public struct LastSessionSummary: Codable, Equatable {
     }
 }
 
+/// One entry of a plan-driven AM lift's resolved top/backoff set list
+/// (Part A2/A3). `reps` stays free text, same as the rest of the contract.
+public struct ResolvedSetEntry: Codable, Equatable {
+    public let index: Int
+    public let kind: String  // "warmup" | "top" | "backoff"
+    public let weight: Double?
+    public let reps: String?
+    public let rpeCap: Double?
+    public let rir: String?
+
+    enum CodingKeys: String, CodingKey {
+        case index, kind, weight, reps, rir
+        case rpeCap = "rpe_cap"
+    }
+}
+
 public struct WorkoutExercise: Codable, Equatable {
     public let name: String?
     public let variant: String?
@@ -144,6 +160,8 @@ public struct WorkoutExercise: Codable, Equatable {
     public let prescribedSets: Int?
     /// Drop segments performed under this exercise. Volume, not completion.
     public let completedDropSegments: Int?
+    /// Warm-up sets performed under this exercise. Never counts toward target.
+    public let completedWarmupSets: Int?
     /// Free text like "8-10", not a number — the backend keeps the range.
     public let targetReps: String?
     public let targetRpe: Double?
@@ -159,12 +177,20 @@ public struct WorkoutExercise: Codable, Equatable {
     public let supersetGroup: String?
     public let setTechnique: String?
     public let restSeconds: Int?
+    /// Plan-driven AM lifts only (Part A); nil for every other exercise.
+    public let setPlan: [ResolvedSetEntry]?
+    /// The entry about to be performed — warm-ups first, then top, then backoffs.
+    public let nextSet: ResolvedSetEntry?
+    public let effectiveWeek: Int?
+    public let held: Bool?
+    public let planNote: String?
 
     enum CodingKeys: String, CodingKey {
-        case name, variant, notes
+        case name, variant, notes, held
         case targetSets = "target_sets"
         case prescribedSets = "prescribed_sets"
         case completedDropSegments = "completed_drop_segments"
+        case completedWarmupSets = "completed_warmup_sets"
         case targetReps = "target_reps"
         case targetRpe = "target_rpe"
         case approvedWeight = "approved_weight"
@@ -176,6 +202,10 @@ public struct WorkoutExercise: Codable, Equatable {
         case supersetGroup = "superset_group"
         case setTechnique = "set_technique"
         case restSeconds = "rest_seconds"
+        case setPlan = "set_plan"
+        case nextSet = "next_set"
+        case effectiveWeek = "effective_week"
+        case planNote = "plan_note"
     }
 }
 
@@ -368,6 +398,8 @@ public enum WorkoutCommandKind: String, Codable {
     case rejectProposal = "reject_proposal"
     case healthkitState = "healthkit_state"
     case setPolicy = "set_policy"
+    // A5 — "use week N anyway" override on a held plan-driven AM exercise.
+    case setPlanWeek = "set_plan_week"
 }
 
 public struct WorkoutCommand: Codable, Equatable {

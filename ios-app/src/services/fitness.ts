@@ -317,6 +317,14 @@ export interface WorkoutTemplate {
   notes?: string;
   created_at: string;
   updated_at: string;
+  /**
+   * A5/A6 — resolved server-side by /templates/today from today's (ET)
+   * active_workout_session rows: null (not started), 'active', 'completed'
+   * or 'abandoned'. Replaces matching session titles against template names
+   * to find "today's next outstanding session".
+   */
+  session_status?: 'active' | 'completed' | 'abandoned' | null;
+  completed_at?: string | null;
 }
 
 export interface TemplateExercise {
@@ -461,6 +469,16 @@ export interface CreateCustomFoodParams {
   sodium?: number;
 }
 
+// One entry of a plan-driven AM lift's resolved top/backoff set list (Part A2/A3).
+export interface ResolvedSetEntry {
+  index: number;
+  kind: 'warmup' | 'top' | 'backoff';
+  weight: number | null;
+  reps: string | null;
+  rpe_cap?: number | null;
+  rir?: string | null;
+}
+
 // Active Workout Session Types (Real-time Sara Coaching)
 export interface ActiveWorkoutExercise {
   name: string;
@@ -480,6 +498,13 @@ export interface ActiveWorkoutExercise {
     avg_rpe: number;
   };
   completed_sets?: number;
+  completed_warmup_sets?: number;
+  // Plan-driven AM lifts only (Part A); undefined for every other exercise.
+  set_plan_resolved?: ResolvedSetEntry[];
+  next_set?: ResolvedSetEntry | null;
+  effective_week?: number | null;
+  held?: boolean;
+  plan_note?: string | null;
 }
 
 export interface ActiveWorkoutSnapshot {
@@ -514,6 +539,7 @@ export interface LogSetParams {
   rpe?: number;
   rpe_feeling?: 'light' | 'moderate' | 'hard' | 'failed';
   notes?: string;
+  set_kind?: 'working' | 'warmup';
 }
 
 export interface RestTimerStatus {
@@ -668,6 +694,57 @@ class FitnessService {
 
   async deleteFoodLog(id: string): Promise<void> {
     await apiClient.delete(`/api/fitness/food-log/${id}`);
+  }
+
+  // B2 — diary: one day (or the trailing `days`) shaped for the Nutrition
+  // tab — targets, totals, remaining, items grouped by meal.
+  async getFoodDiary(date?: string, days: number = 1): Promise<any> {
+    const params = new URLSearchParams();
+    if (date) params.append('date', date);
+    if (days !== 1) params.append('days', String(days));
+    return await apiClient.get(`/api/fitness/food-diary?${params}`);
+  }
+
+  // B4 — repeat a past meal verbatim, optionally at a different meal/time.
+  async repeatFoodLog(logId: string, params: {
+    meal_type?: string; logged_at?: string; idempotency_key?: string;
+  } = {}): Promise<{ success: boolean; log_id: string }> {
+    return await apiClient.post(`/api/fitness/food-log/${logId}/repeat`, params);
+  }
+
+  // B4 — copy a whole day's (or selected meals') food log onto another date.
+  async copyFoodLogDay(fromDate: string, toDate: string, meals?: string[]): Promise<{
+    success: boolean; copied: number; log_ids: string[];
+  }> {
+    return await apiClient.post('/api/fitness/food-log/copy-day', {
+      from_date: fromDate, to_date: toDate, meals,
+    });
+  }
+
+  // B4 — saved meals: a named snapshot of items, logged again in one tap.
+  async createSavedMeal(name: string, items: any[], defaultMealType?: string): Promise<{
+    success: boolean; saved_meal_id: string;
+  }> {
+    return await apiClient.post('/api/fitness/saved-meals', {
+      name, items, default_meal_type: defaultMealType,
+    });
+  }
+
+  async getSavedMeals(): Promise<{ saved_meals: Array<{
+    id: string; name: string; default_meal_type: string | null;
+    items: any[]; calories: number | null; created_at: string;
+  }> }> {
+    return await apiClient.get('/api/fitness/saved-meals');
+  }
+
+  async archiveSavedMeal(savedMealId: string): Promise<void> {
+    await apiClient.delete(`/api/fitness/saved-meals/${savedMealId}`);
+  }
+
+  async logSavedMeal(savedMealId: string, params: {
+    meal_type?: string; logged_at?: string; idempotency_key?: string;
+  } = {}): Promise<{ success: boolean; log_id: string }> {
+    return await apiClient.post(`/api/fitness/saved-meals/${savedMealId}/log`, params);
   }
 
   // Workout Logs
@@ -893,9 +970,13 @@ class FitnessService {
   }
 
   // Recent Foods (frequently logged in last 30 days)
-  async getRecentFoods(limit: number = 20): Promise<any[]> {
+  async getRecentFoods(limit: number = 20, mealType?: string): Promise<any[]> {
     try {
-      const response: any = await apiClient.get(`/api/fitness/food-log/recent-foods?limit=${limit}`);
+      // B5 — passing the meal being logged for lets the server rank "usual
+      // {mealType}" foods above raw frequency.
+      const params = new URLSearchParams({ limit: String(limit) });
+      if (mealType) params.append('meal_type', mealType);
+      const response: any = await apiClient.get(`/api/fitness/food-log/recent-foods?${params}`);
       return response.recent_foods || [];
     } catch (error) {
       console.error('Failed to fetch recent foods:', error);
@@ -910,6 +991,29 @@ class FitnessService {
     } catch (error) {
       console.error('Failed to fetch yesterday foods:', error);
       return { meals: {}, all_foods: [] };
+    }
+  }
+
+  /**
+   * B1 — the most recent serving David logged for each of `foodIds`, so a
+   * *searched* or barcode-scanned food (not already in Recent/Yesterday) can
+   * still open at the remembered amount. Missing ids simply aren't in the result.
+   */
+  async getLastUsedServings(foodIds: string[]): Promise<Record<string, {
+    serving_id: string | null;
+    serving_description: string | null;
+    quantity: number;
+    unit: string;
+    meal_type: string | null;
+    logged_at: string | null;
+  }>> {
+    const ids = foodIds.filter(Boolean);
+    if (ids.length === 0) return {};
+    try {
+      return await apiClient.get(`/api/fitness/food-log/last-used?food_ids=${encodeURIComponent(ids.join(','))}`);
+    } catch (error) {
+      console.error('Failed to fetch last-used servings:', error);
+      return {};
     }
   }
 
@@ -1037,6 +1141,22 @@ class FitnessService {
     return apiClient.post('/api/fitness/workout-session/set-variant', {
       exercise_index: exerciseIndex,
       variant,
+    });
+  }
+
+  /**
+   * "Use week N anyway" override on a held plan-driven AM exercise (A5) —
+   * re-resolves that exercise's set_plan at `week` instead of the week the
+   * advance rule held it at.
+   */
+  async setPlanWeek(exerciseIndex: number, week: number): Promise<{
+    success: boolean;
+    exercise_index: number;
+    effective_week?: number;
+  }> {
+    return apiClient.post('/api/fitness/workout-session/set-plan-week', {
+      exercise_index: exerciseIndex,
+      week,
     });
   }
 

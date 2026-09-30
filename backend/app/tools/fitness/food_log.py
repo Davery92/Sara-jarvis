@@ -2,10 +2,18 @@
 Food Log Tools
 Tools for tracking meals, nutrition, and dietary information
 """
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple
+from app.services.civil_time import (
+    AmbiguousTimeError,
+    TIME_PARAMETER_CONTRACT,
+    as_utc,
+    describe_instant,
+    parse_user_datetime,
+)
 from app.tools.base import BaseTool, ToolResult
 from sqlalchemy import text
 from datetime import datetime, timezone, timedelta
+import re
 import uuid
 import json
 
@@ -14,6 +22,59 @@ def get_fitness_db():
     """Get database session"""
     from app.db.session import get_db
     return next(get_db())
+
+
+# "6 oz chicken thighs" -> (6.0, "oz", "chicken thighs"). Best-effort only —
+# this manual tool has no resolved food_id/serving to fall back on, but a
+# leading quantity+unit is common enough in what David actually says that
+# writing a flat quantity:1/unit:"serving" every time was quietly poisoning
+# Recent's "last amount logged" memory for these foods (B1).
+_QTY_UNIT_RE = re.compile(
+    r"^\s*(\d+(?:\.\d+)?|\d+/\d+)\s*"
+    r"(oz|ounce|ounces|g|gram|grams|lb|lbs|pound|pounds|cup|cups|"
+    r"tbsp|tablespoon|tablespoons|tsp|teaspoon|teaspoons|ml|l|"
+    r"slice|slices|serving|servings)\b\.?\s+(.+)$",
+    re.IGNORECASE,
+)
+
+
+def _parse_quantity_unit(description: str) -> Tuple[float, str, str]:
+    """Best-effort (quantity, unit, name) from a free-text description.
+    Falls back to (1, "serving", description) when nothing parses."""
+    text_in = (description or "").strip()
+    m = _QTY_UNIT_RE.match(text_in)
+    if not m:
+        return 1.0, "serving", text_in
+    raw_qty, unit, rest = m.group(1), m.group(2).lower(), m.group(3).strip()
+    if "/" in raw_qty:
+        num, den = raw_qty.split("/", 1)
+        try:
+            qty = float(num) / float(den)
+        except (ValueError, ZeroDivisionError):
+            return 1.0, "serving", text_in
+    else:
+        qty = float(raw_qty)
+    return qty, unit, rest or text_in
+
+
+def local_day_window(start_day, end_day) -> Tuple[datetime, datetime]:
+    """The naive-UTC half-open window covering David's local days.
+
+    `food_log.logged_at` is a naive `timestamp` column holding UTC (the session
+    TimeZone is UTC), and these queries compared it against bare `date` values
+    — which Postgres casts to midnight UTC. So "today" was 00:00-24:00 UTC, and
+    every meal David ate after 8pm ET counted as the NEXT day: the day totals
+    he read back were not the day he asked about. Converting his local day
+    bounds to UTC first is what makes a "day" his day.
+    """
+    from app.core.timezone import local_day_bounds
+
+    start_local, _ = local_day_bounds(start_day)
+    _, end_local = local_day_bounds(end_day)
+    return (
+        start_local.astimezone(timezone.utc).replace(tzinfo=None),
+        end_local.astimezone(timezone.utc).replace(tzinfo=None),
+    )
 
 
 class FoodLogCreateTool(BaseTool):
@@ -102,11 +163,15 @@ class FoodLogCreateTool(BaseTool):
             except:
                 fats = None
 
-        # Create food_items from description
+        # Create food_items from description — parse a leading quantity+unit
+        # ("6 oz chicken thighs") so Recent remembers the real amount rather
+        # than a flat 1 serving (B1).
         if food_description:
-            food_items = [{"name": food_description, "quantity": 1, "unit": "serving"}]
+            qty, unit, name = _parse_quantity_unit(food_description)
+            food_items = [{"name": name, "quantity": qty, "unit": unit}]
         elif notes:
-            food_items = [{"name": notes, "quantity": 1, "unit": "serving"}]
+            qty, unit, name = _parse_quantity_unit(notes)
+            food_items = [{"name": name, "quantity": qty, "unit": unit}]
         elif calories or protein or carbs or fats:
             food_items = [{"name": "Food entry", "quantity": 1, "unit": "serving"}]
         else:
@@ -115,11 +180,17 @@ class FoodLogCreateTool(BaseTool):
                 message="Please provide food_description or nutritional information"
             )
 
-        # Parse logged_at timestamp
+        # One timestamp contract, shared with reminders/timers/calendar (see
+        # app/services/civil_time.py). Finding 35 recorded a "~4-hour-wrong
+        # default logged_at timestamp" on a food entry: a naive local time from
+        # the model was read as UTC, so a 7pm dinner landed at 3pm.
+        _logged_at_note = ""
         if logged_at_str:
             try:
-                logged_at = datetime.fromisoformat(logged_at_str.replace('Z', '+00:00'))
-            except:
+                _interpretation = parse_user_datetime(logged_at_str)
+                logged_at = _interpretation.instant
+                _logged_at_note = _interpretation.note
+            except AmbiguousTimeError:
                 logged_at = datetime.now(timezone.utc)
         else:
             logged_at = datetime.now(timezone.utc)
@@ -169,9 +240,15 @@ class FoodLogCreateTool(BaseTool):
                     "carbs": carbs,
                     "fats": fats,
                     "logged_at": logged_at.isoformat(),
+                    "when": describe_instant(logged_at),
                     "created_at": row.created_at.isoformat() if row.created_at else None
                 },
-                message=f"Logged {meal_type}: {items_str}" + (f" ({calories} cal)" if calories else "")
+                message=(
+                    f"Logged {meal_type}: {items_str}"
+                    + (f" ({calories} cal)" if calories else "")
+                    + f" at {describe_instant(logged_at)}"
+                    + (f" — {_logged_at_note}" if _logged_at_note else "")
+                )
             )
 
         except Exception as e:
@@ -249,10 +326,11 @@ class FoodLogSearchTool(BaseTool):
 
         try:
             meal_filter = ""
+            _start_utc, _end_utc = local_day_window(start_date, end_date)
             params = {
                 "user_id": user_id,
-                "start_date": start_date,
-                "end_date": end_date + timedelta(days=1),  # Include full day
+                "start_date": _start_utc,
+                "end_date": _end_utc,
                 "limit": limit
             }
 
@@ -397,13 +475,15 @@ class FoodLogSummaryTool(BaseTool):
                 pass
 
         db = get_fitness_db()
+        _summary_start_utc, _summary_end_utc = local_day_window(start_date, end_date)
 
         try:
             # Get summary statistics
             sql = text("""
                 SELECT
                     COUNT(*) as total_entries,
-                    COUNT(DISTINCT DATE(logged_at)) as days_logged,
+                    COUNT(DISTINCT DATE(logged_at AT TIME ZONE 'UTC'
+                          AT TIME ZONE 'America/New_York')) as days_logged,
                     SUM(calories) as total_calories,
                     AVG(calories) as avg_calories,
                     SUM(protein) as total_protein,
@@ -420,8 +500,8 @@ class FoodLogSummaryTool(BaseTool):
 
             result = db.execute(sql, {
                 "user_id": user_id,
-                "start_date": start_date,
-                "end_date": end_date + timedelta(days=1)
+                "start_date": _summary_start_utc,
+                "end_date": _summary_end_utc
             })
 
             row = result.fetchone()
@@ -438,8 +518,8 @@ class FoodLogSummaryTool(BaseTool):
 
             meal_result = db.execute(meal_dist_sql, {
                 "user_id": user_id,
-                "start_date": start_date,
-                "end_date": end_date + timedelta(days=1)
+                "start_date": _summary_start_utc,
+                "end_date": _summary_end_utc
             })
 
             meal_distribution = {m.meal_type: m.count for m in meal_result.fetchall()}
@@ -482,5 +562,230 @@ class FoodLogSummaryTool(BaseTool):
                 success=False,
                 message=f"Failed to generate summary: {str(e)}"
             )
+        finally:
+            db.close()
+
+
+class FoodLogCorrectTool(BaseTool):
+    """Correct an existing food entry — reliable-assistant plan Phase C4.
+
+    "Expose coherent operations such as… correct food quantity… Do not require
+    the model to improvise coupled delete/create sequences."
+
+    Two confirmed findings are the same missing operation:
+
+    * **35** — `food_search_and_log` logged a flat 1-serving (100g/165cal)
+      entry for a requested 150g, and Sara "worked around it with a manually
+      computed correct entry (248 cal for 150g) rather than fixing the wrong
+      one, leaving BOTH in the log." There was no fix-the-wrong-one available.
+    * **7/9** — a real food entry was denied, then listed in the next summary.
+      A correction that adds a row instead of changing one guarantees the two
+      readbacks disagree.
+
+    So this updates one row in place, scales the macros with the quantity when
+    it can, and never leaves a second entry behind.
+    """
+
+    @property
+    def name(self) -> str:
+        return "food_log_correct"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Fix a food entry David has already logged — 'that was 150 grams not 100', "
+            "'make it two eggs', 'that was lunch not breakfast', 'I had that at 7 not 3'. "
+            "Changes the existing entry: use this rather than logging a corrected copy, "
+            "which leaves both the wrong entry and the right one in his day's totals.\n"
+            "Pass `scale_by` when the AMOUNT changed and you want the calories and macros "
+            "scaled with it (150g instead of 100g is scale_by 1.5) — or pass explicit "
+            "calories/protein/carbs/fats to set them outright. Find the entry first with "
+            "food_log_search and pass its real log_id."
+        )
+
+    @property
+    def parameters(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "log_id": {
+                    "type": "string",
+                    "description": "The entry to fix (from food_log_search).",
+                },
+                "food_description": {
+                    "type": "string",
+                    "description": "Corrected description, e.g. '150g chicken breast'.",
+                },
+                "scale_by": {
+                    "type": "number",
+                    "description": (
+                        "Multiply the existing calories and macros by this. 1.5 for "
+                        "'150g not 100g', 2 for 'two of them not one'. Ignored if "
+                        "explicit calories/macros are given."
+                    ),
+                },
+                "calories": {"type": "number", "description": "Set calories outright."},
+                "protein": {"type": "number", "description": "Set protein (g) outright."},
+                "carbs": {"type": "number", "description": "Set carbs (g) outright."},
+                "fats": {"type": "number", "description": "Set fats (g) outright."},
+                "meal_type": {
+                    "type": "string",
+                    "enum": ["breakfast", "lunch", "dinner", "snack"],
+                    "description": "Corrected meal, if he had the wrong one.",
+                },
+                "logged_at": {
+                    "type": "string",
+                    "description": "Corrected time. " + TIME_PARAMETER_CONTRACT,
+                },
+            },
+            "required": ["log_id"],
+        }
+
+    async def execute(self, user_id: str, **kwargs) -> ToolResult:
+        log_id = kwargs.get("log_id")
+        if not log_id:
+            return ToolResult(success=False, message="log_id is required.")
+
+        scale_by = kwargs.get("scale_by")
+        explicit = {
+            field: kwargs.get(field)
+            for field in ("calories", "protein", "carbs", "fats")
+            if kwargs.get(field) is not None
+        }
+        new_description = kwargs.get("food_description")
+        new_meal = kwargs.get("meal_type")
+        new_logged_at_str = kwargs.get("logged_at")
+
+        if not any([scale_by, explicit, new_description, new_meal, new_logged_at_str]):
+            return ToolResult(
+                success=False,
+                message="Nothing to correct — say what changed (amount, macros, meal, or time).",
+            )
+
+        time_note = ""
+        new_logged_at = None
+        if new_logged_at_str:
+            try:
+                interpretation = parse_user_datetime(new_logged_at_str)
+            except AmbiguousTimeError as exc:
+                return ToolResult(success=False, message=str(exc))
+            new_logged_at = interpretation.instant
+            time_note = interpretation.note
+
+        db = get_fitness_db()
+        try:
+            row = db.execute(text("""
+                SELECT id, meal_type, food_items, calories, protein, carbs, fats,
+                       notes, logged_at
+                FROM food_log WHERE id = :id AND user_id = :uid
+            """), {"id": log_id, "uid": user_id}).mappings().first()
+            if not row:
+                return ToolResult(
+                    success=False,
+                    message="That food entry isn't there — nothing was changed.",
+                )
+
+            before = {
+                "calories": row["calories"], "protein": row["protein"],
+                "carbs": row["carbs"], "fats": row["fats"],
+                "meal_type": row["meal_type"],
+                "logged_at": as_utc(row["logged_at"]),
+            }
+
+            values: Dict[str, Any] = {}
+            changed: List[str] = []
+
+            if explicit:
+                for field, value in explicit.items():
+                    values[field] = float(value)
+                changed.append("macros")
+            elif scale_by:
+                try:
+                    factor = float(scale_by)
+                except (TypeError, ValueError):
+                    return ToolResult(success=False, message="scale_by must be a number.")
+                if factor <= 0:
+                    return ToolResult(
+                        success=False,
+                        message="scale_by must be greater than zero — to remove an entry, say so.",
+                    )
+                for field in ("calories", "protein", "carbs", "fats"):
+                    current = row[field]
+                    if current is not None:
+                        values[field] = round(float(current) * factor, 1)
+                changed.append(f"amount (×{factor:g})")
+
+            if new_description:
+                values["food_items"] = json.dumps([
+                    {"name": new_description, "quantity": 1, "unit": "serving"}
+                ])
+                changed.append("description")
+            if new_meal and new_meal != row["meal_type"]:
+                values["meal_type"] = new_meal
+                changed.append(f"meal ({row['meal_type']} → {new_meal})")
+            if new_logged_at is not None:
+                values["logged_at"] = new_logged_at
+                changed.append("time")
+
+            if not values:
+                return ToolResult(
+                    success=False,
+                    message="That entry already reads that way — nothing changed.",
+                )
+
+            assignments = ", ".join(f"{field} = :{field}" for field in values)
+            values_with_keys = dict(values)
+            values_with_keys.update({"id": log_id, "uid": user_id})
+            result = db.execute(text(
+                f"UPDATE food_log SET {assignments}, updated_at = NOW() "
+                "WHERE id = :id AND user_id = :uid"
+            ), values_with_keys)
+            if not result.rowcount:
+                db.rollback()
+                return ToolResult(
+                    success=False,
+                    message="That food entry isn't there any more — nothing was changed.",
+                )
+            db.commit()
+
+            after = db.execute(text(
+                "SELECT meal_type, calories, protein, carbs, fats, logged_at "
+                "FROM food_log WHERE id = :id"
+            ), {"id": log_id}).mappings().first()
+
+            summary = f"Fixed that entry: {', '.join(changed)}."
+            if after["calories"] is not None:
+                summary += f" Now {after['calories']:g} cal"
+                if after["protein"] is not None:
+                    summary += f", {after['protein']:g}g protein"
+                summary += "."
+            summary += f" Still one entry, at {describe_instant(as_utc(after['logged_at']))}."
+            if time_note:
+                summary += f" — {time_note}"
+
+            return ToolResult(
+                success=True,
+                data={
+                    "log_id": log_id,
+                    "changed": changed,
+                    "before": {
+                        k: (v.isoformat() if hasattr(v, "isoformat") else v)
+                        for k, v in before.items()
+                    },
+                    "after": {
+                        "meal_type": after["meal_type"],
+                        "calories": after["calories"],
+                        "protein": after["protein"],
+                        "carbs": after["carbs"],
+                        "fats": after["fats"],
+                        "logged_at": as_utc(after["logged_at"]).isoformat(),
+                        "when": describe_instant(as_utc(after["logged_at"])),
+                    },
+                },
+                message=summary,
+            )
+        except Exception as e:
+            db.rollback()
+            return ToolResult(success=False, message=f"Failed to correct the entry: {e}")
         finally:
             db.close()

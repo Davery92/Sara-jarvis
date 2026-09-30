@@ -667,3 +667,171 @@ class WorkoutStatsTool(BaseTool):
             )
         finally:
             db.close()
+
+
+class WorkoutLogCorrectTool(BaseTool):
+    """Correct a workout set David has already logged.
+
+    Reliable-assistant plan Phase C4: *"Expose coherent operations such as…
+    correct food quantity, correct workout set… Do not require the model to
+    improvise coupled delete/create sequences."* Food, notes, lists, reminders
+    and timers each got their correction operation; the workout set was the one
+    left on the list, and its absence has the same consequence as the food one
+    did (finding 35): with no way to fix the wrong row, the only thing available
+    is to log a corrected copy, and then BOTH are in the set history — which is
+    the input to `progressive_overload.py`, so a phantom set does not just read
+    wrong, it prescribes wrong.
+
+    "225 for 5, not 3" and "that was 235 not 225" are the whole case. It updates
+    one row in place, keyed by the row's own id and owner, and reads the row back
+    afterwards so what David is told is what the table holds.
+    """
+
+    @property
+    def name(self) -> str:
+        return "workout_log_correct"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Fix a set David has already logged — '225 for 5, not 3', 'that was 235 "
+            "not 225', 'that one was an 8 not a 6'. Changes the existing set: use this "
+            "rather than logging a corrected copy, which leaves the wrong set in his "
+            "history and in the progression math. Find the set first with "
+            "workout_details and pass its real log_id."
+        )
+
+    @property
+    def parameters(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "log_id": {
+                    "type": "string",
+                    "description": "The set to fix (from workout_details).",
+                },
+                "weight": {"type": "number", "description": "Corrected weight in lbs."},
+                "reps": {"type": "integer", "description": "Corrected rep count."},
+                "rpe": {"type": "integer", "description": "Corrected RPE, 1-10."},
+                "notes": {"type": "string", "description": "Corrected note on the set."},
+            },
+            "required": ["log_id"],
+        }
+
+    async def execute(self, user_id: str, **kwargs) -> ToolResult:
+        log_id = kwargs.get("log_id")
+        if not log_id:
+            return ToolResult(success=False, message="log_id is required.")
+
+        fields = {
+            name: kwargs.get(name)
+            for name in ("weight", "reps", "rpe", "notes")
+            if kwargs.get(name) is not None
+        }
+        if not fields:
+            return ToolResult(
+                success=False,
+                message="Nothing to correct — say what changed (weight, reps, RPE or the note).",
+            )
+
+        if "rpe" in fields:
+            try:
+                rpe = int(fields["rpe"])
+            except (TypeError, ValueError):
+                return ToolResult(success=False, message="RPE must be a whole number 1-10.")
+            if not 1 <= rpe <= 10:
+                return ToolResult(success=False, message="RPE only goes 1 to 10.")
+            fields["rpe"] = rpe
+        for numeric in ("weight", "reps"):
+            if numeric in fields:
+                try:
+                    value = float(fields[numeric])
+                except (TypeError, ValueError):
+                    return ToolResult(success=False, message=f"{numeric} must be a number.")
+                if value <= 0:
+                    return ToolResult(
+                        success=False,
+                        message=f"{numeric} must be greater than zero — to remove a set, say so.",
+                    )
+                fields[numeric] = int(value) if numeric == "reps" else value
+
+        db = get_fitness_db()
+        try:
+            # Owner-scoped read first, so "that set isn't yours" and "that set
+            # doesn't exist" cannot be answered with each other's message.
+            row = db.execute(text("""
+                SELECT id, set_index, weight, reps, rpe, notes, session_date
+                FROM workout_log WHERE id = :id AND user_id = :uid
+            """), {"id": log_id, "uid": user_id}).mappings().first()
+            if not row:
+                return ToolResult(
+                    success=False,
+                    message="That set isn't there — nothing was changed.",
+                )
+
+            before = {
+                "set_index": row["set_index"], "weight": row["weight"],
+                "reps": row["reps"], "rpe": row["rpe"],
+            }
+            changed = [
+                f"{name} ({row[name]} → {value})"
+                for name, value in fields.items()
+                if name != "notes" and row[name] != value
+            ]
+            if fields.get("notes") is not None and fields["notes"] != (row["notes"] or ""):
+                changed.append("note")
+            if not changed:
+                return ToolResult(
+                    success=False,
+                    message="That set already reads that way — nothing changed.",
+                )
+
+            assignments = ", ".join(f"{name} = :{name}" for name in fields)
+            params = dict(fields)
+            params.update({"id": log_id, "uid": user_id})
+            result = db.execute(text(
+                f"UPDATE workout_log SET {assignments} WHERE id = :id AND user_id = :uid"
+            ), params)
+            if not result.rowcount:
+                db.rollback()
+                return ToolResult(
+                    success=False,
+                    message="That set isn't there any more — nothing was changed.",
+                )
+            db.commit()
+
+            # Read the row back. The tool's own account of what it wrote is not
+            # evidence about what the table holds.
+            after = db.execute(text(
+                "SELECT set_index, weight, reps, rpe, notes FROM workout_log "
+                "WHERE id = :id AND user_id = :uid"
+            ), {"id": log_id, "uid": user_id}).mappings().first()
+
+            summary = (
+                f"Fixed set {after['set_index']}: {', '.join(changed)}. "
+                f"It now reads {after['weight']:g}lbs x {after['reps']} reps"
+            )
+            summary += f" @ RPE {after['rpe']}." if after["rpe"] is not None else "."
+            summary += " Still one set, not a second one."
+
+            return ToolResult(
+                success=True,
+                data={
+                    "log_id": log_id,
+                    "changed": changed,
+                    "before": before,
+                    "after": {
+                        "set_index": after["set_index"],
+                        "weight": after["weight"],
+                        "reps": after["reps"],
+                        "rpe": after["rpe"],
+                        "notes": after["notes"],
+                    },
+                },
+                message=summary,
+            )
+        except Exception as e:
+            db.rollback()
+            return ToolResult(success=False, message=f"Failed to correct the set: {e}")
+        finally:
+            db.close()

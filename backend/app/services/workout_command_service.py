@@ -46,7 +46,7 @@ from app.core.timezone import today as local_today
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2  # v2: exercise view carries set_plan/next_set/effective_week/held/plan_note
 
 # How long an in-session proposal stays actionable before it is stale advice.
 PROPOSAL_TTL_SECONDS = 300
@@ -73,6 +73,8 @@ MUTATING_KINDS = {
     "approve_proposal",
     "reject_proposal",
     "healthkit_state",
+    # A5 — "use week N anyway" override on a held plan-driven exercise.
+    "set_plan_week",
     "set_policy",
 }
 
@@ -174,6 +176,33 @@ class WorkoutCommandService:
         from app.services.workout_recalc import working_counts
         return working_counts(db, session_id)
 
+    def _last_top_set(self, db: Session, user_id: str, exercise_name: str) -> Optional[Dict[str, Any]]:
+        """Most recent logged top set for a plan-driven lift, across sessions.
+
+        Feeds set_plan.resolve_set_plan's advance rule. Only a working set
+        stamped `flags.role='top'` (A5) qualifies — a set logged before this
+        feature shipped has no `role` and correctly reads as "nothing to gate
+        on" to the resolver (its `plan_week` comes back missing).
+        """
+        row = db.execute(text("""
+            SELECT reps, rpe, flags->>'plan_week' AS plan_week
+            FROM workout_log
+            WHERE user_id = :uid
+              AND LOWER(exercise_id) = LOWER(:name)
+              AND set_kind = 'working'
+              AND voided_at IS NULL
+              AND flags->>'role' = 'top'
+            ORDER BY session_date DESC, created_at DESC
+            LIMIT 1
+        """), {"uid": user_id, "name": exercise_name}).fetchone()
+        if not row:
+            return None
+        return {
+            "reps": row.reps,
+            "rpe": float(row.rpe) if row.rpe is not None else None,
+            "plan_week": int(row.plan_week) if row.plan_week is not None else None,
+        }
+
     def projection(
         self, db: Session, session: Optional[Dict[str, Any]], *, compact: bool = False
     ) -> Optional[Dict[str, Any]]:
@@ -188,6 +217,7 @@ class WorkoutCommandService:
 
         from app.services.workout_recalc import (
             drop_counts, effective_name, load_session_sets, target_sets_for, total_target_sets,
+            warmup_counts,
         )
         from app.services.workout_session_service import workout_session_service as legacy
 
@@ -195,12 +225,14 @@ class WorkoutCommandService:
         exercises: List[Dict[str, Any]] = snap.get("exercises") or []
         counts = self._name_counts(db, session["id"])
         drops = drop_counts(db, session["id"])
+        warmups = warmup_counts(db, session["id"])
         performed = load_session_sets(db, session["id"])
 
         for ex in exercises:
             name = effective_name(ex)
             ex["completed_sets"] = min(counts.get(name, 0), target_sets_for(ex))
             ex["completed_drop_segments"] = drops.get(name, 0)
+            ex["completed_warmup_sets"] = warmups.get(name, 0)
             # Older sessions predate the approved/calculated split — treat the
             # value they were started with as already approved.
             ex.setdefault("approved_weight", ex.get("suggested_weight"))
@@ -365,6 +397,8 @@ class WorkoutCommandService:
     ) -> Dict[str, Any]:
         from app.services.progressive_overload import get_deload_state
         from app.services.workout_session_service import workout_session_service as legacy
+        from app.services import set_plan as set_plan_service
+        from app.services import workout_prescription
 
         row = db.execute(text("""
             SELECT id, name, phase_id, scheduled_days, exercises, notes
@@ -381,6 +415,7 @@ class WorkoutCommandService:
         is_deload = deload["is_deload"]
         enforce_approval = _v2_enabled()
         consumed_approvals = self._approved_next_session_weights(db, user_id) if enforce_approval else {}
+        program_week = workout_prescription.program_week(db, user_id, date.today())
 
         snapshots = []
         for spec in specs:
@@ -412,7 +447,7 @@ class WorkoutCommandService:
                 except (TypeError, ValueError):
                     effective_sets = target_sets
 
-            snapshots.append({
+            ex_snapshot = {
                 "name": name,
                 "variant": None,
                 "sets": effective_sets,
@@ -432,7 +467,33 @@ class WorkoutCommandService:
                 "calculated_suggestion": calculated,
                 "progression_note": suggestion["progression_note"],
                 "last_session": suggestion["last_session"],
-            })
+            }
+
+            # Plan-driven AM lifts (A2): the 8-week top/backoff table takes
+            # over sets/weight entirely — the deload halving and the flat
+            # progressive_overload suggestion above are both for non-plan
+            # exercises only, so they're overridden here rather than skipped
+            # above (still want `last_session` for display context).
+            if set_plan_service.is_plan_driven(spec):
+                last_top_set = self._last_top_set(db, user_id, name)
+                resolved = set_plan_service.resolve_set_plan(spec, program_week, last_top_set)
+                if resolved["sets"]:
+                    top_entry = next(s for s in resolved["sets"] if s["kind"] == "top")
+                    top_weight = top_entry.get("weight")
+                    ex_snapshot["sets"] = resolved["working_set_count"]
+                    ex_snapshot["sets_original"] = None
+                    ex_snapshot["suggested_weight"] = top_weight
+                    ex_snapshot["approved_weight"] = top_weight
+                    ex_snapshot["calculated_suggestion"] = top_weight
+                    ex_snapshot["progression_note"] = (
+                        resolved["note"] or set_plan_service.describe_resolved(name, resolved)
+                    )
+                    ex_snapshot["set_plan_resolved"] = resolved["sets"]
+                    ex_snapshot["effective_week"] = resolved["effective_week"]
+                    ex_snapshot["held"] = resolved["held"]
+                    ex_snapshot["plan_note"] = resolved["note"]
+
+            snapshots.append(ex_snapshot)
 
         snapshot = {
             "template_id": template_id,
@@ -444,6 +505,7 @@ class WorkoutCommandService:
             "week_of_phase": deload.get("week_of_phase"),
             "deload_week": deload.get("deload_week"),
             "phase_name": deload.get("phase_name"),
+            "program_week": program_week,
         }
 
         session_id = str(uuid.uuid4())
@@ -690,6 +752,8 @@ class WorkoutCommandService:
             )
         if kind == "healthkit_state":
             return self._apply_healthkit_state(db, session, payload)
+        if kind == "set_plan_week":
+            return self._apply_set_plan_week(db, session, payload)
         raise ValueError(f"unhandled kind {kind}")
 
     def _bump(self, db: Session, session_id: str, origin: str) -> None:
@@ -730,9 +794,10 @@ class WorkoutCommandService:
         self, db: Session, session: Dict[str, Any], payload: Dict[str, Any], command_id: str
     ) -> Dict[str, Any]:
         from app.services.workout_recalc import (
-            effective_name, recalculate_session, target_sets_for,
+            effective_name, recalculate_session, target_sets_for, warmup_counts,
         )
         from app.services.workout_session_service import workout_session_service as legacy
+        from app.services.set_plan import _min_reps as plan_min_reps, next_entry as plan_next_entry
 
         snap = session["workout_snapshot"]
         exercises: List[Dict[str, Any]] = snap.get("exercises") or []
@@ -759,16 +824,42 @@ class WorkoutCommandService:
         if rpe is None and effort:
             rpe = EFFORT_RPE.get(effort, 7)
 
+        counts_before = self._name_counts(db, session["id"])
+
+        # A5 — a plan-driven lift's next prescribed entry (warm-up, top or
+        # backoff) is the default source of truth when the client omits
+        # weight/reps, not the flat approved_weight/low+1 heuristic below.
+        resolved_plan: List[Dict[str, Any]] = ex.get("set_plan_resolved") or []
+        next_set = None
+        if resolved_plan:
+            warm_before = warmup_counts(db, session["id"]).get(exercise_name, 0)
+            working_before = min(counts_before.get(exercise_name, 0), target_sets)
+            # Kind-aware: this is the set actually about to be written, so it
+            # resolves against `set_kind`'s own sequence — logging a working
+            # set is what "Skip warm-ups" means, not blocked on warm-ups.
+            next_set = plan_next_entry(resolved_plan, warm_before, working_before, requested_kind=set_kind)
+
         weight = payload.get("weight")
         if weight is None:
-            weight = ex.get("approved_weight") or ex.get("suggested_weight") or 0
+            if next_set is not None:
+                weight = next_set.get("weight")
+            weight = weight if weight is not None else (ex.get("approved_weight") or ex.get("suggested_weight") or 0)
         reps = payload.get("reps")
         if reps is None:
-            target_reps = str(ex.get("reps", "8"))
-            reps = int(target_reps.split("-")[0]) + 1 if "-" in target_reps else int(target_reps)
+            if next_set is not None:
+                reps = plan_min_reps(next_set.get("reps"))
+            if reps is None:
+                target_reps = str(ex.get("reps", "8"))
+                reps = int(target_reps.split("-")[0]) + 1 if "-" in target_reps else int(target_reps)
 
-        counts_before = self._name_counts(db, session["id"])
         set_index = min(counts_before.get(exercise_name, 0), max(target_sets - 1, 0))
+
+        # Stamp which slot of the plan this set fills — the advance rule
+        # (set_plan.resolve_set_plan) reads flags.role='top' back out on the
+        # next session; `plan_week` is the week this session actually
+        # resolved to (post-hold), not necessarily the calendar week.
+        role = next_set.get("kind") if next_set is not None else None
+        plan_week = ex.get("effective_week") if resolved_plan else None
 
         log_id = str(uuid.uuid4())
         self._insert_set(
@@ -784,6 +875,7 @@ class WorkoutCommandService:
             group_sequence=0,
             counts_toward_target=(set_kind == "working"),
             command_id=command_id,
+            plan_role=role, plan_week=plan_week,
         )
 
         # Everything downstream is derived, never patched (§6.4) — the same
@@ -822,9 +914,11 @@ class WorkoutCommandService:
                 """), {"d": rest_seconds, "sid": session["id"]})
 
         # An RPE that overshoots the approved target is a recommendation, not a
-        # licence to change the next set (§11.2).
+        # licence to change the next set (§11.2). Plan-driven AM lifts are
+        # exempt — the loading table already says what next week is; a
+        # "+10 lb?" proposal mid-session would contradict it (A5).
         proposal = None
-        if not workout_complete and rpe is not None:
+        if not workout_complete and rpe is not None and not resolved_plan:
             proposal = self._maybe_propose_weight(
                 db, session, exercises, new_ex_idx, rpe, reps, float(weight)
             )
@@ -850,15 +944,28 @@ class WorkoutCommandService:
         notes: Optional[str], set_kind: str, set_group_id: str, group_sequence: int,
         counts_toward_target: bool, command_id: Optional[str],
         parent_set_id: Optional[str] = None, revised_from_set_id: Optional[str] = None,
+        plan_role: Optional[str] = None, plan_week: Optional[int] = None,
     ) -> None:
         """Write one performed set. The only place `workout_log` rows are born.
 
         Kept as a single function so the structured columns (§6.1) can never be
         half-populated by a new command that forgets one of them — a row with a
         null `set_kind` would silently count as working.
+
+        `plan_role`/`plan_week` (A5) stamp which slot of a plan-driven lift's
+        resolved set list this row fills — set_plan.resolve_set_plan reads
+        `flags.role == 'top'` back out on the next session to gate advancing.
         """
         variant = (exercise.get("variant") or "").strip() or None
-        flags = json.dumps({"base_exercise": exercise.get("name"), "variant": variant}) if variant else None
+        flag_fields: Dict[str, Any] = {}
+        if variant:
+            flag_fields["base_exercise"] = exercise.get("name")
+            flag_fields["variant"] = variant
+        if plan_role:
+            flag_fields["role"] = plan_role
+        if plan_week is not None:
+            flag_fields["plan_week"] = plan_week
+        flags = json.dumps(flag_fields) if flag_fields else None
         db.execute(text("""
             INSERT INTO workout_log (
                 id, workout_id, user_id, exercise_id, set_index, weight, reps, rpe, notes,
@@ -1349,6 +1456,48 @@ class WorkoutCommandService:
             "last_session": ex["last_session"],
         }
 
+    def _apply_set_plan_week(self, db: Session, session: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
+        """A5 — "Use week N anyway" override on a held plan-driven exercise.
+
+        Re-resolves `set_plan_resolved` for one exercise at a caller-chosen
+        week, bypassing the hold rule. Does not touch `flags.plan_week` on
+        sets already logged this session; the new week only governs what
+        `next_set` prescribes from here.
+        """
+        from app.services import set_plan as set_plan_service
+        snap = session["workout_snapshot"]
+        exercises = snap.get("exercises") or []
+        idx = int(payload.get("exercise_index", -1))
+        if idx < 0 or idx >= len(exercises):
+            raise ValueError(f"Exercise index {idx} out of range")
+        week = int(payload.get("week"))
+
+        ex = exercises[idx]
+        if not set_plan_service.is_plan_driven(ex):
+            raise ValueError("This exercise has no set_plan to re-resolve.")
+
+        resolved = set_plan_service.resolve_set_plan(ex, week, last_top_set=None)
+        if not resolved["sets"]:
+            raise ValueError(f"No set_plan row for week {week}.")
+
+        top_entry = next(s for s in resolved["sets"] if s["kind"] == "top")
+        top_weight = top_entry.get("weight")
+        ex["sets"] = resolved["working_set_count"]
+        ex["suggested_weight"] = top_weight
+        ex["approved_weight"] = top_weight
+        ex["calculated_suggestion"] = top_weight
+        ex["progression_note"] = resolved["note"] or set_plan_service.describe_resolved(ex.get("name"), resolved)
+        ex["set_plan_resolved"] = resolved["sets"]
+        ex["effective_week"] = resolved["effective_week"]
+        ex["held"] = False
+        ex["plan_note"] = f"Using week {week} (manual override)."
+
+        db.execute(text("""
+            UPDATE active_workout_session SET workout_snapshot = CAST(:snap AS jsonb) WHERE id = :sid
+        """), {"snap": json.dumps(snap), "sid": session["id"]})
+
+        return {"exercise_index": idx, "effective_week": resolved["effective_week"]}
+
     def _apply_skip(self, db: Session, session: Dict[str, Any]) -> Dict[str, Any]:
         from app.services.workout_session_service import workout_session_service as legacy
         exercises = session["workout_snapshot"].get("exercises") or []
@@ -1709,6 +1858,10 @@ class WorkoutCommandService:
         for ex in (snap.get("exercises") or []):
             name = legacy._effective_name(ex)
             if not name:
+                continue
+            # Plan-driven AM lifts already know next session's number from the
+            # loading table (A5) — a flat +2.5/+10 proposal would contradict it.
+            if ex.get("set_plan_resolved"):
                 continue
             try:
                 suggestion = legacy._compute_suggestion(
@@ -2276,6 +2429,18 @@ def _last_approved_weight(last_session: Optional[Dict[str, Any]]) -> Optional[fl
 def _exercise_view(ex: Dict[str, Any]) -> Dict[str, Any]:
     from app.services.workout_recalc import prescribed_sets_for, target_sets_for
 
+    # A3: the resolved set list (warm-ups then top then backoffs) plus which
+    # entry is up next. Warm-ups and working sets are independent sequences
+    # (set_plan.next_entry) so skipping warm-ups doesn't misalign the
+    # top/backoff cursor. `None` once everything has been logged.
+    resolved = ex.get("set_plan_resolved")
+    next_set = None
+    if resolved:
+        from app.services.set_plan import next_entry
+        next_set = next_entry(
+            resolved, int(ex.get("completed_warmup_sets", 0) or 0), int(ex.get("completed_sets", 0) or 0)
+        )
+
     return {
         "name": ex.get("name"),
         "variant": ex.get("variant"),
@@ -2286,6 +2451,7 @@ def _exercise_view(ex: Dict[str, Any]) -> Dict[str, Any]:
         "target_sets": target_sets_for(ex),
         "prescribed_sets": prescribed_sets_for(ex),
         "completed_drop_segments": ex.get("completed_drop_segments", 0),
+        "completed_warmup_sets": ex.get("completed_warmup_sets", 0),
         "target_reps": ex.get("reps"),
         "target_rpe": ex.get("rpe_target"),
         "approved_weight": ex.get("approved_weight", ex.get("suggested_weight")),
@@ -2299,6 +2465,12 @@ def _exercise_view(ex: Dict[str, Any]) -> Dict[str, Any]:
         "superset_group": ex.get("superset_group"),
         "set_technique": ex.get("set_technique"),
         "rest_seconds": ex.get("rest_seconds"),
+        # Plan-driven AM lifts only (A2/A3); null for every other exercise.
+        "set_plan": resolved,
+        "next_set": next_set,
+        "effective_week": ex.get("effective_week"),
+        "held": ex.get("held", False),
+        "plan_note": ex.get("plan_note"),
     }
 
 

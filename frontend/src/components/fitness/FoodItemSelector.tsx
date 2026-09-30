@@ -521,14 +521,32 @@ export default function FoodItemSelector({ onFoodsSelected, initialFoods = [] }:
     try {
       // For FatSecret foods, fetch detailed serving info
       if (food.source === 'fatsecret' && food.id.startsWith('fs-')) {
-        const details = await apiClient.getFoodDetails(food.id)
+        const [details, lastUsedById] = await Promise.all([
+          apiClient.getFoodDetails(food.id),
+          apiClient.getLastUsedServings([food.id]),
+        ])
         const synthetic = buildSyntheticWeightServings(details.servings || [])
         const allServings = [...(details.servings || []), ...synthetic]
-        const defaultServing = allServings?.[0]
+
+        // B1 — a search result opens at the amount David actually logged
+        // last time, not always servings[0] @ quantity 1.
+        const lastUsed = lastUsedById[food.id]
+        let defaultServing = allServings?.[0]
+        let quantity = 1
+        if (lastUsed) {
+          const matched =
+            (lastUsed.serving_id && allServings.find(s => s.serving_id === lastUsed.serving_id)) ||
+            (lastUsed.serving_description && allServings.find(s => s.serving_description === lastUsed.serving_description)) ||
+            (lastUsed.unit && allServings.find(s => s.serving_description === lastUsed.unit))
+          if (matched) {
+            defaultServing = matched
+            quantity = lastUsed.quantity || 1
+          }
+        }
 
         const selectedFood = calculateNutrition(
           { ...food, servings: allServings },
-          1,
+          quantity,
           defaultServing
         )
         setSelectedFoods([...selectedFoods, selectedFood])

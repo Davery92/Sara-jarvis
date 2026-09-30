@@ -2,7 +2,7 @@
 Fitness Routes
 API endpoints for fitness tracking: notes, food logging, workouts
 """
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Request, Form
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Request, Form, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, validator
 from typing import List, Optional, Dict, Any
@@ -983,16 +983,38 @@ async def get_food_log_summary(
     return result.data
 
 
+_TIME_BUCKETS = (
+    ("morning", range(5, 11)),
+    ("midday", range(11, 15)),
+    ("evening", range(15, 21)),
+    ("night", tuple(list(range(21, 24)) + list(range(0, 5)))),
+)
+
+
+def _time_bucket(hour: int) -> str:
+    for label, hours in _TIME_BUCKETS:
+        if hour in hours:
+            return label
+    return "night"
+
+
 @router.get("/food-log/recent-foods")
 async def get_recent_foods(
     limit: int = 20,
+    meal_type: Optional[str] = None,
     user_id: str = Depends(get_current_user_id),
     db: Session = Depends(get_db)
 ):
     """
     Get recently logged foods for quick re-logging.
-    Returns unique food items from detailed_items, ordered by frequency and recency.
-    Like MyFitnessPal's recent foods feature.
+
+    B5 — ranked by a deterministic, explainable score (no model): 30-day
+    frequency + recency decay + a bonus when this food is usually logged
+    under `meal_type` (the meal the composer is currently open to) + a bonus
+    when it's usually logged around this time of day + a bonus when today's
+    training-day-ness matches this food's usual pattern. Every row carries
+    `reason` naming whichever signal dominated, so ranking never reads as
+    unexplained shuffling.
     """
     from datetime import timedelta
     from collections import Counter
@@ -1005,7 +1027,7 @@ async def get_recent_foods(
         thirty_days_ago = naive_local_now() - timedelta(days=30)
 
         query = text("""
-            SELECT food_items, detailed_items, calories, protein, carbs, fats, logged_at
+            SELECT food_items, detailed_items, calories, protein, carbs, fats, logged_at, meal_type
             FROM food_log
             WHERE user_id = :user_id
               AND logged_at >= :since
@@ -1029,6 +1051,11 @@ async def get_recent_foods(
         food_frequency = Counter()
         food_details = {}  # Store full details for each food
         food_last_logged = {}  # Track when each food was last logged
+        food_last_meal_type = {}  # Track which meal each food was last logged under (B1)
+        # B5 — every occurrence's meal_type/hour/date, for the ranking score.
+        food_meal_types: Dict[str, Counter] = {}
+        food_hour_buckets: Dict[str, Counter] = {}
+        food_dates: Dict[str, set] = {}
 
         for row in result.fetchall():
             logged_at = row.logged_at
@@ -1056,55 +1083,168 @@ async def get_recent_foods(
                 food_key = item.get("food_id") or food_name.lower()
 
                 food_frequency[food_key] += 1
+                food_meal_types.setdefault(food_key, Counter())[row.meal_type] += 1
+                if logged_at:
+                    food_hour_buckets.setdefault(food_key, Counter())[_time_bucket(logged_at.hour)] += 1
+                    food_dates.setdefault(food_key, set()).add(logged_at.date())
 
-                # Store details (keep most recent version)
+                # Store details (keep most recent version — rows arrive DESC
+                # by logged_at, so the first hit for a key IS the last time
+                # this food was logged).
                 if food_key not in food_details:
                     if from_detailed:
+                        last_serving_id = item.get("serving_id")
+                        last_quantity = item.get("quantity") or item.get("serving_size") or 1
+                        last_unit = item.get("unit") or item.get("serving_unit") or "serving"
+                        last_serving_description = item.get("serving_description")
+                        cal = item.get("calculated_calories") or item.get("calories")
+                        pro = item.get("calculated_protein") or item.get("protein")
+                        carb = item.get("calculated_carbs") or item.get("carbs")
+                        fat = item.get("calculated_fats") or item.get("fats")
                         food_details[food_key] = {
                             "food_id": item.get("food_id"),
                             "id": item.get("id") or item.get("food_id"),
                             "name": food_name,
-                            "calories": item.get("calculated_calories") or item.get("calories"),
-                            "protein": item.get("calculated_protein") or item.get("protein"),
-                            "carbs": item.get("calculated_carbs") or item.get("carbs"),
-                            "fats": item.get("calculated_fats") or item.get("fats"),
-                            "serving_description": item.get("serving_description"),
-                            "serving_size": item.get("quantity") or item.get("serving_size") or 1,
+                            "calories": cal,
+                            "protein": pro,
+                            "carbs": carb,
+                            "fats": fat,
+                            "serving_description": last_serving_description,
+                            "serving_size": last_quantity,
                             "serving_unit": item.get("serving_unit") or item.get("selected_serving", {}).get("serving_description") or "serving",
                             "source": item.get("source", "history"),
-                            "is_custom": item.get("is_custom", False)
+                            "is_custom": item.get("is_custom", False),
+                            # B1 — the amount actually logged last time, plus
+                            # per-serving macros so the client can scale to a
+                            # different quantity without re-fetching the food.
+                            "last_serving_id": last_serving_id,
+                            "last_serving_description": last_serving_description,
+                            "last_quantity": last_quantity,
+                            "last_unit": last_unit,
+                            "calories_per_serving": (cal / last_quantity) if (cal is not None and last_quantity) else cal,
+                            "protein_per_serving": (pro / last_quantity) if (pro is not None and last_quantity) else pro,
+                            "carbs_per_serving": (carb / last_quantity) if (carb is not None and last_quantity) else carb,
+                            "fats_per_serving": (fat / last_quantity) if (fat is not None and last_quantity) else fat,
                         }
                     else:
                         # food_items fallback: name/quantity/unit only.
+                        last_quantity = item.get("quantity") or 1
+                        last_unit = item.get("unit") or "serving"
+                        cal = row.calories if single_item else None
+                        pro = row.protein if single_item else None
+                        carb = row.carbs if single_item else None
+                        fat = row.fats if single_item else None
                         food_details[food_key] = {
                             "food_id": item.get("food_id"),
                             "id": item.get("food_id"),
                             "name": food_name,
-                            "calories": row.calories if single_item else None,
-                            "protein": row.protein if single_item else None,
-                            "carbs": row.carbs if single_item else None,
-                            "fats": row.fats if single_item else None,
+                            "calories": cal,
+                            "protein": pro,
+                            "carbs": carb,
+                            "fats": fat,
                             "serving_description": item.get("unit"),
-                            "serving_size": item.get("quantity") or 1,
-                            "serving_unit": item.get("unit") or "serving",
+                            "serving_size": last_quantity,
+                            "serving_unit": last_unit,
                             "source": "history",
-                            "is_custom": False
+                            "is_custom": False,
+                            "last_serving_id": None,
+                            "last_serving_description": item.get("unit"),
+                            "last_quantity": last_quantity,
+                            "last_unit": last_unit,
+                            "calories_per_serving": (cal / last_quantity) if (cal is not None and last_quantity) else cal,
+                            "protein_per_serving": (pro / last_quantity) if (pro is not None and last_quantity) else pro,
+                            "carbs_per_serving": (carb / last_quantity) if (carb is not None and last_quantity) else carb,
+                            "fats_per_serving": (fat / last_quantity) if (fat is not None and last_quantity) else fat,
                         }
                     food_last_logged[food_key] = logged_at
+                    food_last_meal_type[food_key] = row.meal_type
 
-        # Sort by frequency (descending), then by recency
+        # B5 — score each food: frequency + recency decay + a meal-type bonus
+        # (only when the caller says what meal it's logging for) + a
+        # time-of-day bonus + a training-day-agreement bonus. Weighted so a
+        # strong meal-type match can outrank raw frequency (a food eaten
+        # constantly at dinner shouldn't top the breakfast list), but a
+        # single frequency point never swings the order on its own.
+        now = naive_local_now()
+        current_bucket = _time_bucket(now.hour)
+        requested_meal = (meal_type or "").strip().lower() or None
+        if requested_meal not in VALID_MEAL_TYPES:
+            requested_meal = None
+
+        # Training dates in-window, from workout_session presence — a cheap,
+        # deliberately approximate signal (it misses "scheduled but not yet
+        # logged" days that training_day.is_training_day also checks); good
+        # enough for a ranking nudge, not something else depends on it.
+        training_dates = set()
+        try:
+            train_rows = db.execute(text("""
+                SELECT DISTINCT session_date FROM workout_session
+                WHERE user_id = :uid AND session_date >= :since
+            """), {"uid": user_id, "since": thirty_days_ago.date()}).fetchall()
+            training_dates = {r.session_date for r in train_rows}
+        except Exception:
+            pass
+        today_is_training = now.date() in training_dates
+
+        def _score_and_reason(food_key: str):
+            freq = food_frequency[food_key]
+            last = food_last_logged.get(food_key)
+            days_since = (now - last).days if last else 999
+            recency = max(0.0, 1 - days_since / 14.0)  # decays to 0 over two weeks
+
+            meal_counter = food_meal_types.get(food_key) or Counter()
+            total_occurrences = sum(meal_counter.values()) or 1
+            meal_bonus = 0.0
+            is_usual_meal = False
+            if requested_meal and meal_counter.get(requested_meal):
+                ratio = meal_counter[requested_meal] / total_occurrences
+                meal_bonus = ratio
+                is_usual_meal = ratio >= 0.5
+
+            hour_counter = food_hour_buckets.get(food_key) or Counter()
+            hour_bonus = 0.0
+            if hour_counter:
+                hour_bonus = hour_counter.get(current_bucket, 0) / sum(hour_counter.values())
+
+            dates = food_dates.get(food_key) or set()
+            training_bonus = 0.0
+            if dates:
+                on_training_ratio = sum(1 for d in dates if d in training_dates) / len(dates)
+                # Reward agreement between the food's usual day-type and today's.
+                training_bonus = on_training_ratio if today_is_training else (1 - on_training_ratio)
+
+            score = (freq * 1.0) + (recency * 3.0) + (meal_bonus * 4.0) + (hour_bonus * 2.0) + (training_bonus * 1.0)
+
+            if is_usual_meal:
+                reason = f"Usual {requested_meal}"
+            elif days_since == 0:
+                reason = "Logged today"
+            elif days_since == 1:
+                reason = "Logged yesterday"
+            elif freq >= 3:
+                reason = f"Used {freq}×"
+            else:
+                reason = "Recent"
+            return score, reason
+
+        scored = {k: _score_and_reason(k) for k in food_frequency.keys()}
         sorted_foods = sorted(
             food_frequency.keys(),
-            key=lambda k: (food_frequency[k], food_last_logged.get(k, datetime.min)),
-            reverse=True
+            key=lambda k: scored[k][0],
+            reverse=True,
         )[:limit]
 
-        # Build response with frequency info
+        # Build response with frequency + ranking info
         recent_foods = []
         for food_key in sorted_foods:
             details = food_details[food_key]
             details["count"] = food_frequency[food_key]  # How many times logged in last 30 days
+            details["times_30d"] = food_frequency[food_key]  # B1 alias — explicit name in the plan
             details["last_logged"] = food_last_logged.get(food_key).isoformat() if food_last_logged.get(food_key) else None
+            details["last_logged_at"] = details["last_logged"]
+            details["last_meal_type"] = food_last_meal_type.get(food_key)
+            details["score"] = round(scored[food_key][0], 3)
+            details["reason"] = scored[food_key][1]
             recent_foods.append(details)
 
         return {
@@ -1244,6 +1384,7 @@ async def get_yesterday_foods(
                     for item in items_to_use:
                         if item.get("name"):
                             # Normalize the format for consistent frontend usage
+                            quantity = item.get("quantity") or item.get("serving_size") or 1
                             normalized_food = {
                                 "id": item.get("id") or item.get("food_id"),
                                 "food_id": item.get("food_id"),
@@ -1252,12 +1393,17 @@ async def get_yesterday_foods(
                                 "protein": item.get("calculated_protein") or item.get("protein"),
                                 "carbs": item.get("calculated_carbs") or item.get("carbs"),
                                 "fats": item.get("calculated_fats") or item.get("fats"),
-                                "serving_size": item.get("quantity") or item.get("serving_size") or 1,
+                                "serving_size": quantity,
                                 "serving_unit": item.get("serving_unit") or item.get("selected_serving", {}).get("serving_description") or "serving",
                                 "serving_description": item.get("serving_description") or item.get("selected_serving", {}).get("serving_description"),
                                 "source": item.get("source", "history"),
                                 "is_custom": item.get("is_custom", False),
-                                "meal_type": meal_type
+                                "meal_type": meal_type,
+                                # B1 — surfaced so a tap on a Yesterday row can
+                                # preset the exact serving, not just its macros.
+                                "serving_id": item.get("serving_id"),
+                                "quantity": quantity,
+                                "unit": item.get("unit") or item.get("serving_unit") or "serving",
                             }
                             all_foods.append(normalized_food)
 
@@ -1271,6 +1417,491 @@ async def get_yesterday_foods(
     except Exception as e:
         logger.error(f"Error getting yesterday's foods: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get yesterday's foods: {str(e)}")
+
+
+@router.get("/food-log/last-used")
+async def get_last_used_servings(
+    food_ids: str,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """
+    B1 — the most recent serving David actually logged for each of `food_ids`
+    (comma-separated), from the last 30 days of `detailed_items`.
+
+    Lets a *searched* or barcode-scanned food open at the remembered amount
+    too, not just the ones already surfacing in Recent/Yesterday — search
+    results and barcode hits call this once they have candidate food_ids.
+
+    Returns {food_id: {serving_id, serving_description, quantity, unit,
+    meal_type, logged_at}}; a food_id with no recent log is simply absent.
+    """
+    from datetime import timedelta
+
+    ids = [f.strip() for f in (food_ids or "").split(",") if f.strip()]
+    if not ids:
+        return {}
+
+    try:
+        thirty_days_ago = naive_local_now() - timedelta(days=30)
+        rows = db.execute(text("""
+            SELECT detailed_items, meal_type, logged_at
+            FROM food_log
+            WHERE user_id = :user_id AND logged_at >= :since
+              AND detailed_items IS NOT NULL
+            ORDER BY logged_at DESC
+        """), {"user_id": user_id, "since": thirty_days_ago}).fetchall()
+
+        wanted = set(ids)
+        result: Dict[str, Any] = {}
+        for row in rows:
+            if len(result) == len(wanted):
+                break
+            detailed = row.detailed_items
+            if isinstance(detailed, str):
+                try:
+                    detailed = json.loads(detailed)
+                except Exception:
+                    detailed = None
+            for item in (detailed or []):
+                fid = item.get("food_id")
+                if fid not in wanted or fid in result:
+                    continue
+                result[fid] = {
+                    "serving_id": item.get("serving_id"),
+                    "serving_description": item.get("serving_description"),
+                    "quantity": item.get("quantity") or item.get("serving_size") or 1,
+                    "unit": item.get("unit") or item.get("serving_unit") or "serving",
+                    "meal_type": row.meal_type,
+                    "logged_at": row.logged_at.isoformat() if row.logged_at else None,
+                }
+        return result
+    except Exception as e:
+        logger.error(f"Error getting last-used servings: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get last-used servings: {str(e)}")
+
+
+def _parse_json_field(value):
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except (TypeError, ValueError):
+            return None
+    return value
+
+
+async def _build_diary_day(db: Session, user_id: str, target_date: date) -> Dict[str, Any]:
+    """One day's food log, shaped for the diary/composer (B2): targets,
+    totals, remaining, and items grouped by meal. Every item carries
+    `log_id` + `line_id` so a composer row can be edited or deleted in place
+    without re-deriving anything from the raw food_log row."""
+    day_start = datetime.combine(target_date, datetime.min.time())
+    day_end = day_start + timedelta(days=1)
+
+    rows = db.execute(text("""
+        SELECT id, meal_type, food_items, detailed_items, calories, protein, carbs, fats, logged_at
+        FROM food_log
+        WHERE user_id = :uid AND logged_at >= :start AND logged_at < :end
+        ORDER BY logged_at ASC
+    """), {"uid": user_id, "start": day_start, "end": day_end}).fetchall()
+
+    meals: Dict[str, List[Dict[str, Any]]] = {"breakfast": [], "lunch": [], "dinner": [], "snack": []}
+    for row in rows:
+        meal_type = row.meal_type if row.meal_type in meals else "snack"
+        detailed = _parse_json_field(row.detailed_items)
+        food_items = _parse_json_field(row.food_items)
+        items = detailed or food_items or []
+        single = len(items) == 1
+
+        for idx, item in enumerate(items):
+            if not isinstance(item, dict) or not item.get("name"):
+                continue
+            cal = item.get("calculated_calories") or item.get("calories")
+            pro = item.get("calculated_protein") or item.get("protein")
+            carb = item.get("calculated_carbs") or item.get("carbs")
+            fat = item.get("calculated_fats") or item.get("fats")
+            # A row with no per-item macros (legacy food_items, or a manual
+            # macro-only entry) attributes the whole row to its one item.
+            if cal is None and single:
+                cal, pro, carb, fat = row.calories, row.protein, row.carbs, row.fats
+            meals[meal_type].append({
+                "log_id": row.id,
+                "line_id": item.get("line_id") or f"{row.id}:{idx}",
+                "food_id": item.get("food_id"),
+                "name": item.get("name"),
+                "serving_id": item.get("serving_id"),
+                "serving_description": item.get("serving_description"),
+                "quantity": item.get("quantity") or item.get("serving_size") or 1,
+                "unit": item.get("unit") or item.get("serving_unit") or "serving",
+                "calories": cal, "protein": pro, "carbs": carb, "fats": fat,
+                "source": item.get("source", "history"),
+                "logged_at": row.logged_at.isoformat() if row.logged_at else None,
+            })
+
+    meal_summaries: Dict[str, Any] = {}
+    totals = {"calories": 0.0, "protein": 0.0, "carbs": 0.0, "fats": 0.0}
+    for meal_type, meal_items in meals.items():
+        subtotal = {"calories": 0.0, "protein": 0.0, "carbs": 0.0, "fats": 0.0}
+        for it in meal_items:
+            for field in subtotal:
+                v = it.get(field)
+                if v is not None:
+                    subtotal[field] += float(v)
+        for field in totals:
+            totals[field] += subtotal[field]
+        meal_summaries[meal_type] = {
+            "items": meal_items,
+            "subtotal": {k: round(v, 1) for k, v in subtotal.items()},
+        }
+
+    target_resp = await get_today_nutrition_target(on_date=target_date, user_id=user_id, db=db)
+    target = target_resp.get("target") or {}
+    targets = {
+        "calories": target.get("calories"), "protein": target.get("protein"),
+        "carbs": target.get("carbs"), "fats": target.get("fat"),
+    }
+    remaining = {
+        field: (targets[field] - totals[field]) if targets[field] is not None else None
+        for field in totals
+    }
+
+    return {
+        "date": target_date.isoformat(),
+        "is_training_day": target_resp.get("is_training_day"),
+        "targets": targets,
+        "totals": {k: round(v, 1) for k, v in totals.items()},
+        "remaining": {k: (round(v, 1) if v is not None else None) for k, v in remaining.items()},
+        "meals": meal_summaries,
+    }
+
+
+@router.get("/food-diary")
+async def get_food_diary(
+    date_param: Optional[str] = Query(None, alias="date", description="YYYY-MM-DD (ET); defaults to today"),
+    days: int = Query(1, ge=1, le=31, description="Return the trailing N days (week strip) instead of one"),
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """
+    B2 — one screen that reads like a diary: targets, totals, remaining, and
+    items grouped by meal, in the v2 canonical item shape (`log_id`/`line_id`
+    included so a row can be edited/deleted in place). `days>1` returns the
+    trailing week for the date-strip view.
+    """
+    try:
+        target_date = date.fromisoformat(date_param) if date_param else local_now().date()
+        if days > 1:
+            out = []
+            for i in range(days):
+                d = target_date - timedelta(days=(days - 1 - i))
+                out.append(await _build_diary_day(db, user_id, d))
+            return {"days": out}
+        return await _build_diary_day(db, user_id, target_date)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid date: {date_param!r}")
+    except Exception as e:
+        logger.error(f"Error building food diary: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to build food diary: {str(e)}")
+
+
+# ============================================================================
+# B4 — REPEAT, COPY-DAY, SAVED MEALS
+# ============================================================================
+
+class RepeatFoodLogRequest(BaseModel):
+    meal_type: Optional[str] = None
+    logged_at: Optional[str] = None
+    idempotency_key: Optional[str] = None
+
+
+@router.post("/food-log/{log_id}/repeat")
+async def repeat_food_log_entry(
+    log_id: str,
+    request: RepeatFoodLogRequest,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """B4 — re-log a past meal verbatim: copies detailed_items/food_items and
+    their totals into a new row, optionally at a different meal_type/time
+    ("Same lunch as yesterday?" is one tap of this)."""
+    try:
+        if request.idempotency_key:
+            existing = db.execute(text("""
+                SELECT id FROM food_log WHERE user_id = :uid AND idempotency_key = :key
+            """), {"uid": user_id, "key": request.idempotency_key}).fetchone()
+            if existing:
+                return {"success": True, "log_id": existing.id, "message": "Meal repeated"}
+
+        source = db.execute(text("""
+            SELECT meal_type, food_items, detailed_items, calories, protein, carbs, fats, notes
+            FROM food_log WHERE id = :id AND user_id = :uid
+        """), {"id": log_id, "uid": user_id}).fetchone()
+        if not source:
+            raise HTTPException(status_code=404, detail="Food log entry not found")
+
+        meal_type = (request.meal_type or source.meal_type or "snack").lower()
+        if meal_type not in VALID_MEAL_TYPES:
+            meal_type = "snack"
+        # A meal picked up from Yesterday defaults to now, not yesterday's
+        # wall-clock time (B6) — only an explicit logged_at overrides that.
+        logged_at_time = _coerce_logged_at(request.logged_at) or naive_local_now()
+        logged_at_aware = logged_at_time.replace(tzinfo=USER_TIMEZONE)
+
+        new_id = str(uuid.uuid4())
+        db.execute(text("""
+            INSERT INTO food_log (id, user_id, meal_type, food_items, detailed_items,
+                                  calories, protein, carbs, fats, notes, logged_at, idempotency_key)
+            VALUES (:id, :uid, :meal, CAST(:fi AS jsonb), CAST(:di AS jsonb),
+                    :cal, :pro, :carb, :fat, :notes, :logged_at, :key)
+            ON CONFLICT (user_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
+        """), {
+            "id": new_id, "uid": user_id, "meal": meal_type,
+            "fi": json.dumps(source.food_items) if source.food_items is not None else "[]",
+            "di": json.dumps(source.detailed_items) if source.detailed_items is not None else None,
+            "cal": source.calories, "pro": source.protein, "carb": source.carbs, "fat": source.fats,
+            "notes": source.notes, "logged_at": logged_at_time, "key": request.idempotency_key,
+        })
+        from app.services.world_state.writer import append_world_event
+        append_world_event(
+            db, user_id=str(user_id), kind="food.logged", source="fitness_api",
+            source_ref=f"food_log:{new_id}", aggregate_type="food_log", aggregate_id=new_id,
+            actor_type="user", actor_id=str(user_id), dedupe_key=f"food-logged:{new_id}",
+            occurred_at=logged_at_aware,
+            payload={"log_id": new_id, "meal_type": meal_type, "repeated_from": log_id,
+                     "calories": source.calories, "protein": source.protein,
+                     "carbs": source.carbs, "fats": source.fats},
+        )
+        db.commit()
+        return {"success": True, "log_id": new_id, "message": "Meal repeated"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to repeat food log entry: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class CopyDayRequest(BaseModel):
+    from_date: str
+    to_date: str
+    meals: Optional[List[str]] = None  # restrict to these meal_types; omitted = all
+
+
+@router.post("/food-log/copy-day")
+async def copy_food_log_day(
+    request: CopyDayRequest,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """B4 — copy a whole day's (or selected meals') food log rows onto
+    another date, preserving each row's time-of-day. One new row per source
+    row — same idempotent-create shape a single repeat uses."""
+    try:
+        from_d = date.fromisoformat(request.from_date)
+        to_d = date.fromisoformat(request.to_date)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="from_date/to_date must be YYYY-MM-DD")
+
+    try:
+        day_start = datetime.combine(from_d, datetime.min.time())
+        day_end = day_start + timedelta(days=1)
+        params: Dict[str, Any] = {"uid": user_id, "start": day_start, "end": day_end}
+        meal_filter = ""
+        if request.meals:
+            wanted = [m.lower() for m in request.meals if m.lower() in VALID_MEAL_TYPES]
+            if wanted:
+                meal_filter = "AND meal_type = ANY(:meals)"
+                params["meals"] = wanted
+
+        sources = db.execute(text(f"""
+            SELECT meal_type, food_items, detailed_items, calories, protein, carbs, fats, notes, logged_at
+            FROM food_log
+            WHERE user_id = :uid AND logged_at >= :start AND logged_at < :end
+            {meal_filter}
+            ORDER BY logged_at ASC
+        """), params).fetchall()
+
+        from app.services.world_state.writer import append_world_event
+        copied_ids = []
+        for row in sources:
+            # Same wall-clock time-of-day, moved onto the target date.
+            new_logged_at = (datetime.combine(to_d, row.logged_at.time())
+                             if row.logged_at else naive_local_now())
+            new_id = str(uuid.uuid4())
+            db.execute(text("""
+                INSERT INTO food_log (id, user_id, meal_type, food_items, detailed_items,
+                                      calories, protein, carbs, fats, notes, logged_at)
+                VALUES (:id, :uid, :meal, CAST(:fi AS jsonb), CAST(:di AS jsonb),
+                        :cal, :pro, :carb, :fat, :notes, :logged_at)
+            """), {
+                "id": new_id, "uid": user_id, "meal": row.meal_type,
+                "fi": json.dumps(row.food_items) if row.food_items is not None else "[]",
+                "di": json.dumps(row.detailed_items) if row.detailed_items is not None else None,
+                "cal": row.calories, "pro": row.protein, "carb": row.carbs, "fat": row.fats,
+                "notes": row.notes, "logged_at": new_logged_at,
+            })
+            append_world_event(
+                db, user_id=str(user_id), kind="food.logged", source="fitness_api",
+                source_ref=f"food_log:{new_id}", aggregate_type="food_log", aggregate_id=new_id,
+                actor_type="user", actor_id=str(user_id), dedupe_key=f"food-logged:{new_id}",
+                occurred_at=new_logged_at.replace(tzinfo=USER_TIMEZONE),
+                payload={"log_id": new_id, "meal_type": row.meal_type, "copied_from_date": request.from_date},
+            )
+            copied_ids.append(new_id)
+
+        db.commit()
+        return {"success": True, "copied": len(copied_ids), "log_ids": copied_ids}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to copy food log day: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class SavedMealCreate(BaseModel):
+    name: str
+    default_meal_type: Optional[str] = None
+    items: List[dict]  # v2 canonical detailed_items snapshot
+
+
+class SavedMealLogRequest(BaseModel):
+    meal_type: Optional[str] = None
+    logged_at: Optional[str] = None
+    idempotency_key: Optional[str] = None
+
+
+@router.post("/saved-meals")
+async def create_saved_meal(
+    request: SavedMealCreate,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """B4 — "Save as meal": snapshot a set of items under a name so it can be
+    logged again in one tap. The snapshot is frozen at save time — a later
+    edit or deletion of the underlying food doesn't change what this logs."""
+    if not request.items:
+        raise HTTPException(status_code=400, detail="A saved meal needs at least one item")
+    meal_type = (request.default_meal_type or "").lower() or None
+    if meal_type and meal_type not in VALID_MEAL_TYPES:
+        meal_type = None
+    meal_id = str(uuid.uuid4())
+    db.execute(text("""
+        INSERT INTO saved_meal (id, user_id, name, default_meal_type, items)
+        VALUES (:id, :uid, :name, :meal, CAST(:items AS jsonb))
+    """), {
+        "id": meal_id, "uid": user_id, "name": (request.name or "").strip() or "Saved meal",
+        "meal": meal_type, "items": json.dumps(request.items),
+    })
+    db.commit()
+    return {"success": True, "saved_meal_id": meal_id}
+
+
+@router.get("/saved-meals")
+async def list_saved_meals(
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    rows = db.execute(text("""
+        SELECT id, name, default_meal_type, items, created_at
+        FROM saved_meal
+        WHERE user_id = :uid AND archived_at IS NULL
+        ORDER BY created_at DESC
+    """), {"uid": user_id}).fetchall()
+    saved_meals = []
+    for r in rows:
+        totals = _sum_detailed_items(r.items) or {}
+        saved_meals.append({
+            "id": r.id, "name": r.name, "default_meal_type": r.default_meal_type,
+            "items": r.items, "calories": totals.get("calories"),
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        })
+    return {"saved_meals": saved_meals}
+
+
+@router.delete("/saved-meals/{saved_meal_id}")
+async def archive_saved_meal(
+    saved_meal_id: str,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    result = db.execute(text("""
+        UPDATE saved_meal SET archived_at = NOW(), updated_at = NOW()
+        WHERE id = :id AND user_id = :uid AND archived_at IS NULL
+        RETURNING id
+    """), {"id": saved_meal_id, "uid": user_id})
+    archived = result.fetchone()
+    db.commit()
+    if not archived:
+        raise HTTPException(status_code=404, detail="Saved meal not found")
+    return {"success": True}
+
+
+@router.post("/saved-meals/{saved_meal_id}/log")
+async def log_saved_meal(
+    saved_meal_id: str,
+    request: SavedMealLogRequest,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db),
+):
+    """B4 — log a saved meal's item snapshot as a new food_log row."""
+    try:
+        if request.idempotency_key:
+            existing = db.execute(text("""
+                SELECT id FROM food_log WHERE user_id = :uid AND idempotency_key = :key
+            """), {"uid": user_id, "key": request.idempotency_key}).fetchone()
+            if existing:
+                return {"success": True, "log_id": existing.id, "message": "Meal logged"}
+
+        meal = db.execute(text("""
+            SELECT name, default_meal_type, items FROM saved_meal
+            WHERE id = :id AND user_id = :uid AND archived_at IS NULL
+        """), {"id": saved_meal_id, "uid": user_id}).fetchone()
+        if not meal:
+            raise HTTPException(status_code=404, detail="Saved meal not found")
+
+        items = meal.items or []
+        totals = _sum_detailed_items(items) or {"calories": None, "protein": None, "carbs": None, "fats": None}
+        meal_type = (request.meal_type or meal.default_meal_type or "snack").lower()
+        if meal_type not in VALID_MEAL_TYPES:
+            meal_type = "snack"
+        logged_at_time = _coerce_logged_at(request.logged_at) or naive_local_now()
+        logged_at_aware = logged_at_time.replace(tzinfo=USER_TIMEZONE)
+
+        food_items = [
+            {"name": i.get("name"), "quantity": i.get("quantity") or 1, "unit": i.get("unit") or "serving"}
+            for i in items if isinstance(i, dict)
+        ]
+        log_id = str(uuid.uuid4())
+        db.execute(text("""
+            INSERT INTO food_log (id, user_id, meal_type, food_items, detailed_items,
+                                  calories, protein, carbs, fats, notes, logged_at, idempotency_key)
+            VALUES (:id, :uid, :meal, CAST(:fi AS jsonb), CAST(:di AS jsonb),
+                    :cal, :pro, :carb, :fat, :notes, :logged_at, :key)
+            ON CONFLICT (user_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
+        """), {
+            "id": log_id, "uid": user_id, "meal": meal_type,
+            "fi": json.dumps(food_items), "di": json.dumps(items),
+            "cal": totals["calories"], "pro": totals["protein"], "carb": totals["carbs"], "fat": totals["fats"],
+            "notes": f"From saved meal: {meal.name}", "logged_at": logged_at_time, "key": request.idempotency_key,
+        })
+        from app.services.world_state.writer import append_world_event
+        append_world_event(
+            db, user_id=str(user_id), kind="food.logged", source="fitness_api",
+            source_ref=f"food_log:{log_id}", aggregate_type="food_log", aggregate_id=log_id,
+            actor_type="user", actor_id=str(user_id), dedupe_key=f"food-logged:{log_id}",
+            occurred_at=logged_at_aware,
+            payload={"log_id": log_id, "meal_type": meal_type, "saved_meal_id": saved_meal_id,
+                     "calories": totals["calories"]},
+        )
+        db.commit()
+        return {"success": True, "log_id": log_id, "message": "Meal logged"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to log saved meal: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ============================================================================
@@ -1463,6 +2094,8 @@ async def create_exercise_variant(
 async def list_workouts(
     status: str = "all",
     limit: int = 200,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
     user_id: str = Depends(get_current_user_id),
     db: Session = Depends(get_db)
 ):
@@ -1470,12 +2103,21 @@ async def list_workouts(
     List workout sessions with their sets grouped together
 
     Returns workout sessions with all their exercise sets properly grouped.
+
+    `limit` caps the number of WORKOUTS returned, not joined set rows — a
+    30-set AM/PM pair used to burn most of a 200-row LIMIT applied to the join
+    itself, silently truncating history for anyone with a busy day. `start_date`
+    /`end_date` (ET, inclusive, matched against workout.created_at) were
+    accepted and ignored before this (A6) — the phone's "today" picker relied
+    on them actually filtering.
     """
     from sqlalchemy import text
     from collections import defaultdict
 
     try:
-        # Query workouts with their sets
+        # Select the target workout ids first (limited/filtered here), then
+        # join their sets — so LIMIT bounds workouts, never truncates a
+        # workout's own sets mid-list.
         query = text("""
             SELECT
                 w.id as workout_id,
@@ -1496,14 +2138,25 @@ async def list_workouts(
                 wl.session_date,
                 wl.session_time,
                 wl.created_at as set_created_at
-            FROM workout w
+            FROM (
+                SELECT id, title, phase, week, day_of_week, duration_min, status, created_at
+                FROM workout
+                WHERE user_id = :user_id
+                  AND (CAST(:start_date AS date) IS NULL
+                       OR (created_at AT TIME ZONE 'America/New_York')::date >= CAST(:start_date AS date))
+                  AND (CAST(:end_date AS date) IS NULL
+                       OR (created_at AT TIME ZONE 'America/New_York')::date <= CAST(:end_date AS date))
+                ORDER BY created_at DESC
+                LIMIT :limit
+            ) w
             LEFT JOIN workout_log wl ON w.id = wl.workout_id
-            WHERE w.user_id = :user_id
             ORDER BY w.created_at DESC, wl.set_index ASC
-            LIMIT :limit
         """)
 
-        result = db.execute(query, {"user_id": user_id, "limit": limit})
+        result = db.execute(query, {
+            "user_id": user_id, "limit": limit,
+            "start_date": start_date, "end_date": end_date,
+        })
 
         # Group sets by workout_id
         workouts_dict = {}
@@ -3926,51 +4579,74 @@ async def create_template(template: TemplateCreate, user_id: str = Depends(get_c
 
 @router.get("/templates/today")
 async def get_today_template(user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
-    """Get template scheduled for today - prioritizes active phase templates"""
+    """Get template(s) scheduled for today - prioritizes active phase templates.
+
+    A6 — each template carries `session_status` (null | 'active' | 'completed'
+    | 'abandoned') for today, resolved server-side, so the phone can pick the
+    next OUTSTANDING session by id rather than matching template names
+    against titles (the "AM re-offered after it's done" bug).
+    """
     try:
         import json
-        from datetime import datetime
+        from app.services.training_day import templates_for_day
 
-        day_of_week = naive_local_now().strftime("%A").lower()
+        target_date = local_now().date()
+        day_of_week = target_date.strftime("%A").lower()
 
         # Resolve the dated phase of the approved active program.
-        active_phase = reconcile_active_program_phase_statuses(
-            db, user_id, local_now().date()
-        )
+        active_phase = reconcile_active_program_phase_statuses(db, user_id, target_date)
         db.commit()
-        active_phase_id = active_phase["id"] if active_phase else None
 
         # Ordered by the plan's own sequence: on a two-a-day the AM strength
         # session must come back before the PM hypertrophy one, because clients
-        # render the first entry as the hero card.
-        templates = db.execute(text("""
-            SELECT id, phase_id, name, scheduled_days, exercises, notes, order_in_phase
+        # render the first entry as the hero card. Same code path the brief and
+        # chat use (training_day.templates_for_day), so "today's session" can
+        # never disagree between the phone and Sara.
+        matching_templates = (
+            templates_for_day(db, user_id, target_date, phase=active_phase) if active_phase else []
+        )
+
+        # Standalone templates (no phase_id) are a legacy fallback that
+        # templates_for_day doesn't cover — it's phase-scoped by design.
+        standalone_rows = db.execute(text("""
+            SELECT id, name, scheduled_days, exercises, notes, order_in_phase
             FROM fitness_template
-            WHERE user_id = :user_id
+            WHERE user_id = :uid AND phase_id IS NULL
             ORDER BY order_in_phase ASC NULLS LAST, name ASC
-        """), {"user_id": user_id}).fetchall()
+        """), {"uid": user_id}).fetchall()
+        for row in standalone_rows:
+            d = dict(row._mapping)
+            raw_days = d.get("scheduled_days") or "[]"
+            days = [x.lower() for x in (json.loads(raw_days) if isinstance(raw_days, str) else raw_days)]
+            if day_of_week not in days:
+                continue
+            d["scheduled_days"] = days
+            raw_ex = d.get("exercises") or "[]"
+            d["exercises"] = json.loads(raw_ex) if isinstance(raw_ex, str) else raw_ex
+            d["phase_id"] = None
+            matching_templates.append(d)
 
-        # Find templates that have today in their scheduled_days
-        active_phase_templates = []
-        other_templates = []
-
-        for row in templates:
-            template_dict = dict(row._mapping)
-            scheduled_days = json.loads(template_dict.get("scheduled_days", "[]"))
-            if day_of_week in [d.lower() for d in scheduled_days]:
-                template_dict["scheduled_days"] = scheduled_days
-                template_dict["exercises"] = json.loads(template_dict.get("exercises", "[]"))
-
-                # Prioritize templates from active phase
-                if active_phase_id and template_dict.get("phase_id") == active_phase_id:
-                    active_phase_templates.append(template_dict)
-                elif not template_dict.get("phase_id"):
-                    # Templates not linked to any phase (standalone)
-                    other_templates.append(template_dict)
-
-        # Return active phase templates first, then standalone templates
-        # Don't include templates from inactive phases
-        matching_templates = active_phase_templates + other_templates
+        # session_status per template, resolved from today's (ET) sessions —
+        # the most recent one wins if a template was somehow started twice.
+        template_ids = [t["id"] for t in matching_templates]
+        status_by_template: Dict[str, Dict[str, Any]] = {}
+        if template_ids:
+            sess_rows = db.execute(text("""
+                SELECT template_id, status, completed_at
+                FROM active_workout_session
+                WHERE user_id = :uid AND template_id = ANY(:tids)
+                  AND DATE(started_at AT TIME ZONE 'America/New_York') = :d
+                ORDER BY started_at DESC
+            """), {"uid": user_id, "tids": template_ids, "d": target_date}).fetchall()
+            for r in sess_rows:
+                status_by_template.setdefault(r.template_id, {
+                    "session_status": r.status,
+                    "completed_at": r.completed_at.isoformat() if r.completed_at else None,
+                })
+        for t in matching_templates:
+            info = status_by_template.get(t["id"])
+            t["session_status"] = info["session_status"] if info else None
+            t["completed_at"] = info["completed_at"] if info else None
 
         return {
             "templates": matching_templates,
@@ -4104,8 +4780,19 @@ def _exercise_row_to_json(row_mapping: dict) -> dict:
 def _sync_template_exercises_json(db: Session, template_id: str) -> None:
     """Rebuild fitness_template.exercises JSON from the relational template_exercise rows.
     Called after every create/update/delete/reorder of a template_exercise so the JSON
-    (which the live workout view reads from) stays in sync with the relational data."""
+    (which the live workout view reads from) stays in sync with the relational data.
+
+    The relational `template_exercise` table has no `set_plan` column, so a
+    naive rebuild would silently strip the top/backoff loading table off any
+    plan-driven AM lift the first time its template was touched through this
+    route. Carry it forward from the current JSON, matched by exercise name."""
     import json as _json
+    existing_row = db.execute(text(
+        "SELECT exercises FROM fitness_template WHERE id = :tid"), {"tid": template_id}).fetchone()
+    existing = existing_row.exercises if existing_row else None
+    existing = _json.loads(existing) if isinstance(existing, str) else (existing or [])
+    set_plans_by_name = {e.get("name"): e.get("set_plan") for e in existing if e.get("set_plan")}
+
     rows = db.execute(text("""
         SELECT exercise_name, order_index, target_sets, rep_range_low, rep_range_high,
                target_rpe, rest_seconds, progression_rule, notes,
@@ -4115,6 +4802,10 @@ def _sync_template_exercises_json(db: Session, template_id: str) -> None:
         ORDER BY order_index ASC, created_at ASC
     """), {"tid": template_id}).fetchall()
     exercises_json = [_exercise_row_to_json(dict(r._mapping)) for r in rows]
+    for ex in exercises_json:
+        carried = set_plans_by_name.get(ex.get("name"))
+        if carried:
+            ex["set_plan"] = carried
     db.execute(text("""
         UPDATE fitness_template
         SET exercises = :ex, updated_at = CURRENT_TIMESTAMP
@@ -5684,6 +6375,7 @@ class LogSetRequest(BaseModel):
     rpe: Optional[int] = None
     rpe_feeling: Optional[str] = None  # "light", "moderate", "hard", "failed"
     notes: Optional[str] = None
+    set_kind: Optional[str] = None  # "working" (default) | "warmup" — A4 warm-up chip
 
 
 class RestTimerRequest(BaseModel):
@@ -5774,6 +6466,7 @@ async def log_workout_set(
             rpe=request.rpe,
             rpe_feeling=request.rpe_feeling,
             notes=request.notes,
+            set_kind=request.set_kind,
             db=db
         )
         return result
@@ -5841,6 +6534,12 @@ class SetVariantRequest(BaseModel):
     variant: Optional[str] = None
 
 
+class SetPlanWeekRequest(BaseModel):
+    """Request body for the 'use week N anyway' override on a held plan-driven exercise"""
+    exercise_index: int
+    week: int
+
+
 @router.post("/workout-session/set-variant")
 async def set_workout_variant(
     request: SetVariantRequest,
@@ -5866,6 +6565,34 @@ async def set_workout_variant(
         raise
     except Exception as e:
         logger.error(f"Failed to set exercise variant: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/workout-session/set-plan-week")
+async def set_workout_plan_week(
+    request: SetPlanWeekRequest,
+    user_id: str = Depends(get_current_user_id),
+    db: Session = Depends(get_db)
+):
+    """
+    Override which program week a plan-driven AM exercise resolves to.
+
+    Used by the "Use week N anyway" tap when the advance rule held the
+    exercise at a prior week's loads (A2/A5) — David can override it in-session
+    rather than being stuck with the held numbers for the whole workout.
+    """
+    try:
+        result = await workout_session_service.set_plan_week(
+            user_id=user_id,
+            exercise_index=request.exercise_index,
+            week=request.week,
+            db=db,
+        )
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to set plan week: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

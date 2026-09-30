@@ -638,12 +638,13 @@ public final class WorkoutManager: NSObject, ObservableObject {
         transmit(command)
     }
 
-    public func logSet(weight: Double, reps: Int, effort: String?) {
+    public func logSet(weight: Double, reps: Int, effort: String?, setKind: String? = nil) {
         var payload: [String: JSONValue] = [
             "weight": .number(weight),
             "reps": .number(Double(reps)),
         ]
         if let effort { payload["effort"] = .string(effort) }
+        if let setKind { payload["set_kind"] = .string(setKind) }
         if let idx = projection?.cursor.exerciseIndex { payload["exercise_index"] = .number(Double(idx)) }
         issue(.logSet, payload: payload)
     }

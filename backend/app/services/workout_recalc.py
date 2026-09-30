@@ -161,6 +161,17 @@ def drop_counts(db: Session, session_id: str) -> Dict[str, int]:
     return {r.exercise_id: int(r.c) for r in rows}
 
 
+def warmup_counts(db: Session, session_id: str) -> Dict[str, int]:
+    """Live warm-up sets per exercise name — feeds `next_set` (A3): warm-ups
+    are consumed first, then working sets, from a plan's resolved set list."""
+    rows = db.execute(text(f"""
+        SELECT exercise_id, COUNT(*) AS c FROM workout_log
+        WHERE active_session_id = :sid AND {LIVE_SET_PREDICATE} AND set_kind = 'warmup'
+        GROUP BY exercise_id
+    """), {"sid": session_id}).fetchall()
+    return {r.exercise_id: int(r.c) for r in rows}
+
+
 def completed_for(exercises: List[Dict[str, Any]], counts: Dict[str, int], idx: int) -> int:
     """Completed working sets for one exercise, capped at its effective target."""
     if idx < 0 or idx >= len(exercises):

@@ -661,6 +661,30 @@ class ApiClient {
     }
   }
 
+  // B1 — the most recent serving logged for each food id, so a fresh search
+  // result / barcode hit can also open at the remembered amount, not just
+  // the ones already surfacing in Recent/Yesterday.
+  async getLastUsedServings(foodIds: string[]): Promise<Record<string, {
+    serving_id: string | null
+    serving_description: string | null
+    quantity: number
+    unit: string
+    meal_type: string | null
+    logged_at: string | null
+  }>> {
+    const ids = foodIds.filter(Boolean)
+    if (ids.length === 0) return {}
+    try {
+      const response = await this.client.get(
+        `/api/fitness/food-log/last-used?food_ids=${encodeURIComponent(ids.join(','))}`
+      )
+      return response.data
+    } catch (error) {
+      console.error('Failed to fetch last-used servings:', error)
+      return {}
+    }
+  }
+
   async createFood(data: any): Promise<any> {
     const response = await this.client.post('/api/fitness/foods', data)
     return response.data

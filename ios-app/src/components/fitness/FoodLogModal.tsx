@@ -75,6 +75,34 @@ const COMMON_UNITS = [
 ];
 
 // Parse serving description like "292g", "1 cup (185g)", "100 ml" into { amount, unit }
+// B6 — the quantity field is free text ("0.5", "1/2", "1 1/2"), not just a
+// stepper's output, so it has to parse fractions as well as decimals.
+// Returns NaN (same contract as parseFloat) when nothing usable is there.
+export function parseQuantityInput(raw: string): number {
+  const trimmed = (raw || '').trim();
+  if (!trimmed) return NaN;
+
+  // "1 1/2" — a whole number followed by a fraction.
+  const mixed = trimmed.match(/^(\d+)\s+(\d+)\/(\d+)$/);
+  if (mixed) {
+    const [, whole, num, den] = mixed;
+    const denominator = parseFloat(den);
+    if (denominator === 0) return NaN;
+    return parseFloat(whole) + parseFloat(num) / denominator;
+  }
+
+  // "1/2" — a bare fraction.
+  const fraction = trimmed.match(/^(\d+)\/(\d+)$/);
+  if (fraction) {
+    const [, num, den] = fraction;
+    const denominator = parseFloat(den);
+    if (denominator === 0) return NaN;
+    return parseFloat(num) / denominator;
+  }
+
+  return parseFloat(trimmed);
+}
+
 function parseServingDescription(description: string): { amount: number; unit: string } | null {
   if (!description) return null;
 
@@ -180,6 +208,9 @@ export default function FoodLogModal({
   // Recent foods state
   const [recentFoods, setRecentFoods] = useState<any[]>([]);
   const [yesterdayFoods, setYesterdayFoods] = useState<any[]>([]);
+  // B4 — grouped-by-meal view of yesterday, for "Repeat yesterday's lunch".
+  const [yesterdayMeals, setYesterdayMeals] = useState<Record<string, any[]>>({});
+  const [repeatingMealLogId, setRepeatingMealLogId] = useState<string | null>(null);
   const [activeQuickTab, setActiveQuickTab] = useState<'recent' | 'yesterday'>('recent');
   const [loadingQuickFoods, setLoadingQuickFoods] = useState(true);
 
@@ -204,16 +235,57 @@ export default function FoodLogModal({
     setLoadingQuickFoods(true);
     try {
       const [recent, yesterday] = await Promise.all([
-        fitnessService.getRecentFoods(20),
+        fitnessService.getRecentFoods(20, mealType),
         fitnessService.getYesterdayFoods(),
       ]);
       setRecentFoods(recent);
       setYesterdayFoods(yesterday.all_foods || []);
+      setYesterdayMeals(yesterday.meals || {});
     } catch (error) {
       console.error('Failed to load quick foods:', error);
     } finally {
       setLoadingQuickFoods(false);
     }
+  };
+
+  // B4 — "Same lunch as yesterday?" one-tap repeat of a whole meal group.
+  const handleRepeatYesterdayMeal = async (entry: { log_id: string; meal_type: string }) => {
+    setRepeatingMealLogId(entry.log_id);
+    try {
+      await fitnessService.repeatFoodLog(entry.log_id, {
+        meal_type: mealType,
+        idempotency_key: `repeat-${entry.log_id}-${Date.now()}`,
+      });
+      onComplete();
+    } catch (error) {
+      console.error('Failed to repeat meal:', error);
+      Alert.alert('Error', 'Failed to repeat that meal. Please try again.');
+    } finally {
+      setRepeatingMealLogId(null);
+    }
+  };
+
+  // B4 — "Save as meal": snapshot a logged meal's items under a name so it
+  // can be logged again in one tap from a fresh day, not just "yesterday".
+  const handleSaveYesterdayMealAs = (entry: { meal_type: string; detailed_items?: any[]; food_items?: any[] }) => {
+    const items = entry.detailed_items?.length ? entry.detailed_items : entry.food_items || [];
+    if (items.length === 0) return;
+    Alert.prompt(
+      'Save as Meal',
+      'Name this meal so you can log it again in one tap.',
+      async (name?: string) => {
+        if (!name || !name.trim()) return;
+        try {
+          await fitnessService.createSavedMeal(name.trim(), items, entry.meal_type);
+          Alert.alert('Saved', `"${name.trim()}" is ready to log anytime.`);
+        } catch (error) {
+          console.error('Failed to save meal:', error);
+          Alert.alert('Error', 'Failed to save that meal. Please try again.');
+        }
+      },
+      'plain-text',
+      entry.meal_type ? `My ${entry.meal_type}` : 'My meal',
+    );
   };
 
   const handleSelectQuickFood = (food: any) => {
@@ -231,7 +303,15 @@ export default function FoodLogModal({
       is_custom: food.is_custom || false,
       source: food.source || 'recent',
     };
-    handleSelectFood(foodItem);
+    // B1 — Recent (`last_*`) and Yesterday (bare field names) surface the
+    // remembered serving under different keys; normalize to one preset shape.
+    handleSelectFood(foodItem, {
+      serving_id: food.last_serving_id ?? food.serving_id ?? null,
+      serving_description: food.last_serving_description ?? food.serving_description ?? null,
+      quantity: food.last_quantity ?? food.quantity ?? food.serving_size ?? null,
+      unit: food.last_unit ?? food.unit ?? food.serving_unit ?? null,
+      meal_type: food.last_meal_type ?? food.meal_type ?? null,
+    });
   };
 
   useEffect(() => {
@@ -376,6 +456,24 @@ export default function FoodLogModal({
     });
   };
 
+  // B1 — find the serving a preset/edit target actually used: by serving_id
+  // first (stable even across a rename), then by its description, then by
+  // the plain unit string, else the food's default (index 0, or -1 when
+  // there are no servings at all to match against).
+  const matchServingIndex = (
+    servings: FoodServing[],
+    target: { serving_id?: string | null; serving_description?: string | null; unit?: string | null },
+  ): number => {
+    if (servings.length === 0) return -1;
+    let idx = -1;
+    if (target.serving_id) idx = servings.findIndex(s => s.serving_id === target.serving_id);
+    if (idx < 0 && target.serving_description) {
+      idx = servings.findIndex(s => s.serving_description === target.serving_description);
+    }
+    if (idx < 0 && target.unit) idx = servings.findIndex(s => s.serving_description === target.unit);
+    return idx >= 0 ? idx : 0;
+  };
+
   // Rehydrate an edit target: fetch the food's servings (rebuilding the same
   // synthetic g/oz/ml options handleSelectFood would offer), re-select the
   // serving the entry was originally logged with, and recompute macros from it.
@@ -409,11 +507,9 @@ export default function FoodLogModal({
         const synthetic = buildSyntheticWeightServings(realServings);
         const allServings = [...realServings, ...synthetic];
 
-        let matchIdx = -1;
-        if (item.serving_id) matchIdx = allServings.findIndex(s => s.serving_id === item.serving_id);
-        if (matchIdx < 0 && item.serving_description) matchIdx = allServings.findIndex(s => s.serving_description === item.serving_description);
-        if (matchIdx < 0 && item.unit) matchIdx = allServings.findIndex(s => s.serving_description === item.unit);
-        if (matchIdx < 0 && allServings.length > 0) matchIdx = 0;
+        const matchIdx = matchServingIndex(allServings, {
+          serving_id: item.serving_id, serving_description: item.serving_description, unit: item.unit,
+        });
 
         if (matchIdx >= 0) {
           setAvailableServings(allServings);
@@ -448,14 +544,46 @@ export default function FoodLogModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, editEntry]);
 
-  const handleSelectFood = async (food: FoodItem) => {
+  // B1 — a preset carries the amount David actually logged last time
+  // (from Recent/Yesterday, or fetched here for a fresh search/barcode hit),
+  // so the modal opens at 6 oz instead of resetting to servings[0] @ qty 1.
+  type ServingPreset = {
+    serving_id?: string | null;
+    serving_description?: string | null;
+    quantity?: number | null;
+    unit?: string | null;
+    meal_type?: string | null;
+  };
+
+  const handleSelectFood = async (food: FoodItem, preset?: ServingPreset) => {
     setSelectedFood(food);
     setSearchQuery(food.name);
     setSearchResults([]);
     setBarcodeError(null);
-    setQuantity('1');
     setAvailableServings([]);
     setSelectedServingIdx(0);
+
+    // A search result or barcode hit arrives with no preset of its own — ask
+    // once whether this food has a remembered serving, so it opens the same
+    // way a Recent/Yesterday tap would.
+    let effectivePreset = preset;
+    if (!effectivePreset && food.id) {
+      const lastUsed = await fitnessService.getLastUsedServings([food.id]);
+      const found = lastUsed[food.id];
+      if (found) {
+        effectivePreset = {
+          serving_id: found.serving_id, serving_description: found.serving_description,
+          quantity: found.quantity, unit: found.unit,
+        };
+      }
+    }
+
+    setQuantity(effectivePreset?.quantity ? String(effectivePreset.quantity) : '1');
+    // Only steer the meal tab when the modal wasn't already scoped to one —
+    // `initialMealType` defaults to 'snack', so anything else was explicit.
+    if (effectivePreset?.meal_type && initialMealType === 'snack') {
+      setMealType(effectivePreset.meal_type);
+    }
 
     // Prefer the food's real serving options (each carries its own macros).
     if (food.id) {
@@ -463,8 +591,12 @@ export default function FoodLogModal({
       const servings = (detail?.servings || []).filter(s => s && s.serving_description);
       if (servings.length > 0) {
         const synthetic = buildSyntheticWeightServings(servings);
-        setAvailableServings([...servings, ...synthetic]);
-        applyServing(servings[0], 0);
+        const allServings = [...servings, ...synthetic];
+        const idx = effectivePreset
+          ? matchServingIndex(allServings, effectivePreset)
+          : 0;
+        setAvailableServings(allServings);
+        applyServing(allServings[idx], idx);
         return;
       }
     }
@@ -482,7 +614,7 @@ export default function FoodLogModal({
         perUnit: parsed.unit,
       });
     } else {
-      setUnit(food.serving_unit || 'serving');
+      setUnit(effectivePreset?.unit || food.serving_unit || 'serving');
       setBaseNutrition({
         calories: food.calories || 0,
         protein: food.protein || 0,
@@ -551,7 +683,7 @@ export default function FoodLogModal({
       return null;
     }
 
-    const qty = parseFloat(quantity) || 0;
+    const qty = parseQuantityInput(quantity) || 0;
     if (qty <= 0) {
       return { calories: 0, protein: 0, carbs: 0, fats: 0 };
     }
@@ -566,26 +698,19 @@ export default function FoodLogModal({
     const targetIsVolume = VOLUME_UNITS.includes(targetUnit);
 
     let multiplier = qty;
-    let conversionType = 'none (using qty as multiplier)';
 
     if (sourceIsWeight && targetIsWeight) {
       // Both are weight units - convert
       const targetInGrams = qty * (UNIT_CONVERSIONS[targetUnit] || 1);
       const sourceInGrams = baseNutrition.perAmount * (UNIT_CONVERSIONS[sourceUnit] || 1);
       multiplier = targetInGrams / sourceInGrams;
-      conversionType = `weight: ${qty} ${targetUnit} (${targetInGrams.toFixed(1)}g) / ${baseNutrition.perAmount} ${sourceUnit} (${sourceInGrams.toFixed(1)}g)`;
     } else if (sourceIsVolume && targetIsVolume) {
       // Both are volume units - convert
       const targetInMl = qty * (UNIT_CONVERSIONS[targetUnit] || 1);
       const sourceInMl = baseNutrition.perAmount * (UNIT_CONVERSIONS[sourceUnit] || 1);
       multiplier = targetInMl / sourceInMl;
-      conversionType = `volume: ${qty} ${targetUnit} (${targetInMl.toFixed(1)}ml) / ${baseNutrition.perAmount} ${sourceUnit} (${sourceInMl.toFixed(1)}ml)`;
     }
     // If units are incompatible or non-convertible (serving, piece, slice), just use qty as multiplier
-
-    console.log(`🧮 Nutrition calc: source="${sourceUnit}" (isWeight=${sourceIsWeight}, isVolume=${sourceIsVolume}), target="${targetUnit}" (isWeight=${targetIsWeight}, isVolume=${targetIsVolume})`);
-    console.log(`🧮 Conversion: ${conversionType}, multiplier=${multiplier.toFixed(3)}`);
-    console.log(`🧮 Result: ${baseNutrition.calories} * ${multiplier.toFixed(3)} = ${Math.round(baseNutrition.calories * multiplier)} cal`);
 
     return {
       calories: Math.round(baseNutrition.calories * multiplier),
@@ -616,7 +741,7 @@ export default function FoodLogModal({
       return;
     }
 
-    const qty = parseFloat(quantity);
+    const qty = parseQuantityInput(quantity);
     if (isNaN(qty) || qty <= 0) {
       Alert.alert('Error', 'Please enter a valid quantity');
       return;
@@ -973,12 +1098,12 @@ export default function FoodLogModal({
                                   {food.name}
                                 </Text>
                                 <Text style={styles.quickFoodDetails}>
-                                  {food.serving_size} {food.serving_unit}
+                                  {food.last_quantity ?? food.serving_size} {food.last_unit ?? food.serving_unit}
                                   {food.calories && ` • ${Math.round(food.calories)} cal`}
                                   {food.protein && ` • ${Math.round(food.protein)}g protein`}
                                 </Text>
                                 <Text style={styles.quickFoodCount}>
-                                  Logged {food.count}x in last 30 days
+                                  {food.times_30d ?? food.count}× this month
                                 </Text>
                               </View>
                               <Ionicons name="add-circle" size={26} color={colors.primary} style={styles.quickFoodAdd} />
@@ -995,6 +1120,47 @@ export default function FoodLogModal({
                           nestedScrollEnabled={true}
                           showsVerticalScrollIndicator={false}
                         >
+                          {/* B4 — "Same lunch as yesterday?" one tap repeats
+                              the whole meal instead of re-adding each item. */}
+                          {Object.entries(yesterdayMeals)
+                            .filter(([, entries]) => Array.isArray(entries) && entries.length > 0)
+                            .map(([mt, entries]) => entries.map((entry: any) => {
+                              const names = (entry.detailed_items?.length ? entry.detailed_items : entry.food_items || [])
+                                .map((it: any) => it.name).filter(Boolean).join(', ');
+                              const isRepeating = repeatingMealLogId === entry.log_id;
+                              return (
+                                <TouchableOpacity
+                                  key={`repeat-${entry.log_id}`}
+                                  style={styles.repeatMealRow}
+                                  onPress={() => handleRepeatYesterdayMeal({ log_id: entry.log_id, meal_type: mt })}
+                                  disabled={isRepeating}
+                                >
+                                  <Ionicons name="repeat" size={18} color={colors.accent} />
+                                  <View style={{ flex: 1, marginLeft: spacing.sm }}>
+                                    <Text style={styles.repeatMealTitle} numberOfLines={1}>
+                                      Repeat yesterday's {mt}{names ? `: ${names}` : ''}
+                                    </Text>
+                                    <Text style={styles.repeatMealSubtitle}>
+                                      {entry.calories ? `${Math.round(entry.calories)} cal` : ''}
+                                    </Text>
+                                  </View>
+                                  {isRepeating ? (
+                                    <ActivityIndicator size="small" color={colors.accent} />
+                                  ) : (
+                                    <>
+                                      <TouchableOpacity
+                                        onPress={() => handleSaveYesterdayMealAs({ meal_type: mt, ...entry })}
+                                        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                                        style={{ marginRight: spacing.sm }}
+                                      >
+                                        <Ionicons name="bookmark-outline" size={18} color={colors.textSecondary} />
+                                      </TouchableOpacity>
+                                      <Ionicons name="chevron-forward" size={16} color={colors.textSecondary} />
+                                    </>
+                                  )}
+                                </TouchableOpacity>
+                              );
+                            }))}
                           {yesterdayFoods.map((food, idx) => (
                             <TouchableOpacity
                               key={`yesterday-${food.name}-${idx}`}
@@ -1793,6 +1959,26 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.md,
     borderBottomWidth: 1,
     borderBottomColor: colors.divider,
+  },
+  repeatMealRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.md,
+    backgroundColor: colors.assistant.panelRaised,
+    borderRadius: borderRadius.md,
+    marginHorizontal: spacing.md,
+    marginTop: spacing.sm,
+  },
+  repeatMealTitle: {
+    fontSize: fontSizes.sm,
+    fontWeight: fontWeights.semibold,
+    color: colors.text,
+  },
+  repeatMealSubtitle: {
+    fontSize: fontSizes.xs,
+    color: colors.textSecondary,
+    marginTop: 1,
   },
   quickFoodInfo: {
     flex: 1,

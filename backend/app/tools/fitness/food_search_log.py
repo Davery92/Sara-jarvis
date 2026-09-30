@@ -184,7 +184,7 @@ class FoodSearchAndLogTool(BaseTool):
                 nutrition = await self._resolve_nutrition(
                     fatsecret_result["id"], quantity, unit, food_name, fatsecret_result
                 )
-                item_calories, item_protein, item_carbs, item_fats, serving_label = nutrition
+                item_calories, item_protein, item_carbs, item_fats, serving_label, serving_id = nutrition
 
                 # Add to totals
                 total_calories += item_calories
@@ -197,7 +197,7 @@ class FoodSearchAndLogTool(BaseTool):
                     "food_id": fatsecret_result.get("id"),
                     "name": fatsecret_result.get("name"),
                     "source": "fatsecret",
-                    "serving_id": None,
+                    "serving_id": serving_id,
                     "serving_description": serving_label,
                     "quantity": quantity,
                     "unit": unit or "serving",
@@ -291,7 +291,25 @@ class FoodSearchAndLogTool(BaseTool):
 
         # Pattern: quantity + optional unit + food name
         # Examples: "3 eggs", "4oz ground beef", "2 large chicken breasts", "1 cup rice"
-        pattern = r'(\d+(?:\.\d+)?)\s*(oz|g|gram|grams|cup|cups|tbsp|tsp|large|medium|small|slice|slices)?\s*(.+)'
+        #
+        # R08 (Sara repair plan 2026-09-25, evidence
+        # J05_trial2_TURNS1_4_SEARCH_MATCH_AND_SCALING_AND_DUPLICATE): the
+        # unit alternation used to list the SHORT form of each unit before
+        # its longer forms ("g" before "gram"/"grams", "cup" before "cups",
+        # "slice" before "slices"). Regex alternation is leftmost-alternative-
+        # wins, not longest-match, so "150 grams chicken breast" matched
+        # unit="g" and left "rams chicken breast" as the food NAME — a
+        # silent, wrong search term, not merely a wrong unit. Longer forms
+        # now come first, and `(?![a-z])` on each alternative additionally
+        # guards against a short unit matching as a prefix of any word that
+        # happens to start the food name itself (defense in depth beyond
+        # the specific three collisions found).
+        _UNIT_ALTS = "|".join(
+            f"{u}(?![a-z])" for u in
+            ("oz", "grams", "gram", "g", "cups", "cup", "tbsp", "tsp",
+             "large", "medium", "small", "slices", "slice")
+        )
+        pattern = r'(\d+(?:\.\d+)?)\s*(' + _UNIT_ALTS + r')?\s*(.+)'
 
         for part in parts:
             part = part.strip()
@@ -344,11 +362,15 @@ class FoodSearchAndLogTool(BaseTool):
 
     async def _resolve_nutrition(
         self, food_id, quantity: float, unit: Optional[str], food_name: str, fallback: Dict[str, Any]
-    ) -> Tuple[float, float, float, float, str]:
+    ) -> Tuple[float, float, float, float, str, Optional[str]]:
         """Accurate macros for quantity+unit using the food's full serving list.
 
-        Returns (calories, protein, carbs, fats, serving_label). Falls back to the
-        legacy "summary serving × quantity" if the full food can't be fetched.
+        Returns (calories, protein, carbs, fats, serving_label, serving_id).
+        `serving_id` is the real FatSecret serving matched, or None on the
+        legacy summary-serving fallback — B1: this is what lets Recent open a
+        food back at the same serving instead of re-guessing servings[0].
+        Falls back to the legacy "summary serving × quantity" if the full
+        food can't be fetched.
         """
         try:
             from app.services.fatsecret_service import get_fatsecret_service
@@ -370,11 +392,11 @@ class FoodSearchAndLogTool(BaseTool):
         cb = (fallback.get("carbs") or 0) * quantity
         f = (fallback.get("fats") or 0) * quantity
         label = f"{quantity:g} × {fallback.get('serving_description') or 'serving'}"
-        return (c, p, cb, f, label)
+        return (c, p, cb, f, label, None)
 
     def _compute_item_nutrition(
         self, food, quantity: float, unit: Optional[str], food_name: str
-    ) -> Optional[Tuple[float, float, float, float, str]]:
+    ) -> Optional[Tuple[float, float, float, float, str, Optional[str]]]:
         """Pick the right serving and scale it for (quantity, unit)."""
         servings = food.servings or []
         if not servings:
@@ -402,7 +424,7 @@ class FoodSearchAndLogTool(BaseTool):
                 ratio = target_g / gs.metric_serving_amount
                 c, p, cb, f = macros(gs)
                 return (c * ratio, p * ratio, cb * ratio, f * ratio,
-                        f"{quantity:g} {unit} (~{round(target_g)}g)")
+                        f"{quantity:g} {unit} (~{round(target_g)}g)", gs.serving_id)
 
         # 2. Unit names a real serving (e.g. "cup", "slice") → use that serving × qty.
         if u:
@@ -410,7 +432,7 @@ class FoodSearchAndLogTool(BaseTool):
             if match:
                 c, p, cb, f = macros(match)
                 return (c * quantity, p * quantity, cb * quantity, f * quantity,
-                        f"{quantity:g} × {match.serving_description}")
+                        f"{quantity:g} × {match.serving_description}", match.serving_id)
 
         # 3. Other volume/size unit → grams approximation off a gram serving.
         if u:
@@ -420,12 +442,12 @@ class FoodSearchAndLogTool(BaseTool):
                 ratio = target_g / gs.metric_serving_amount
                 c, p, cb, f = macros(gs)
                 return (c * ratio, p * ratio, cb * ratio, f * ratio,
-                        f"{quantity:g} {unit} (~{round(target_g)}g)")
+                        f"{quantity:g} {unit} (~{round(target_g)}g)", gs.serving_id)
 
         # 4. No/unknown unit → treat quantity as a count of the default serving.
         c, p, cb, f = macros(default)
         return (c * quantity, p * quantity, cb * quantity, f * quantity,
-                f"{quantity:g} × {default.serving_description}")
+                f"{quantity:g} × {default.serving_description}", default.serving_id)
 
     def _convert_to_grams(self, quantity: float, unit: Optional[str], food_name: str) -> float:
         """Convert quantity to grams for nutrition calculation"""

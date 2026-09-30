@@ -19,6 +19,24 @@ from ..base import BaseTool, ToolResult
 logger = logging.getLogger(__name__)
 
 
+def _as_tool_result(raw: Dict[str, Any]) -> ToolResult:
+    """R07 (Sara repair plan 2026-09-25, evidence
+    J06_trial2_START_WORKOUT_TOOL_COMPLETELY_BROKEN): every tool in this
+    file used to return a plain dict instead of a ToolResult, and
+    `ToolRegistry.execute_tool` unconditionally reads `result.success` —
+    `dict.success` doesn't exist, so any successful path here raised
+    AttributeError, caught by the registry's own generic exception handler
+    and reported back to the model as an opaque 'Tool execution failed'.
+    Converts the existing dict shape (success/error/message_for_user/...)
+    into a real ToolResult without changing any of the business-logic
+    payload — everything besides `success` and the derived `message`
+    still lands in `data`, unchanged, for any caller already reading those
+    keys (content_card_builder, etc.)."""
+    success = bool(raw.get("success"))
+    message = raw.get("message_for_user") or raw.get("error") or ("Done" if success else "Failed")
+    return ToolResult(success=success, data=raw, message=message)
+
+
 class WorkoutModeLogTool(BaseTool):
     """Log sets or skip exercises during an active workout session via natural language"""
 
@@ -73,8 +91,33 @@ class WorkoutModeLogTool(BaseTool):
         "required": ["action"]
     }
 
-    async def execute(
+    async def execute(self, user_id: str, **kwargs) -> ToolResult:
+        """Execute the workout mode action.
+
+        R07 (Sara repair plan 2026-09-25): the registry dispatches every
+        tool as `tool.execute(user_id, **parameters)` — `user_id` is
+        ALWAYS the first positional argument. This method used to declare
+        `action` as its first parameter, so the model's own required
+        `action` argument collided with the positionally-passed user_id
+        (`execute() got multiple values for argument 'action'`) on every
+        single call. `db` was also never injected by the registry at all
+        (only `_task_id`/`_conversation_id`/`_raw_user_turn` are), so the
+        old `if not user_id or not db` guard was unreachable-safe code
+        masking an always-broken tool. This method now owns its own DB
+        session, exactly like every other tool in this package.
+        """
+        from app.db.session import get_db
+        db_gen = get_db()
+        db: Session = next(db_gen)
+        try:
+            return _as_tool_result(await self._execute_impl(user_id=user_id, db=db, **kwargs))
+        finally:
+            db.close()
+
+    async def _execute_impl(
         self,
+        user_id: str,
+        db: Session,
         action: Literal["log_set", "skip_exercise", "start_rest"],
         weight: Optional[float] = None,
         reps: Optional[int] = None,
@@ -82,19 +125,13 @@ class WorkoutModeLogTool(BaseTool):
         rpe_feeling: Optional[str] = None,
         notes: Optional[str] = None,
         rest_duration: Optional[int] = None,
-        user_id: str = None,
-        db: Session = None,
         **kwargs
     ) -> Dict[str, Any]:
-        """Execute the workout mode action"""
+        """Original business logic, unchanged — only the entrypoint above
+        changed. Still returns the original dict shape; execute() converts
+        it to a ToolResult."""
 
         from app.services.workout_session_service import workout_session_service
-
-        if not user_id or not db:
-            return {
-                "success": False,
-                "error": "Missing user_id or database session"
-            }
 
         try:
             # Check for active session first
@@ -231,24 +268,34 @@ class WorkoutModeStartTool(BaseTool):
         "required": []
     }
 
-    async def execute(
+    async def execute(self, user_id: str, **kwargs) -> ToolResult:
+        """R07 (Sara repair plan 2026-09-25, evidence
+        J06_trial2_START_WORKOUT_TOOL_COMPLETELY_BROKEN): `template_id` used
+        to be this method's first parameter, so the registry's positional
+        `tool.execute(user_id, **parameters)` bound the real user_id string
+        into `template_id` instead. `db` was never injected either. See
+        `_as_tool_result`'s docstring for why every call also silently
+        failed the registry's `result.success` check regardless."""
+        from app.db.session import get_db
+        db_gen = get_db()
+        db: Session = next(db_gen)
+        try:
+            return _as_tool_result(await self._execute_impl(user_id=user_id, db=db, **kwargs))
+        finally:
+            db.close()
+
+    async def _execute_impl(
         self,
+        user_id: str,
+        db: Session,
         template_id: Optional[str] = None,
         template_name: Optional[str] = None,
-        user_id: str = None,
-        db: Session = None,
         **kwargs
     ) -> Dict[str, Any]:
-        """Start a workout session"""
+        """Original business logic, unchanged."""
 
         from app.services.workout_session_service import workout_session_service
         from sqlalchemy import text
-
-        if not user_id or not db:
-            return {
-                "success": False,
-                "error": "Missing user_id or database session"
-            }
 
         try:
             # If template_name provided but not ID, look it up
@@ -366,22 +413,28 @@ class WorkoutModeCompleteTool(BaseTool):
         "required": ["action"]
     }
 
-    async def execute(
+    async def execute(self, user_id: str, **kwargs) -> ToolResult:
+        """R07 (Sara repair plan 2026-09-25): same broken-contract shape as
+        the other two tools in this file — `action` collided with the
+        registry's positional user_id, and `db` was never injected."""
+        from app.db.session import get_db
+        db_gen = get_db()
+        db: Session = next(db_gen)
+        try:
+            return _as_tool_result(await self._execute_impl(user_id=user_id, db=db, **kwargs))
+        finally:
+            db.close()
+
+    async def _execute_impl(
         self,
+        user_id: str,
+        db: Session,
         action: Literal["complete", "abandon"],
-        user_id: str = None,
-        db: Session = None,
         **kwargs
     ) -> Dict[str, Any]:
-        """End the workout session"""
+        """Original business logic, unchanged."""
 
         from app.services.workout_session_service import workout_session_service
-
-        if not user_id or not db:
-            return {
-                "success": False,
-                "error": "Missing user_id or database session"
-            }
 
         try:
             if action == "complete":

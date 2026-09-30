@@ -261,6 +261,7 @@ class WorkoutSessionService:
             )
             name_counts: Dict[str, int] = {}
             drop_counts: Dict[str, int] = {}
+            warmup_counts: Dict[str, int] = {}
             for entry in session["sets_logged"]:
                 if entry.get("voided"):
                     continue
@@ -269,6 +270,8 @@ class WorkoutSessionService:
                     name_counts[ex_name] = name_counts.get(ex_name, 0) + 1
                 if entry.get("set_kind") == "drop":
                     drop_counts[ex_name] = drop_counts.get(ex_name, 0) + 1
+                if entry.get("set_kind") == "warmup":
+                    warmup_counts[ex_name] = warmup_counts.get(ex_name, 0) + 1
             for ex in (session["workout_snapshot"].get("exercises") or []):
                 name = effective_name(ex)
                 # Read both before writing either: `sets` is an input to
@@ -278,11 +281,26 @@ class WorkoutSessionService:
                 effective = target_sets_for(ex)
                 ex["completed_sets"] = min(name_counts.get(name, 0), effective)
                 ex["completed_drop_segments"] = drop_counts.get(name, 0)
+                ex["completed_warmup_sets"] = warmup_counts.get(name, 0)
                 # The phone's existing panel reads `sets`; keep it the number of
                 # sets to actually do, and expose the untouched prescription
                 # alongside it so "4 sets (3 prescribed)" stays derivable.
                 ex["prescribed_sets"] = prescribed
                 ex["sets"] = effective
+
+                # A3/A4 — plan-driven AM lifts (set via _create_session): the
+                # next warm-up/top/backoff entry to prefill. Same derivation as
+                # workout_command_service._exercise_view's `next_set` (see
+                # set_plan.next_entry), kept in sync here because the phone
+                # still reads this raw snapshot path rather than the v2
+                # projection.
+                resolved_plan = ex.get("set_plan_resolved") or []
+                ex["next_set"] = None
+                if resolved_plan:
+                    from app.services.set_plan import next_entry
+                    ex["next_set"] = next_entry(
+                        resolved_plan, ex["completed_warmup_sets"], ex["completed_sets"]
+                    )
 
             return session
 
@@ -298,7 +316,8 @@ class WorkoutSessionService:
         rpe: Optional[int],
         rpe_feeling: Optional[str],
         notes: Optional[str],
-        db: Session
+        db: Session,
+        set_kind: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Log a set — compatibility adapter over the v2 command service.
 
@@ -325,6 +344,7 @@ class WorkoutSessionService:
             "payload": {
                 "weight": weight, "reps": reps, "rpe": rpe,
                 "rpe_feeling": rpe_feeling, "notes": notes,
+                "set_kind": set_kind,
             },
         })
 
@@ -635,6 +655,16 @@ Current situation:
             "last_session": result.get("last_session"),
         }
 
+    async def set_plan_week(
+        self, user_id: str, exercise_index: int, week: int, db: Session
+    ) -> Dict[str, Any]:
+        """A5 — "Use week N anyway" override on a held plan-driven exercise."""
+        result = await self._command(
+            user_id, db, "set_plan_week", {"exercise_index": exercise_index, "week": week}
+        )
+        return {"success": True, "exercise_index": exercise_index,
+                "effective_week": result.get("effective_week")}
+
     async def start_rest_timer(
         self,
         user_id: str,
@@ -820,9 +850,25 @@ Current situation:
                 lines.append(set_line)
                 lines.append(f"- **Target**: {current_ex['reps']} reps @ RPE {current_ex.get('rpe_target', 7)}")
 
-                if current_ex.get("suggested_weight"):
+                # A7 — a plan-driven AM lift's next prescribed entry: Sara can
+                # say "top set now: 225 for 2-4" instead of a flat suggested
+                # weight, which for these lifts isn't what's actually next.
+                next_set = current_ex.get("next_set")
+                if next_set:
+                    kind_label = {"warmup": "Warm-up", "top": "Top set", "backoff": "Backoff"}.get(
+                        next_set["kind"], "Next set")
+                    extra = ""
+                    if next_set.get("rpe_cap"):
+                        extra = f", cap RPE {next_set['rpe_cap']}"
+                    elif next_set.get("rir"):
+                        extra = f", {next_set['rir']} RIR"
+                    lines.append(f"- **{kind_label} now**: {next_set['weight']} for {next_set['reps']}{extra}")
+                    if current_ex.get("held"):
+                        held_note = current_ex.get("plan_note") or "holding a prior week's loads"
+                        lines.append(f"- **Note**: {held_note}")
+                elif current_ex.get("suggested_weight"):
                     lines.append(f"- **Suggested Weight**: {current_ex['suggested_weight']} lbs")
-                if current_ex.get("progression_note"):
+                if current_ex.get("progression_note") and not next_set:
                     lines.append(f"- **Note**: {current_ex['progression_note']}")
 
                 # Last session data

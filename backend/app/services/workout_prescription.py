@@ -98,9 +98,27 @@ def prescription_for_week(notes: str, week: Optional[int]) -> Dict[str, Optional
 
 
 def describe_exercise(ex: Dict[str, Any], week: Optional[int] = None) -> str:
-    """One line for a template exercise: the week's loads when the notes carry a
-    table, otherwise the plain sets×reps prescription."""
+    """One line for a template exercise: the week's loads when it carries a
+    structured `set_plan` (Part A1/A2) or the notes have a loading table,
+    otherwise the plain sets×reps prescription.
+
+    `set_plan` takes priority — it's the structured source of truth the
+    engine itself resolves from; the notes-table parser is the fallback for
+    exercises that predate it. No hold-rule gating here (no db/last-top-set
+    to check against): this describes what the calendar week prescribes, the
+    same as a passive readout in the brief — the actual session is where the
+    advance rule decides whether that's really what gets lifted.
+    """
+    from app.services.set_plan import is_plan_driven, resolve_set_plan, describe_resolved
+
     name = ex.get("name") or "Exercise"
+    if is_plan_driven(ex) and week:
+        resolved = resolve_set_plan(ex, week, last_top_set=None)
+        if resolved["sets"]:
+            line = f"{name} — {describe_resolved(name, resolved).split(': ', 1)[1]}"
+            label = ((ex["set_plan"]["weeks"].get(str(resolved["effective_week"])) or {}).get("label"))
+            return f"{line} [{label}]" if label else line
+
     sets = ex.get("sets")
     reps = ex.get("reps")
     notes = ex.get("notes") or ""

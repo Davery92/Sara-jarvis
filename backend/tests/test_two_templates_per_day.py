@@ -13,7 +13,7 @@ lives in the exercise `notes`, the only place the importer has for it) reads
 back as this week's actual prescription.
 """
 import json
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -227,3 +227,135 @@ class TestDescribeDay:
         assert "3 exercises" in line
         # AM first.
         assert line.index("Mon AM") < line.index("Mon PM")
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# A6 — /templates/today's session_status: "next outstanding", not "the
+# first". Needs real Postgres (ANY(:tids), AT TIME ZONE — see
+# training_day._with_session_status), so this runs against the disposable
+# test database rather than the SQLite fixture above.
+# ──────────────────────────────────────────────────────────────────────────
+import os
+import uuid
+
+
+def _pg_available() -> bool:
+    return os.getenv("DATABASE_URL", "").startswith("postgresql")
+
+
+requires_pg = pytest.mark.skipif(
+    not _pg_available(), reason="needs a real PostgreSQL database")
+
+
+@pytest.fixture
+def pg():
+    from app.db.session import SessionLocal
+    session = SessionLocal()
+    try:
+        yield session
+    finally:
+        session.rollback()
+        session.close()
+
+
+@pytest.fixture
+def pg_user_and_templates(pg):
+    """A real active program/phase with an AM + PM template scheduled today,
+    matching the AM/PM shape this whole file tests against."""
+    from app.core.timezone import now as local_now
+
+    uid = str(uuid.uuid4())
+    pg.execute(text("INSERT INTO app_user (id, email, password_hash) VALUES (:id, :email, 'x')"),
+               {"id": uid, "email": f"a6-test-{uid}@example.invalid"})
+
+    today = local_now().date()
+    weekday = today.strftime("%A").lower()
+    program_id, phase_id = str(uuid.uuid4()), str(uuid.uuid4())
+    pg.execute(text("""
+        INSERT INTO fitness_program (id, user_id, name, goal, start_date, end_date, is_active)
+        VALUES (:id, :uid, 'A6 Test Program', 'recomp', :start, :end, true)
+    """), {"id": program_id, "uid": uid,
+           "start": today - timedelta(days=14), "end": today + timedelta(days=14)})
+    pg.execute(text("""
+        INSERT INTO fitness_phase (id, user_id, program_id, name, order_index,
+                                   start_date, end_date, status)
+        VALUES (:id, :uid, :pid, 'Build 1', 0, :start, :end, 'active')
+    """), {"id": phase_id, "uid": uid, "pid": program_id,
+           "start": today - timedelta(days=14), "end": today + timedelta(days=14)})
+
+    am_id, pm_id = str(uuid.uuid4()), str(uuid.uuid4())
+    pg.execute(text("""
+        INSERT INTO fitness_template (id, user_id, phase_id, name, scheduled_days,
+                                      exercises, order_in_phase)
+        VALUES (:id, :uid, :pid, :name, CAST(:days AS jsonb), CAST(:ex AS jsonb), :oi)
+    """), [
+        {"id": am_id, "uid": uid, "pid": phase_id, "name": "AM Squat",
+         "days": json.dumps([weekday]), "ex": json.dumps([{"name": "Back Squat", "sets": 4, "reps": "2-6"}]),
+         "oi": 0},
+        {"id": pm_id, "uid": uid, "pid": phase_id, "name": "PM Legs",
+         "days": json.dumps([weekday]), "ex": json.dumps([{"name": "Leg Press", "sets": 3, "reps": "8-12"}]),
+         "oi": 1},
+    ])
+    pg.commit()
+
+    yield uid, am_id, pm_id
+
+    for stmt in (
+        "DELETE FROM active_workout_session WHERE user_id = :uid",
+        "DELETE FROM fitness_template WHERE user_id = :uid",
+        "DELETE FROM fitness_phase WHERE user_id = :uid",
+        "DELETE FROM fitness_program WHERE user_id = :uid",
+        "DELETE FROM app_user WHERE id = :uid",
+    ):
+        try:
+            pg.execute(text(stmt), {"uid": uid})
+            pg.commit()
+        except Exception:
+            pg.rollback()
+
+
+@requires_pg
+class TestSessionStatusNextOutstanding:
+    def test_nothing_started_yet_next_outstanding_is_am(self, pg, pg_user_and_templates):
+        from app.core.timezone import now as local_now
+        from app.services.training_day import is_training_day
+        uid, am_id, pm_id = pg_user_and_templates
+
+        result = is_training_day(pg, uid, local_now().date())
+        assert result["template_id"] == am_id
+        statuses = {t["id"]: t.get("session_status") for t in result["templates"]}
+        assert statuses[am_id] is None and statuses[pm_id] is None
+
+    def test_am_completed_next_outstanding_is_pm(self, pg, pg_user_and_templates):
+        from app.core.timezone import now as local_now
+        from app.services.training_day import is_training_day
+        uid, am_id, pm_id = pg_user_and_templates
+
+        pg.execute(text("""
+            INSERT INTO active_workout_session (id, user_id, template_id, status, started_at, completed_at)
+            VALUES (:id, :uid, :tid, 'completed', now(), now())
+        """), {"id": str(uuid.uuid4()), "uid": uid, "tid": am_id})
+        pg.commit()
+
+        result = is_training_day(pg, uid, local_now().date())
+        assert result["template_id"] == pm_id
+        assert result["template_name"] == "PM Legs"
+        statuses = {t["id"]: t.get("session_status") for t in result["templates"]}
+        assert statuses[am_id] == "completed"
+        assert statuses[pm_id] is None
+
+    def test_both_completed_falls_back_to_the_first(self, pg, pg_user_and_templates):
+        from app.core.timezone import now as local_now
+        from app.services.training_day import is_training_day
+        uid, am_id, pm_id = pg_user_and_templates
+
+        for tid in (am_id, pm_id):
+            pg.execute(text("""
+                INSERT INTO active_workout_session (id, user_id, template_id, status, started_at, completed_at)
+                VALUES (:id, :uid, :tid, 'completed', now(), now())
+            """), {"id": str(uuid.uuid4()), "uid": uid, "tid": tid})
+        pg.commit()
+
+        result = is_training_day(pg, uid, local_now().date())
+        assert result["template_id"] == am_id
+        assert all(t.get("session_status") == "completed" for t in result["templates"])

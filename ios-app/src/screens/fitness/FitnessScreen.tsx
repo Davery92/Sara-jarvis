@@ -102,6 +102,12 @@ export default function FitnessScreen({ navigation }: Props) {
   const [expandedTemplates, setExpandedTemplates] = useState<Set<string>>(new Set());
   const [isTrainingDayFromApi, setIsTrainingDayFromApi] = useState<boolean | null>(null);
   const [togglingTrainingDay, setTogglingTrainingDay] = useState(false);
+  // B2 — training/rest-day-cycled target for whatever date the Nutrition tab
+  // is showing, not just today. `nutritionGoals` stays today-only (the
+  // dashboard checklist reads it for "today"); this is scoped to the date
+  // nav so Prev/Next shows the day's own macro target, not today's applied
+  // to every day.
+  const [selectedDateTarget, setSelectedDateTarget] = useState<NutritionGoals | null>(null);
 
   useEffect(() => {
     loadData();
@@ -141,6 +147,26 @@ export default function FitnessScreen({ navigation }: Props) {
       console.error('Failed to load today target:', error);
     }
   };
+
+  // B2 — the Nutrition tab's date nav needs THAT date's training/rest-day
+  // target, not today's applied to every day. Reuses /today-target (already
+  // training-day-aware) with an explicit on_date.
+  useEffect(() => {
+    if (viewMode !== 'nutrition') return;
+    let cancelled = false;
+    fitnessService.getTodayTarget(selectedDate)
+      .then((data) => {
+        if (cancelled || !data.target) return;
+        setSelectedDateTarget({
+          calories: data.target.calories,
+          protein: data.target.protein,
+          carbs: data.target.carbs,
+          fats: data.target.fat,
+        });
+      })
+      .catch((error) => console.error('Failed to load target for', selectedDate, error));
+    return () => { cancelled = true; };
+  }, [selectedDate, viewMode]);
 
   const handleToggleTrainingDay = async () => {
     setTogglingTrainingDay(true);
@@ -234,22 +260,26 @@ export default function FitnessScreen({ navigation }: Props) {
   // single card. The hero shows the next one still outstanding — AM until a
   // session for it is logged, then PM — instead of always the first template,
   // which would have kept pointing at the morning lift all afternoon.
-  // Sessions carry no template_id, so they are matched by title.
+  //
+  // A6 — resolved server-side (`/templates/today` → session_status) by
+  // template id, not by matching a logged session's title against the
+  // template name. Title matching was the root of the Thursday 13:05
+  // abandoned-AM-restart bug: any drift between a session's title and the
+  // template's name (a renamed template, a variant-scoped title) silently
+  // un-hid a template that was actually done.
   const nextTemplateToday = React.useMemo(() => {
     if (todaysTemplates.length === 0) return null;
-    const today = getLocalDateString(new Date().toISOString());
-    const doneTitles = new Set(
-      (workoutLogs || [])
-        .filter(s => (s.session_date || (s.created_at && getLocalDateString(s.created_at))) === today)
-        .map(s => (s.title || '').trim().toLowerCase())
-        .filter(Boolean),
-    );
-    const outstanding = todaysTemplates.find(
-      t => !doneTitles.has((t.name || '').trim().toLowerCase()),
-    );
+    const outstanding = todaysTemplates.find(t => t.session_status !== 'completed');
     // Everything done: keep showing the last session rather than an empty card.
     return outstanding ?? todaysTemplates[todaysTemplates.length - 1];
-  }, [todaysTemplates, workoutLogs]);
+  }, [todaysTemplates]);
+
+  // True once every one of today's scheduled sessions is completed — the
+  // "Done for today" state, both cards collapsed (A6).
+  const allTemplatesDoneToday = React.useMemo(
+    () => todaysTemplates.length > 0 && todaysTemplates.every(t => t.session_status === 'completed'),
+    [todaysTemplates],
+  );
 
   const loadData = async () => {
     try {
@@ -1129,7 +1159,28 @@ export default function FitnessScreen({ navigation }: Props) {
         {/* Today's workout hero */}
         <Text style={styles.trainSectionTitle}>Today's Workout</Text>
         <View style={styles.trainHero}>
-          {todaysTemplate ? (
+          {allTemplatesDoneToday && !hasActiveWorkout ? (
+            // A6 — every scheduled session for today is completed. Collapsed
+            // rather than re-offering the last one as "Start Workout", which
+            // is exactly how the Thursday 13:05 abandoned-AM-restart happened.
+            <>
+              <View style={styles.trainHeroTopRow}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.trainHeroName}>Done for today 🎉</Text>
+                  <Text style={styles.trainHeroMeta}>
+                    {todaysTemplates.length} session{todaysTemplates.length === 1 ? '' : 's'} completed
+                  </Text>
+                </View>
+              </View>
+              <TouchableOpacity
+                style={styles.todaySwitchButton}
+                onPress={() => setShowTemplatePicker(true)}
+              >
+                <Ionicons name="add-circle-outline" size={14} color={colors.textSecondary} />
+                <Text style={styles.todaySwitchButtonText}>Log another session</Text>
+              </TouchableOpacity>
+            </>
+          ) : todaysTemplate ? (
             <>
               <View style={styles.trainHeroTopRow}>
                 <View style={{ flex: 1 }}>
@@ -1151,6 +1202,18 @@ export default function FitnessScreen({ navigation }: Props) {
                 onPress={() => {
                   if (hasActiveWorkout) {
                     navigation.navigate('WorkoutMode' as any);
+                  } else if (todaysTemplate.session_status === 'completed') {
+                    // Everything else today isn't done, but this particular
+                    // template already has a completed session — confirm
+                    // rather than silently starting a duplicate (A6).
+                    Alert.alert(
+                      `Log another ${todaysTemplate.name}?`,
+                      'You already completed this session today.',
+                      [
+                        { text: 'Cancel', style: 'cancel' },
+                        { text: 'Start anyway', onPress: () => handleStartWorkout(todaysTemplate.id) },
+                      ],
+                    );
                   } else {
                     handleStartWorkout(todaysTemplate.id);
                   }
@@ -1575,21 +1638,21 @@ export default function FitnessScreen({ navigation }: Props) {
 
   const renderNutritionView = () => {
     // Calculate selected date's totals from food logs (using LOCAL date comparison)
-    console.log('📊 Nutrition view - selectedDate:', selectedDate);
-    console.log('📊 Nutrition view - all foodLogs:', foodLogs.map(log => ({ id: log.id, meal_type: log.meal_type, logged_at: log.logged_at, localDate: log.logged_at ? getLocalDateString(log.logged_at) : 'unknown', food_name: log.food_name })));
     const selectedDateFoods = foodLogs.filter(log => log.logged_at && getLocalDateString(log.logged_at) === selectedDate);
-    console.log('📊 Nutrition view - filtered foods count:', selectedDateFoods.length);
 
     const totalCalories = selectedDateFoods.reduce((sum, log) => sum + (log.calories || 0), 0);
     const totalProtein = selectedDateFoods.reduce((sum, log) => sum + (log.protein || 0), 0);
     const totalCarbs = selectedDateFoods.reduce((sum, log) => sum + (log.carbs || 0), 0);
     const totalFat = selectedDateFoods.reduce((sum, log) => sum + (log.fat || 0), 0);
 
-    // Get goals with defaults
-    const goalCalories = nutritionGoals?.calories || 2000;
-    const goalProtein = nutritionGoals?.protein || 150;
-    const goalCarbs = nutritionGoals?.carbs || 200;
-    const goalFats = nutritionGoals?.fats || 70;
+    // B2 — the date-scoped, training/rest-day-cycled target (falls back to
+    // the today-only goals while the per-date fetch is in flight, so the
+    // rings don't flash to hardcoded defaults on every date change).
+    const effectiveGoals = selectedDateTarget || nutritionGoals;
+    const goalCalories = effectiveGoals?.calories || 2000;
+    const goalProtein = effectiveGoals?.protein || 150;
+    const goalCarbs = effectiveGoals?.carbs || 200;
+    const goalFats = effectiveGoals?.fats || 70;
 
     // Calculate remaining
     const remainingCalories = goalCalories - totalCalories;

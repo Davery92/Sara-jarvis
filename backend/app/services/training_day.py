@@ -81,15 +81,55 @@ def templates_for_day(db: Session, user_id: str, on_date: date,
     return out
 
 
+def _with_session_status(db: Session, user_id: str, on_date: date,
+                          templates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Attach today's (ET) `session_status` to each template (A6).
+
+    The most recent session for a template wins if it was somehow started
+    twice in one day. `None` means "not started yet" — the phone and the
+    Watch catalog both use this to find the next OUTSTANDING session by id
+    instead of matching template names against titles.
+    """
+    if not templates:
+        return templates
+    ids = [t["id"] for t in templates]
+    by_template: Dict[str, Dict[str, Any]] = {}
+    try:
+        rows = db.execute(text("""
+            SELECT template_id, status, completed_at
+            FROM active_workout_session
+            WHERE user_id = :uid AND template_id = ANY(:tids)
+              AND DATE(started_at AT TIME ZONE 'America/New_York') = :d
+            ORDER BY started_at DESC
+        """), {"uid": user_id, "tids": ids, "d": on_date}).fetchall()
+        for r in rows:
+            by_template.setdefault(r.template_id, {
+                "session_status": r.status,
+                "completed_at": r.completed_at.isoformat() if r.completed_at else None,
+            })
+    except Exception:
+        # Postgres-only SQL (ANY(:tids), AT TIME ZONE) — degrade to "unknown"
+        # rather than 500 a reader that only wanted the schedule, not status.
+        logger.debug("training_day._with_session_status: status lookup failed", exc_info=True)
+    for t in templates:
+        info = by_template.get(t["id"])
+        t["session_status"] = info["session_status"] if info else None
+        t["completed_at"] = info["completed_at"] if info else None
+    return templates
+
+
 def is_training_day(db: Session, user_id: str, on_date: date) -> Dict:
     """Resolve training vs rest for `on_date`.
 
     Returns {is_training_day, reason, template_id, template_name, templates}.
     `reason` is one of: "session_logged", "scheduled", "rest".
 
-    `templates` lists every session scheduled for the day (AM before PM);
-    `template_id`/`template_name` stay the first one so existing callers keep
-    working.
+    `templates` lists every session scheduled for the day (AM before PM), each
+    carrying `session_status` (A6). `template_id`/`template_name` are the next
+    OUTSTANDING one — the first whose `session_status` isn't 'completed' or
+    'active' elsewhere yet — falling back to the first template once every
+    session for the day is done, so callers with no "done for today" state of
+    their own still get a real template id rather than null.
     """
     # 0. Explicit day-type override (Phase 10D set_day_type) wins over everything.
     try:
@@ -113,17 +153,28 @@ def is_training_day(db: Session, user_id: str, on_date: date) -> Dict:
     if sess:
         # Still resolve the day's templates: with two sessions a date, logging
         # the AM one must not make the PM one disappear from every reader.
+        day_templates = _with_session_status(db, user_id, on_date, templates_for_day(db, user_id, on_date))
+        next_up = next((t for t in day_templates if t.get("session_status") not in ("completed", "active")),
+                        day_templates[0] if day_templates else None)
         return {"is_training_day": True, "reason": "session_logged",
-                "template_id": None, "template_name": None,
-                "templates": templates_for_day(db, user_id, on_date)}
+                "template_id": next_up["id"] if next_up else None,
+                "template_name": next_up["name"] if next_up else None,
+                "templates": day_templates}
 
     # 2. Effective approved-program phase templates scheduled for this weekday.
-    scheduled = templates_for_day(db, user_id, on_date)
+    scheduled = _with_session_status(db, user_id, on_date, templates_for_day(db, user_id, on_date))
     if scheduled:
+        # The next OUTSTANDING session — the first not yet completed or
+        # currently active — falling back to the first template once the day
+        # is done, so "today's template" stays a real id (A6).
+        next_up = next((t for t in scheduled if t.get("session_status") not in ("completed", "active")),
+                        scheduled[0])
         return {"is_training_day": True, "reason": "scheduled",
-                "template_id": scheduled[0]["id"], "template_name": scheduled[0]["name"],
+                "template_id": next_up["id"], "template_name": next_up["name"],
                 "templates": [{"id": t["id"], "name": t["name"],
-                               "order_in_phase": t["order_in_phase"]} for t in scheduled]}
+                               "order_in_phase": t["order_in_phase"],
+                               "session_status": t.get("session_status"),
+                               "completed_at": t.get("completed_at")} for t in scheduled]}
 
     return {"is_training_day": False, "reason": "rest",
             "template_id": None, "template_name": None, "templates": []}

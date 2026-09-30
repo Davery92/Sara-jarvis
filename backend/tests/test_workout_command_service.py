@@ -158,7 +158,8 @@ async def test_first_start_creates_one_session(pg, svc, user_id):
 
     assert result["status"] == "accepted"
     proj = result["projection"]
-    assert proj["schema_version"] == 1
+    from app.services.workout_command_service import SCHEMA_VERSION
+    assert proj["schema_version"] == SCHEMA_VERSION
     assert proj["version"] == 1
     assert proj["origin_device"] == "watch"
     assert proj["progress"]["total_sets"] == 4
@@ -690,7 +691,8 @@ async def test_catalog_gives_the_watch_enough_to_start(pg, svc, user_id):
     _template(pg, user_id, "Upper A")
     cat = svc.catalog(pg, user_id)
 
-    assert cat["schema_version"] == 1
+    from app.services.workout_command_service import SCHEMA_VERSION
+    assert cat["schema_version"] == SCHEMA_VERSION
     assert cat["generated_for_date"]
     assert cat["today_template_id"] is None
     assert any(t["name"] == "Upper A" and t["exercise_count"] == 2 for t in cat["templates"])
@@ -781,3 +783,118 @@ async def test_unknown_command_kind_is_refused(pg, svc, user_id):
     sid = (await svc.start(pg, user_id, tid))["projection"]["session_id"]
     with pytest.raises(ValueError):
         await svc.execute(pg, user_id, _envelope("rewrite_program", sid, 1, {}))
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Plan-driven AM lifts (A2/A3/A5) — TWO_A_DAY_AM_SETS_AND_FOOD_REPEAT_PLAN
+# ────────────────────────────────────────────────────────────────────────
+
+PLAN_DRIVEN_EXERCISES = [{
+    "name": "Test Squat", "sets": 3, "reps": "2-6", "rpe_target": 8,
+    "set_plan": {
+        "kind": "top_backoff",
+        "warmup": [{"weight": 45, "reps": 8}],
+        "weeks": {"1": {
+            "top": {"weight": 200, "reps": "2-4", "rpe_cap": 8},
+            "backoff": {"weight": 180, "reps": "4-6", "sets": 2, "rir": "1-2"},
+        }},
+    },
+}]
+
+
+def _dated_program_starting_today(pg, user_id):
+    """program_week resolves to 1 regardless of when the test runs."""
+    from datetime import date
+    pid = str(uuid.uuid4())
+    pg.execute(text("""
+        INSERT INTO fitness_program (id, user_id, name, goal, start_date, is_active)
+        VALUES (:id, :uid, 'A2 Test Program', 'recomp', :start, true)
+    """), {"id": pid, "uid": user_id, "start": date.today()})
+    pg.commit()
+    return pid
+
+
+@requires_pg
+@pytest.mark.asyncio
+async def test_plan_driven_session_starts_on_the_resolved_top_set(pg, svc, user_id):
+    _dated_program_starting_today(pg, user_id)
+    tid = _template(pg, user_id, "AM Squat", exercises=PLAN_DRIVEN_EXERCISES)
+    start = await svc.start(pg, user_id, tid)
+
+    ex = start["projection"]["current_exercise"]
+    assert ex["set_plan"] is not None
+    assert [s["kind"] for s in ex["set_plan"]] == ["warmup", "top", "backoff", "backoff"]
+    assert ex["next_set"]["kind"] == "warmup"
+    assert ex["next_set"]["weight"] == 45
+    # approved/calculated both read the plan's top-set weight — no competing
+    # +10lb proposal for a plan-driven lift.
+    assert ex["approved_weight"] == 200
+    assert ex["calculated_suggestion"] == 200
+    assert ex["target_sets"] == 3  # 1 top + 2 backoff; warm-up doesn't count
+
+
+@requires_pg
+@pytest.mark.asyncio
+async def test_log_set_defaults_walk_warmup_then_top_then_backoff(pg, svc, user_id):
+    """No weight/reps in the payload — the plan's next_set fills them in, in
+    order, and each row is stamped with which slot it filled (A5)."""
+    _dated_program_starting_today(pg, user_id)
+    tid = _template(pg, user_id, "AM Squat", exercises=PLAN_DRIVEN_EXERCISES)
+    sid = (await svc.start(pg, user_id, tid))["projection"]["session_id"]
+
+    # 1. Warm-up — set_kind must be explicit (log_set defaults to "working").
+    r = await svc.execute(pg, user_id, _envelope("log_set", sid, 1, {"set_kind": "warmup"}))
+    assert r["logged"]["weight"] == 45.0 and r["logged"]["reps"] == 8
+    v = r["projection"]["version"]
+
+    # 2. Top set.
+    r = await svc.execute(pg, user_id, _envelope("log_set", sid, v, {}))
+    assert r["logged"]["weight"] == 200.0 and r["logged"]["reps"] == 2
+    v = r["projection"]["version"]
+
+    # 3. Backoff #1 — send a hard RPE to prove no competing proposal fires
+    #    for a plan-driven lift even when the set is "hard".
+    r = await svc.execute(pg, user_id, _envelope("log_set", sid, v, {"rpe": 9}))
+    assert r["logged"]["weight"] == 180.0 and r["logged"]["reps"] == 4
+    assert r["proposal"] is None
+    v = r["projection"]["version"]
+
+    # 4. Backoff #2 — exercise (and workout) complete.
+    r = await svc.execute(pg, user_id, _envelope("log_set", sid, v, {}))
+    assert r["logged"]["weight"] == 180.0
+    assert r["workout_complete"] is True
+
+    rows = pg.execute(text("""
+        SELECT set_kind, weight, reps, flags FROM workout_log
+        WHERE active_session_id = :s ORDER BY created_at ASC
+    """), {"s": sid}).fetchall()
+    assert len(rows) == 4
+    roles = [(r.flags or {}).get("role") for r in rows]
+    assert roles == ["warmup", "top", "backoff", "backoff"]
+    plan_weeks = [(r.flags or {}).get("plan_week") for r in rows]
+    assert plan_weeks == [1, 1, 1, 1]
+
+
+@requires_pg
+@pytest.mark.asyncio
+async def test_no_next_session_proposal_for_a_plan_driven_lift(pg, svc, user_id):
+    """_create_next_session_proposals (post-workout) also skips plan-driven
+    exercises — the loading table already says what next week is."""
+    from app.services.workout_command_service import _v2_enabled
+    if not _v2_enabled():
+        pytest.skip("next-session proposals are v2-flag-gated")
+    _dated_program_starting_today(pg, user_id)
+    tid = _template(pg, user_id, "AM Squat", exercises=PLAN_DRIVEN_EXERCISES)
+    sid = (await svc.start(pg, user_id, tid))["projection"]["session_id"]
+
+    v = 1
+    for payload in ({"set_kind": "warmup"}, {}, {}, {}):
+        r = await svc.execute(pg, user_id, _envelope("log_set", sid, v, payload))
+        v = r["projection"]["version"]
+    await svc.execute(pg, user_id, _envelope("complete", sid, v, {}))
+
+    proposals = pg.execute(text("""
+        SELECT COUNT(*) FROM workout_adjustment_proposal
+        WHERE user_id = :uid AND kind = 'next_session_weight'
+    """), {"uid": user_id}).scalar()
+    assert proposals == 0

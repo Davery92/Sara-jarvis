@@ -44,6 +44,7 @@ export default function WorkoutPanel({ onCollapse, isCollapsed = false, onFinish
     skipExercise,
     selectExercise,
     setVariant,
+    setPlanWeek,
     startRestTimer,
     stopRestTimer,
     completeWorkout,
@@ -58,18 +59,43 @@ export default function WorkoutPanel({ onCollapse, isCollapsed = false, onFinish
   const [feeling, setFeeling] = useState<Feeling>('moderate');
   const [variantInput, setVariantInput] = useState<string>('');
   const [showVariantPicker, setShowVariantPicker] = useState(false);
+  // A4 — plan-driven AM lifts (top/backoff): which chip the next Log Set
+  // tap writes as. Auto-follows next_set.kind, but a manual toggle (or
+  // "skip warm-ups") can override it — logging a working set while warm-up
+  // entries remain unlogged still resolves correctly server-side, since
+  // warm-ups and working sets are tracked as independent cursors
+  // (set_plan.next_entry).
+  const [warmupSelected, setWarmupSelected] = useState(false);
+
+  const nextSet = currentExercise?.next_set;
+  const resolvedPlan = currentExercise?.set_plan_resolved;
 
   // Reset inputs when the exercise (or its scoped suggestion, e.g. after setting a
-  // machine variant) changes.
+  // machine variant) changes — or when the plan's next prescribed entry moves.
   useEffect(() => {
     if (currentExercise) {
-      setCustomWeight(currentExercise.suggested_weight?.toString() || '');
-      const targetReps = currentExercise.reps?.toString().split('-')[0] || '';
-      setCustomReps(targetReps);
+      if (nextSet) {
+        setCustomWeight(nextSet.weight != null ? nextSet.weight.toString() : '');
+        const repsLow = nextSet.reps ? nextSet.reps.replace('+', '').split('-')[0] : '';
+        setCustomReps(repsLow);
+        setWarmupSelected(nextSet.kind === 'warmup');
+      } else {
+        setCustomWeight(currentExercise.suggested_weight?.toString() || '');
+        const targetReps = currentExercise.reps?.toString().split('-')[0] || '';
+        setCustomReps(targetReps);
+        setWarmupSelected(false);
+      }
       setFeeling('moderate');
       setVariantInput(currentExercise.variant || '');
     }
-  }, [currentExercise?.name, session?.current_exercise_index, currentExercise?.variant, currentExercise?.suggested_weight]);
+  }, [
+    currentExercise?.name,
+    session?.current_exercise_index,
+    currentExercise?.variant,
+    currentExercise?.suggested_weight,
+    nextSet?.index,
+    nextSet?.kind,
+  ]);
 
   // Commit the machine/variation the user typed (null reverts to the base lift).
   const commitVariant = () => {
@@ -121,7 +147,8 @@ export default function WorkoutPanel({ onCollapse, isCollapsed = false, onFinish
     try {
       const weight = customWeight ? parseFloat(customWeight) : currentExercise?.suggested_weight;
       const reps = customReps ? parseInt(customReps, 10) : undefined;
-      const result = await logSet({ rpe_feeling: feeling, weight, reps });
+      const setKind = resolvedPlan ? (warmupSelected ? 'warmup' : 'working') : undefined;
+      const result = await logSet({ rpe_feeling: feeling, weight, reps, set_kind: setKind });
       if (result.coaching_feedback) {
         setLastFeedback(result.coaching_feedback);
         setTimeout(() => setLastFeedback(null), 5000);
@@ -201,14 +228,38 @@ export default function WorkoutPanel({ onCollapse, isCollapsed = false, onFinish
     : '';
   const last = currentExercise?.last_session;
 
+  // A4 — kind-aware header for a plan-driven AM lift's next set: which warm-up
+  // / top / backoff this is, and its prescribed number.
+  let planKindLabel: string | null = null;
+  if (nextSet && resolvedPlan) {
+    if (nextSet.kind === 'warmup') {
+      const total = resolvedPlan.filter(s => s.kind === 'warmup').length;
+      planKindLabel = `WARM-UP ${(currentExercise?.completed_warmup_sets || 0) + 1} of ${total} · ${nextSet.weight ?? '—'} × ${nextSet.reps ?? '—'}`;
+    } else if (nextSet.kind === 'top') {
+      planKindLabel = `TOP SET · ${nextSet.weight ?? '—'} × ${nextSet.reps ?? '—'}${nextSet.rpe_cap ? ` · cap RPE ${nextSet.rpe_cap}` : ''}`;
+    } else {
+      const total = resolvedPlan.filter(s => s.kind === 'backoff').length;
+      const done = Math.max(0, (currentExercise?.completed_sets || 0) - 1);
+      planKindLabel = `BACKOFF ${Math.min(done + 1, total)} of ${total} · ${nextSet.weight ?? '—'} × ${nextSet.reps ?? '—'}${nextSet.rir ? ` · ${nextSet.rir} RIR` : ''}`;
+    }
+  }
+
   return (
     <View style={styles.container}>
-      {/* SET x OF y + progress */}
-      <View style={styles.setHeader}>
-        <Text style={styles.setHeaderText}>
-          SET {Math.min(progress.completed + 1, progress.total)} OF {progress.total}
-        </Text>
-      </View>
+      {/* SET x OF y + progress — working sets only; a plan-driven lift shows
+          the kind-aware line below instead while a warm-up is next. */}
+      {!(nextSet && nextSet.kind === 'warmup') && (
+        <View style={styles.setHeader}>
+          <Text style={styles.setHeaderText}>
+            SET {Math.min(progress.completed + 1, progress.total)} OF {progress.total}
+          </Text>
+        </View>
+      )}
+      {planKindLabel && (
+        <View style={styles.planKindHeader}>
+          <Text style={styles.planKindHeaderText}>{planKindLabel}</Text>
+        </View>
+      )}
       <View style={styles.progressBar}>
         <View style={[styles.progressFill, { width: `${progress.percentage}%` }]} />
       </View>
@@ -258,8 +309,9 @@ export default function WorkoutPanel({ onCollapse, isCollapsed = false, onFinish
                 {currentExercise.progression_note ? (
                   <Text style={styles.progressionNote}>{currentExercise.progression_note}</Text>
                 ) : null}
-                {/* Coaching cue from the template. */}
-                {currentExercise.notes ? (
+                {/* Coaching cue from the template — a plan-driven lift shows
+                    the resolved-sets table below instead. */}
+                {currentExercise.notes && !resolvedPlan ? (
                   <Text style={styles.exerciseNote}>💡 {currentExercise.notes}</Text>
                 ) : null}
                 {/* Advanced-set hints (were captured but invisible before). */}
@@ -282,6 +334,64 @@ export default function WorkoutPanel({ onCollapse, isCollapsed = false, onFinish
                 <Text style={styles.rpeTargetValue}>{currentExercise.rpe_target ?? '—'}</Text>
               </View>
             </View>
+
+            {/* Held banner — the advance rule (A2) repeated a prior week's
+                loads because the last top set wasn't clean. One tap overrides
+                it for this session only. */}
+            {currentExercise.held && (
+              <View style={styles.heldBanner}>
+                <Ionicons name="pause-circle-outline" size={16} color={colors.warning} />
+                <Text style={styles.heldBannerText}>
+                  {currentExercise.plan_note || `Holding week ${currentExercise.effective_week} loads`}
+                </Text>
+                <TouchableOpacity
+                  onPress={() => setPlanWeek(
+                    session?.current_exercise_index ?? 0,
+                    (currentExercise.effective_week || 1) + 1
+                  )}
+                >
+                  <Text style={styles.heldBannerAction}>
+                    Use week {(currentExercise.effective_week || 1) + 1} anyway
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            )}
+
+            {/* Resolved top/backoff table for a plan-driven AM lift — the
+                whole session's shape at a glance, replacing the notes dump. */}
+            {resolvedPlan && resolvedPlan.length > 0 && (() => {
+              const warmupDone = currentExercise.completed_warmup_sets || 0;
+              const workingDone = currentExercise.completed_sets || 0;
+              let warmupSeen = 0;
+              let workingSeen = 0;
+              return (
+                <View style={styles.planTable}>
+                  {resolvedPlan.map((entry) => {
+                    const isNext = nextSet ? nextSet.index === entry.index : false;
+                    const isDone = entry.kind === 'warmup'
+                      ? warmupSeen++ < warmupDone
+                      : workingSeen++ < workingDone;
+                    const label = entry.kind === 'warmup' ? 'Warm-up'
+                      : entry.kind === 'top' ? 'Top' : 'Backoff';
+                    return (
+                      <View
+                        key={entry.index}
+                        style={[styles.planRow, isNext && styles.planRowNext]}
+                      >
+                        <Text style={[styles.planRowLabel, isDone && styles.planRowDone]}>
+                          {isDone ? '✓ ' : ''}{label}
+                        </Text>
+                        <Text style={[styles.planRowValue, isDone && styles.planRowDone]}>
+                          {entry.weight ?? '—'} × {entry.reps ?? '—'}
+                          {entry.rpe_cap ? ` · cap RPE ${entry.rpe_cap}` : ''}
+                          {entry.rir ? ` · ${entry.rir} RIR` : ''}
+                        </Text>
+                      </View>
+                    );
+                  })}
+                </View>
+              );
+            })()}
 
             {/* Machine / variation — scopes weight history so a different machine
                 (e.g. hack squat vs barbell squat) is tracked separately. */}
@@ -340,6 +450,27 @@ export default function WorkoutPanel({ onCollapse, isCollapsed = false, onFinish
               onChangeText={setCustomReps}
               placeholder={currentExercise.reps?.toString().split('-')[0] || '8'}
             />
+
+            {/* Warm-up chip — a plan-driven lift only. Auto-selected while
+                next_set.kind is 'warmup'; toggling it off is how "skip
+                warm-ups" works: the working-set cursor tracks independently
+                server-side (set_plan.next_entry), so it lands on the top set
+                as soon as a working set is logged regardless of warm-ups. */}
+            {resolvedPlan && resolvedPlan.some(s => s.kind === 'warmup') && (
+              <TouchableOpacity
+                style={[styles.warmupChip, warmupSelected && styles.warmupChipActive]}
+                onPress={() => setWarmupSelected(w => !w)}
+              >
+                <Ionicons
+                  name={warmupSelected ? 'checkbox' : 'square-outline'}
+                  size={16}
+                  color={warmupSelected ? colors.background : colors.textSecondary}
+                />
+                <Text style={[styles.warmupChipText, warmupSelected && styles.warmupChipTextActive]}>
+                  Warm-up
+                </Text>
+              </TouchableOpacity>
+            )}
 
             {/* Log set */}
             <TouchableOpacity
@@ -711,6 +842,93 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: fontWeights.bold,
     letterSpacing: 0.3,
+  },
+  planKindHeader: {
+    paddingHorizontal: spacing.md,
+    paddingBottom: 4,
+  },
+  planKindHeaderText: {
+    color: colors.accent,
+    fontSize: fontSizes.sm,
+    fontWeight: fontWeights.bold,
+    letterSpacing: 0.3,
+  },
+  heldBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 8,
+    backgroundColor: colors.assistant.panelRaised,
+    borderWidth: 1,
+    borderColor: colors.warning,
+    borderRadius: borderRadius.md,
+    padding: 10,
+    marginBottom: 10,
+  },
+  heldBannerText: {
+    flex: 1,
+    color: colors.text,
+    fontSize: fontSizes.sm,
+  },
+  heldBannerAction: {
+    color: colors.accent,
+    fontSize: fontSizes.sm,
+    fontWeight: fontWeights.bold,
+  },
+  planTable: {
+    backgroundColor: colors.assistant.panelRaised,
+    borderRadius: borderRadius.md,
+    padding: 8,
+    marginBottom: 12,
+    gap: 2,
+  },
+  planRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingVertical: 5,
+    paddingHorizontal: 6,
+    borderRadius: 6,
+  },
+  planRowNext: {
+    backgroundColor: colors.accent + '22',
+  },
+  planRowLabel: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    fontWeight: fontWeights.semibold,
+    textTransform: 'uppercase',
+    letterSpacing: 0.3,
+  },
+  planRowValue: {
+    color: colors.text,
+    fontSize: fontSizes.sm,
+  },
+  planRowDone: {
+    opacity: 0.5,
+  },
+  warmupChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    gap: 6,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: borderRadius.md,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    marginBottom: 10,
+  },
+  warmupChipActive: {
+    backgroundColor: colors.accent,
+    borderColor: colors.accent,
+  },
+  warmupChipText: {
+    color: colors.textSecondary,
+    fontSize: fontSizes.sm,
+    fontWeight: fontWeights.semibold,
+  },
+  warmupChipTextActive: {
+    color: colors.background,
   },
   rpeTarget: {
     alignItems: 'flex-end',

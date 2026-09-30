@@ -246,6 +246,7 @@ class WorkoutSuggestTool(BaseTool):
         """Prescription for one exercise: the plan's number when it has one,
         otherwise progressive overload off the log."""
         from app.services.workout_prescription import prescription_for_week
+        from app.services.set_plan import is_plan_driven, resolve_set_plan
 
         exercise_name = exercise_spec.get("name")
         target_sets = exercise_spec.get("sets", 3)
@@ -285,10 +286,23 @@ class WorkoutSuggestTool(BaseTool):
         suggested_weight = None
         progression_note = ""
 
-        # The AM lifts carry an 8-week loading table in their notes. Where the
-        # plan states this week's load, it is the prescription — a +5/+10
-        # extrapolation from the log would quietly compete with the program.
-        prescribed = prescription_for_week(exercise_spec.get("notes") or "", week)
+        # The AM lifts carry a structured top/backoff loading table (A1/A2) —
+        # or, for exercises that predate it, the same table as text in
+        # `notes`. Where the plan states this week's load, it is the
+        # prescription — a +5/+10 extrapolation from the log would quietly
+        # compete with the program.
+        resolved_plan = None
+        if is_plan_driven(exercise_spec) and week:
+            resolved_plan = resolve_set_plan(exercise_spec, week, last_top_set=None)
+        if resolved_plan and resolved_plan["sets"]:
+            top_entry = next(s for s in resolved_plan["sets"] if s["kind"] == "top")
+            backoff_entries = [s for s in resolved_plan["sets"] if s["kind"] == "backoff"]
+            prescribed = {"top": f"{top_entry['weight']}x{top_entry['reps']}"}
+            if backoff_entries:
+                b = backoff_entries[0]
+                prescribed["backoff"] = f"{b['weight']}x{b['reps']} x{len(backoff_entries)}"
+        else:
+            prescribed = prescription_for_week(exercise_spec.get("notes") or "", week)
 
         if sessions_by_date:
             last_date = max(sessions_by_date.keys())

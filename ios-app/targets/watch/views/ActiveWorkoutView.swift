@@ -20,9 +20,15 @@ struct ActiveWorkoutView: View {
     @State private var showExercises = false
     @State private var showFinishConfirm = false
     @State private var showAbandonConfirm = false
+    /// A4 — plan-driven AM lifts (top/backoff): which chip Log Set writes as.
+    /// Auto-follows `nextSet.kind`; toggling it off is "skip warm-ups" (the
+    /// server resolves a working set against the working sequence directly
+    /// regardless of warm-up count — set_plan.next_entry).
+    @State private var warmupSelected = false
 
     private var projection: WorkoutProjection? { manager.projection }
     private var exercise: WorkoutExercise? { projection?.currentExercise }
+    private var nextSet: ResolvedSetEntry? { exercise?.nextSet }
 
     var body: some View {
         Group {
@@ -70,9 +76,16 @@ struct ActiveWorkoutView: View {
                 .multilineTextAlignment(.center)
 
             HStack(spacing: 8) {
-                // Effective target, so an added set is immediately reachable
-                // rather than reading "Set 4 of 3" (§7.2).
-                Text("Set \(setNumber) of \(exercise?.targetSets ?? 0)")
+                // A plan-driven AM lift names the slot (warm-up/top/backoff)
+                // instead of a flat set count, which for these lifts is not
+                // what's actually next.
+                if let kindLabel {
+                    Text(kindLabel)
+                } else {
+                    // Effective target, so an added set is immediately reachable
+                    // rather than reading "Set 4 of 3" (§7.2).
+                    Text("Set \(setNumber) of \(exercise?.targetSets ?? 0)")
+                }
                 if manager.heartRate > 0 {
                     Label("\(Int(manager.heartRate))", systemImage: "heart.fill")
                         .foregroundStyle(.red)
@@ -81,10 +94,16 @@ struct ActiveWorkoutView: View {
             .font(.caption2)
             .foregroundStyle(.secondary)
 
-            if let target = exercise?.targetReps {
+            if nextSet == nil, let target = exercise?.targetReps {
                 Text("Target \(target) reps")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
+            }
+
+            if let held = exercise?.held, held {
+                Text(exercise?.planNote ?? "Holding a prior week's loads")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
             }
 
             if let target = exercise?.targetSets, let prescribed = exercise?.prescribedSets,
@@ -170,6 +189,12 @@ struct ActiveWorkoutView: View {
 
     private var secondaryActions: some View {
         VStack(spacing: 4) {
+            if nextSet != nil {
+                Button(warmupSelected ? "Warm-up ✓" : "Warm-up") { warmupSelected.toggle() }
+                    .font(.caption2)
+                    .buttonStyle(.bordered)
+                    .tint(warmupSelected ? .orange : nil)
+            }
             Button("Exercises") { showExercises = true }
                 .font(.caption2)
             Button("Skip") { manager.skipExercise() }
@@ -205,6 +230,16 @@ struct ActiveWorkoutView: View {
         (projection?.cursor.setIndex ?? 0) + 1
     }
 
+    private var kindLabel: String? {
+        guard let ns = nextSet else { return nil }
+        switch ns.kind {
+        case "warmup": return "Warm-up · \(Int(ns.weight ?? 0)) × \(ns.reps ?? "")"
+        case "top": return "Top set"
+        case "backoff": return "Backoff"
+        default: return nil
+        }
+    }
+
     private var previousSetLine: String? {
         guard let last = exercise?.lastSession,
               let weights = last.weights, let reps = last.reps,
@@ -214,21 +249,29 @@ struct ActiveWorkoutView: View {
 
     private func log(effort: String?) {
         WatchHaptics.setLogged()
-        manager.logSet(weight: weight, reps: reps, effort: effort)
+        manager.logSet(weight: weight, reps: reps, effort: effort,
+                       setKind: nextSet != nil ? (warmupSelected ? "warmup" : "working") : nil)
     }
 
-    /// Seed the steppers once per set, from the approved prescription.
+    /// Seed the steppers once per set, from `nextSet` when the lift is
+    /// plan-driven, else the approved prescription.
     ///
     /// Re-seeding on every projection would fight David's own adjustment
     /// mid-set; seeding on cursor movement is what makes the common path
     /// "raise wrist, tap Log Set".
     private func seedIfNeeded(force: Bool = false) {
         guard let projection else { return }
-        let key = "\(projection.cursor.exerciseIndex)-\(projection.cursor.setIndex)"
+        let key = "\(projection.cursor.exerciseIndex)-\(projection.cursor.setIndex)-\(nextSet?.index ?? -1)"
         guard force || seededFor != key else { return }
         seededFor = key
-        weight = exercise?.approvedWeight ?? weight
-        reps = defaultReps
+        if let ns = nextSet {
+            weight = ns.weight ?? weight
+            reps = ns.reps.flatMap { repsFromRange($0) } ?? reps
+            warmupSelected = ns.kind == "warmup"
+        } else {
+            weight = exercise?.approvedWeight ?? weight
+            reps = defaultReps
+        }
     }
 
     /// Lower bound of the target range + 1, matching what the backend fills in
@@ -239,5 +282,14 @@ struct ActiveWorkoutView: View {
             return lower + 1
         }
         return Int(target) ?? reps
+    }
+
+    /// Lower bound of a plan entry's rep range ("2-4" -> 2, "4+" -> 4, "3" -> 3).
+    private func repsFromRange(_ range: String) -> Int? {
+        let trimmed = range.hasSuffix("+") ? String(range.dropLast()) : range
+        if let dash = trimmed.firstIndex(of: "-") {
+            return Int(trimmed[trimmed.startIndex..<dash])
+        }
+        return Int(trimmed)
     }
 }

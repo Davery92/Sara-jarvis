@@ -94,6 +94,7 @@ interface WorkoutModeContextType {
   skipExercise: () => Promise<void>;
   selectExercise: (exerciseIndex: number) => Promise<void>;
   setVariant: (exerciseIndex: number, variant: string | null) => Promise<void>;
+  setPlanWeek: (exerciseIndex: number, week: number) => Promise<void>;
   startRestTimer: (duration?: number) => Promise<void>;
   stopRestTimer: () => Promise<void>;
   completeWorkout: () => Promise<{ summary?: any }>;
@@ -551,6 +552,18 @@ export function WorkoutModeProvider({ children }: { children: React.ReactNode })
     }
   };
 
+  const setPlanWeek = async (exerciseIndex: number, week: number) => {
+    try {
+      setError(null);
+      await fitnessService.setPlanWeek(exerciseIndex, week);
+      await refreshSession();
+      void syncWatch();
+    } catch (err: any) {
+      console.error('Failed to set plan week:', err);
+      setError(err.message);
+    }
+  };
+
   const startRestTimer = async (duration?: number) => {
     try {
       const defaultDuration = duration || 120;
@@ -791,6 +804,7 @@ export function WorkoutModeProvider({ children }: { children: React.ReactNode })
     skipExercise,
     selectExercise,
     setVariant,
+    setPlanWeek,
     startRestTimer,
     stopRestTimer,
     completeWorkout,
