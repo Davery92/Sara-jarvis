@@ -1,0 +1,6 @@
+{
+  "cap": 1200,
+  "elapsed_s": 16.59,
+  "answer_chars": 396,
+  "answer": "Two of the four are done:\n\n- **Grocery list** note (milk, eggs, bread) \u2014 saved.\n- **Renew car registration** reminder, set for next Friday.\n\nThe other two didn't land:\n\n- **Call dentist** note \u2014 the write timed out, so I don't know if it saved. I'm not going to call it done or blind-retry it.\n- **Pick up dry cleaning** reminder \u2014 storage was unavailable, not saved.\n\nWant me to retry those two?"
+}

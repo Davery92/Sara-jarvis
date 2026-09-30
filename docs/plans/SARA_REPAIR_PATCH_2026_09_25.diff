@@ -1,0 +1,1622 @@
+--- a/backend/tests/test_chat_tool_loop.py
++++ b/backend/tests/test_chat_tool_loop.py
+@@ -962,6 +962,14 @@
+         client = ms.SimpleLLMClient()
+         client._active_tools = [{"function": {"name": "notes_delete"}}]
+         client._sticky_key = "test-execution-authorizes"
++        # R01 (Sara repair plan 2026-09-25): execute_tool now also enforces
++        # its OWN execution-boundary action-evidence check (independent of
++        # whatever selection path put the tool in _active_tools) — this
++        # test is about what happens AFTER a legitimately-authorized
++        # execution, not about whether an unevidenced call succeeds, so it
++        # needs a real turn message the way the sibling tests above do.
++        client._turn_message_for_mutation_gate = "delete my old note about the dentist"
++        client._last_turn_mutating_tools_for_boundary = []
+         ms._CHAT_INVOKED_MUTATING_TOOL_NAMES.pop("test-execution-authorizes", None)
+ 
+         class _Result:
+--- a/backend/app/services/contextual_awareness_service.py
++++ b/backend/app/services/contextual_awareness_service.py
+@@ -259,7 +259,10 @@
+                 alert = {
+                     'type': 'reminder',
+                     'reminder_id': reminder.id,
+-                    'content': reminder.content,
++                    # R06 (Sara repair plan 2026-09-25): Reminder has no
++                    # `content` column — this unconditionally raised
++                    # AttributeError for every upcoming reminder.
++                    'content': reminder.description or reminder.title,
+                     'time_until': time_until.total_seconds(),
+                     'urgency': 'high' if time_until.total_seconds() <= 900 else 'medium'  # High if < 15 min
+                 }
+--- a/backend/app/tools/notes.py
++++ b/backend/app/tools/notes.py
+@@ -1,18 +1,98 @@
+-from typing import Dict, Any, Optional
++from typing import Dict, Any, Optional, Tuple
+ import logging
++import re
+ from app.tools.base import BaseTool, ToolResult
+ from app.models.note import Note
+ from app.models.folder import Folder
+ from app.services.embeddings import get_embedding
+ from app.db.session import get_db
+ from sqlalchemy.orm import Session
+-from sqlalchemy import text
++from sqlalchemy import text, update as sa_update
+ import uuid
+ from datetime import datetime, timezone
+ 
+ logger = logging.getLogger(__name__)
+ 
+ 
++def _remove_span(content: str, needle: str) -> Tuple[Optional[str], Optional[str]]:
++    """Remove exactly ONE occurrence of `needle` from `content`, touching
++    only that occurrence — never reconstructing or rewriting the rest of
++    the note. Returns (new_content, error_code); error_code is one of
++    "empty", "not_found", "ambiguous" (with a count appended after ':'),
++    or None on success.
++
++    R02 (Sara repair plan 2026-09-25 review remediation, evidence
++    J03_trial2_TURN6_FALSE_DIAGNOSIS_CAUSES_REAL_DATA_LOSS): the first
++    version of this operation deleted the WHOLE LINE containing a match,
++    which silently destroyed unrelated text sharing that line — an inline
++    comma-separated list item, or a phrase inside a paragraph. This
++    replaces that with true span-level removal, matched only at
++    non-letter/digit boundaries (so "cup" cannot match inside "cupcake"),
++    with three cleanup shapes tried in order:
++
++      1. The match IS an entire line by itself (a list note, one item per
++         line) — remove the whole line including its own newline, so no
++         blank line is left behind.
++      2. The match sits inside a comma-separated inline list ("a, X, b")
++         — remove it together with the ONE adjacent ", " separator so the
++         list rejoins cleanly, preferring the trailing separator (more
++         items follow) and falling back to the leading one (X is last).
++      3. Anywhere else (mid-sentence prose) — remove exactly the matched
++         characters and collapse a resulting double space. Grammar may
++         read slightly awkwardly afterward; no OTHER text is ever altered.
++
++    Exactly one match is required (case-insensitive) — zero or multiple
++    matches refuse rather than guess which one was meant.
++    """
++    if not needle or not needle.strip():
++        return None, "empty"
++
++    pattern = re.compile(
++        r"(?<![A-Za-z0-9])" + re.escape(needle.strip()) + r"(?![A-Za-z0-9])",
++        re.IGNORECASE,
++    )
++    matches = list(pattern.finditer(content))
++    if not matches:
++        return None, "not_found"
++    if len(matches) > 1:
++        return None, f"ambiguous:{len(matches)}"
++
++    m = matches[0]
++    start, end = m.start(), m.end()
++
++    # Shape 1: the match is an entire line by itself.
++    line_start = content.rfind("\n", 0, start) + 1
++    nl_after = content.find("\n", end)
++    line_end = nl_after if nl_after != -1 else len(content)
++    if content[line_start:line_end].strip().lower() == needle.strip().lower():
++        if nl_after != -1:
++            new_content = content[:line_start] + content[nl_after + 1:]
++        elif line_start > 0 and content[line_start - 1] == "\n":
++            new_content = content[:line_start - 1]
++        else:
++            new_content = content[:line_start]
++        return new_content, None
++
++    # Shape 2: comma-separated inline list item.
++    before, after = content[:start], content[end:]
++    after_stripped = after.lstrip(" ")
++    if after_stripped.startswith(","):
++        rest = after_stripped[1:]
++        if rest.startswith(" "):
++            rest = rest[1:]
++        return before + rest, None
++
++    before_rstripped = before.rstrip(" ")
++    if before_rstripped.endswith(","):
++        new_before = before_rstripped[:-1].rstrip(" ")
++        return new_before + after, None
++
++    # Shape 3: plain excision inside prose, collapse any double space.
++    new_content = before + after
++    new_content = re.sub(r"[ \t]{2,}", " ", new_content)
++    return new_content, None
++
++
+ def _resolve_folder(
+     db: Session,
+     user_id: str,
+@@ -323,7 +403,15 @@
+     
+     @property
+     def description(self) -> str:
+-        return "Edit an existing note's title or content. The note will be re-embedded after editing."
++        return (
++            "Edit an existing note's title or content. The note will be re-embedded after editing. "
++            "For removing or adding ONE item from an otherwise-unchanged note (e.g. 'remove the "
++            "rain jacket but keep the other items'), use remove_text or append_text instead of content "
++            "— they touch only the matched text (a whole line, one item in a comma-separated list, or "
++            "a phrase mid-sentence) and leave everything else byte-for-byte untouched. Use content only "
++            "for a genuine full rewrite, and pass base_revision (the updated_at you last read for this "
++            "note) with it — this refuses instead of overwriting if the note changed since you last saw it."
++        )
+ 
+     @property
+     def parameters(self) -> Dict[str, Any]:
+@@ -340,7 +428,34 @@
+                 },
+                 "content": {
+                     "type": "string",
+-                    "description": "New content for the note"
++                    "description": (
++                        "Full replacement content for the note — REPLACES everything. Do not use "
++                        "this for a narrow single-item change ('remove X', 'add Y'); use remove_text "
++                        "or append_text for those so unrelated existing content can't be silently lost. "
++                        "Requires base_revision if the note currently has content."
++                    )
++                },
++                "base_revision": {
++                    "type": "string",
++                    "description": (
++                        "The note's updated_at timestamp as you last read it (from notes_search, "
++                        "notes_list, or a prior notes_edit result). Required when using content on a "
++                        "note that already has content — if the note changed since then, the edit is "
++                        "refused instead of silently overwriting the newer version; reread and retry."
++                    )
++                },
++                "remove_text": {
++                    "type": "string",
++                    "description": (
++                        "Remove exactly the one existing occurrence of this text — a whole line, one "
++                        "item in a comma-separated list, or a phrase mid-sentence — leaving every other "
++                        "line/item/word untouched. Fails honestly (no change made) if the text isn't "
++                        "found or matches more than once — it never guesses. Mutually exclusive with content."
++                    )
++                },
++                "append_text": {
++                    "type": "string",
++                    "description": "Add this as a new line at the end of the note's existing content, leaving everything else untouched. Mutually exclusive with content.",
+                 },
+                 "folder_name": {
+                     "type": "string",
+@@ -355,11 +470,32 @@
+         }
+ 
+     async def execute(self, user_id: str, **kwargs) -> ToolResult:
+-        """Edit an existing note"""
++        """Edit an existing note.
++
++        R02 (Sara repair plan 2026-09-25 review remediation): every write
++        path here (title, content, remove_text, append_text, folder move)
++        now goes through ONE conditional UPDATE, guarded by the note's
++        `updated_at` at the moment this call read it — not the ORM's
++        implicit "last write wins" commit. If any other write (another
++        session, another tool call, a concurrent request) committed to
++        this note between this call's read and its write, the conditional
++        UPDATE matches zero rows and the whole edit is refused rather than
++        silently clobbering whatever that other write did. This is
++        automatic and requires no cooperation from the caller. `content`
++        additionally requires an explicit `base_revision` argument when
++        the note has existing content — forcing the caller to have looked
++        at a specific revision before requesting a full rewrite, which the
++        automatic same-call check alone cannot guarantee (it only proves
++        nothing else committed in the brief window of THIS call, not that
++        the caller's belief about the content is actually current).
++        """
+ 
+         note_id = kwargs.get("note_id")
+         new_title = kwargs.get("title")
+         new_content = kwargs.get("content")
++        base_revision = kwargs.get("base_revision")
++        remove_text = kwargs.get("remove_text")
++        append_text = kwargs.get("append_text")
+         folder_id_arg = kwargs.get("folder_id")
+         folder_name_arg = kwargs.get("folder_name")
+ 
+@@ -369,6 +505,16 @@
+                 message="Note ID is required"
+             )
+ 
++        # content and remove_text/append_text are different operations on
++        # the same field — mixing them makes the intended result ambiguous
++        # (does a full replacement happen before or after the line
++        # removal?), so refuse rather than guess an order.
++        if new_content is not None and (remove_text is not None or append_text is not None):
++            return ToolResult(
++                success=False,
++                message="Pass either content (full replacement) or remove_text/append_text (single-line edit), not both.",
++            )
++
+         db_gen = get_db()
+         db: Session = next(db_gen)
+ 
+@@ -385,46 +531,145 @@
+                     message="Note not found"
+                 )
+ 
+-            # Update fields
+-            updated = False
++            # Captured immediately after the read above — this is the
++            # revision the conditional UPDATE below is staked against.
++            read_updated_at = note.updated_at
++            current_content = note.content or ""
++
++            if new_content is not None and current_content:
++                current_revision = read_updated_at.isoformat() if read_updated_at else None
++                if base_revision is None:
++                    return ToolResult(
++                        success=False,
++                        message=(
++                            "This note already has content — a full replacement needs base_revision "
++                            f"(the updated_at you last read: {current_revision}) so a stale rewrite "
++                            "can be refused instead of silently overwriting it. If you haven't actually "
++                            "read this note's current content, do that first."
++                        ),
++                    )
++                if base_revision != current_revision:
++                    return ToolResult(
++                        success=False,
++                        message=(
++                            "This note has changed since the revision you gave — reread its current "
++                            "content before overwriting it, so you don't drop whatever changed."
++                        ),
++                    )
++
++            values: Dict[str, Any] = {}
++            final_title = new_title if new_title is not None else note.title
++            final_content = current_content
++
+             if new_title is not None:
+-                note.title = new_title
+-                updated = True
++                values["title"] = new_title
++
+             if new_content is not None:
+-                note.content = new_content
+-                updated = True
++                final_content = new_content
++                values["content"] = new_content
++
++            # R02: narrow, span-level operations. Never reconstruct the
++            # rest of the content from the model's own belief about what
++            # the note contains — J03's real failure was a full-content
++            # rewrite built on a FALSE belief that an earlier item was
++            # never saved (it was), which silently dropped that item even
++            # though the user only asked to remove a different one. These
++            # touch exactly the matched span (or append a new line) and
++            # leave everything else byte-for-byte as stored — see
++            # _remove_span's docstring for the three removal shapes.
++            if remove_text is not None:
++                new_span_content, err = _remove_span(current_content, remove_text)
++                if err == "empty":
++                    return ToolResult(success=False, message="remove_text is empty — nothing to remove.")
++                if err == "not_found":
++                    return ToolResult(
++                        success=False,
++                        message=(
++                            f"Didn't find \"{remove_text}\" in the note's current content — nothing "
++                            "removed. Reread the note first if you're not sure what's actually in it."
++                        ),
++                    )
++                if err and err.startswith("ambiguous"):
++                    count = err.split(":", 1)[1]
++                    return ToolResult(
++                        success=False,
++                        message=(
++                            f"\"{remove_text}\" appears {count} separate times in the note — too "
++                            "ambiguous to remove automatically. Say exactly which occurrence, or pass "
++                            "the full replacement via content."
++                        ),
++                    )
++                final_content = new_span_content
++                values["content"] = new_span_content
++
++            if append_text is not None:
++                stripped = append_text.strip()
++                if not stripped:
++                    return ToolResult(success=False, message="append_text is empty — nothing to add.")
++                final_content = (
++                    current_content + ("\n" if current_content and not current_content.endswith("\n") else "")
++                    + append_text
++                )
++                values["content"] = final_content
+ 
+             # Optional folder move
++            final_folder_id = note.folder_id
+             if folder_id_arg is not None and folder_id_arg.lower() in ("root", "none", ""):
+-                note.folder_id = None
+-                updated = True
++                final_folder_id = None
++                values["folder_id"] = None
+             elif folder_id_arg or folder_name_arg:
+                 resolved_folder_id, folder_err = _resolve_folder(
+                     db, user_id, folder_id_arg, folder_name_arg
+                 )
+                 if folder_err:
+                     return ToolResult(success=False, message=folder_err)
+-                note.folder_id = resolved_folder_id
+-                updated = True
++                final_folder_id = resolved_folder_id
++                values["folder_id"] = resolved_folder_id
+ 
+-            if not updated:
++            if not values:
+                 return ToolResult(
+                     success=False,
+                     message="No changes provided"
+                 )
+-            
+-            # Re-embed the note
+-            full_text = f"{note.title}\n{note.content}" if note.title else note.content
+-            note.embedding = await get_embedding(full_text)
+-            note.updated_at = datetime.now(timezone.utc)
+-            
++
++            # Re-embed against the FINAL title/content this call is about
++            # to write, not the pre-edit ones.
++            full_text = f"{final_title}\n{final_content}" if final_title else final_content
++            values["embedding"] = await get_embedding(full_text)
++            new_updated_at = datetime.now(timezone.utc)
++            values["updated_at"] = new_updated_at
++
++            # The conditional UPDATE itself — this is what makes a
++            # concurrent edit safe without needing the caller to
++            # cooperate: it only applies if updated_at is EXACTLY what
++            # this call observed when it read the note above.
++            where_clause = [Note.id == note_id, Note.user_id == user_id]
++            if read_updated_at is None:
++                where_clause.append(Note.updated_at.is_(None))
++            else:
++                where_clause.append(Note.updated_at == read_updated_at)
++
++            stmt = sa_update(Note).where(*where_clause).values(**values)
++            result = db.execute(stmt)
++
++            if result.rowcount == 0:
++                db.rollback()
++                return ToolResult(
++                    success=False,
++                    message=(
++                        "This note changed since this edit started (a concurrent edit committed first) "
++                        "— nothing was written. Reread the note's current content and reissue the edit "
++                        "against that."
++                    ),
++                )
++
+             db.commit()
+ 
+             # Re-detect connections after edit
+             try:
+                 from app.services.note_connector import process_note_connections_sync
+                 await process_note_connections_sync(
+-                    str(note.id), user_id, note.title or "", note.content or "", db
++                    str(note_id), user_id, final_title or "", final_content or "", db
+                 )
+             except Exception as conn_err:
+                 logger.warning(f"Connection detection failed for edited note: {conn_err}")
+@@ -432,12 +677,12 @@
+             return ToolResult(
+                 success=True,
+                 data={
+-                    "note_id": str(note.id),
+-                    "title": note.title,
+-                    "content": note.content,
+-                    "updated_at": note.updated_at.isoformat()
++                    "note_id": str(note_id),
++                    "title": final_title,
++                    "content": final_content,
++                    "updated_at": new_updated_at.isoformat()
+                 },
+-                message=f"Updated note: {note.title or 'Untitled'}"
++                message=f"Updated note: {final_title or 'Untitled'}"
+             )
+ 
+         except Exception as e:
+--- a/backend/app/tools/timers.py
++++ b/backend/app/tools/timers.py
+@@ -15,6 +15,16 @@
+     user_id = Column(String, nullable=False)
+     title = Column(String, nullable=False)
+     duration_minutes = Column(Integer, nullable=False)
++    # R05 (Sara repair plan 2026-09-25, evidence
++    # D04_TIMERS_STATUS_CRASHES_NAIVE_AWARE_DATETIME): the REAL `timer`
++    # table (verified directly against the schema: `\d timer`) has genuinely
++    # naive `timestamp without time zone` columns — not a Python-type
++    # mismatch with an aware column, as first suspected. `timezone=True`
++    # here would not change what the driver hands back for an actual
++    # naive-typed column, and would misdescribe the real schema. The naive
++    # value IS a UTC instant (TimersStartTool always writes
++    # `datetime.now(timezone.utc)`) — it just has no tzinfo attached. Fixed
++    # at the comparison site instead (`_as_utc` below), not here.
+     start_time = Column(DateTime, nullable=False)
+     end_time = Column(DateTime, nullable=False)
+     is_active = Column(Boolean, default=True)
+@@ -22,6 +32,20 @@
+     created_at = Column(DateTime, server_default=func.now())
+ 
+ 
++def _as_utc(value: datetime) -> datetime:
++    """A value read back from `timer.start_time`/`end_time` is a naive
++    datetime whose WALL-CLOCK VALUE is already UTC (every writer in this
++    file stores `datetime.now(timezone.utc)` into these naive columns) —
++    attach the tzinfo the value already implicitly has, rather than
++    comparing it against an aware `datetime.now(timezone.utc)` and raising
++    "can't subtract offset-naive and offset-aware datetimes". A value that
++    somehow already carries tzinfo (e.g. after a future migration to a real
++    timestamptz column) passes through unchanged."""
++    if value.tzinfo is None:
++        return value.replace(tzinfo=timezone.utc)
++    return value
++
++
+ class TimersStartTool(BaseTool):
+     """Tool for starting new timers"""
+     
+@@ -182,7 +206,7 @@
+                 is_expired = False
+ 
+                 if timer.is_active and not timer.is_completed:
+-                    remaining_seconds = (timer.end_time - now).total_seconds()
++                    remaining_seconds = (_as_utc(timer.end_time) - now).total_seconds()
+                     if remaining_seconds <= 0:
+                         is_expired = True
+                         # Auto-complete expired timers
+--- a/backend/app/tools/fitness/food_search_log.py
++++ b/backend/app/tools/fitness/food_search_log.py
+@@ -291,7 +291,25 @@
+ 
+         # Pattern: quantity + optional unit + food name
+         # Examples: "3 eggs", "4oz ground beef", "2 large chicken breasts", "1 cup rice"
+-        pattern = r'(\d+(?:\.\d+)?)\s*(oz|g|gram|grams|cup|cups|tbsp|tsp|large|medium|small|slice|slices)?\s*(.+)'
++        #
++        # R08 (Sara repair plan 2026-09-25, evidence
++        # J05_trial2_TURNS1_4_SEARCH_MATCH_AND_SCALING_AND_DUPLICATE): the
++        # unit alternation used to list the SHORT form of each unit before
++        # its longer forms ("g" before "gram"/"grams", "cup" before "cups",
++        # "slice" before "slices"). Regex alternation is leftmost-alternative-
++        # wins, not longest-match, so "150 grams chicken breast" matched
++        # unit="g" and left "rams chicken breast" as the food NAME — a
++        # silent, wrong search term, not merely a wrong unit. Longer forms
++        # now come first, and `(?![a-z])` on each alternative additionally
++        # guards against a short unit matching as a prefix of any word that
++        # happens to start the food name itself (defense in depth beyond
++        # the specific three collisions found).
++        _UNIT_ALTS = "|".join(
++            f"{u}(?![a-z])" for u in
++            ("oz", "grams", "gram", "g", "cups", "cup", "tbsp", "tsp",
++             "large", "medium", "small", "slices", "slice")
++        )
++        pattern = r'(\d+(?:\.\d+)?)\s*(' + _UNIT_ALTS + r')?\s*(.+)'
+ 
+         for part in parts:
+             part = part.strip()
+--- a/backend/app/tools/fitness/workout_mode.py
++++ b/backend/app/tools/fitness/workout_mode.py
+@@ -19,6 +19,24 @@
+ logger = logging.getLogger(__name__)
+ 
+ 
++def _as_tool_result(raw: Dict[str, Any]) -> ToolResult:
++    """R07 (Sara repair plan 2026-09-25, evidence
++    J06_trial2_START_WORKOUT_TOOL_COMPLETELY_BROKEN): every tool in this
++    file used to return a plain dict instead of a ToolResult, and
++    `ToolRegistry.execute_tool` unconditionally reads `result.success` —
++    `dict.success` doesn't exist, so any successful path here raised
++    AttributeError, caught by the registry's own generic exception handler
++    and reported back to the model as an opaque 'Tool execution failed'.
++    Converts the existing dict shape (success/error/message_for_user/...)
++    into a real ToolResult without changing any of the business-logic
++    payload — everything besides `success` and the derived `message`
++    still lands in `data`, unchanged, for any caller already reading those
++    keys (content_card_builder, etc.)."""
++    success = bool(raw.get("success"))
++    message = raw.get("message_for_user") or raw.get("error") or ("Done" if success else "Failed")
++    return ToolResult(success=success, data=raw, message=message)
++
++
+ class WorkoutModeLogTool(BaseTool):
+     """Log sets or skip exercises during an active workout session via natural language"""
+ 
+@@ -73,8 +91,33 @@
+         "required": ["action"]
+     }
+ 
+-    async def execute(
++    async def execute(self, user_id: str, **kwargs) -> ToolResult:
++        """Execute the workout mode action.
++
++        R07 (Sara repair plan 2026-09-25): the registry dispatches every
++        tool as `tool.execute(user_id, **parameters)` — `user_id` is
++        ALWAYS the first positional argument. This method used to declare
++        `action` as its first parameter, so the model's own required
++        `action` argument collided with the positionally-passed user_id
++        (`execute() got multiple values for argument 'action'`) on every
++        single call. `db` was also never injected by the registry at all
++        (only `_task_id`/`_conversation_id`/`_raw_user_turn` are), so the
++        old `if not user_id or not db` guard was unreachable-safe code
++        masking an always-broken tool. This method now owns its own DB
++        session, exactly like every other tool in this package.
++        """
++        from app.db.session import get_db
++        db_gen = get_db()
++        db: Session = next(db_gen)
++        try:
++            return _as_tool_result(await self._execute_impl(user_id=user_id, db=db, **kwargs))
++        finally:
++            db.close()
++
++    async def _execute_impl(
+         self,
++        user_id: str,
++        db: Session,
+         action: Literal["log_set", "skip_exercise", "start_rest"],
+         weight: Optional[float] = None,
+         reps: Optional[int] = None,
+@@ -82,20 +125,14 @@
+         rpe_feeling: Optional[str] = None,
+         notes: Optional[str] = None,
+         rest_duration: Optional[int] = None,
+-        user_id: str = None,
+-        db: Session = None,
+         **kwargs
+     ) -> Dict[str, Any]:
+-        """Execute the workout mode action"""
++        """Original business logic, unchanged — only the entrypoint above
++        changed. Still returns the original dict shape; execute() converts
++        it to a ToolResult."""
+ 
+         from app.services.workout_session_service import workout_session_service
+ 
+-        if not user_id or not db:
+-            return {
+-                "success": False,
+-                "error": "Missing user_id or database session"
+-            }
+-
+         try:
+             # Check for active session first
+             session = await workout_session_service.get_active_session(user_id, db)
+@@ -231,25 +268,35 @@
+         "required": []
+     }
+ 
+-    async def execute(
++    async def execute(self, user_id: str, **kwargs) -> ToolResult:
++        """R07 (Sara repair plan 2026-09-25, evidence
++        J06_trial2_START_WORKOUT_TOOL_COMPLETELY_BROKEN): `template_id` used
++        to be this method's first parameter, so the registry's positional
++        `tool.execute(user_id, **parameters)` bound the real user_id string
++        into `template_id` instead. `db` was never injected either. See
++        `_as_tool_result`'s docstring for why every call also silently
++        failed the registry's `result.success` check regardless."""
++        from app.db.session import get_db
++        db_gen = get_db()
++        db: Session = next(db_gen)
++        try:
++            return _as_tool_result(await self._execute_impl(user_id=user_id, db=db, **kwargs))
++        finally:
++            db.close()
++
++    async def _execute_impl(
+         self,
++        user_id: str,
++        db: Session,
+         template_id: Optional[str] = None,
+         template_name: Optional[str] = None,
+-        user_id: str = None,
+-        db: Session = None,
+         **kwargs
+     ) -> Dict[str, Any]:
+-        """Start a workout session"""
++        """Original business logic, unchanged."""
+ 
+         from app.services.workout_session_service import workout_session_service
+         from sqlalchemy import text
+ 
+-        if not user_id or not db:
+-            return {
+-                "success": False,
+-                "error": "Missing user_id or database session"
+-            }
+-
+         try:
+             # If template_name provided but not ID, look it up
+             if not template_id and template_name:
+@@ -366,23 +413,29 @@
+         "required": ["action"]
+     }
+ 
+-    async def execute(
++    async def execute(self, user_id: str, **kwargs) -> ToolResult:
++        """R07 (Sara repair plan 2026-09-25): same broken-contract shape as
++        the other two tools in this file — `action` collided with the
++        registry's positional user_id, and `db` was never injected."""
++        from app.db.session import get_db
++        db_gen = get_db()
++        db: Session = next(db_gen)
++        try:
++            return _as_tool_result(await self._execute_impl(user_id=user_id, db=db, **kwargs))
++        finally:
++            db.close()
++
++    async def _execute_impl(
+         self,
++        user_id: str,
++        db: Session,
+         action: Literal["complete", "abandon"],
+-        user_id: str = None,
+-        db: Session = None,
+         **kwargs
+     ) -> Dict[str, Any]:
+-        """End the workout session"""
++        """Original business logic, unchanged."""
+ 
+         from app.services.workout_session_service import workout_session_service
+ 
+-        if not user_id or not db:
+-            return {
+-                "success": False,
+-                "error": "Missing user_id or database session"
+-            }
+-
+         try:
+             if action == "complete":
+                 result = await workout_session_service.complete_workout(user_id, db)
+--- a/backend/app/main_simple.py
++++ b/backend/app/main_simple.py
+@@ -1746,6 +1746,19 @@
+         # model asks for is callable on the very next round.
+         self._active_tools = list(tools or [])
+         self._turn_message_for_mutation_gate = turn_message or ""
++        # R01 (Sara repair plan 2026-09-25, J11): a read-only peek (never a
++        # pop — the diet-path/voice-path gates above still own the actual
++        # pop/consume of this data for THEIR OWN schema-offer decision) at
++        # what mutating tools this session actually executed last turn, so
++        # `execute_tool`'s execution-boundary authorization check below can
++        # recognize a legitimate continuation ("yes", "do it") without
++        # depending on which of the three tool-selection branches ran.
++        # `conversation_id` mirrors the fallback key `execute_tool` itself
++        # already uses when writing to `_CHAT_INVOKED_MUTATING_TOOL_NAMES`
++        # (`_sticky_key or conversation_id` — see the write site).
++        self._last_turn_mutating_tools_for_boundary = list(
++            _CHAT_INVOKED_MUTATING_TOOL_NAMES.get(conversation_id, [])
++        ) if conversation_id else []
+         try:
+             logger.info(f"🔧 chat_with_tools called with conversation_id: {conversation_id}, model: {model}, ephemeral: {ephemeral}")
+ 
+@@ -1933,6 +1946,11 @@
+             # looked "just one call" and both executed. See
+             # find_ambiguous_same_turn_removals / record_removal_attempts.
+             self._turn_removal_attempts: Dict[str, set] = {}
++            # R01 review remediation (J10): running list of every
++            # scope-sensitive (cancel/delete/resolve/complete/...) tool
++            # call this turn, any round — see
++            # find_cross_tool_unscoped_mutations / record_cross_tool_attempts.
++            self._turn_cross_tool_calls: List[Dict[str, Any]] = []
+ 
+             message = await self._stream_response(payload)
+ 
+@@ -2023,12 +2041,27 @@
+                     # the actual removal clause and not negated, clears it.
+                     from app.services.tool_mutation import (
+                         find_ambiguous_same_turn_removals, record_removal_attempts,
++                        find_cross_tool_unscoped_mutations, record_cross_tool_attempts,
+                     )
++                    _raw_turn_msg = getattr(self, "_current_raw_user_turn", None) or ""
+                     _blocked_call_ids = set(find_ambiguous_same_turn_removals(
+-                        message["tool_calls"], getattr(self, "_current_raw_user_turn", None) or "",
++                        message["tool_calls"], _raw_turn_msg,
+                         prior_attempts=self._turn_removal_attempts,
+                     ))
+                     record_removal_attempts(self._turn_removal_attempts, message["tool_calls"])
++                    # R01 review remediation (J10 — "permission to close one
++                    # thread does not authorize cancelling unrelated work"):
++                    # a SEPARATE check from the one above — that one catches
++                    # the SAME tool called on multiple distinct targets;
++                    # this one catches DIFFERENT scope-sensitive tools
++                    # (cancel/delete/resolve/complete/...) firing in one
++                    # turn beyond what the message's own distinct action
++                    # asks actually support.
++                    _blocked_call_ids |= set(find_cross_tool_unscoped_mutations(
++                        message["tool_calls"], _raw_turn_msg,
++                        prior_calls=self._turn_cross_tool_calls,
++                    ))
++                    record_cross_tool_attempts(self._turn_cross_tool_calls, message["tool_calls"])
+                     if _blocked_call_ids:
+                         logger.warning(
+                             f"🚫 Withholding {len(_blocked_call_ids)} ambiguous same-turn "
+@@ -2048,22 +2081,26 @@
+                         
+                         _tool_t0 = time.monotonic()
+                         if tool_call.get("id") in _blocked_call_ids:
+-                            # Ambiguous same-turn removal — see above. Never
+-                            # reaches execute_tool; still flows into the same
+-                            # _turn_tools_called bookkeeping below with
+-                            # success=False, same as any other refused call,
+-                            # so it can never be misreported as a completed
+-                            # write later in this turn.
++                            # Ambiguous same-turn removal, OR a scope-
++                            # sensitive tool beyond what this turn's message
++                            # independently supports (J10) — see above.
++                            # Never reaches execute_tool; still flows into
++                            # the same _turn_tools_called bookkeeping below
++                            # with success=False, same as any other refused
++                            # call, so it can never be misreported as a
++                            # completed write later in this turn.
+                             tool_response = {
+                                 "role": "tool",
+                                 "tool_call_id": tool_call.get("id", ""),
+                                 "content": json.dumps({
+                                     "success": False,
+                                     "message": (
+-                                        f"Not executed: {tool_name} was called on more than one "
+-                                        "different target this turn, and David did not say "
+-                                        "\"all\"/\"both\"/similar. Ask him which one he meant "
+-                                        "instead of acting on every match."
++                                        f"Not executed: {tool_name} wasn't clearly authorized by "
++                                        "what David actually said this turn — either it matched "
++                                        "more than one target with no bulk language (\"all\"/"
++                                        "\"both\"), or it's a second, different action beyond "
++                                        "what his message specifically asked for. Ask him to "
++                                        "confirm exactly what he wants before acting on it."
+                                     ),
+                                 }),
+                             }
+@@ -2715,6 +2752,209 @@
+                 }),
+             }
+ 
++        # R01 (Sara repair plan 2026-09-25, evidence J11 —
++        # J11_trial1_TURN3_UNAUTHORIZED_STANDING_ORDER_FROM_HYPOTHETICAL):
++        # the offered-menu check above proves `function_name` was on this
++        # turn's wire, but three different code paths populate
++        # `_active_tools` (retrieval + `gate_mutating_tools`, the "work
++        # mode" category path, and a legacy category-classifier fallback
++        # path used when PRESENCE_TOOL_DIET is off) and only the first of
++        # them checks the human's actual message for action evidence
++        # before adding a mutating tool. With the flag off, the legacy
++        # path loaded `standing_order_create` from "I'm thinking about
++        # turning on the porch light when I get back" — explicitly
++        # hypothetical/musing language, not a request — and the model
++        # invoked it, creating a real, persistent, self-repeating
++        # automation with no confirmation step. This is the
++        # execution-boundary authorization the repair plan requires:
++        # independent of *how* the tool got into `_active_tools`, a
++        # mutating tool only actually RUNS if this turn's own message (or
++        # a session-scoped continuation of a mutating tool this session
++        # already executed last turn — "yes", "do it") evidences the
++        # request. Read-only tools and the narrow always-allowed
++        # exceptions (e.g. acknowledge_notifications) are unaffected.
++        try:
++            from app.services.tool_mutation import (
++                ALWAYS_ALLOWED_MUTATING as _ALWAYS_ALLOWED_MUTATING,
++                RECURRING_ESTABLISHING_TOOLS as _RECURRING_ESTABLISHING_TOOLS,
++                has_action_intent as _has_action_intent,
++                has_recurring_scope as _has_recurring_scope,
++                is_continuation_of_pending_action as _is_continuation_of_pending_action,
++                is_mutating_tool as _is_mutating_tool,
++            )
++            if _is_mutating_tool(function_name) and function_name not in _ALWAYS_ALLOWED_MUTATING:
++                _turn_msg = getattr(self, "_turn_message_for_mutation_gate", "") or ""
++                _recent_mutating = getattr(self, "_last_turn_mutating_tools_for_boundary", None) or []
++                _via_continuation = (
++                    function_name in _recent_mutating
++                    and _is_continuation_of_pending_action(_turn_msg)
++                )
++                _authorized = _has_action_intent(_turn_msg) or _via_continuation
++                # Message to check recurring-scope evidence against, for
++                # RECURRING_ESTABLISHING_TOOLS below — overwritten if this
++                # call ends up authorized via a consumed pending proposal
++                # (see immediately below), since the confirming turn's own
++                # message ("yes") is never where that evidence would be.
++                _recurring_scope_source = _turn_msg
++                _via_proposal = False
++
++                # R01 review remediation ("pending-proposal state"): the
++                # continuation check above only knows "this session
++                # EXECUTED some mutating tool last turn" — it conflates an
++                # already-completed action with a genuinely PENDING one,
++                # and only remembers a bare tool NAME, not what was
++                # actually about to happen. When neither direct evidence
++                # nor that coarse continuation authorizes this call, check
++                # for a typed pending proposal — created below, the LAST
++                # time this exact tool was refused for lack of evidence —
++                # scoped to this user+conversation+tool_name, consumed
++                # exactly once, and re-executed with the ORIGINALLY
++                # proposed arguments (not whatever the model passes this
++                # time), so a scoped "yes" re-authorizes exactly the one
++                # specific thing that was asked about, not "any mutating
++                # tool this session touched."
++                if not _authorized and conversation_id and _is_continuation_of_pending_action(_turn_msg):
++                    try:
++                        from app.services.chat_proposal_service import consume as _consume_proposal
++                        from app.db.session import get_db as _get_db_for_proposal
++                        _prop_db_gen = _get_db_for_proposal()
++                        _prop_db = next(_prop_db_gen)
++                        try:
++                            _consumed = _consume_proposal(
++                                _prop_db, user_id=str(user_id), conversation_id=str(conversation_id),
++                                tool_name=function_name,
++                            )
++                        finally:
++                            _prop_db.close()
++                        if _consumed is not None:
++                            try:
++                                arguments = json.loads(_consumed.arguments_json)
++                                _authorized = True
++                                _via_proposal = True
++                                # Critical: recurring-scope (checked below)
++                                # must be verified against the ORIGINAL
++                                # message that prompted the proposal, not
++                                # this turn's confirming "yes" — otherwise
++                                # a hypothetical, non-recurring message
++                                # that got refused-and-proposed could be
++                                # bare-"yes"-confirmed into a standing
++                                # order anyway, reopening J11 through a
++                                # back door.
++                                _recurring_scope_source = _consumed.source_message
++                                logger.info(
++                                    f"✅ '{function_name}' authorized via consumed pending "
++                                    f"proposal — executing the originally-proposed arguments"
++                                )
++                            except json.JSONDecodeError:
++                                logger.error(f"⚠️ Pending proposal for '{function_name}' had unparseable arguments; ignoring")
++                    except Exception as _prop_err:
++                        logger.debug(f"Pending-proposal consume skipped: {_prop_err}")
++
++                if not _authorized:
++                    logger.warning(
++                        f"🚫 Execution-boundary authorization refused '{function_name}' — "
++                        f"no action evidence in this turn's message and no continuation "
++                        f"of a mutating tool this session ran last turn"
++                    )
++                    # Record what was refused as a pending proposal — an
++                    # explicit follow-up ("yes", "do it") on a LATER turn
++                    # can then consume it and re-run exactly this call.
++                    # Never blocks or slows the refusal itself.
++                    if conversation_id:
++                        try:
++                            from app.services.chat_proposal_service import propose as _propose_pending
++                            from app.db.session import get_db as _get_db_for_proposal2
++                            _prop_db_gen2 = _get_db_for_proposal2()
++                            _prop_db2 = next(_prop_db_gen2)
++                            try:
++                                _propose_pending(
++                                    _prop_db2, user_id=str(user_id), conversation_id=str(conversation_id),
++                                    tool_name=function_name, arguments_json=json.dumps(arguments),
++                                    source_message=_turn_msg,
++                                    summary=f"{function_name} refused for lack of action evidence",
++                                )
++                            finally:
++                                _prop_db2.close()
++                        except Exception as _prop_err2:
++                            logger.debug(f"Pending-proposal record skipped: {_prop_err2}")
++                    return {
++                        "role": "tool",
++                        "tool_call_id": tool_call["id"],
++                        "content": json.dumps({
++                            "success": False,
++                            "message": (
++                                f"{function_name} did not run — nothing David actually "
++                                "said this turn requests that action. Do not describe it "
++                                "as done. If he wants it, ask him to say so directly."
++                            ),
++                            "data": None,
++                        }),
++                    }
++                # R01 review remediation (plan item 6, "recurring-action
++                # authorization"): action evidence alone authorizes at most
++                # a ONE-TIME action. A tool that installs STANDING,
++                # unsupervised authority to act again on every future
++                # occurrence needs its own, explicit recurring-scope
++                # evidence. Checked against EITHER this turn's own message
++                # OR (when authorized via a consumed proposal) the
++                # ORIGINAL proposing turn's message — never ONLY the
++                # proposal's stored message, which would otherwise refuse
++                # a confirmation that itself adds the missing recurring
++                # language ("yes, every time" — live-model validation
++                # caught this: Sara asked "just tonight, or make it the
++                # default?", the user answered "yes, every time", and an
++                # earlier version of this check looked ONLY at the
++                # original non-recurring proposing message and kept
++                # refusing even that explicit answer). Consuming a
++                # proposal still can never MANUFACTURE recurring scope
++                # that was never stated anywhere — it only adds a second
++                # place to find it if it's genuinely present. Skipped only
++                # for `_via_continuation` (the tool actually EXECUTED last
++                # turn, which means this exact check already ran and
++                # passed at that time).
++                if function_name in _RECURRING_ESTABLISHING_TOOLS and not _via_continuation:
++                    _recurring_ok = _has_recurring_scope(_turn_msg) or (
++                        _via_proposal and _has_recurring_scope(_recurring_scope_source)
++                    )
++                    if not _recurring_ok:
++                        _scope_src_desc = "the original proposing message or this confirmation" if _via_proposal else "this turn's message"
++                        logger.warning(
++                            f"🚫 Execution-boundary authorization refused '{function_name}' — "
++                            f"action evidence present but no recurring/standing scope in "
++                            f"{_scope_src_desc} (a one-time request cannot create standing authority)"
++                        )
++                        return {
++                            "role": "tool",
++                            "tool_call_id": tool_call["id"],
++                            "content": json.dumps({
++                                "success": False,
++                                "message": (
++                                    f"{function_name} did not run — David asked for a "
++                                    "one-time action, not a recurring/standing one. "
++                                    "Do it once directly with the real device/action tool "
++                                    "instead, or ask him if he wants it to repeat before "
++                                    "creating a standing order."
++                                ),
++                                "data": None,
++                            }),
++                        }
++        except Exception as _authz_err:
++            # Fail CLOSED for a mutating tool whose classification/check
++            # itself errored — an authorization check that can't run is not
++            # evidence of authorization. Read-only tools are unaffected
++            # since `_is_mutating_tool` defaults unrecognized names to
++            # mutating and the whole block only ever refuses, never grants.
++            logger.error(f"⚠️ Execution-boundary authorization check failed for '{function_name}': {_authz_err}")
++            return {
++                "role": "tool",
++                "tool_call_id": tool_call["id"],
++                "content": json.dumps({
++                    "success": False,
++                    "message": f"{function_name} did not run — an internal authorization check failed. Try again.",
++                    "data": None,
++                }),
++            }
++
+         # Work-order item 5 (2026-07-30): the 8 inline branches that used to
+         # live here (search_notes/create_note/list_notes/list_folders/
+         # create_reminder/start_timer/search_documents/search_memory) were
+@@ -3105,17 +3345,33 @@
+         # one this turn.
+         from app.services.tool_mutation import (
+             find_ambiguous_same_turn_removals, record_removal_attempts,
++            find_cross_tool_unscoped_mutations, record_cross_tool_attempts,
+         )
+         _turn_removal_attempts = getattr(self, "_turn_removal_attempts", None)
+         if _turn_removal_attempts is None:
+             _turn_removal_attempts = {}
+             self._turn_removal_attempts = _turn_removal_attempts
++        _deadline_raw_turn_msg = getattr(self, "_current_raw_user_turn", None) or ""
+         _blocked_call_ids = set(find_ambiguous_same_turn_removals(
+-            writes, getattr(self, "_current_raw_user_turn", None) or "",
++            writes, _deadline_raw_turn_msg,
+             prior_attempts=_turn_removal_attempts,
+         ))
+         record_removal_attempts(_turn_removal_attempts, writes)
+ 
++        # R01 review remediation (J10) — same cross-tool scoping check as
++        # the normal in-round path; a deadline crossing does not change
++        # whether one actionable clause in the message authorized more
++        # than one different scope-sensitive tool this turn.
++        _turn_cross_tool_calls = getattr(self, "_turn_cross_tool_calls", None)
++        if _turn_cross_tool_calls is None:
++            _turn_cross_tool_calls = []
++            self._turn_cross_tool_calls = _turn_cross_tool_calls
++        _blocked_call_ids |= set(find_cross_tool_unscoped_mutations(
++            writes, _deadline_raw_turn_msg,
++            prior_calls=_turn_cross_tool_calls,
++        ))
++        record_cross_tool_attempts(_turn_cross_tool_calls, writes)
++
+         for tool_call in message["tool_calls"]:
+             tool_name = _tool_call_name(tool_call) or "unknown"
+ 
+@@ -3141,10 +3397,11 @@
+                     "content": json.dumps({
+                         "success": False,
+                         "message": (
+-                            f"Not executed: {tool_name} was called on more than one "
+-                            "different target this turn, and David did not say "
+-                            "\"all\"/\"both\"/similar. Ask him which one he meant "
+-                            "instead of acting on every match."
++                            f"Not executed: {tool_name} wasn't clearly authorized by what "
++                            "David actually said this turn — either it matched more than "
++                            "one target with no bulk language (\"all\"/\"both\"), or it's a "
++                            "second, different action beyond what his message specifically "
++                            "asked for. Ask him to confirm exactly what he wants."
+                         ),
+                     }),
+                 })
+@@ -6154,7 +6411,11 @@
+                         if notification_key not in self.scheduled_notifications:
+                             self.scheduled_notifications[notification_key] = {
+                                 "title": f"Reminder: {reminder.title or 'Reminder'}",
+-                                "message": reminder.description or reminder.content or "Time for your reminder",
++                                # R06 (Sara repair plan 2026-09-25): Reminder has no
++                                # `content` column (only title/description) — this
++                                # `or` fallback raised AttributeError whenever
++                                # description was falsy, crashing this dispatch path.
++                                "message": reminder.description or reminder.title or "Time for your reminder",
+                                 "send_time": reminder.reminder_time,
+                                 "type": "reminder",
+                                 "reminder_id": reminder.id,
+@@ -8240,6 +8501,16 @@
+                 # would reject every call here since llm_client would have
+                 # no record of what was actually sent to the model.
+                 llm_client._active_tools = tools
++                # R01 (Sara repair plan 2026-09-25): this fast-worker path
++                # never applied `gate_mutating_tools` at all — tools came
++                # straight from category lookup — so the new
++                # execution-boundary check in `execute_tool` is the ONLY
++                # authorization this path gets. It needs this turn's real
++                # message (not a stale value from a previous request on a
++                # possibly-shared `llm_client`) and a clean continuation set
++                # (no prior-turn context tracked in this fast lane).
++                llm_client._turn_message_for_mutation_gate = message
++                llm_client._last_turn_mutating_tools_for_boundary = []
+ 
+                 # Execute tool calls
+                 tool_results = []
+--- a/backend/tests/test_tool_mutation.py
++++ b/backend/tests/test_tool_mutation.py
+@@ -71,6 +71,34 @@
+         ):
+             assert has_action_intent(msg), msg
+ 
++    def test_separable_take_off_out_phrasal_verb_has_action_intent(self):
++        """R01 review remediation, live-model validation 2026-09-25: 'Take
++        bread off the Grocery Run note, leave everything else' — a
++        plainly explicit edit request — matched no verb at all before this
++        fix (the object sits BETWEEN 'take' and 'off', so a flat substring
++        list can't express it) and a real notes_edit call was wrongly
++        refused by the execution-boundary check as a result."""
++        for msg in (
++            "Take bread off the Grocery Run note, leave everything else.",
++            "Take out the trash reminder.",
++            "Can you take that off my list?",
++            "Take the rain jacket out of the packing list.",
++        ):
++            assert has_action_intent(msg), msg
++
++    def test_take_without_off_or_out_has_no_action_intent(self):
++        """The narrow phrasal-verb pattern must not become a bare 'take'
++        match — these have no off/out at all, or too far away."""
++        for msg in (
++            "It'll take a while to get there.",
++            "Just take it easy today.",
++            "Take a look at this when you get a chance.",
++        ):
++            assert not has_action_intent(msg), msg
++
++    def test_negated_take_off_out_has_no_action_intent(self):
++        assert not has_action_intent("Don't take that off the list.")
++
+     def test_negation_and_reported_facts_have_no_action_intent(self):
+         """Living-world-context plan §3 finding: 'Tool gating treats words as
+         authorization' — a listed verb appearing in a prohibition, a plain
+--- a/backend/app/core/auth.py
++++ b/backend/app/core/auth.py
+@@ -1,11 +1,132 @@
++import logging
++import uuid
+ from datetime import datetime, timedelta, timezone
+ from typing import Optional
+ from jose import jwt
+ from passlib.context import CryptContext
+ from fastapi import Request
++from sqlalchemy import text
++from sqlalchemy.orm import Session
+ from app.core.config import settings
+ 
+ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
++logger = logging.getLogger(__name__)
++
++# R11 (Sara repair plan 2026-09-25, evidence A05_LOGOUT_DOES_NOT_REVOKE_TOKEN,
++# and the 2026-09-25 review remediation of the first version of this fix):
++# this app's JWTs are stateless (signature + exp only) — logout only ever
++# cleared the cookie, so a bearer token captured before logout (the `/auth/
++# token` endpoint hands the raw token to mobile/API clients on purpose)
++# stayed valid for its full week-long lifetime regardless. Every token now
++# carries a per-issuance `jti`; logging out (`revoke_token`) records that
++# jti in the DURABLE `revoked_token` Postgres table (moved off the first
++# version's Redis-only, fail-open design — see that table's module
++# docstring for why). This revokes THIS ONE SESSION's token, not every
++# device's — a separate "log out everywhere" is not implemented (not
++# evidenced, would be a new feature, not this defect's repair).
++
++
++class RevokeResult:
++    """Truthful outcome of a revoke_token() call — logout() reports this
++    to the caller instead of a blanket 'Successfully logged out' regardless
++    of whether anything was actually revoked."""
++    __slots__ = ("revoked", "reason")
++
++    def __init__(self, revoked: bool, reason: str):
++        self.revoked = revoked
++        self.reason = reason  # "revoked" | "no_jti_legacy_token" | "already_expired" | "invalid_token" | "store_unavailable"
++
++
++def _own_db_session():
++    from app.db.session import get_db
++    gen = get_db()
++    return next(gen), gen
++
++
++def revoke_token(token: str, db: Optional[Session] = None) -> RevokeResult:
++    """Revoke one issued token so `verify_token` refuses it from now on.
++
++    `db` is optional — callers that already have a session open (routes
++    with `db: Session = Depends(get_db)`) should pass it to avoid opening a
++    second one; callers without one get a short-lived session opened and
++    closed internally.
++    """
++    try:
++        payload = jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
++    except Exception:
++        return RevokeResult(False, "invalid_token")
++
++    jti = payload.get("jti")
++    exp = payload.get("exp")
++    if not jti or not exp:
++        logger.info("Logout: token has no jti — issued before session revocation existed; cannot be individually revoked, will expire naturally")
++        return RevokeResult(False, "no_jti_legacy_token")
++
++    expires_at = datetime.fromtimestamp(exp, tz=timezone.utc)
++    if expires_at <= datetime.now(timezone.utc):
++        return RevokeResult(False, "already_expired")  # nothing to revoke
++
++    owns_session = db is None
++    try:
++        # Opening the session itself can fail (e.g. Postgres genuinely
++        # unreachable) — this must land in the SAME except below as a
++        # query failure, not raise uncaught past this function. An
++        # earlier version of this fix opened the session BEFORE the
++        # try/except and let exactly this case propagate unhandled.
++        if owns_session:
++            db, _ = _own_db_session()
++        db.execute(text("""
++            INSERT INTO revoked_token (jti, user_id, expires_at)
++            VALUES (:jti, :user_id, :expires_at)
++            ON CONFLICT (jti) DO NOTHING
++        """), {"jti": jti, "user_id": payload.get("sub"), "expires_at": expires_at})
++        db.commit()
++        return RevokeResult(True, "revoked")
++    except Exception as e:
++        # Durable store unavailable (Postgres down) — this is a hard
++        # dependency failure, not a soft "Redis cache miss": the whole app
++        # is already unusable in this condition (every authenticated
++        # request needs Postgres for the User lookup too), so there is no
++        # "fail open silently" trade-off being made here, only an honest
++        # report that revocation could not be recorded.
++        if db is not None:
++            try:
++                db.rollback()
++            except Exception:
++                pass
++        logger.error(f"Failed to record token revocation (Postgres unavailable?): {e}")
++        return RevokeResult(False, "store_unavailable")
++    finally:
++        if owns_session and db is not None:
++            db.close()
++
++
++def _is_revoked(jti: Optional[str], db: Optional[Session] = None) -> bool:
++    if not jti:
++        return False
++    owns_session = db is None
++    try:
++        # See revoke_token's matching comment: opening the session itself
++        # must be inside this try, not before it.
++        if owns_session:
++            db, _ = _own_db_session()
++        row = db.execute(text("""
++            SELECT 1 FROM revoked_token WHERE jti = :jti AND expires_at > NOW()
++        """), {"jti": jti}).fetchone()
++        return row is not None
++    except Exception as e:
++        # A revocation check that cannot run must fail CLOSED, not open —
++        # this is the corrected behavior from the review remediation. It
++        # is safe to fail closed here because Postgres being unreachable
++        # already means every OTHER authenticated request is failing too
++        # (get_current_user's own User lookup needs the same database) —
++        # unlike the first version's Redis-only design, this introduces no
++        # new single point of failure the rest of the app didn't already have.
++        logger.error(f"Revocation check failed (Postgres unavailable?) — failing closed: {e}")
++        return True
++    finally:
++        if owns_session and db is not None:
++            db.close()
+ 
+ 
+ def get_cookie_domain(request: Request) -> Optional[str]:
+@@ -27,18 +148,30 @@
+     else:
+         expire = datetime.now(timezone.utc) + timedelta(hours=settings.jwt_expire_hours)
+ 
+-    to_encode.update({"exp": expire})
++    # R11: a per-issuance id, so this ONE token (and only this one) can
++    # later be individually revoked at logout without needing a stateful
++    # session table for every request's hot path.
++    to_encode.update({"exp": expire, "jti": str(uuid.uuid4())})
+     encoded_jwt = jwt.encode(to_encode, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+     return encoded_jwt
+ 
+ 
+-def verify_token(token: str) -> Optional[dict]:
+-    """Verify a JWT token and return payload"""
++def verify_token(token: str, db: Optional[Session] = None) -> Optional[dict]:
++    """Verify a JWT token and return payload.
++
++    `db` is optional, same contract as `revoke_token` — pass an existing
++    session when the caller already has one open (e.g. `get_current_user`),
++    to avoid a second connection on every authenticated request.
++    """
+     try:
+         payload = jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
+-        return payload
+     except Exception:
+         return None
++    # R11 (evidence A05_LOGOUT_DOES_NOT_REVOKE_TOKEN): a signature- and
++    # exp-valid token that was explicitly logged out must still be refused.
++    if _is_revoked(payload.get("jti"), db=db):
++        return None
++    return payload
+ 
+ 
+ def verify_password(plain_password: str, hashed_password: str) -> bool:
+--- a/backend/app/services/tool_mutation.py
++++ b/backend/app/services/tool_mutation.py
+@@ -205,6 +205,22 @@
+ )
+ 
+ 
++# R01 review remediation (live-model validation, 2026-09-25, evidence: a
++# live conversation against these fixes): "Take bread off the Grocery Run
++# note, leave everything else" — a plainly explicit, unambiguous edit
++# request — matched NO verb in ACTION_INTENT_VERBS at all, so notes_edit
++# was correctly-per-the-code-but-wrongly-in-effect refused, and the model
++# (accurately) reported the edit as blocked rather than fabricating
++# success — but a legitimate request went unfulfilled. "take"/"off"/"out"
++# is a separable phrasal verb ("take X off", "take the trash out") that a
++# flat substring list can't express (the object sits BETWEEN the two
++# words). Matched as "take" followed by up to 4 words then "off"/"out",
++# not as a bare "take" — bare "take" was deliberately rejected to avoid
++# false-positiving on "it'll take a while" / "take it easy", which have no
++# reliable copula/hypothetical guard the way "is set"/"was scheduled" do.
++_TAKE_OFF_OUT_RE = re.compile(r"\btake\b(?:\s+\S+){0,4}\s+(?:off|out)\b", re.IGNORECASE)
++
++
+ def has_action_intent(message: str) -> bool:
+     """True when the message carries positive evidence of a requested
+     mutation — an imperative or an explicit write-operation verb — and that
+@@ -243,6 +259,13 @@
+             if m.group(1) in _NOUN_AMBIGUOUS_VERBS and _DETERMINER_BEFORE_RE.search(clause):
+                 continue
+             return True
++        for m2 in _TAKE_OFF_OUT_RE.finditer(low):
++            clause = _current_clause(low[: m2.start()])
++            if any(neg in clause for neg in _NEGATION_MARKERS):
++                continue
++            if _inside_quotes(full_lower, sentence_start + m2.start()):
++                continue
++            return True
+         offset = sentence_start + len(low)
+     return False
+ 
+@@ -493,3 +516,172 @@
+             continue
+         args = tc.get("function", {}).get("arguments", "")
+         prior_attempts.setdefault(name, set()).add(args)
++
++
++# ── R01 review remediation (2026-09-25): recurring-scope authorization ──
++#
++# Original plan item 6: "Require explicit recurring scope before activating
++# a standing order. Hypothetical or one-time language cannot become
++# recurring authority." The execution-boundary fix (main_simple.py
++# execute_tool) closed the pure BYPASS (a mutating tool reaching execution
++# with NO action evidence at all, per J11), but a message with real,
++# unambiguous one-time action intent — "turn on the porch light" — still
++# satisfies `has_action_intent` and would authorize `standing_order_create`
++# even though the user never asked for anything recurring. A standing
++# order is categorically different from every other mutating tool: it
++# doesn't just act once, it installs standing authority to act again,
++# unsupervised, on every future occurrence. That requires its own,
++# additional evidence — not just "some action verb was present somewhere."
++RECURRING_ESTABLISHING_TOOLS = {"standing_order_create"}
++
++_RECURRING_SCOPE_MARKERS = (
++    "every time", "each time", "every day", "every morning", "every night",
++    "every week", "every arrival", "every time i", "whenever i", "whenever",
++    "always", "from now on", "automatically", "standing order", "recurring",
++    "each morning", "each night", "each week", "any time i", "anytime i",
++    "each arrival", "going forward",
++)
++
++
++def has_recurring_scope(message: str) -> bool:
++    """True when the message itself asks for a RECURRING/standing action,
++    not just a one-time one. "Turn on the porch light" (real, one-time
++    action intent) is not enough on its own to authorize
++    `standing_order_create`; "turn on the porch light every time I get
++    home" or "set up a standing order for..." is."""
++    if not message:
++        return False
++    low = message.lower()
++    return any(marker in low for marker in _RECURRING_SCOPE_MARKERS)
++
++
++# ── R01 review remediation: cross-tool authorization scoping ────────────
++#
++# J10 (evidence J10_trial1_TURN3_WRONG_ENTITY_CANCELLED_CROSS_CONTEXT /
++# J10_trial2_TURN3_SECOND_WRONG_ENTITY_ACTION): "The Cedar follow-up is
++# handled. Close that thread and stop reminding me about it." correctly
++# resolved the real followup_thread AND additionally cancelled an
++# unrelated, real research_plan (trial 1) or reminder (trial 2) — a
++# SEPARATE tool, on a SEPARATE entity, that the message gave no
++# independent evidence for. This is an authorization-SCOPE failure, not
++# only a reasoning failure: the execution-boundary check (has_action_intent)
++# only asks "does this message evidence ANY mutation," which one true
++# action ("stop reminding me about it") satisfies for the WHOLE turn —
++# nothing scopes that evidence to the ONE tool call it actually supports.
++#
++# The fix is deliberately NOT "only one mutating tool per turn, ever" —
++# that would break the explicitly legitimate case ("cancel the standing
++# order and mark the reminder done", two distinct real requests, two
++# distinct tools). Instead: count how many separate, INDEPENDENTLY
++# action-evidenced clauses the message actually contains
++# (`_count_actionable_clauses`), and allow that many distinct
++# consequential (cancel/delete/resolve/complete/...) tool calls this turn
++# — by call order, mirroring `find_ambiguous_same_turn_removals`'s own
++# "first N survive" precedent for the same-tool case. A message with ONE
++# actionable clause authorizes ONE consequential tool call; a second,
++# DIFFERENT tool acting on a different entity needs its own evidence.
++_SCOPE_SENSITIVE_TOKENS = {
++    "cancel", "delete", "remove", "resolve", "complete", "abandon",
++    "close", "archive", "deactivate",
++}
++
++
++def is_scope_sensitive_tool(name: str) -> bool:
++    """A tool whose effect TERMINATES/CLOSES/REMOVES an existing entity —
++    the class of action `find_cross_tool_unscoped_mutations` checks is
++    actually supported by the message's own distinct asks. Deliberately a
++    separate, broader set from `is_removal_tool` (which stays scoped to
++    its own existing same-tool-multiple-targets check) — this one also
++    covers "resolve"/"complete"/"abandon"/"archive"/"deactivate", the
++    verbs the J10 confirmed failure actually used."""
++    return bool(_tokens(name) & _SCOPE_SENSITIVE_TOKENS)
++
++
++def _count_actionable_clauses(message: str) -> int:
++    """A rough count of how many separate things the message actually asks
++    for — how many clauses carry their OWN action-verb evidence (reusing
++    `has_action_intent`'s existing guards by calling it per-clause). "Cancel
++    the standing order and mark the reminder done" -> 2. "Close that thread
++    and stop reminding me about it" -> 1 in practice (only "stop reminding"
++    matches a listed verb; "close" is not itself in ACTION_INTENT_VERBS,
++    which is exactly why the model's OTHER, unrelated cancellation call in
++    that transcript had no textual support of its own).
++
++    Deliberately conservative in the SAFE direction: splitting on clause
++    boundaries can undercount a genuinely compound request phrased without
++    a clean per-clause verb (rare), which only makes this check MORE
++    willing to allow additional tool calls, never less — a false block on
++    a legitimate second request is the expensive direction of error here,
++    the same way `has_bulk_intent`'s negation window treats an uncertain
++    case as authorized rather than blocked.
++    """
++    if not message:
++        return 0
++    count = 0
++    for sentence in _SENTENCE_SPLIT_RE.split(message):
++        for clause in _CLAUSE_SPLIT_RE.split(sentence):
++            if has_action_intent(clause):
++                count += 1
++    return count
++
++
++def find_cross_tool_unscoped_mutations(
++    tool_calls: Sequence[Dict[str, Any]], message: str,
++    prior_calls: Optional[Sequence[Dict[str, Any]]] = None,
++) -> List[str]:
++    """Tool-call ids to BLOCK: DIFFERENT scope-sensitive tools invoked in
++    the same turn beyond what the message's own distinct action asks
++    support (see module comment above for the full J10 rationale).
++
++    `prior_calls` (optional) mirrors `find_ambiguous_same_turn_removals`'s
++    `prior_attempts` contract but as a flat list of raw tool-call dicts
++    from earlier rounds THIS turn — the caller accumulates it the same way.
++
++    Returns an empty list when `has_bulk_intent(message)` (explicit "cancel
++    both" style authorization) or when every scope-sensitive call this turn
++    is either within the message's actionable-clause budget or an EXACT
++    repeat of an already-counted call (a retry, not a second ask).
++
++    Known, stated limitation — same shape as the same-tool version this
++    complements: given N scope-sensitive calls where the message supports
++    fewer, this can only block "the calls beyond the first N in the order
++    they were made," not identify which specific call was the wrong one.
++    """
++    if has_bulk_intent(message):
++        return []
++
++    from app.tools.mutating import tool_call_name
++
++    seen_signatures: set = set()
++    for prior in (prior_calls or []):
++        name = tool_call_name(prior)
++        if name and is_scope_sensitive_tool(name):
++            seen_signatures.add((name, prior.get("function", {}).get("arguments", "")))
++
++    allowed = _count_actionable_clauses(message)
++    blocked: List[str] = []
++    for tc in tool_calls or []:
++        name = tool_call_name(tc)
++        if not name or not is_scope_sensitive_tool(name):
++            continue
++        sig = (name, tc.get("function", {}).get("arguments", ""))
++        if sig in seen_signatures:
++            continue  # exact repeat of an already-counted call — not a new ask
++        if len(seen_signatures) < allowed:
++            seen_signatures.add(sig)
++            continue
++        seen_signatures.add(sig)
++        blocked.append(tc.get("id", ""))
++    return blocked
++
++
++def record_cross_tool_attempts(
++    prior_calls: List[Dict[str, Any]], tool_calls: Sequence[Dict[str, Any]],
++) -> None:
++    """Mutates `prior_calls` in place, appending every tool call this round
++    (whether it went on to execute or was blocked) — the running per-turn
++    history `find_cross_tool_unscoped_mutations` checks future rounds
++    against. Call once per round, after deciding what to block, exactly
++    like `record_removal_attempts`."""
++    for tc in tool_calls or []:
++        prior_calls.append(tc)
+--- a/backend/app/services/msgraph_service.py
++++ b/backend/app/services/msgraph_service.py
+@@ -318,8 +318,19 @@
+             return emails
+ 
+         except Exception as e:
++            # R12 (Sara repair plan 2026-09-25, evidence
++            # P03_SOURCE_UNAVAILABLE_MISREPORTED_AS_ZERO_ERRORS): this used
++            # to log the real error and then `return []` — indistinguishable,
++            # to every caller, from a genuinely empty inbox. Both real
++            # callers (app/tasks/email_sync.py's inbound and sent-items sync
++            # loops) already wrap this call in a per-mailbox
++            # `except Exception: total_errors += 1; continue`, so re-raising
++            # here is enough to make a real outage actually counted as an
++            # error instead of silently reported as "0 errors, 0 new mail" —
++            # without losing the existing per-mailbox isolation (one
++            # mailbox's outage still doesn't stop the others from syncing).
+             logger.error(f"MS Graph get_emails error for {mailbox}: {e}")
+-            return []
++            raise
+ 
+     async def get_unread_ids(
+         self,
+@@ -485,8 +496,16 @@
+         """
+         results = {}
+         for mailbox in self.mailboxes:
+-            emails = await self.get_emails(mailbox, since=since, top=top_per_mailbox)
+-            results[mailbox] = emails
++            # get_emails now raises on a real fetch failure instead of
++            # swallowing it into an empty list (R12) — this caller has no
++            # error-accounting contract of its own, so preserve its
++            # original per-mailbox-isolated behavior explicitly rather than
++            # letting one mailbox's outage abort the whole sync silently.
++            try:
++                results[mailbox] = await self.get_emails(mailbox, since=since, top=top_per_mailbox)
++            except Exception as e:
++                logger.error(f"sync_all_mailboxes: {mailbox} failed: {e}")
++                results[mailbox] = []
+         return results
+ 
+ 
+--- a/backend/app/routes/auth.py
++++ b/backend/app/routes/auth.py
+@@ -185,14 +185,63 @@
+ 
+ 
+ @router.post("/logout")
+-async def logout(request: Request, response: Response):
+-    """Log out the current user by clearing the access token cookie."""
++async def logout(request: Request, response: Response, db: Session = Depends(get_db)):
++    """Log out the current user: clears the cookie AND revokes the ACTIVE
++    session's token server-side (R11, evidence
++    A05_LOGOUT_DOES_NOT_REVOKE_TOKEN — and the 2026-09-25 review
++    remediation of the first version of this fix) so a bearer token
++    captured before logout (returned to mobile/API clients by `/auth/token`
++    on purpose) cannot keep authenticating afterward. Cookie clearing alone
++    was necessary but not sufficient — these JWTs are stateless and were
++    accepted purely on signature+exp.
++
++    Precedence matches `get_current_user` EXACTLY — cookie first, else the
++    Authorization header — and revokes ONLY that one token, not both. This
++    is a deliberate correction from the first version of this fix, which
++    revoked whichever of the two were present: if a browser tab's stale
++    cookie and a mobile client's unrelated bearer token both happened to
++    ride on the same request, revoking "whichever is present" could
++    invalidate a session this request was never actually authenticating
++    with. "Log out THIS session" means the one identity this request
++    itself would have resolved to via get_current_user, no more.
++
++    Reports truthfully whether a token was actually revoked, rather than
++    a blanket "Successfully logged out" regardless of outcome — a legacy
++    token with no `jti`, an already-expired token, or a revocation-store
++    failure are each surfaced distinctly.
++    """
++    from app.core.auth import revoke_token
++
++    token = request.cookies.get("access_token")
++    if not token:
++        auth_header = request.headers.get("Authorization")
++        if auth_header and auth_header.startswith("Bearer "):
++            token = auth_header[7:]
++
+     cookie_domain = get_cookie_domain(request)
+     if cookie_domain:
+         response.delete_cookie(key="access_token", domain=cookie_domain)
+     else:
+         response.delete_cookie(key="access_token")
+-    return {"message": "Successfully logged out"}
++
++    if not token:
++        return {"message": "No active session token found — cookie cleared.", "revoked": False, "reason": "no_token_presented"}
++
++    result = revoke_token(token, db=db)
++
++    if result.revoked:
++        return {"message": "Successfully logged out.", "revoked": True, "reason": "revoked"}
++
++    if result.reason == "no_jti_legacy_token":
++        message = "Logged out locally, but this session's token predates server-side revocation and cannot be individually invalidated — it will still expire on its own."
++    elif result.reason == "already_expired":
++        message = "Logged out — that token had already expired on its own."
++    elif result.reason == "invalid_token":
++        message = "Logged out locally — the presented token was not valid."
++    else:  # store_unavailable
++        message = "Logged out locally, but the token could NOT be revoked server-side (the revocation store is unavailable) — treat it as still valid elsewhere until this is resolved."
++
++    return {"message": message, "revoked": False, "reason": result.reason}
+ 
+ 
+ @router.get("/me", response_model=UserResponse)
+--- a/backend/app/tasks/inproc_schedulers.py
++++ b/backend/app/tasks/inproc_schedulers.py
+@@ -208,7 +208,11 @@
+     await send_push_to_user(
+         user_id=reminder.user_id,
+         title=f"Reminder: {reminder.title or 'Reminder'}",
+-        body=reminder.description or reminder.content or "Time for your reminder",
++        # R06 (Sara repair plan 2026-09-25, evidence
++        # REMINDER_DISPATCH_CRASH_NO_DESCRIPTION): Reminder has no `content`
++        # column — this fallback raised AttributeError and crashed dispatch
++        # for any reminder with an empty description, i.e. most of them.
++        body=reminder.description or reminder.title or "Time for your reminder",
+         notification_data={
+             "type": "reminder",
+             "reminder_id": reminder.id,
+diff --git a/backend/app/core/deps.py b/backend/app/core/deps.py
+index bb80339b..3336afe4 100644
+--- a/backend/app/core/deps.py
++++ b/backend/app/core/deps.py
+@@ -31,7 +31,10 @@ async def get_current_user(
+ 
+     # If we have a JWT token, validate it
+     if token:
+-        payload = verify_token(token)
++        # R11 review remediation: pass this request's own already-open
++        # session so the revocation check doesn't open a second DB
++        # connection on every single authenticated request.
++        payload = verify_token(token, db=db)
+         if payload is None:
+             raise credentials_exception
+ 

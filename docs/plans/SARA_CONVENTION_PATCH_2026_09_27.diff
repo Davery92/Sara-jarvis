@@ -1,0 +1,473 @@
+--- a/backend/app/tools/notes.py
++++ b/backend/app/tools/notes.py
+@@ -135,6 +135,88 @@
+     return None, None
+ 
+ 
++# --- notes_search result shaping (2026-09-27) -------------------------------
++# notes_search used to return every hit's FULL content. Median note in this
++# database is 3,977 chars, p90 is 10,732, and the largest is 670,130 — so a
++# default limit=10 search routinely produced ~19,000 chars. Anything over
++# TOOL_RESULT_INLINE_MAX (9,000) is replaced upstream by `content[:3000]`
++# plus "Do not tell David the result was empty", which means hits 3..10 were
++# invisible to the model while it was explicitly told not to report an empty
++# result. Readback questions therefore got a confident answer drawn from
++# whichever note happened to sort first.
++#
++# A search result only needs to be enough to (a) recognise the right note and
++# (b) answer a simple readback. Full content stays one notes_search away with
++# a narrower query, or a direct read by note_id.
++NOTES_SNIPPET_CHARS = 400
++
++# Below this cosine similarity a note is not a match, it is just the nearest
++# row in the table. The vector branch had no floor at all, so a query with no
++# real match still returned `limit` arbitrary notes and invited an answer
++# assembled from unrelated ones.
++NOTES_VECTOR_MIN_SIMILARITY = 0.35
++
++_WORD_RE = re.compile(r"[A-Za-z0-9']+")
++# Words that carry no selectivity in a note search. A query like "who did I
++# meet from Acme" must search for "acme" (and "meet"), not for the literal
++# phrase — the old single whole-query ILIKE matched only notes containing that
++# entire sentence, i.e. essentially never.
++_NOTE_STOPWORDS = frozenset({
++    "a", "an", "and", "any", "are", "about", "at", "be", "but", "by",
++    "can", "did", "do", "does", "for", "from", "had", "has", "have", "he",
++    "her", "his", "i", "if", "in", "is", "it", "its", "me", "my", "of", "on",
++    "or", "our", "she", "that", "the", "their", "them", "then", "there",
++    "they", "this", "to", "up", "us", "was", "we", "were", "what", "when",
++    "where", "which", "who", "whom", "why", "will", "with", "you", "your",
++    "tell", "say", "said", "again", "note", "notes", "anything", "something",
++    "remember", "recall", "know", "knew", "meet", "met", "talk", "talked",
++})
++
++
++def _query_terms(query: str, max_terms: int = 6) -> list:
++    """Selective search terms from a natural-language query, longest first.
++
++    Longest-first matters: "acme" is a far better filter than "from", and the
++    SQL below only uses the first `max_terms` so the discriminating words must
++    come first.
++    """
++    seen = set()
++    terms = []
++    for w in _WORD_RE.findall(query or ""):
++        lw = w.lower()
++        if len(lw) < 3 or lw in _NOTE_STOPWORDS or lw in seen:
++            continue
++        seen.add(lw)
++        terms.append(lw)
++    terms.sort(key=len, reverse=True)
++    return terms[:max_terms]
++
++
++def _snippet(content: Optional[str], terms: Optional[list] = None,
++             width: int = NOTES_SNIPPET_CHARS) -> str:
++    """A short excerpt, centred on the first matching term when there is one.
++
++    The point of centring is that the reason a note matched should be visible
++    in the excerpt — a person's name three paragraphs in is exactly the case
++    that a leading `content[:400]` would hide.
++    """
++    text_val = (content or "").strip()
++    if len(text_val) <= width:
++        return text_val
++
++    start = 0
++    if terms:
++        low = text_val.lower()
++        positions = [p for p in (low.find(t) for t in terms) if p != -1]
++        if positions:
++            start = max(0, min(positions) - width // 3)
++
++    excerpt = text_val[start:start + width].strip()
++    prefix = "…" if start > 0 else ""
++    suffix = "…" if start + width < len(text_val) else ""
++    return f"{prefix}{excerpt}{suffix}"
++
++
+ class NotesCreateTool(BaseTool):
+     """Tool for creating new notes"""
+     
+@@ -144,7 +226,16 @@
+     
+     @property
+     def description(self) -> str:
+-        return "Create a new note with optional title and content. The note will be automatically embedded for semantic search."
++        return (
++            "Create a NEW note with optional title and content. The note will be "
++            "automatically embedded for semantic search.\n"
++            "Do NOT use this to correct or update something already written down. If a "
++            "note on this subject already exists — you searched and found one, or you "
++            "wrote one earlier in this conversation — call notes_edit with append_text "
++            "on THAT note instead. Two notes disagreeing about the same person is worse "
++            "than one note carrying its own correction: a later search can surface the "
++            "stale one and answer David wrongly."
++        )
+     
+     @property
+     def parameters(self) -> Dict[str, Any]:
+@@ -256,7 +347,14 @@
+     
+     @property
+     def description(self) -> str:
+-        return "Search through notes using keywords or semantic similarity."
++        return (
++            "Search the user's notes by keyword and semantic similarity. Returns the "
++            "best matches as EXCERPTS (a few hundred characters each) with note_id, "
++            "title and dates — not whole notes. If an excerpt looks like the right "
++            "note but you need more of it, search again with a narrower query drawn "
++            "from that note's own wording. An empty result means nothing matched: say "
++            "so rather than answering from memory."
++        )
+     
+     @property
+     def parameters(self) -> Dict[str, Any]:
+@@ -298,21 +396,45 @@
+ 
+             # Normalize query for fuzzy matching (remove spaces)
+             normalized_query = query.replace(" ", "")
++            terms = _query_terms(query)
+ 
+-            # FIRST: Text-based search on title and content (works even without embeddings)
+-            text_sql = text("""
+-                SELECT id, title, content, created_at, updated_at, 1.0 as similarity
++            # FIRST: Text-based search on title and content (works even without
++            # embeddings). The whole query is still tried as one phrase — that
++            # is the strongest possible signal when it hits — but a natural
++            # question ("who did I meet from Acme?") only ever matches on its
++            # individual terms, so those are tried too, ranked by how many of
++            # them a note actually contains.
++            term_patterns = {f"t{i}": f"%{t}%" for i, t in enumerate(terms)}
++            if term_patterns:
++                term_where = " OR ".join(
++                    f"(title ILIKE :{k} OR content ILIKE :{k})" for k in term_patterns
++                )
++                term_score = " + ".join(
++                    f"(CASE WHEN title ILIKE :{k} THEN 2 "
++                    f"WHEN content ILIKE :{k} THEN 1 ELSE 0 END)"
++                    for k in term_patterns
++                )
++            else:
++                term_where = "FALSE"
++                term_score = "0"
++
++            text_sql = text(f"""
++                SELECT id, title, content, created_at, updated_at,
++                       ({term_score}) AS term_score,
++                       (CASE WHEN title ILIKE :query_pattern THEN 1 ELSE 0 END) AS phrase_title,
++                       (CASE WHEN content ILIKE :query_pattern THEN 1 ELSE 0 END) AS phrase_body
+                 FROM note
+                 WHERE user_id = :user_id
+                   AND (
+                     title ILIKE :query_pattern
+                     OR REPLACE(title, ' ', '') ILIKE :normalized_pattern
+                     OR content ILIKE :query_pattern
++                    OR ({term_where})
+                   )
+                 ORDER BY
+-                    CASE WHEN title ILIKE :query_pattern THEN 0
+-                         WHEN REPLACE(title, ' ', '') ILIKE :normalized_pattern THEN 1
+-                         ELSE 2 END,
++                    phrase_title DESC,
++                    term_score DESC,
++                    phrase_body DESC,
+                     updated_at DESC
+                 LIMIT :limit
+             """)
+@@ -321,7 +443,8 @@
+                 "user_id": user_id,
+                 "query_pattern": f"%{query}%",
+                 "normalized_pattern": f"%{normalized_query}%",
+-                "limit": limit
++                "limit": limit,
++                **term_patterns,
+             })
+ 
+             for row in text_result.fetchall():
+@@ -330,8 +453,9 @@
+                     notes.append({
+                         "note_id": str(row.id),
+                         "title": row.title,
+-                        "content": row.content,
+-                        "similarity": 1.0,  # Text match = high relevance
++                        "snippet": _snippet(row.content, terms),
++                        "content_chars": len(row.content or ""),
++                        "match": "text",
+                         "created_at": row.created_at.isoformat(),
+                         "updated_at": row.updated_at.isoformat()
+                     })
+@@ -359,20 +483,41 @@
+                     })
+ 
+                     for row in vector_result.fetchall():
+-                        if str(row.id) not in seen_ids and len(notes) < limit:
+-                            seen_ids.add(str(row.id))
+-                            notes.append({
+-                                "note_id": str(row.id),
+-                                "title": row.title,
+-                                "content": row.content,
+-                                "similarity": round(row.similarity, 3),
+-                                "created_at": row.created_at.isoformat(),
+-                                "updated_at": row.updated_at.isoformat()
+-                            })
+-                            citations.append(f"note:{row.id}")
++                        if str(row.id) in seen_ids or len(notes) >= limit:
++                            continue
++                        # Nearest-neighbour with no floor returned `limit`
++                        # arbitrary notes whenever nothing actually matched,
++                        # which is how an answer gets assembled out of
++                        # unrelated notes. Below the floor it is not a match.
++                        if row.similarity is None or row.similarity < NOTES_VECTOR_MIN_SIMILARITY:
++                            continue
++                        seen_ids.add(str(row.id))
++                        notes.append({
++                            "note_id": str(row.id),
++                            "title": row.title,
++                            "snippet": _snippet(row.content, terms),
++                            "content_chars": len(row.content or ""),
++                            "match": "semantic",
++                            "similarity": round(row.similarity, 3),
++                            "created_at": row.created_at.isoformat(),
++                            "updated_at": row.updated_at.isoformat()
++                        })
++                        citations.append(f"note:{row.id}")
+                 except Exception as embed_error:
+                     # Vector search failed, but text search may have worked
+-                    pass
++                    logger.warning(f"notes_search vector branch failed: {type(embed_error).__name__}: {embed_error}")
++
++            if notes:
++                message = (
++                    f"Found {len(notes)} notes matching '{query}'. Each result is an "
++                    "excerpt, not the whole note — search again with a narrower query "
++                    "if you need more of one."
++                )
++            else:
++                message = (
++                    f"No notes matched '{query}'. Nothing was found — say so rather "
++                    "than answering from memory."
++                )
+ 
+             return ToolResult(
+                 success=True,
+@@ -381,7 +526,7 @@
+                     "query": query,
+                     "total_found": len(notes)
+                 },
+-                message=f"Found {len(notes)} notes matching '{query}'",
++                message=message,
+                 citations=citations
+             )
+ 
+@@ -405,6 +550,13 @@
+     def description(self) -> str:
+         return (
+             "Edit an existing note's title or content. The note will be re-embedded after editing. "
++            "CORRECTING A FACT ('actually she's at Initech, not Globex', 'his title is VP') "
++            "→ use append_text ONLY, with a dated correction line such as "
++            "'Correction 2026-09-27: now at Initech, not Globex.' Do not pass content or "
++            "title for a correction: rewriting or renaming a note needs David to have "
++            "actually asked for it, and those calls are refused when he only told you a "
++            "fact changed. An appended correction is also the better record — it keeps "
++            "what he said before alongside what he says now.\n"
+             "For removing or adding ONE item from an otherwise-unchanged note (e.g. 'remove the "
+             "rain jacket but keep the other items'), use remove_text or append_text instead of content "
+             "— they touch only the matched text (a whole line, one item in a comma-separated list, or "
+--- a/backend/app/services/tool_mutation.py
++++ b/backend/app/services/tool_mutation.py
+@@ -51,6 +51,21 @@
+     # must be able to check a real record on its own initiative, the same
+     # way it can search or list.
+     "verify",
++    # Live validation 2026-09-27, conversation B turn 2 ("What was I supposed
++    # to do about the Contoso guy?"): `query_david_knowledge` was REFUSED by
++    # the execution boundary as a mutating tool. Unrecognized names default to
++    # mutating — deliberately conservative — but that default also catches
++    # read-only tools whose names happen to use none of the listed read verbs,
++    # and then a plain recall question cannot reach the very tool that answers
++    # it. `query_david_knowledge` and `pattern_query` only ever SELECT;
++    # `diagnostics_explain` only reads state. These are gated exactly when
++    # David is asking a question, which is the worst possible time.
++    #
++    # Safe by construction: READ_TOKENS only decides a name that carries NO
++    # mutating token at all (see is_mutating_tool), so this cannot un-gate a
++    # "query_and_delete"-shaped name.
++    "query",
++    "explain",
+ }
+ 
+ _TOKEN_RE = re.compile(r"[a-z0-9]+")
+@@ -75,6 +90,82 @@
+ # acknowledgement path" for a bare "Good morning Sara").
+ ALWAYS_ALLOWED_MUTATING = {"acknowledge_notifications"}
+ 
++
++# --- Capture is not an imperative (2026-09-27) ------------------------------
++# The execution-boundary gate requires a verb from ACTION_INTENT_VERBS before
++# any mutating tool may run. That is the right bar for a consequential action
++# (a standing order, a cancellation, sending something), and the wrong bar for
++# writing down what David just said. Measured against realistic phrasings for
++# "capture a note about a person I just met", 7 of 9 were refused:
++#
++#   REFUSE  "Remember that I met Dana from Acme, she runs their platform team"
++#   REFUSE  "Dana from Acme: platform team lead, wants a follow-up on pricing"
++#   REFUSE  "Jot down that Marcus at Contoso is hiring two SREs"
++#   REFUSE  "FYI I talked to Priya from Globex about the migration"
++#   ALLOW   "Add a note that Dana runs the platform team"
++#
++# For a capture, the disclosure IS the request — there is no separate imperative
++# to look for, and demanding one produces exactly the "I had to tell her twice"
++# failure. These calls are additive (they create a new row or append to an
++# existing one), user-visible in the notes UI, and trivially reversible, so the
++# gate buys nothing here that is worth that cost. Note that this is narrower
++# than ALWAYS_ALLOWED_MUTATING: only the ADDITIVE shape is exempt. A full
++# content rewrite or a remove_text on an existing note still needs real action
++# evidence, because those can destroy something.
++CAPTURE_TOOLS = {
++    "notes_create",
++    "notes_create_folder",
++    "fitness_note_create",
++}
++
++# Tools that can be called in a purely additive way, but also in a destructive
++# way — so the exemption depends on the ARGUMENTS, not just the name.
++APPEND_ONLY_CAPABLE = {"notes_edit", "fitness_note_edit"}
++
++# The only exempt edit shape: `append_text` strictly ADDS to the end of a note.
++# It cannot remove or overwrite anything, so authorizing it can lose nothing.
++_NARROW_EDIT_ARGS = ("append_text",)
++
++# Everything else a notes_edit can do requires the user's own authorization.
++#
++# `remove_text` was briefly exempt here on the grounds that it deletes exactly
++# one matched span and refuses on zero/multiple matches. Narrowness is not
++# authorization: a precise deletion is still a deletion, and "it can only
++# destroy a little" is not a reason to run it unasked. Reverted 2026-09-27 on
++# David's instruction. `content` replaces the whole body; `title` renames.
++_WHOLE_NOTE_EDIT_ARGS = ("content", "title", "remove_text")
++
++
++def is_additive_capture_call(tool_name: str, arguments) -> bool:
++    """True when this specific call only records, appends, or narrowly revises.
++
++    Capture (a new note) and pure APPEND are exempt, because neither can lose
++    anything that already exists and because the disclosure is itself the
++    request — "Remember that I met Dana from Acme" carries no imperative verb
++    at all, and demanding one refused 7 of 9 realistic phrasings.
++
++    Everything that can remove or overwrite existing text — `content`,
++    `title`, `remove_text` — needs the user's own authorization and is NOT
++    exempt, however narrowly scoped its arguments are. A correction therefore
++    lands as an append (an audit trail, which is the right shape for "actually
++    it's X, not Y" anyway), not as an unauthorized deletion.
++
++    `arguments` is the call's own argument dict (whatever the model passed);
++    anything unparseable is treated as NOT a capture, so the gate stays the
++    default and this can only ever widen authority for a shape it can actually
++    verify.
++    """
++    if tool_name in CAPTURE_TOOLS:
++        return True
++    if tool_name in APPEND_ONLY_CAPABLE and isinstance(arguments, dict):
++        if any(arguments.get(k) for k in _WHOLE_NOTE_EDIT_ARGS):
++            return False
++        for key in _NARROW_EDIT_ARGS:
++            value = arguments.get(key)
++            if isinstance(value, str) and value.strip():
++                return True
++    return False
++
+ # Imperative/action verbs David actually uses when he wants Sara to do
+ # something, as opposed to reporting or reacting to something. Deliberately
+ # a fixed lexicon, not a second LLM call (Phase 5 non-goal: no unconstrained
+@@ -348,6 +439,16 @@
+         if name in ALWAYS_ALLOWED_MUTATING or action_ok:
+             kept.append(schema)
+             continue
++        # Capture tools stay on the wire even with no imperative verb — see
++        # `is_additive_capture_call`. Selection can only judge by NAME (the
++        # model hasn't chosen arguments yet), so `notes_edit` is offered here
++        # and it is the execution boundary that checks whether the call it
++        # actually made was additive or destructive. Offering a tool is not
++        # authorizing it; that two-layer split is the pre-existing contract
++        # this follows rather than widens.
++        if name in CAPTURE_TOOLS or name in APPEND_ONLY_CAPABLE:
++            kept.append(schema)
++            continue
+         if continuation_ok and name in recent_set:
+             kept.append(schema)
+             continue
+--- a/backend/app/main_simple.py
++++ b/backend/app/main_simple.py
+@@ -2847,6 +2847,7 @@
+                 RECURRING_ESTABLISHING_TOOLS as _RECURRING_ESTABLISHING_TOOLS,
+                 has_action_intent as _has_action_intent,
+                 has_recurring_scope as _has_recurring_scope,
++                is_additive_capture_call as _is_additive_capture_call,
+                 is_continuation_of_pending_action as _is_continuation_of_pending_action,
+                 is_mutating_tool as _is_mutating_tool,
+             )
+@@ -2857,7 +2858,14 @@
+                     function_name in _recent_mutating
+                     and _is_continuation_of_pending_action(_turn_msg)
+                 )
+-                _authorized = _has_action_intent(_turn_msg) or _via_continuation
++                # Writing down what David just told you is not an imperative
++                # action and must not need an imperative verb — see
++                # `tool_mutation.is_additive_capture_call` for the measured
++                # refusal rate this exists to fix. Narrow by construction: the
++                # additive shape only, checked against this call's own
++                # arguments, so a rewrite or a removal still faces the gate.
++                _via_capture = _is_additive_capture_call(function_name, arguments)
++                _authorized = _has_action_intent(_turn_msg) or _via_continuation or _via_capture
+                 # Message to check recurring-scope evidence against, for
+                 # RECURRING_ESTABLISHING_TOOLS below — overwritten if this
+                 # call ends up authorized via a consumed pending proposal
+--- a/backend/app/core/app_state.py
++++ b/backend/app/core/app_state.py
+@@ -113,7 +113,17 @@
+             {"id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro", "provider": "google"},
+             {"id": "gemini-2.5-flash", "name": "Gemini 2.5 Flash", "provider": "google"},
+             {"id": "Qwen3.5-35B-A3B", "name": "Local 35B", "provider": "local"},
+-            {"id": "qwen3.8-27b", "name": "Local Qwen3.8 27B (chat lane)", "provider": "local", "base_url": "http://100.104.68.115:8082/v1"},
++            # This catalog entry's own base_url OVERRIDES OPENAI_BASE_URL for the
++            # chat lane (see get_model_config: catalog_base_url wins). That is
++            # why an isolated acceptance stack — which sets OPENAI_BASE_URL to a
++            # budget gateway and has no route to the real host — silently talked
++            # to production's model host instead: on 2026-09-27 a full live run
++            # appeared to execute while the gateway ledger recorded ZERO
++            # requests, every turn failing with ConnectError. Made overridable
++            # so an isolated environment can actually isolate. Default unchanged,
++            # so production behaviour is identical with the variable unset.
++            {"id": "qwen3.8-27b", "name": "Local Qwen3.8 27B (chat lane)", "provider": "local",
++             "base_url": os.getenv("LOCAL_CHAT_BASE_URL", "http://100.104.68.115:8082/v1")},
+             {"id": "nemotron-3-nano", "name": "Nemotron Nano", "provider": "local"},
+         ]
+ 
+--- a/backend/app/tools/registry.py
++++ b/backend/app/tools/registry.py
+@@ -399,8 +399,21 @@
+             'tools': ['route_behavior', 'show_behavior_config']
+         },
+         'personal_knowledge': {
+-            'description': "Query and store personal knowledge about David — preferences, routines, goals, interests, health, relationships, and places.",
+-            'tools': ['query_david_knowledge', 'remember_about_david']
++            # `remember_about_david` removed from the offered set 2026-09-27.
++            # Live-measured 0 for 4 across two validation conversations (2
++            # refused at the execution boundary, 2 `action_receipt`
++            # status=failed). Worse than useless: because it reads as the
++            # obvious "remember this" tool, the model reached for it on both
++            # capture and correction turns, burned the round, persisted
++            # nothing, and never tried `notes_create`/`notes_edit` — which
++            # both work. Removing the option is what makes a correction
++            # actually select notes_edit.
++            #
++            # Reads are unaffected: `query_david_knowledge` still answers from
++            # whatever the PKG already holds. Restore the write tool here once
++            # its own failure is diagnosed and it has a passing test.
++            'description': "Query personal knowledge about David — preferences, routines, goals, interests, health, relationships, and places.",
++            'tools': ['query_david_knowledge']
+         },
+         'standing_orders': {
+             'description': "Manage standing orders — pre-authorized autonomous actions Sara can execute without asking. Also view/undo recent autonomous actions.",
