@@ -64,7 +64,6 @@ SECTIONS = LIST_SECTIONS + DICT_SECTIONS
 
 _SECTION_CAP = 15
 _HAPPENED_WINDOW_HOURS = 72
-_BRIEF_CACHE_TTL_SEC = 120
 
 
 async def _safe_rollback(db) -> None:
@@ -283,7 +282,6 @@ async def brief_patch(
         "evidence": json.dumps(evidence or []),
     })
     await db.commit()
-    await _invalidate_cache(user_id)
 
 
 # ── Zone migration + temporary maintainer sweep ────────────────────────────
@@ -861,44 +859,24 @@ async def render_brief(db, user_id: str = DEFAULT_USER_ID, now: Optional[datetim
     return "\n".join(lines)
 
 
-# ── Redis cache of the rendered form (§3.1) ────────────────────────────────
-
-
-def _cache_key(user_id: str) -> str:
-    return f"world_brief:rendered:{user_id}"
-
-
-async def _invalidate_cache(user_id: str) -> None:
-    try:
-        from app.services.unified_context import _get_redis
-        r = await _get_redis()
-        await r.delete(_cache_key(user_id))
-    except Exception as e:
-        logger.debug(f"[world_brief] cache invalidate skipped: {e}")
+# ── Rendered-form entry point ───────────────────────────────────────────────
+#
+# Living-world-context plan §3 Finding "Brief caching can preserve changing
+# state": this used to cache the FULL rendered string in Redis for
+# _BRIEF_CACHE_TTL_SEC (120s), even though the docstring claimed NOW/TODAY
+# and BODY & TRAINING were "live-computed on every render regardless" — a
+# cache HIT returned the whole frozen string, those sections included,
+# without calling render_brief() at all. A workout started mid-cache-window
+# could read as not-yet-started for up to two minutes.
+#
+# The thing the cache was saving (get_brief_row: one indexed SELECT, plus a
+# handful more small queries inside the "live" sections) is cheap — cheaper
+# than the correctness this cost. No caching layer here at all now;
+# render_brief() already reads its own state fresh on every call.
 
 
 async def get_rendered_brief(db, user_id: str = DEFAULT_USER_ID, force: bool = False) -> str:
-    """Cached entry point for consumers (chat context, judge, compose,
-    slots). Cache is short (2 min) since NOW/TODAY and BODY & TRAINING are
-    live-computed on every render regardless — this only saves the patch
-    sections' DB round-trip on hot paths like every chat turn."""
-    if not force:
-        try:
-            from app.services.unified_context import _get_redis
-            r = await _get_redis()
-            cached = await r.get(_cache_key(user_id))
-            if cached:
-                return cached if isinstance(cached, str) else cached.decode("utf-8")
-        except Exception as e:
-            logger.debug(f"[world_brief] cache read skipped: {e}")
-
-    rendered = await render_brief(db, user_id)
-
-    try:
-        from app.services.unified_context import _get_redis
-        r = await _get_redis()
-        await r.set(_cache_key(user_id), rendered, ex=_BRIEF_CACHE_TTL_SEC)
-    except Exception as e:
-        logger.debug(f"[world_brief] cache write skipped: {e}")
-
-    return rendered
+    """Entry point for consumers (chat context, judge, compose, slots,
+    deliberation). `force` is accepted for backward compatibility with
+    existing call sites; every render is already uncached and current."""
+    return await render_brief(db, user_id)
