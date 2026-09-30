@@ -2107,14 +2107,27 @@ class AgentDispatchService:
             # Step 1: Execute with internal tools
             self._update_mission_step(db, mission_id, 1, "running")
 
+            async def _internal_agent_progress(summary: str) -> None:
+                await self._emit_progress(
+                    user_id,
+                    task_id,
+                    "running",
+                    summary=summary,
+                )
+
             agent = InternalToolAgent(
                 task_id=task_id,
                 mission_id=mission_id,
                 user_id=user_id,
                 categories=categories,
+                progress_callback=_internal_agent_progress,
             )
             result = await agent.run(task_description)
 
+            # Heartbeats update this row through their own short-lived session.
+            # Refresh before writing the terminal result so stale JSON metadata
+            # cannot overwrite the liveness journal accumulated during the run.
+            db.refresh(task)
             meta = task.task_metadata or {}
             # Make internal runs inspectable in the task detail drawer, the same
             # way VM dispatch runs already are.
@@ -2134,20 +2147,22 @@ class AgentDispatchService:
                 return
 
             if result["status"] == "failed":
+                error_message = result.get("error", "Unknown error")
                 self._update_mission_step(db, mission_id, 1, "failed",
-                                          error=result.get("error", "")[:500])
+                                          error=error_message[:500])
                 self._update_mission_state(db, mission_id, "failed")
                 task.status = "failed"
-                meta["error"] = result.get("error", "Unknown error")
+                task.error_message = error_message[:2000]
+                meta["error"] = error_message
                 task.task_metadata = {**meta}
                 db.commit()
                 # Track skill usage as failed (internal mode)
                 used_skill_ids = meta.get("used_skill_ids", [])
                 self._track_skill_usage(db, used_skill_ids, succeeded=False)
                 await self._emit_progress(user_id, task_id, "failed",
-                                          summary=result.get("error", "")[:200])
+                                          summary=error_message[:200])
                 await self._notify(user_id, task_id, "failed",
-                                   f"Agent task failed: {result.get('error', '')[:200]}")
+                                   f"Agent task failed: {error_message[:200]}")
                 return
 
             # Completed
@@ -2220,18 +2235,22 @@ class AgentDispatchService:
                                           summary, notify_on_complete)
 
         except Exception as e:
-            logger.exception(f"[dispatch] Internal mode failed for task {task_id}: {e}")
+            error_message = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+            logger.exception(
+                f"[dispatch] Internal mode failed for task {task_id}: {error_message}"
+            )
             await self._emit_progress(user_id, task_id, "failed",
-                                      summary=str(e)[:200])
+                                      summary=error_message[:200])
             try:
                 if db:
                     db.rollback()
                     task = self._get_task(db, task_id)
                     if task:
                         task.status = "failed"
+                        task.error_message = error_message[:2000]
                         task.task_metadata = {
                             **(task.task_metadata or {}),
-                            "error": str(e),
+                            "error": error_message,
                         }
                     self._update_mission_state(db, mission_id, "failed")
                     db.commit()
