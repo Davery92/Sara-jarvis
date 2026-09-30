@@ -157,6 +157,7 @@ async def interpret(db: Session, event_id: str) -> Dict[str, str]:
     # transaction and pin that database connection for the entire model call.
     event_view = SimpleNamespace(
         event_id=event.event_id,
+        sequence=event.sequence,
         user_id=event.user_id,
         kind=event.kind,
         occurred_at=event.occurred_at,
@@ -225,6 +226,18 @@ async def interpret(db: Session, event_id: str) -> Dict[str, str]:
             payload={
                 **extracted,
                 "source_event_id": event_view.event_id,
+                # Living-world-context plan: "a slow result cannot overwrite
+                # newer evidence." An interpretation can take 90s (the LLM
+                # call's own timeout); a correction typed while it's
+                # running commits and gets its OWN, EARLIER sequence
+                # number, but the interpretation's event — created only
+                # once the model call returns — gets committed (and
+                # sequenced) LATER despite describing older information.
+                # The reducer must compare against what was actually read
+                # (this), not against when the reducer got around to
+                # reading it (event.sequence on world.interpretation.
+                # completed itself), or the correction loses a race it won.
+                "source_sequence": event_view.sequence,
                 # The reducer refuses threads interpreted out of Sara's own speech;
                 # it needs to know what was interpreted, not just that something was.
                 "source_event_kind": event_view.kind,

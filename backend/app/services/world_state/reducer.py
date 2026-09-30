@@ -211,17 +211,47 @@ def _fact(
     object_entity_id: Optional[str] = None, confidence: Optional[float] = None,
     confidence_basis: Optional[str] = None, extractor_version: Optional[str] = None,
     valid_from: Optional[datetime] = None, valid_to: Optional[datetime] = None,
+    effective_sequence: Optional[int] = None,
 ) -> Tuple[WorldFact, bool]:
+    """`effective_sequence` overrides `event.sequence` for staleness
+    comparison and for what gets recorded as this fact's freshness marker.
+
+    Needed for `world.interpretation.completed`: that event's OWN sequence
+    reflects when the (possibly slow, up to 90s) model call finished, not
+    when the source material it read was current. A correction typed while
+    interpretation was still running commits — and gets its sequence
+    number — first, but interpretation's event, created only once the
+    model returns, is committed and sequenced LATER despite describing
+    older information. Comparing interpretation against its OWN sequence
+    would let it win a race it should lose. Callers pass the interpreted
+    source event's sequence instead (interpreter.py's `source_sequence`),
+    so an interpretation is only ever as fresh as what it actually read.
+    """
+    eff_seq = event.sequence if effective_sequence is None else effective_sequence
     current = db.execute(select(WorldFact).where(
         WorldFact.user_id == event.user_id,
         WorldFact.fact_key == fact_key,
         WorldFact.status == "active",
     ).order_by(WorldFact.created_at.desc()).limit(1)).scalar_one_or_none()
     normalized = _safe(value)
+    # Living-world-context plan: "late-arriving old events must not roll
+    # state backward." Per-event dispatch has no cross-event ordering
+    # guarantee (see the matching guard in `_thread`) — an older event
+    # reduced after a newer one for the same key must not overwrite it,
+    # even when the older event's value happens to differ. It is simply
+    # stale, not a correction.
+    #
+    # Strictly LESS than, not <=: one event's own reduction can legitimately
+    # call `_fact` more than once for the same fact_key (a domain branch's
+    # generic write followed by the explicit-facts loop refining the same
+    # key) — those share event.sequence and must both apply, not have the
+    # second one rejected as "stale" against itself.
+    if current is not None and eff_seq < (current.last_event_sequence or 0):
+        return current, False
     if current is not None and current.value == normalized and current.object_entity_id == object_entity_id:
         current.source_event_id = event.event_id
         current.source_ref = event.source_ref
-        current.last_event_sequence = event.sequence
+        current.last_event_sequence = eff_seq
         current.observed_at = event.observed_at
         return current, False
     if current is not None:
@@ -237,7 +267,7 @@ def _fact(
         source_event_id=event.event_id, source_ref=event.source_ref,
         extractor_version=extractor_version,
         supersedes_fact_id=current.id if current is not None else None,
-        last_event_sequence=event.sequence,
+        last_event_sequence=eff_seq,
     )
     db.add(row)
     db.flush()
@@ -265,7 +295,12 @@ def _thread(
     status: str = "open", next_step: Optional[str] = None,
     due_at: Optional[datetime] = None, priority: float = 0.5,
     confidence: Optional[float] = None, due_provenance: Optional[str] = None,
+    effective_sequence: Optional[int] = None,
 ) -> Tuple[WorldThread, str]:
+    """See `_fact`'s `effective_sequence` docstring — same override, same
+    reason (a slow world.interpretation.completed must be compared against
+    what it read, not when it finished reading it)."""
+    eff_seq = event.sequence if effective_sequence is None else effective_sequence
     row = db.execute(select(WorldThread).where(
         WorldThread.user_id == event.user_id,
         WorldThread.thread_key == thread_key,
@@ -282,11 +317,37 @@ def _thread(
             priority=max(0.0, min(priority, 1.0)),
             confidence=confidence if confidence is not None else event.confidence,
             source_event_id=event.event_id, correlation_id=event.correlation_id,
-            last_event_sequence=event.sequence,
+            last_event_sequence=eff_seq,
         )
         row.due_provenance = due_provenance if due_at is not None else None
+        if status in {"resolved", "cancelled", "expired"}:
+            # A thread can be born already terminal — an out-of-order
+            # "completed" reduced before its own "started" (no cross-event
+            # dispatch ordering guarantee; see the stale-event guard below)
+            # creates the row here rather than in the branch that normally
+            # sets resolved_at. Without this, "when did this resolve" was
+            # silently NULL for any thread whose first-seen event was
+            # already a closer.
+            row.resolved_at = event.occurred_at
+            operation = "thread_resolved"
         db.add(row)
         db.flush()
+    elif eff_seq < (row.last_event_sequence or 0):
+        # Living-world-context plan: "late-arriving old events must not roll
+        # state backward." Per-event Celery dispatch (writer.py's
+        # after_commit hook) has no cross-event ordering guarantee — two
+        # events for the same session, committed moments apart, can be
+        # picked up by different workers and reduced out of order. Without
+        # this guard, an out-of-order "started" applied after "completed"
+        # would reopen an already-finished workout. WorldSnapshot already
+        # guards this way (_update_snapshot); threads and facts did not.
+        #
+        # Strictly LESS than, not <=: one event's own reduction can
+        # legitimately call `_thread` more than once for the same
+        # thread_key (email's action_required auto-thread, then the
+        # explicit-threads loop refining the same key with a real due_at) —
+        # those share event.sequence and must both apply.
+        operation = "stale_ignored"
     else:
         operation = "thread_advanced"
         old_status = row.status
@@ -299,7 +360,7 @@ def _thread(
             row.next_review_at = review_at
         row.priority = max(row.priority or 0.0, priority)
         row.source_event_id = event.event_id
-        row.last_event_sequence = event.sequence
+        row.last_event_sequence = eff_seq
         row.status = status
         if status in {"resolved", "cancelled", "expired"}:
             row.resolved_at = event.occurred_at
@@ -375,14 +436,26 @@ def _reduce_domain(db: Session, event: WorldEvent) -> Tuple[Dict[str, Any], List
     outcomes: List[str] = ["absorbed", "state_updated"]
     outputs: Dict[str, List[str]] = {"entities": [], "facts": [], "threads": [], "attention": []}
 
+    aggregate_id = event.aggregate_id or p.get("id") or p.get("email_id") or p.get("event_id") or p.get("note_id") or p.get("document_id") or p.get("log_id") or p.get("session_id") or event.source_ref
+    spec = get_spec(kind)
+
     if kind.endswith(".deleted") or kind.endswith(".cancelled"):
         retracted = _retract_source(db, event)
         if retracted:
             outcomes.append("retracted")
             state["retracted_fact_count"] = retracted
-
-    aggregate_id = event.aggregate_id or p.get("id") or p.get("email_id") or p.get("event_id") or p.get("note_id") or p.get("document_id") or p.get("log_id") or p.get("session_id") or event.source_ref
-    spec = get_spec(kind)
+        # Living-world-context plan: "duplicate delivery and late old events
+        # cannot resurrect the previous value." food/workout/health and
+        # notes/documents below key their fact on the OBJECT's own id and
+        # write the raw event payload as its value — falling through after
+        # a real retraction would immediately recreate an "active" fact for
+        # that same key from the deletion event's own (mostly empty)
+        # payload, undoing the retraction in the same reduction. Calendar
+        # is deliberately excluded: it encodes cancelled/deleted AS a
+        # status field on one evolving fact rather than retracting it, so
+        # it must keep falling through.
+        if retracted and spec.domain in {"food", "workout", "health", "notes", "documents"}:
+            return state, list(dict.fromkeys(outcomes)), outputs
 
     if kind in CLOSER_KINDS:
         closed = _close_threads(db, event, CLOSER_KINDS[kind])
@@ -486,11 +559,28 @@ def _reduce_domain(db: Session, event: WorldEvent) -> Tuple[Dict[str, Any], List
         )
         outputs["entities"].append(entity.id)
 
+    # The second lock on the interpreter's kind vocabulary (the first is in
+    # interpreter.py). Trusted producers keep their raw kind — calendar opens
+    # `prep`/`meeting`, the conversation tracker opens `active_conversation` —
+    # but a kind an LLM chose has to be one something can close.
+    from_interpretation = kind == "world.interpretation.completed"
+    # "A slow result cannot overwrite newer evidence" — see _fact's and
+    # _thread's effective_sequence docstring. Only meaningful (and only
+    # trusted) for an actual interpretation event; a trusted producer's own
+    # explicit facts/threads keep using event.sequence natively (None here
+    # falls through to that default).
+    _source_seq = p.get("source_sequence") if from_interpretation else None
+    _source_seq = _source_seq if isinstance(_source_seq, int) else None
+
     for item in p.get("facts", []) if isinstance(p.get("facts"), list) else []:
         if not isinstance(item, dict) or not item.get("predicate"):
             continue
         key = item.get("fact_key") or f"explicit:{event.event_id}:{item['predicate']}:{len(outputs['facts'])}"
-        fact, changed = _fact(db, event, fact_key=key, predicate=item["predicate"], value=item.get("value"), confidence=item.get("confidence"), confidence_basis=item.get("confidence_basis"), extractor_version=item.get("extractor_version"))
+        fact, changed = _fact(
+            db, event, fact_key=key, predicate=item["predicate"], value=item.get("value"),
+            confidence=item.get("confidence"), confidence_basis=item.get("confidence_basis"),
+            extractor_version=item.get("extractor_version"), effective_sequence=_source_seq,
+        )
         outputs["facts"].append(fact.id)
         if changed:
             outcomes.append("connected")
@@ -506,12 +596,6 @@ def _reduce_domain(db: Session, event: WorldEvent) -> Tuple[Dict[str, Any], List
         if thread_items:
             outcomes.append("threads_discarded_own_speech")
         thread_items = []
-
-    # The second lock on the interpreter's kind vocabulary (the first is in
-    # interpreter.py). Trusted producers keep their raw kind — calendar opens
-    # `prep`/`meeting`, the conversation tracker opens `active_conversation` —
-    # but a kind an LLM chose has to be one something can close.
-    from_interpretation = kind == "world.interpretation.completed"
 
     for item in thread_items:
         if not isinstance(item, dict) or not item.get("title"):
@@ -532,6 +616,7 @@ def _reduce_domain(db: Session, event: WorldEvent) -> Tuple[Dict[str, Any], List
             due_at=due_at, due_provenance=due_provenance,
             priority=coerce_score(item.get("priority"), 0.5),
             confidence=coerce_score(item.get("confidence"), float(event.confidence)),
+            effective_sequence=_source_seq,
         )
         outputs["threads"].append(thread.id)
         outcomes.append(operation)
