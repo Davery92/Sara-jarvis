@@ -186,3 +186,26 @@ def partition_by_effect(tool_calls) -> tuple:
     for tc in tool_calls or []:
         (writes if is_write_tool(tool_call_name(tc)) else reads).append(tc)
     return writes, reads
+
+
+def tool_success_state(payload: Dict[str, Any]) -> Optional[bool]:
+    """Harness/thinking/personality plan, Phase 3: a write's outcome is one
+    of three states, not two. `payload.get("success") is not False` (the
+    check this replaces, at both call sites in main_simple.py) collapses
+    `True` and anything-that-isn't-literally-`False` — including `None`,
+    a missing key, or a string like `"unknown"` — into the SAME bucket. A
+    tool honestly reporting `{"success": None, "message": "timed out,
+    outcome unknown"}` was therefore recorded as a confirmed success, and
+    `_last_resort_reply` would tell David "That's saved" on a write nobody
+    actually confirmed. Explicit tri-state: `True` (confirmed done),
+    `False` (confirmed failed), `None` (genuinely unknown — the timeout/
+    ambiguous-outcome case Phase 4's "uncertain external writes" concerns
+    itself with)."""
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get("success")
+    if value is True:
+        return True
+    if value is False:
+        return False
+    return None
