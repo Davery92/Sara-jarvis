@@ -15,7 +15,13 @@ from sqlalchemy.orm import Session
 from app.core.deps import get_current_user, get_current_user_sync
 from app.db.session import get_db
 from app.core.config import settings
+from app.core.timezone import naive_local_now
 from app.models.user import User
+from app.models.conversation import Conversation, ConversationTurn
+from app.models.doc import Document
+from app.models.note import Note
+from app.models.reminder import Reminder, Timer
+from app.services.embedding_service import embedding_service
 from sqlalchemy import text
 
 logger = logging.getLogger(__name__)
