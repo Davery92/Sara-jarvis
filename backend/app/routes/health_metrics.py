@@ -191,6 +191,32 @@ async def ingest_metrics_batch(
                 db, user_id, request.daily_recovery
             )
 
+        # Living-world-context plan: health.sync_completed was registered in
+        # the catalog (coalesce=True, expecting a burst of these) but had no
+        # real producer anywhere — HEALTH_DATA_SYNCED was only ever
+        # subscribed to, never published. One event per batch, not per
+        # metric: the catalog's coalesce flag exists for exactly this kind
+        # of high-frequency sync, and per-metric events would just be noise
+        # the reducer immediately collapses anyway. Only emitted when
+        # something new actually landed — a resync that was all duplicates
+        # isn't a fresh observation.
+        if inserted_count > 0:
+            latest = max(request.metrics, key=lambda m: m.recorded_at, default=None)
+            from app.services.world_state.writer import append_world_event
+            append_world_event(
+                db, user_id=str(user_id), kind="health.sync_completed", source="health_metrics_api",
+                aggregate_type="health_sync", aggregate_id=str(user_id),
+                actor_type="user", actor_id=str(user_id),
+                dedupe_key=f"health-sync:{user_id}:{uuid.uuid4()}",
+                payload={
+                    "inserted_count": inserted_count,
+                    "metric_types": sorted({m.metric_type for m in request.metrics}),
+                    "latest_metric_type": latest.metric_type if latest else None,
+                    "latest_value": latest.value if latest else None,
+                    "latest_recorded_at": latest.recorded_at if latest else None,
+                },
+            )
+
         db.commit()
 
         logger.info(f"Health metrics batch: {inserted_count} inserted, {duplicate_count} duplicates for user {user_id}")
