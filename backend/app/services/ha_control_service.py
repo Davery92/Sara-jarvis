@@ -2,6 +2,8 @@
 
 Provides methods to control Home Assistant entities via REST API.
 """
+import asyncio
+
 import aiohttp
 import logging
 from typing import Dict, Any, List, Optional
@@ -79,6 +81,101 @@ class HAControlService:
 
         return await self._request("POST", f"/services/{domain}/{service}", data)
 
+
+    # ── Accepted is not confirmed (reliable-assistant plan Phase F) ─────────
+    #
+    # "Verify actual device outcome where observable; distinguish accepted
+    # command from confirmed state."
+    #
+    # Finding 21 (`M02_STALE_LOCK_FALSE_SUCCESS_CLAIM`): a lock command
+    # reported success — "Locked... the unavailable state seems to have
+    # cleared" — against a device the adapter's own response explicitly marked
+    # `device_unavailable_no_state_change`. Source-confirmed at the time: every
+    # method here returned `{"success": True}` on the strength of the HTTP call
+    # alone, never reading the entity state back. That applies to any device on
+    # this path, not just locks.
+    #
+    # So an observable command now reads the state back and says which of the
+    # three things happened:
+    #
+    #   accepted=True,  confirmed=True   -> it is in the expected state
+    #   accepted=True,  confirmed=False  -> Home Assistant took the command and
+    #                                       the device did not move. `success`
+    #                                       is False, because telling David
+    #                                       "locked" here is the finding.
+    #   accepted=False                   -> the call itself failed
+    #
+    # Eventual consistency is real: HA's state machine can lag a service call
+    # by a moment, so the readback is retried a bounded number of times before
+    # concluding the device did not move. Bounded, not a wait loop.
+
+    _CONFIRM_ATTEMPTS = 3
+    _CONFIRM_DELAY_S = 0.4
+
+    async def _confirm_state(
+        self, entity_id: str, expected: Optional[List[str]],
+    ) -> Dict[str, Any]:
+        """Read the entity back and report whether it actually moved."""
+        observed = None
+        for attempt in range(self._CONFIRM_ATTEMPTS):
+            try:
+                state_obj = await self.get_state(entity_id)
+            except Exception as exc:
+                return {
+                    "confirmed": False, "observable": False,
+                    "state": None,
+                    "detail": f"could not read {entity_id} back: {exc}",
+                }
+            observed = (state_obj or {}).get("state")
+            if expected is None:
+                return {"confirmed": False, "observable": False, "state": observed,
+                        "detail": "this command has no single observable end state"}
+            if observed in expected:
+                return {"confirmed": True, "observable": True, "state": observed,
+                        "detail": ""}
+            if observed in ("unavailable", "unknown", None):
+                # No point retrying a device that is not reporting at all.
+                break
+            if attempt < self._CONFIRM_ATTEMPTS - 1:
+                await asyncio.sleep(self._CONFIRM_DELAY_S)
+        return {
+            "confirmed": False, "observable": True, "state": observed,
+            "detail": (
+                f"{entity_id} is {observed!r}, not {'/'.join(expected or [])} — "
+                "Home Assistant accepted the command but the device did not move"
+            ),
+        }
+
+    async def _call_and_confirm(
+        self, domain: str, service: str, entity_id: str,
+        expected: Optional[List[str]], action: str, **kwargs,
+    ) -> Dict[str, Any]:
+        await self.call_service(domain, service, entity_id, **kwargs)
+        confirmation = await self._confirm_state(entity_id, expected)
+        result = {
+            # `success` now means "accepted AND, where observable, confirmed".
+            # Callers that only read `success` therefore stop reporting an
+            # unmoved device as done, which is the whole point.
+            "success": bool(confirmation["confirmed"]) or not confirmation["observable"],
+            "accepted": True,
+            "confirmed": confirmation["confirmed"],
+            "observed_state": confirmation["state"],
+            "entity_id": entity_id,
+            "action": action,
+        }
+        if kwargs:
+            result["params"] = kwargs
+        if confirmation["detail"]:
+            result["detail"] = confirmation["detail"]
+        if not result["success"]:
+            logger.warning(
+                "🏠 %s %s accepted but NOT confirmed: %s",
+                action, entity_id, confirmation["detail"],
+            )
+        else:
+            logger.info("🏠 %s %s -> state %r", action, entity_id, confirmation["state"])
+        return result
+
     # Light controls
     async def turn_on_light(
         self,
@@ -99,15 +196,13 @@ class HAControlService:
         if effect is not None:
             kwargs["effect"] = effect
 
-        result = await self.call_service("light", "turn_on", entity_id, **kwargs)
-        logger.info(f"Turned on {entity_id} with params: {kwargs}")
-        return {"success": True, "entity_id": entity_id, "action": "turn_on", "params": kwargs}
+        return await self._call_and_confirm(
+            "light", "turn_on", entity_id, ["on"], "turn_on", **kwargs)
 
     async def turn_off_light(self, entity_id: str) -> Dict[str, Any]:
         """Turn off a light."""
-        await self.call_service("light", "turn_off", entity_id)
-        logger.info(f"Turned off {entity_id}")
-        return {"success": True, "entity_id": entity_id, "action": "turn_off"}
+        return await self._call_and_confirm(
+            "light", "turn_off", entity_id, ["off"], "turn_off")
 
     async def toggle_light(self, entity_id: str) -> Dict[str, Any]:
         """Toggle a light."""
@@ -118,15 +213,13 @@ class HAControlService:
     # Switch controls
     async def turn_on_switch(self, entity_id: str) -> Dict[str, Any]:
         """Turn on a switch."""
-        await self.call_service("switch", "turn_on", entity_id)
-        logger.info(f"Turned on switch {entity_id}")
-        return {"success": True, "entity_id": entity_id, "action": "turn_on"}
+        return await self._call_and_confirm(
+            "switch", "turn_on", entity_id, ["on"], "turn_on")
 
     async def turn_off_switch(self, entity_id: str) -> Dict[str, Any]:
         """Turn off a switch."""
-        await self.call_service("switch", "turn_off", entity_id)
-        logger.info(f"Turned off switch {entity_id}")
-        return {"success": True, "entity_id": entity_id, "action": "turn_off"}
+        return await self._call_and_confirm(
+            "switch", "turn_off", entity_id, ["off"], "turn_off")
 
     async def toggle_switch(self, entity_id: str) -> Dict[str, Any]:
         """Toggle a switch."""
@@ -159,15 +252,13 @@ class HAControlService:
     # Cover/blinds controls
     async def open_cover(self, entity_id: str) -> Dict[str, Any]:
         """Open a cover (blinds, garage door, etc)."""
-        await self.call_service("cover", "open_cover", entity_id)
-        logger.info(f"Opened cover {entity_id}")
-        return {"success": True, "entity_id": entity_id, "action": "open"}
+        return await self._call_and_confirm(
+            "cover", "open_cover", entity_id, ["open", "opening"], "open")
 
     async def close_cover(self, entity_id: str) -> Dict[str, Any]:
         """Close a cover."""
-        await self.call_service("cover", "close_cover", entity_id)
-        logger.info(f"Closed cover {entity_id}")
-        return {"success": True, "entity_id": entity_id, "action": "close"}
+        return await self._call_and_confirm(
+            "cover", "close_cover", entity_id, ["closed", "closing"], "close")
 
     async def set_cover_position(self, entity_id: str, position: int) -> Dict[str, Any]:
         """Set cover position (0-100)."""
@@ -178,15 +269,13 @@ class HAControlService:
     # Lock controls
     async def lock(self, entity_id: str) -> Dict[str, Any]:
         """Lock a lock."""
-        await self.call_service("lock", "lock", entity_id)
-        logger.info(f"Locked {entity_id}")
-        return {"success": True, "entity_id": entity_id, "action": "lock"}
+        return await self._call_and_confirm(
+            "lock", "lock", entity_id, ["locked"], "lock")
 
     async def unlock(self, entity_id: str) -> Dict[str, Any]:
         """Unlock a lock."""
-        await self.call_service("lock", "unlock", entity_id)
-        logger.info(f"Unlocked {entity_id}")
-        return {"success": True, "entity_id": entity_id, "action": "unlock"}
+        return await self._call_and_confirm(
+            "lock", "unlock", entity_id, ["unlocked"], "unlock")
 
     # Fan controls
     async def turn_on_fan(
