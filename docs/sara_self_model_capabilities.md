@@ -296,7 +296,7 @@ All tools are defined in `backend/app/tools/` and registered in `backend/app/too
 **Total Tools: 107+** across 19 categories
 
 <!-- BEGIN GENERATED -->
-_Regenerated 2026-09-30 by truth-maintenance._
+_Regenerated 2026-10-01 by truth-maintenance._
 
 ## Tools You Actually Have
 

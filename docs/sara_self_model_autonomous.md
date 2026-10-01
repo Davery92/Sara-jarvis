@@ -160,7 +160,7 @@ All services use systemd with:
 - Environment variables for database and LLM access
 
 <!-- BEGIN GENERATED -->
-_Regenerated 2026-09-30 by truth-maintenance._
+_Regenerated 2026-10-01 by truth-maintenance._
 
 ## Scheduled Jobs
 
@@ -224,7 +224,7 @@ These are the jobs actually enabled in `scheduled_job` right now — not a remem
 | **health-anomaly-detect** | `*/30 6-23 * * *` | health | Compares latest readings against 7-day baselines (z-score) and writes alerts/insights for  |
 | **health-baseline-recompute** | `15 2 * * *` | health | Recomputes 7-day and 30-day rolling baselines (avg, std, min, max) for every tracked healt |
 | **interoception-self-check** | `5 8 * * *` | health | Daily body-scan: failing tasks, queue depths, heartbeat, voice, backup |
-| **predictive-engine** | `every 30 min` | cognitive | Pattern-based forward-looking suggestions every 30 min |
+| **predictive-engine** | `every 30 min` | cognitive | Pattern-based forward-looking activity nudges every 30 min (app/services/activity_suggesti |
 | **check-stuck-research** | `every 3 min` | low_priority | Detects stuck research jobs every 3 minutes |
 | **deep-research-poller** | `every 1 min` | cognitive | Processes queued research jobs every 60 seconds |
 | **materialize-ml-features** | `30 2 * * *` | cognitive | Nightly rollup of desktop focus, location, sleep/health, workout/food, calendar, notificat |
