@@ -25,6 +25,16 @@ restart before anything you observe at runtime means what you think.
 scripts/sara-prod verify          # check, change nothing (default)
 scripts/sara-prod ps | logs [svc]
 scripts/sara-prod up | restart [svc...]
+scripts/sara-prod cutover         # move onto a NEW pinned generation
+scripts/sara-prod readiness       # the four-capability probe
+
+# Getting a code change into production = a new generation, never a rebuild.
+# rebuild_backend.sh / quick_rebuild_backend.sh now REFUSE; they used to unpin it.
+#   1. commit it   2. refreeze_reliable_candidate.sh <snap>
+#   3. build_reliable_candidate_image.sh <snap> <tag>
+#   4. rehearse_reliable_release.sh <tag>   -> REHEARSAL PASSED
+#   5. update EXPECT_* in sara-prod + the image/path in the pin overlay
+#   6. scripts/sara-prod cutover
 
 # Dev stack (NOT for production — see §3 and the header of docker-compose.dev.yml)
 docker compose -f docker-compose.dev.yml up -d db neo4j redis minio embeddings
@@ -56,12 +66,18 @@ database, discloses every row it creates, and removes what it created.
 
 ## 3. Runtime topology
 
-**`docker-compose.dev.yml` is the authoritative topology.** 14 services: `backend`, `db` (pgvector/pg16),
-`neo4j`, `redis`, `minio`, `embeddings`, `frontend`, `canvas`,
-`acs-tool-runner`, and five celery services. `docker-compose.yml` (prod) declares
-only 10 and **lags dev** — it has no `acs-tool-runner`, no `embeddings`, and none
-of the split celery lanes, but does have `pi-dashboard`. Neither file is
-authoritative on its own; see the headers.
+**`docker-compose.dev.yml` is the authoritative topology**, and the only
+non-overlay compose file at the repo root. 15 services: `backend`, `db`
+(pgvector/pg16), `neo4j`, `redis`, `minio`, `embeddings`, `frontend`, `canvas`,
+`pi-dashboard`, `acs-tool-runner`, and five celery services.
+
+There is deliberately **no `docker-compose.yml`** any more — archived 2026-10-01
+to `deploy/archive-compose/docker-compose.legacy.yml`. It was the file a bare
+`docker compose` resolved, into project `jarvis` (production), with a
+working-tree `build:` and no pin — so `docker compose up -d backend` reproduced
+the 2026-09-29 incident in one command. A bare `docker compose` here now fails
+with "no configuration file provided". That is intended: name your files, or use
+`scripts/sara-prod`.
 
 Celery lanes (queues are the contract, not the service names):
 

@@ -8,8 +8,11 @@ set -e  # Exit on any error
 # ─────────────────────────────────────────────────────────────────────────────
 # REFUSAL GUARD — added 2026-09-29 during production incident recovery.
 #
-# This script targets 10.185.1.188 with `docker compose -f docker-compose.yml
-# -f docker-compose.prod.yml ... up -d`, and docker-compose.yml declares
+# This script targets 10.185.1.188 with `docker compose -f <base> -f
+# docker-compose.prod.yml ... up -d`. Its base was docker-compose.yml, archived
+# on 2026-10-01 to deploy/archive-compose/docker-compose.legacy.yml; the paths
+# below were repointed so the script stays internally consistent, NOT because
+# running it is a good idea. That file declares
 # `build:` for backend. On THIS host that combination would:
 #
 #   * rebuild the backend image from the MUTABLE working tree, and
@@ -304,7 +307,7 @@ echo "=== Sara/Jarvis Weekly Health Check - $(date) ==="
 
 # Check Docker containers
 echo "🐳 Docker Container Status:"
-docker compose ps
+docker compose -f deploy/archive-compose/docker-compose.legacy.yml ps
 
 # Check disk space
 echo "💾 Disk Space:"
@@ -392,7 +395,7 @@ echo
 
 # Docker status
 echo "🐳 Docker Services:"
-docker compose -f docker-compose.yml -f docker-compose.prod.yml ps
+docker compose -f deploy/archive-compose/docker-compose.legacy.yml -f docker-compose.prod.yml ps
 
 echo
 echo "🌐 Service URLs:"

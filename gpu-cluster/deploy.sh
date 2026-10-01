@@ -4,6 +4,14 @@
 
 set -e
 
+# Run from this directory, so the bare `docker compose` calls below resolve
+# gpu-cluster/docker-compose.yml and not whatever sits in the repo root
+# (added 2026-10-01, when the root docker-compose.yml was archived). The
+# services here — riva-server, nemo-diarization, audio-worker — never existed
+# in the root file, so a root-relative run would only ever have errored; this
+# makes it work from anywhere instead.
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 echo "=== Sara GPU Cluster Deployment ==="
 echo ""
 

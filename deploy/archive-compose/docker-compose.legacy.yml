@@ -1,5 +1,29 @@
 ##
-## ⚠  THIS FILE DOES NOT DESCRIBE THE RUNNING SYSTEM. (header added 2026-09-30)
+## ⚠  ARCHIVED 2026-10-01. Was docker-compose.yml at the repo root.
+##    NOT USED BY PRODUCTION, AND NOT A WAY TO RUN IT.
+##
+## Production has not read this file since the 2026-09-29 pin. It is operated as
+##   docker-compose.dev.yml + docker-compose.incident-recovery.yml
+## through `scripts/sara-prod` only — see RECOVERY.md.
+##
+## Why it was archived rather than fixed: while it sat at the repo root it was
+## the file a BARE `docker compose` resolved, into project `jarvis` — production.
+## Its `backend` service has no `image:` (so it builds from the working tree) and
+## no read-only `app/` mount (so the pin is absent), which made
+## `docker compose up -d backend` a one-command reproduction of the 2026-09-29
+## incident. scripts/rebuild_backend.sh and scripts/quick_rebuild_backend.sh did
+## exactly that; both now refuse. Moving the file out of the default-resolution
+## path is the other half of closing that off: a bare `docker compose` in this
+## repo now finds no configuration file and fails outright.
+##
+## Its orphan-queue defect is DELIBERATELY NOT FIXED — see below. Repairing it
+## would re-legitimize this file as a way to run production, which is the exact
+## incident class the pin prevents. It is kept broken, and kept here, as a
+## record of what the topology used to claim.
+##
+## One service was NOT archived with it: `pi-dashboard` was defined only here
+## and was running continuously, so its definition moved into
+## docker-compose.dev.yml rather than being stranded. The copy below is dead.
 ##
 ## It is the older "production" definition and it has drifted behind
 ## docker-compose.dev.yml. Production is actually operated as
@@ -12,7 +36,7 @@
 ## Which file is authoritative for what:
 ##   * service topology, celery lanes, images      -> docker-compose.dev.yml
 ##   * what production actually runs (image + pin) -> docker-compose.incident-recovery.yml
-##   * this file                                   -> historical, unverified
+##   * this file                                   -> archived, dead, unverified
 ##
 ## Known drift from dev, as of 2026-09-30 (NOT fixed here on purpose — adding
 ## services to a production definition is David's call, not a cleanup's):

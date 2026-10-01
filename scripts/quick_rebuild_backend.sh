@@ -1,18 +1,24 @@
 #!/bin/bash
-# Ultra-fast rebuild - only rebuilds code layer (assumes dependencies unchanged)
-# Use this for quick code changes
+#
+# OBSOLETE — see scripts/rebuild_backend.sh for the full explanation. (2026-10-01)
+#
+# This was the "code only, assume dependencies unchanged" variant and carried
+# the identical hazard: a bare `docker compose build backend` followed by
+# `docker compose up -d backend` rebuilt production's backend from the working
+# tree and recreated it without docker-compose.incident-recovery.yml.
+#
+# Code reaches production by cutting a new pinned generation. See
+# scripts/rebuild_backend.sh and RECOVERY.md.
+#
+set -euo pipefail
 
-set -e
+cat >&2 <<'MSG'
+REFUSING: scripts/quick_rebuild_backend.sh is obsolete.
 
-cd /home/david/jarvis
+  Same hazard as scripts/rebuild_backend.sh — it recreated production's backend
+  from the working tree with no pin. Read that file's header for the
+  new-generation procedure, or RECOVERY.md.
 
-echo "⚡ Quick rebuild (code only)..."
-
-# Build with cache - only code layer rebuilds due to COPY . .
-DOCKER_BUILDKIT=1 docker compose build backend
-
-echo "🚀 Restarting backend container..."
-docker compose up -d backend
-
-echo "✅ Backend rebuilt and restarted!"
-echo "📋 Logs: docker compose logs -f backend"
+  Production, without changing it:  scripts/sara-prod verify | ps | logs [svc]
+MSG
+exit 1

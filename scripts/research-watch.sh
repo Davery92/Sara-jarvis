@@ -9,10 +9,10 @@ WHERE="ORDER BY created_at DESC LIMIT 1"
 [ -n "$PREFIX" ] && WHERE="AND id LIKE '${PREFIX}%' ORDER BY created_at DESC LIMIT 1"
 while true; do
   clear
-  docker compose exec -T db psql -U sara -d sara_hub -c "
+  docker compose -f docker-compose.dev.yml -p jarvis exec -T db psql -U sara -d sara_hub -c "
     SELECT left(title,44) AS plan, status, current_step_index AS step, total_tokens_used AS tokens
     FROM research_plan WHERE true $WHERE;"
-  docker compose exec -T db psql -U sara -d sara_hub -c "
+  docker compose -f docker-compose.dev.yml -p jarvis exec -T db psql -U sara -d sara_hub -c "
     SELECT row_number() OVER () AS n, s->>'status' AS status, left(s->>'title',50) AS step,
            left(coalesce(s->'findings'->>'summary',''),46) AS findings
     FROM (SELECT steps FROM research_plan WHERE true $WHERE) p,

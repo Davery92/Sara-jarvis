@@ -103,6 +103,28 @@ services:
     depends_on:
       - backend
 
+  # Moved here from docker-compose.yml on 2026-10-01, when that file was
+  # archived. It was the ONLY definition of this service, and the container has
+  # been running continuously — archiving the file without this would have
+  # orphaned jarvis-pi-dashboard-1 permanently: no definition anywhere, so
+  # nothing could restart or rebuild it and a `compose down` would strand it.
+  #
+  # Copied verbatim from that file and checked against the running container
+  # (ports 3001, both VITE_* values, restart policy). Deliberately NOT
+  # converted to a dev-style live-reload mount like canvas/frontend above: the
+  # Pi dashboard has only ever run as a built image, and changing that here
+  # would be a behavior change smuggled into a file move.
+  pi-dashboard:
+    build: ./pi-dashboard
+    ports:
+      - "3001:3001"
+    restart: unless-stopped
+    environment:
+      - VITE_API_URL=https://sara-api.avery.cloud
+      - VITE_ASSISTANT_NAME=Sara
+    depends_on:
+      - backend
+
   canvas:
     build:
       context: ./workbench-canvas

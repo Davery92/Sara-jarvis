@@ -13,6 +13,18 @@
 # The harness refuses to run at all if DATABASE_URL doesn't name the replay
 # database, so a mistake here fails loudly instead of quietly replaying
 # against David's real data.
+#
+# The compose file is named explicitly (2026-10-01). This used to be a bare
+# `docker compose exec`, which resolved docker-compose.yml by default — that
+# file has since been archived, so a bare call would now fail outright. `exec`
+# only attaches to an already-running container, so this was never dangerous
+# the way the rebuild scripts were; it just needs to say which project it means.
+#
+# Note this runs the suite inside PRODUCTION's backend container (project
+# `jarvis`), which is also the pinned artifact — so it tests the deployed code,
+# not the working tree. To replay the working tree, or to satisfy
+# tests/env_guard.py's disposable-stack requirement, provision into a test
+# stack instead; see provision.py's SARA_REPLAY_COMPOSE_* overrides.
 set -euo pipefail
 
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -29,7 +41,7 @@ if [[ -z "${LIVE_URL}" ]]; then
 fi
 REPLAY_URL="${LIVE_URL%/*}/sara_replay"
 
-exec docker compose exec -T \
+exec docker compose -f docker-compose.dev.yml -p jarvis exec -T \
     -e DATABASE_URL="${REPLAY_URL}" \
     -e REDIS_URL="redis://redis:6379/15" \
     -e SARA_REPLAY=1 \

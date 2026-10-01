@@ -1,4 +1,15 @@
-# Demoting docker-compose.yml — BLOCKED, and why that matters more than the move
+# Demoting docker-compose.yml — BLOCKED, then RESOLVED 2026-10-01
+
+> **RESOLVED.** David authorized fixing the scripts, so the blocker was cleared
+> and the move was completed on 2026-10-01:
+> `docker-compose.yml` → `deploy/archive-compose/docker-compose.legacy.yml`.
+> `rebuild_backend.sh` and `quick_rebuild_backend.sh` now refuse and print the
+> new-generation procedure. `research-watch.sh`, `run_replay.sh`,
+> `gpu-cluster/deploy.sh` and `deploy_production.sh` name their compose files
+> explicitly. `pi-dashboard`, defined only in the archived file and running,
+> moved into `docker-compose.dev.yml`. A bare `docker compose` at the repo root
+> now fails with "no configuration file provided", which was the point.
+> The record below is kept because the analysis is the reason for all of it.
 
 Recorded 2026-09-30. The instruction was: `git mv docker-compose.yml
 deploy/archive-compose/docker-compose.legacy.yml`, but first grep for consumers,
