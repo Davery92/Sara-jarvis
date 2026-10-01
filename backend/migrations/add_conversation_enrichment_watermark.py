@@ -10,10 +10,26 @@ turn only enriches the episodes written since the last successful run.
 import os
 from sqlalchemy import create_engine, text
 
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql+psycopg://sara:sara123@10.185.1.180:5432/sara_hub"
-).replace("+asyncpg", "")
+
+def _require_database_url() -> str:
+    """No default target (2026-10-01).
+
+    This had the live production DSN, credential included, as its os.getenv
+    fallback. Two problems, the same two the 2026-09-22 follow-up removed from
+    alembic.ini and app/core/app_state.py: it is a hardcoded credential in
+    source control, and it means forgetting DATABASE_URL silently runs this
+    DDL against production instead of failing.
+    """
+    url = os.getenv("DATABASE_URL")
+    if not url:
+        raise SystemExit(
+            "DATABASE_URL is not set. Set it explicitly — this script runs DDL "
+            "and has no default target."
+        )
+    return url.replace("+asyncpg", "")
+
+
+DATABASE_URL = _require_database_url()
 
 
 COLUMNS = [
