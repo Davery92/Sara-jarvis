@@ -304,14 +304,116 @@ def total_target_sets(exercises: List[Dict[str, Any]]) -> int:
 # ────────────────────────────────────────────────────────────────────────
 
 def withdraw_prs_for_set(db: Session, user_id: str, set_id: str) -> int:
-    """Remove PR records a set no longer supports.
+    """Retract PR records a set no longer supports.
 
     A PR is a claim about a set that happened. Void or correct the set and the
     claim has to go with it, or Sara congratulates David for a lift he told her
     he did not do (§4.4, §12.7).
+
+    FITNESS_COACH_IMPLEMENTATION_PLAN Step 13/16: this used to be a hard
+    DELETE. It is now a soft withdrawal, where migration 165's
+    `withdrawn_at`/`withdrawn_reason` exist:
+
+    * **The record stays.** "Why did my bench PR change?" is answerable only
+      if the retracted claim is still there with its reason. A DELETE leaves
+      the athlete looking at a number that silently moved.
+    * **The next eligible record is promoted.** Retracting the top claim
+      without promoting the runner-up leaves the athlete with no PR for a
+      lift they genuinely have a best set for — a strictly worse answer than
+      the stale one.
+
+    Falls back to the original DELETE on a schema that predates 165, so the
+    pinned generation keeps working.
     """
+    has_withdrawal = bool(db.execute(text("""
+        SELECT COUNT(*) FROM information_schema.columns
+        WHERE table_name = 'exercise_pr' AND column_name = 'withdrawn_at'
+    """)).scalar())
+
+    if not has_withdrawal:
+        result = db.execute(text("""
+            DELETE FROM exercise_pr WHERE user_id = :uid AND workout_set_id = :sid
+        """), {"uid": user_id, "sid": set_id})
+        db.execute(text("UPDATE workout_log SET is_pr = false WHERE id = :sid"),
+                   {"sid": set_id})
+        return int(result.rowcount or 0)
+
+    affected = db.execute(text("""
+        SELECT id, exercise_name, exercise_library_id, pr_kind
+        FROM exercise_pr
+        WHERE user_id = :uid AND workout_set_id = :sid AND withdrawn_at IS NULL
+    """), {"uid": user_id, "sid": set_id}).fetchall()
+
     result = db.execute(text("""
-        DELETE FROM exercise_pr WHERE user_id = :uid AND workout_set_id = :sid
+        UPDATE exercise_pr
+        SET withdrawn_at = NOW(),
+            withdrawn_reason = 'source set voided or corrected'
+        WHERE user_id = :uid AND workout_set_id = :sid AND withdrawn_at IS NULL
     """), {"uid": user_id, "sid": set_id})
-    db.execute(text("UPDATE workout_log SET is_pr = false WHERE id = :sid"), {"sid": set_id})
+    db.execute(text("UPDATE workout_log SET is_pr = false WHERE id = :sid"),
+               {"sid": set_id})
+
+    for row in affected:
+        _promote_next_pr(
+            db, user_id, row.exercise_name, row.exercise_library_id,
+            exclude_set_id=set_id,
+        )
+
     return int(result.rowcount or 0)
+
+
+def _promote_next_pr(
+    db: Session, user_id: str, exercise_name: str, canonical_id: Optional[str],
+    *, exclude_set_id: str,
+) -> None:
+    """Flag the next best live set for a lift whose PR was just retracted.
+
+    Scans only sets that are still eligible — not voided, not skipped, a
+    working set, with a real load and real reps. A voided set cannot hold a
+    record, which is the whole reason the previous claim was retracted.
+
+    `exclude_set_id` is the set whose claim was just retracted, and excluding
+    it explicitly matters: `_apply_void_set` calls this BEFORE it stamps
+    `voided_at`, so the set is still live from this query's point of view and
+    would otherwise promote itself straight back. Depending on the caller's
+    statement order would make the correctness of a PR a property of
+    somebody else's transaction shape.
+
+    Sets `is_pr` rather than inserting a new `exercise_pr` row: the PR writer
+    (`routes/fitness.check_and_record_pr`) owns the formula and its version,
+    and duplicating that calculation here would give two answers for one
+    lift. This marks which set the next check should find.
+    """
+    best = db.execute(text("""
+        SELECT w.id
+        FROM workout_log w
+        WHERE w.user_id = :uid
+          AND w.id <> :exclude
+          AND w.voided_at IS NULL
+          AND COALESCE(w.skipped, false) = false
+          AND w.set_kind = 'working'
+          AND w.reps IS NOT NULL AND w.reps > 0
+          AND COALESCE(w.load_value, w.weight) IS NOT NULL
+          AND COALESCE(w.load_value, w.weight) > 0
+          AND (
+              -- Explicit casts: `:canon` appears in both a NULL test and a
+              -- comparison, and Postgres cannot deduce one type for a
+              -- parameter used that way.
+              (CAST(:canon AS VARCHAR) IS NOT NULL
+               AND w.exercise_library_id = CAST(:canon AS VARCHAR))
+              OR (CAST(:canon AS VARCHAR) IS NULL
+                  AND LOWER(TRIM(w.exercise_id)) = LOWER(TRIM(CAST(:name AS VARCHAR))))
+          )
+        -- Epley ordering, matching the stored formula: load * (1 + reps/30).
+        ORDER BY COALESCE(w.load_value, w.weight) * (1 + w.reps::numeric / 30) DESC,
+                 COALESCE(w.session_time, w.created_at) DESC
+        LIMIT 1
+    """), {"uid": user_id, "canon": canonical_id, "name": exercise_name,
+           "exclude": exclude_set_id}).fetchone()
+
+    if best is None:
+        # No eligible set left. Correct: the athlete has no recorded best for
+        # this lift any more, and claiming one would be an invention.
+        return
+    db.execute(text("UPDATE workout_log SET is_pr = true WHERE id = :sid"),
+               {"sid": best.id})

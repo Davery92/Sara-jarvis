@@ -378,9 +378,23 @@ async def test_void_set_removes_it_from_progress_volume_and_prs(pg, svc, user_id
     assert proj["exercises"][0]["completed_sets"] == 0
     # The PR it produced is withdrawn — Sara must not congratulate a lift that
     # David has just said did not happen (§12.7).
-    assert pg.execute(text(
-        "SELECT COUNT(*) FROM exercise_pr WHERE workout_set_id = :s"
-    ), {"s": set_id}).scalar() == 0
+    #
+    # FITNESS_COACH_IMPLEMENTATION_PLAN Step 13 changed the mechanism from a
+    # hard DELETE to a soft withdrawal, so the assertion is now about live
+    # PRs rather than about rows: the claim must be gone, and the retracted
+    # claim must still be there with its reason, because "why did my bench PR
+    # change?" is otherwise unanswerable.
+    assert pg.execute(text("""
+        SELECT COUNT(*) FROM exercise_pr
+        WHERE workout_set_id = :s AND withdrawn_at IS NULL
+    """), {"s": set_id}).scalar() == 0, "a voided set must hold no live PR"
+    retracted = pg.execute(text("""
+        SELECT withdrawn_at, withdrawn_reason FROM exercise_pr
+        WHERE workout_set_id = :s
+    """), {"s": set_id}).fetchone()
+    assert retracted is not None, "the retracted claim must remain auditable"
+    assert retracted.withdrawn_at is not None
+    assert retracted.withdrawn_reason
     # The row survives, struck: "this didn't happen" is auditable information.
     row = pg.execute(text(
         "SELECT voided_at, void_reason, counts_toward_target FROM workout_log WHERE id = :s"
@@ -441,11 +455,25 @@ async def test_revise_recomputes_volume_and_withdraws_the_old_pr(pg, svc, user_i
 
     proj = run.projection()
     assert proj["progress"]["total_volume"] == pytest.approx(675)
-    prs = pg.execute(text(
-        "SELECT weight FROM exercise_pr WHERE user_id = :u ORDER BY achieved_at"
-    ), {"u": user_id}).fetchall()
-    # Exactly one record, for the corrected weight — not one of each.
-    assert [int(r.weight) for r in prs] == [135]
+
+    # Step 13 changed the mechanism from DELETE to soft withdrawal, so "one
+    # record" is now "one LIVE record". The 315 claim is retracted with its
+    # reason rather than erased — a PR that silently changes value is worse
+    # than one that says why.
+    live = pg.execute(text("""
+        SELECT weight FROM exercise_pr
+        WHERE user_id = :u AND withdrawn_at IS NULL
+        ORDER BY achieved_at
+    """), {"u": user_id}).fetchall()
+    assert [int(r.weight) for r in live] == [135], (
+        "exactly one live record, for the corrected weight — not one of each"
+    )
+    withdrawn = pg.execute(text("""
+        SELECT weight, withdrawn_reason FROM exercise_pr
+        WHERE user_id = :u AND withdrawn_at IS NOT NULL
+    """), {"u": user_id}).fetchall()
+    assert [int(r.weight) for r in withdrawn] == [315]
+    assert all(r.withdrawn_reason for r in withdrawn)
 
 
 @requires_pg

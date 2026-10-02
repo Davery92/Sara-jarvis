@@ -876,6 +876,18 @@ class WorkoutCommandService:
             counts_toward_target=(set_kind == "working"),
             command_id=command_id,
             plan_role=role, plan_week=plan_week,
+            # Step 13: a client that can express 227.5 lb, RIR 2 or a top set
+            # sends those; one that cannot sends nothing and the integer
+            # `weight` is projected into the fractional pair instead.
+            precise_payload={
+                k: payload[k] for k in (
+                    "load_value", "load_unit", "rir", "rpe_decimal",
+                    "set_role", "is_failure", "actual_rest_seconds", "tempo",
+                ) if k in payload
+            },
+            # "I'm back on bench" starts a second occurrence rather than
+            # adding sets to the first block.
+            new_exercise_block=bool(payload.get("new_exercise_block")),
         )
 
         # Everything downstream is derived, never patched (§6.4) — the same
@@ -945,6 +957,10 @@ class WorkoutCommandService:
         counts_toward_target: bool, command_id: Optional[str],
         parent_set_id: Optional[str] = None, revised_from_set_id: Optional[str] = None,
         plan_role: Optional[str] = None, plan_week: Optional[int] = None,
+        # FITNESS_COACH_IMPLEMENTATION_PLAN Step 13. All optional, so every
+        # existing caller and every shipped client keeps working unchanged.
+        precise_payload: Optional[Dict[str, Any]] = None,
+        new_exercise_block: bool = False,
     ) -> None:
         """Write one performed set. The only place `workout_log` rows are born.
 
@@ -990,6 +1006,125 @@ class WorkoutCommandService:
             "seq": group_sequence, "counts": counts_toward_target,
             "revised": revised_from_set_id,
         })
+
+        # Step 13 metadata, in the same transaction as the row it describes.
+        #
+        # Done HERE rather than at the two call sites, deliberately: this
+        # function is "the only place `workout_log` rows are born", so a new
+        # command cannot forget the occurrence link or the fractional load.
+        # The `weight` column above keeps its integer value — it is the
+        # compatibility projection every shipped client reads, and
+        # `data_access.effective_load` prefers the fractional pair so
+        # analytics see 227.5 while an old client still sees 227.
+        self._attach_precise_set_metadata(
+            db, session, exercise, log_id,
+            exercise_name=exercise_name,
+            integer_weight=weight,
+            legacy_rpe=rpe,
+            precise_payload=precise_payload or {},
+            new_exercise_block=new_exercise_block,
+            parent_set_id=parent_set_id,
+        )
+
+    def _attach_precise_set_metadata(
+        self, db: Session, session: Dict[str, Any], exercise: Dict[str, Any],
+        log_id: str, *, exercise_name: str, integer_weight: Any,
+        legacy_rpe: Optional[int], precise_payload: Dict[str, Any],
+        new_exercise_block: bool, parent_set_id: Optional[str],
+    ) -> None:
+        """Link the set to its occurrence and record what the old columns cannot.
+
+        Never raises into the caller. The set itself is already written and is
+        what the athlete asked for; a failure to attach derived metadata must
+        not lose a logged set. The real exception class is logged first so a
+        catch-all cannot hide which column or import was wrong.
+
+        A drop segment inherits its parent's occurrence — it is part of that
+        set, not a new block of work.
+        """
+        try:
+            from app.schemas.fitness_coach import Unit as _Unit
+            from app.services.fitness.exercises import resolve_exercise, AmbiguousExercise
+            from app.services.fitness.performance import (
+                attach_precise_load, ensure_occurrence,
+            )
+
+            user_id = session["user_id"]
+
+            canonical_id = None
+            load_convention = None
+            try:
+                ref = resolve_exercise(db, user_id, exercise_name)
+                if ref is not None:
+                    canonical_id, load_convention = ref.id, ref.load_convention
+            except AmbiguousExercise:
+                # Two exercises share this name. Leaving the canonical id
+                # NULL keeps the set attributed to the text name it was
+                # logged under; guessing would credit it to a lift the
+                # athlete may never have done.
+                pass
+
+            if parent_set_id:
+                occurrence_id = db.execute(text("""
+                    SELECT exercise_performance_id FROM workout_log
+                    WHERE id = :pid AND user_id = :uid
+                """), {"pid": parent_set_id, "uid": user_id}).scalar()
+            else:
+                occurrence = ensure_occurrence(
+                    db, user_id, session["id"],
+                    captured_name=exercise_name,
+                    captured_variant=(exercise.get("variant") or "").strip() or None,
+                    template_slot_id=exercise.get("slot_id") or exercise.get("template_exercise_id"),
+                    exercise_library_id=canonical_id,
+                    load_convention=load_convention,
+                    order_index=int(session.get("current_exercise_index") or 0),
+                    new_block=new_exercise_block,
+                )
+                occurrence_id = occurrence.id
+
+            # The fractional load. Falls back to the integer the client sent,
+            # in pounds — the legacy contract — so old and new rows take the
+            # same read path.
+            raw_load = precise_payload.get("load_value")
+            raw_unit = precise_payload.get("load_unit")
+            if raw_load is None and integer_weight is not None:
+                try:
+                    numeric = float(integer_weight)
+                except (TypeError, ValueError):
+                    numeric = None
+                if numeric is not None and numeric > 0:
+                    raw_load, raw_unit = numeric, "lb"
+
+            unit = None
+            if raw_unit:
+                try:
+                    unit = _Unit(raw_unit)
+                except ValueError:
+                    # An unrecognised unit is a conflict to surface, not to
+                    # reinterpret: storing it as pounds would misstate the load.
+                    logger.warning(
+                        "[WorkoutCommand] unrecognised load unit %r on set %s; "
+                        "the fractional load was not stored", raw_unit, log_id,
+                    )
+                    raw_load = None
+
+            attach_precise_load(
+                db, user_id, log_id,
+                load_value=raw_load,
+                load_unit=unit,
+                rir=precise_payload.get("rir"),
+                rpe_decimal=precise_payload.get("rpe_decimal"),
+                set_role=precise_payload.get("set_role"),
+                is_failure=precise_payload.get("is_failure"),
+                actual_rest_seconds=precise_payload.get("actual_rest_seconds"),
+                tempo=precise_payload.get("tempo"),
+                exercise_performance_id=occurrence_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[WorkoutCommand] set %s stored without Step 13 metadata (%s): %s",
+                log_id, type(exc).__name__, exc,
+            )
 
     async def _record_pr(
         self, db: Session, user_id: str, exercise_name: str, weight: Any, reps: Any, log_id: str

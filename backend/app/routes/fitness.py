@@ -5403,24 +5403,54 @@ async def check_and_record_pr(
     achieved_at: date,
     workout_set_id: Optional[str] = None
 ) -> Optional[dict]:
-    """Check if this is a new PR and record it if so"""
+    """Check if this is a new PR and record it if so.
+
+    FITNESS_COACH_IMPLEMENTATION_PLAN Step 13: the comparison now excludes
+    **withdrawn** records. `workout_recalc.withdraw_prs_for_set` retracts a
+    PR by setting `withdrawn_at` rather than deleting the row, so that "why
+    did my bench PR change?" stays answerable — but a retracted claim must
+    not go on blocking a real one. Without this filter, correcting a
+    mistaken 315 lb entry down to 135 would leave the athlete with no
+    recorded best at all: the 315 claim is retracted and the 135 set loses
+    to it.
+
+    A tie is deliberately not a PR (`>`, not `>=`), unchanged: matching a
+    record is not breaking it, and congratulating someone for repeating a
+    lift devalues the record.
+    """
     try:
         estimated_1rm = calculate_estimated_1rm(weight, reps)
 
-        # Check current best PR for this exercise
-        current_best = db.execute(text("""
+        has_withdrawal = bool(db.execute(text("""
+            SELECT COUNT(*) FROM information_schema.columns
+            WHERE table_name = 'exercise_pr' AND column_name = 'withdrawn_at'
+        """)).scalar())
+        live_only = "AND withdrawn_at IS NULL" if has_withdrawal else ""
+
+        # Check current best LIVE PR for this exercise
+        current_best = db.execute(text(f"""
             SELECT MAX(estimated_1rm) as best_1rm
             FROM exercise_pr
             WHERE user_id = :user_id AND exercise_name = :exercise_name
+              {live_only}
         """), {"user_id": user_id, "exercise_name": exercise_name}).fetchone()
 
         is_pr = current_best is None or current_best.best_1rm is None or estimated_1rm > current_best.best_1rm
 
         if is_pr:
             pr_id = str(uuid.uuid4())
-            db.execute(text("""
-                INSERT INTO exercise_pr (id, user_id, exercise_name, weight, reps, estimated_1rm, achieved_at, workout_set_id)
-                VALUES (:id, :user_id, :exercise_name, :weight, :reps, :estimated_1rm, :achieved_at, :workout_set_id)
+            # `pr_kind` and `formula_version` are recorded where migration
+            # 165 provides them, so a later change to the e1RM formula does
+            # not silently reinterpret historical records.
+            extra_cols = (
+                ", pr_kind, formula_version, load_unit" if has_withdrawal else ""
+            )
+            extra_vals = (
+                ", 'estimated_1rm', 'epley_v1', 'lb'" if has_withdrawal else ""
+            )
+            db.execute(text(f"""
+                INSERT INTO exercise_pr (id, user_id, exercise_name, weight, reps, estimated_1rm, achieved_at, workout_set_id{extra_cols})
+                VALUES (:id, :user_id, :exercise_name, :weight, :reps, :estimated_1rm, :achieved_at, :workout_set_id{extra_vals})
             """), {
                 "id": pr_id,
                 "user_id": user_id,
