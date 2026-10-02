@@ -70,6 +70,10 @@ REVIEW_SECTIONS = (
     StateSection.RECOVERY, StateSection.TRAINING, StateSection.PAIN,
     StateSection.MEASUREMENTS,
 )
+# PHOTOS is deliberately absent. A review's job is the numbers, and a photo
+# observation is a description — folding one in would let a weekly review
+# cite "looks leaner" as evidence for a calorie change, which is the
+# composition claim the photo schema spends itself preventing.
 
 #: The longer aggregates a weekly review needs beside the seven days. §20.1:
 #: the prior 7 full local days plus 14/28 aggregates. The state already

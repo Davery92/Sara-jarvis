@@ -17,6 +17,19 @@
  *   means.
  * - **No body-fat number anywhere**, and the legacy critique is labelled as
  *   free text rather than as a measurement.
+ *
+ * Step 27 adds the vision pass, and with it three more:
+ *
+ * - **The affordance appears only where it can work.** Consent on, and
+ *   `/vision-capability` reporting a probed endpoint. A llama.cpp server
+ *   started without `--mmproj` answers the text prompt alone, so a button
+ *   that "worked" there would produce confident fiction about a photo
+ *   nothing looked at.
+ * - **Inconclusive is rendered as an answer.** Two photos in different
+ *   light frequently cannot be compared, and that is the honest result, not
+ *   a failure to retry.
+ * - **An analysis failure does not break capture.** The gallery and the
+ *   upload form keep working when the vision lane is down.
  */
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -25,7 +38,9 @@ import React from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import ProgressPhotos from '../ProgressPhotos'
-import type { ProgressPhoto } from '../../../types/fitnessCoach'
+import type {
+  PhotoAnalysisRow, ProgressPhoto,
+} from '../../../types/fitnessCoach'
 
 const ATHLETE = 'athlete-photos'
 
@@ -58,6 +73,35 @@ let uploadBody: unknown = null
 let deleteBody: unknown = null
 let periods: Array<Record<string, unknown>> = []
 let comparableBody: unknown = null
+let capabilityBody: unknown = null
+let capabilityStatus = 200
+let analysesBody: PhotoAnalysisRow[] = []
+let analyseBody: unknown = null
+let analyseStatus = 200
+
+function observation(over: Partial<PhotoAnalysisRow> = {}): PhotoAnalysisRow {
+  return {
+    analysis_id: 'a1', kind: 'single', source_photo_id: 'p1',
+    compare_photo_id: null, status: 'complete', duplicate: false,
+    model_actual: 'qwen3.6-35b-a3b', failure_category: null, detail: null,
+    prompt_version: 'fitness_photo_observations_v1', vision_verified: true,
+    summary: 'Shoulders read wider than the waist.',
+    created_at: '2026-10-02T12:00:00Z',
+    output: {
+      output_version: 1, view: 'front',
+      summary: 'Shoulders read wider than the waist; lats visible.',
+      regions: [{
+        region: 'midsection', observation: 'In shadow; hard to read.',
+        confidence: 'low',
+      }],
+      limitations: ['The midsection is in shadow.'],
+      image_quality: 'good', pose_consistent_with_view: true,
+      confidence: 'moderate',
+      confidence_basis: 'clear lighting and a square-on pose',
+    },
+    ...over,
+  }
+}
 
 function stubFetch() {
   globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -81,6 +125,21 @@ function stubFetch() {
     if (url.includes('/comparable')) {
       return json(200, comparableBody ?? {
         comparable: true, reason: null, photos: ['p1', 'p2'],
+      })
+    }
+    if (url.includes('/vision-capability')) {
+      return json(capabilityStatus, capabilityBody ?? {
+        available: true, model: 'qwen3.6-35b-a3b',
+        endpoint: 'http://10.185.1.8:8686',
+        detail: 'probed 2026-10-02',
+      })
+    }
+    if (url.includes('/analyses')) return json(200, analysesBody)
+    if (url.includes('/analyse')) {
+      return json(analyseStatus, analyseBody ?? {
+        analysis_id: 'a1', status: 'complete', duplicate: false,
+        model_actual: 'qwen3.6-35b-a3b', failure_category: null,
+        detail: null, output: observation().output,
       })
     }
     if (url.includes('/analysis-consent')) {
@@ -122,6 +181,11 @@ beforeEach(() => {
   uploadBody = null
   deleteBody = null
   comparableBody = null
+  capabilityBody = null
+  capabilityStatus = 200
+  analysesBody = []
+  analyseBody = null
+  analyseStatus = 200
   periods = []
   stubFetch()
 })
@@ -520,5 +584,171 @@ describe('comparing sessions', () => {
     await waitFor(() => expect(screen.getByTestId('compare-picker')).toBeTruthy())
     expect(screen.getByTestId('progress-photos').textContent)
       .toContain('does not analyse anything')
+  })
+})
+
+// ── Structured observations (Step 27) ─────────────────────────────────────
+
+describe('vision observations', () => {
+  it('offers to describe a photo whose consent is on', async () => {
+    photos = [photo({ id: 'p1', consent_analysis: true })]
+    wrap(<ProgressPhotos />)
+    await waitFor(() => expect(screen.getByTestId('analyse-p1')).toBeTruthy())
+    expect(screen.getByTestId('analyse-p1').textContent)
+      .toContain('Describe what Sara sees')
+  })
+
+  it('does not offer it on a photo whose consent is off', async () => {
+    // Consent is the gate. A button here would imply the switch is
+    // advisory.
+    photos = [photo({ id: 'p1', consent_analysis: false })]
+    wrap(<ProgressPhotos />)
+    await waitFor(() => expect(screen.getByTestId('photo-p1')).toBeTruthy())
+    expect(screen.queryByTestId('analyse-p1')).toBeNull()
+  })
+
+  it('hides the affordance and says why when no model can see', async () => {
+    // The endpoint a llama.cpp server without --mmproj serves looks
+    // identical over the API. Offering a button that always lies is worse
+    // than offering nothing, and a silent absence is a mystery.
+    capabilityBody = {
+      available: false, model: 'qwen3.6-35b-a3b',
+      endpoint: 'http://10.185.1.8:11434',
+      detail: 'not probed',
+    }
+    photos = [photo({ id: 'p1', consent_analysis: true })]
+    wrap(<ProgressPhotos />)
+    await waitFor(() => expect(screen.getByTestId('no-vision-p1')).toBeTruthy())
+    expect(screen.queryByTestId('analyse-p1')).toBeNull()
+    expect(screen.getByTestId('no-vision-p1').textContent)
+      .toContain('cannot see photos right now')
+  })
+
+  it('treats an unreachable capability check as no capability', async () => {
+    capabilityStatus = 500
+    photos = [photo({ id: 'p1', consent_analysis: true })]
+    wrap(<ProgressPhotos />)
+    await waitFor(() => expect(screen.getByTestId('no-vision-p1')).toBeTruthy())
+    expect(screen.queryByTestId('analyse-p1')).toBeNull()
+  })
+
+  it('shows the observation with its confidence and its limits', async () => {
+    photos = [photo({ id: 'p1', consent_analysis: true })]
+    analysesBody = [observation()]
+    wrap(<ProgressPhotos />)
+    await waitFor(() => expect(screen.getByTestId('observation-a1')).toBeTruthy())
+    const text = screen.getByTestId('observation-a1').textContent ?? ''
+    expect(text).toContain('Shoulders read wider')
+    expect(text).toContain('Moderate confidence')
+    expect(text).toContain('image good')
+    expect(text).toContain('The midsection is in shadow.')
+    // Which model, and that it is not a measurement.
+    expect(text).toContain('qwen3.6-35b-a3b')
+    expect(text).toContain('not a measurement')
+  })
+
+  it('renders inconclusive as an answer, with the reason', async () => {
+    photos = [photo({ id: 'p1', consent_analysis: true })]
+    analysesBody = [observation({
+      status: 'inconclusive',
+      output: {
+        output_version: 1, view: 'front', verdict: 'inconclusive',
+        inconclusive_reason: 'the lighting differs between the two',
+        summary: 'The two shots are lit differently.',
+        regions: [], limitations: [], capture_consistent: false,
+        image_quality: 'fair', confidence: 'low',
+        confidence_basis: 'one window-lit, one overhead',
+      },
+    })]
+    wrap(<ProgressPhotos />)
+    await waitFor(() =>
+      expect(screen.getByTestId('observation-verdict')).toBeTruthy())
+    const text = screen.getByTestId('observation-verdict').textContent ?? ''
+    expect(text).toContain('Inconclusive')
+    expect(text).toContain('the lighting differs')
+    // Not dressed up as an error.
+    expect(screen.queryByTestId('observation-failed')).toBeNull()
+  })
+
+  it('flags an observation from an unverified endpoint', async () => {
+    photos = [photo({ id: 'p1', consent_analysis: true })]
+    analysesBody = [observation({ vision_verified: false })]
+    wrap(<ProgressPhotos />)
+    await waitFor(() => expect(screen.getByTestId('observation-a1')).toBeTruthy())
+    expect(screen.getByTestId('observation-a1').textContent)
+      .toContain('may describe the prompt rather than the photo')
+  })
+
+  it('says nothing was stored when the model could not be honest', async () => {
+    photos = [photo({ id: 'p1', consent_analysis: true })]
+    analysesBody = [observation({
+      status: 'failed', failure_category: 'body_composition_claim',
+      output: null, summary: null,
+    })]
+    wrap(<ProgressPhotos />)
+    await waitFor(() =>
+      expect(screen.getByTestId('observation-failed')).toBeTruthy())
+    const text = screen.getByTestId('observation-failed').textContent ?? ''
+    expect(text).toContain('could not describe it honestly')
+    expect(text).toContain('Nothing was stored')
+  })
+
+  it('posts the analysis and reloads the list', async () => {
+    photos = [photo({ id: 'p1', consent_analysis: true })]
+    wrap(<ProgressPhotos />)
+    await waitFor(() => expect(screen.getByTestId('analyse-p1')).toBeTruthy())
+    analysesBody = [observation()]
+    await userEvent.click(screen.getByTestId('analyse-p1'))
+    await waitFor(() => expect(screen.getByTestId('observation-a1')).toBeTruthy())
+    const posted = calls.filter(
+      (call) => call.method === 'POST' && call.url.includes('/analyse'),
+    )
+    expect(posted.length).toBe(1)
+    expect(posted[0].url).toContain('/p1/analyse')
+    // No pair id on a single-photo request.
+    expect(posted[0].url).not.toContain('compare_photo_id')
+  })
+
+  it('surfaces the server reason when the analysis is refused', async () => {
+    photos = [photo({ id: 'p1', consent_analysis: true })]
+    analyseBody = {
+      analysis_id: 'a9', status: 'failed', duplicate: false,
+      model_actual: null, failure_category: 'model_unavailable',
+      detail: 'The vision model did not answer.', output: null,
+    }
+    wrap(<ProgressPhotos />)
+    await waitFor(() => expect(screen.getByTestId('analyse-p1')).toBeTruthy())
+    await userEvent.click(screen.getByTestId('analyse-p1'))
+    await waitFor(() => expect(
+      (screen.getByTestId('progress-photos').textContent ?? '')
+        .includes('The vision model did not answer.'),
+    ).toBe(true))
+  })
+
+  it('keeps capture working when the analysis lane is down', async () => {
+    // An analysis failure cannot block upload or logging.
+    analyseStatus = 500
+    photos = [photo({ id: 'p1', consent_analysis: true })]
+    wrap(<ProgressPhotos />)
+    await waitFor(() => expect(screen.getByTestId('analyse-p1')).toBeTruthy())
+    await userEvent.click(screen.getByTestId('analyse-p1'))
+    await waitFor(() => expect(screen.getByTestId('photo-upload')).toBeTruthy())
+    await pickFile()
+    await userEvent.click(screen.getByTestId('photo-upload'))
+    await waitFor(() => expect(calls.some(
+      (call) => call.method === 'POST' && call.url.endsWith('/progress-photos'),
+    )).toBe(true))
+  })
+
+  it('shows no body-composition number anywhere', async () => {
+    photos = [photo({ id: 'p1', consent_analysis: true })]
+    analysesBody = [observation()]
+    wrap(<ProgressPhotos />)
+    await waitFor(() => expect(screen.getByTestId('observation-a1')).toBeTruthy())
+    const text = (screen.getByTestId('progress-photos').textContent ?? '')
+      .toLowerCase()
+    for (const banned of ['body fat', 'bodyfat', 'lean mass', 'bmi', '%']) {
+      expect(text).not.toContain(banned)
+    }
   })
 })

@@ -460,3 +460,138 @@ async def check_comparable(
         "reason": reason,
         "photos": [first["id"], second["id"]],
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Structured observations (Step 27)
+# ─────────────────────────────────────────────────────────────────────────
+
+@router.post("/{photo_id}/analyse")
+async def analyse_photo_route(
+    photo_id: str,
+    compare_photo_id: Optional[str] = Query(
+        None,
+        description="A second photo to compare against. The earlier one is "
+                    "whichever was taken first.",
+    ),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Run a structured observation over a photo the athlete consented to.
+
+    Consent is checked before the bytes are fetched — reading somebody's
+    photo out of object storage to decide whether we are allowed to read it
+    is the wrong way round. The endpoint must have passed the vision probe:
+    a llama.cpp server without `--mmproj` serves the same model over the
+    same API and silently answers the text prompt alone, which reads as a
+    model with poor eyesight.
+
+    The output has no body-fat, weight or lean-mass field, and an estimate
+    smuggled into prose is rejected.
+    """
+    from app.services.fitness import photo_analysis
+
+    try:
+        result = await photo_analysis.analyse_photo(
+            db, current_user.id, photo_id,
+            compare_photo_id=compare_photo_id,
+        )
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Progress photo not found")
+    except photo_analysis.AnalysisRefused as exc:
+        raise HTTPException(status_code=409, detail={
+            "code": exc.category.value,
+            "message": str(exc),
+        })
+    except Exception as exc:
+        logger.warning(
+            "photo analysis failed for %s (%s): %s",
+            photo_id, type(exc).__name__, exc,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Could not analyse that photo. Nothing was stored.",
+        )
+
+    return {
+        "analysis_id": result.analysis_id,
+        "status": result.status.value,
+        "duplicate": result.duplicate,
+        "model_actual": result.model_actual,
+        "failure_category": (
+            result.failure_category.value if result.failure_category else None
+        ),
+        "detail": result.detail,
+        "output": (
+            result.output.model_dump(mode="json") if result.output else None
+        ),
+    }
+
+
+@router.get("/analyses")
+async def list_photo_analyses(
+    photo_id: Optional[str] = Query(None),
+    limit: int = Query(20, ge=1, le=100),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """This athlete's observations. Owner-scoped in the query."""
+    from app.services.fitness import photo_analysis
+
+    rows = photo_analysis.list_analyses(
+        db, current_user.id, photo_id=photo_id, limit=limit,
+    )
+    return [
+        {
+            **row,
+            "created_at": (
+                row["created_at"].isoformat() if row.get("created_at") else None
+            ),
+        }
+        for row in rows
+    ]
+
+
+@router.get("/analyses/{analysis_id}")
+async def get_photo_analysis(
+    analysis_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """One observation, with which model and endpoint produced it.
+
+    `vision_verified` is on the row: a result from an unverified endpoint is
+    not evidence of anything, and a reader has to be able to see that.
+    """
+    from app.services.fitness import photo_analysis
+
+    try:
+        row = photo_analysis.get_analysis(db, current_user.id, analysis_id)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Analysis not found")
+    for field in ("created_at", "evaluated_at"):
+        if row.get(field):
+            row[field] = row[field].isoformat()
+    return row
+
+
+@router.get("/vision-capability")
+async def get_vision_capability(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Whether a verified vision endpoint is available at all.
+
+    Exposed so a UI can hide the analysis affordance rather than offering a
+    button that always fails — and so "Sara cannot see photos right now" is
+    a visible fact rather than a mysterious error.
+    """
+    from app.services.fitness import photo_analysis
+
+    capability = photo_analysis.resolve_capability(db, current_user.id)
+    return {
+        "available": capability.verified,
+        "model": capability.model,
+        "endpoint": capability.endpoint,
+        "detail": capability.detail,
+    }

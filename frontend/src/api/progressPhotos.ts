@@ -14,10 +14,13 @@
  */
 import { APP_CONFIG } from '../config'
 import type {
+  PhotoAnalysisResult,
+  PhotoAnalysisRow,
   PhotoComparability,
   PhotoDeleteResult,
   PhotoUploadInput,
   ProgressPhoto,
+  VisionCapability,
 } from '../types/fitnessCoach'
 
 const BASE = `${APP_CONFIG.apiUrl}/api/fitness/progress-photos`
@@ -119,6 +122,58 @@ export const progressPhotoApi = {
       `${BASE}/periods/${encodeURIComponent(periodId)}/comparable?${query}`,
       { credentials: 'include' },
     )
+    if (!response.ok) throw await failure(response)
+    return response.json()
+  },
+}
+
+/**
+ * Structured observations (Step 27).
+ *
+ * Separate from `progressPhotoApi` only in reading order — same base, same
+ * cookie. `capability` exists so the UI can hide the affordance instead of
+ * offering a button that always fails: the vision endpoint here is a
+ * llama.cpp server that must have been started with `--mmproj`, and one
+ * that was not serves the same model over the same API while silently
+ * ignoring the image.
+ */
+export const photoAnalysisApi = {
+  capability: async (): Promise<VisionCapability> => {
+    const response = await fetch(`${BASE}/vision-capability`, {
+      credentials: 'include',
+    })
+    if (!response.ok) throw await failure(response)
+    return response.json()
+  },
+
+  /**
+   * Analyse one photo, or compare two.
+   *
+   * Slow by nature — a multimodal call over a local model — and idempotent
+   * on (photo, pair, prompt version, image bytes), so a retry after a
+   * dropped connection returns the first answer rather than paying twice.
+   */
+  analyse: async (
+    photoId: string, comparePhotoId?: string,
+  ): Promise<PhotoAnalysisResult> => {
+    const query = comparePhotoId
+      ? `?${new URLSearchParams({ compare_photo_id: comparePhotoId })}`
+      : ''
+    const response = await fetch(
+      `${BASE}/${encodeURIComponent(photoId)}/analyse${query}`,
+      { method: 'POST', credentials: 'include' },
+    )
+    if (!response.ok) throw await failure(response)
+    return response.json()
+  },
+
+  list: async (photoId?: string): Promise<PhotoAnalysisRow[]> => {
+    const query = photoId
+      ? `?${new URLSearchParams({ photo_id: photoId })}`
+      : ''
+    const response = await fetch(`${BASE}/analyses${query}`, {
+      credentials: 'include',
+    })
     if (!response.ok) throw await failure(response)
     return response.json()
   },

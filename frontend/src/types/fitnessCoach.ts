@@ -859,3 +859,86 @@ export interface PhotoComparability {
   reason: string | null
   photos: string[]
 }
+
+// ── Structured photo observations (Step 27) ─────────────────────────────
+//
+// Deliberately absent from every type below: body fat, weight, lean mass,
+// BMI. The server has no field for one and rejects an estimate smuggled
+// into prose, so a client that invented a place to show one would be
+// showing something that cannot arrive.
+
+export type ObservationConfidence = 'low' | 'moderate' | 'high'
+export type ImageQuality = 'poor' | 'fair' | 'good'
+export type ComparisonVerdict = 'comparable' | 'inconclusive' | 'not_comparable'
+
+export interface RegionObservation {
+  region: string
+  observation: string
+  confidence: ObservationConfidence
+}
+
+export interface PhotoObservation {
+  output_version: number
+  view: PhotoView
+  summary: string
+  regions: RegionObservation[]
+  limitations: string[]
+  image_quality: ImageQuality
+  pose_consistent_with_view: boolean
+  confidence: ObservationConfidence
+  confidence_basis: string
+}
+
+export interface PhotoComparison {
+  output_version: number
+  view: PhotoView
+  verdict: ComparisonVerdict
+  /** Required whenever the verdict is not `comparable`. */
+  inconclusive_reason: string | null
+  summary: string
+  regions: RegionObservation[]
+  limitations: string[]
+  /** Same lighting, pose and distance. False forbids a `comparable` verdict. */
+  capture_consistent: boolean
+  image_quality: ImageQuality
+  confidence: ObservationConfidence
+  confidence_basis: string
+}
+
+export type PhotoAnalysisStatus =
+  | 'pending'
+  | 'complete'
+  | 'inconclusive'
+  | 'failed'
+  | 'source_gone'
+
+export interface PhotoAnalysisResult {
+  analysis_id: string
+  status: PhotoAnalysisStatus
+  /** True when an identical request was already answered; no second call. */
+  duplicate: boolean
+  /** What the endpoint said it was, which can differ from what we asked. */
+  model_actual: string | null
+  failure_category: string | null
+  detail: string | null
+  output: PhotoObservation | PhotoComparison | null
+}
+
+export interface PhotoAnalysisRow extends PhotoAnalysisResult {
+  kind: 'single' | 'pair'
+  source_photo_id: string
+  compare_photo_id: string | null
+  prompt_version: string
+  /** Whether the endpoint had passed the vision probe. An unverified
+   *  result is not evidence of anything, and a reader must see that. */
+  vision_verified: boolean
+  summary: string | null
+  created_at: string | null
+}
+
+export interface VisionCapability {
+  available: boolean
+  model: string | null
+  endpoint: string | null
+  detail: string
+}

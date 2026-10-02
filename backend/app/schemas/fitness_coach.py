@@ -21,10 +21,11 @@ Nothing here connects to a database or an LLM at import.
 from __future__ import annotations
 
 import math
+import re
 from datetime import date, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from enum import Enum
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Sequence, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -1240,3 +1241,200 @@ class ReviewRequest(BaseModel):
 
 
 CoachReviewDetail.model_rebuild()
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Photo observations (Step 27)
+# ─────────────────────────────────────────────────────────────────────────
+
+class PhotoView(str, Enum):
+    FRONT = "front"
+    SIDE = "side"
+    BACK = "back"
+    OTHER = "other"
+
+
+class ObservationConfidence(str, Enum):
+    """How sure the model is. Separate from image quality, deliberately.
+
+    A clear photo can still support only a weak statement, and a confident
+    reading of a badly lit one is exactly the thing that must stay visible
+    as two facts rather than one.
+    """
+    LOW = "low"
+    MODERATE = "moderate"
+    HIGH = "high"
+
+
+class ImageQuality(str, Enum):
+    GOOD = "good"
+    ACCEPTABLE = "acceptable"
+    POOR = "poor"
+
+
+class ComparisonVerdict(str, Enum):
+    """Whether a pair can be compared at all.
+
+    `INCONCLUSIVE` is a first-class answer, not a failure. Lighting, pose
+    and distance dominate photo-to-photo difference, so "these two cannot
+    be compared" is often the only honest reading — and a system without
+    this value would produce a confident difference instead.
+    """
+    COMPARABLE = "comparable"
+    INCONCLUSIVE = "inconclusive"
+    NOT_COMPARABLE = "not_comparable"
+
+
+class RegionObservation(BaseModel):
+    """One qualitative statement about one region.
+
+    No numbers. There is no `size_cm`, no `body_fat`, no score: a
+    photograph cannot support any of them, and a field for one guarantees
+    a model fills it.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    #: A body region in the athlete's own vocabulary — "shoulders",
+    #: "upper back". Free text, capped, because a closed list would force a
+    #: model to mislabel whatever it actually saw.
+    region: str = Field(min_length=1, max_length=60)
+    observation: str = Field(min_length=1, max_length=600)
+    confidence: ObservationConfidence
+
+
+class PhotoObservationV1(BaseModel):
+    """What a model may say about ONE photo.
+
+    Notably absent: any estimate of body fat, weight, lean mass or
+    measurement. §5.5 — "no body-fat percentage field or diagnosis" — and
+    `extra="forbid"` means a model that produces one is rejected rather
+    than having the field dropped on the way to storage.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    output_version: int = 1
+    view: PhotoView
+    #: Two or three sentences. A longer description is a model filling space.
+    summary: str = Field(min_length=1, max_length=1200)
+    regions: List[RegionObservation] = Field(default_factory=list, max_length=12)
+    #: What the photo itself prevented. "The lighting hides the midsection"
+    #: is the most useful sentence such a system produces.
+    limitations: List[str] = Field(default_factory=list, max_length=8)
+    image_quality: ImageQuality
+    pose_consistent_with_view: bool
+    confidence: ObservationConfidence
+    confidence_basis: str = Field(min_length=1, max_length=600)
+
+    @model_validator(mode="after")
+    def _no_numbers_about_the_body(self) -> "PhotoObservationV1":
+        """Reject a composition estimate smuggled into prose.
+
+        The schema has no field for it, so a model that wants to say it puts
+        it in `summary`. A percentage or a weight in this text would read as
+        an observation and `health_metric` would never see it.
+        """
+        _reject_body_numbers(
+            [self.summary, self.confidence_basis]
+            + [r.observation for r in self.regions]
+            + list(self.limitations)
+        )
+        return self
+
+
+class PhotoComparisonV1(BaseModel):
+    """What a model may say about a PAIR.
+
+    `verdict=INCONCLUSIVE` with a reason is the expected answer far more
+    often than a difference is, because two photos taken weeks apart are
+    almost never taken the same way.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    output_version: int = 1
+    view: PhotoView
+    verdict: ComparisonVerdict
+    #: Required when the verdict is not `comparable`: a refusal with no
+    #: reason is indistinguishable from a failure.
+    inconclusive_reason: Optional[str] = Field(default=None, max_length=600)
+    summary: str = Field(min_length=1, max_length=1200)
+    regions: List[RegionObservation] = Field(default_factory=list, max_length=12)
+    limitations: List[str] = Field(default_factory=list, max_length=8)
+    #: Whether the two images were taken comparably — lighting, pose,
+    #: distance. Reported separately from the verdict so a reader can see
+    #: WHY a comparison was refused.
+    capture_consistent: bool
+    image_quality: ImageQuality
+    confidence: ObservationConfidence
+    confidence_basis: str = Field(min_length=1, max_length=600)
+
+    @model_validator(mode="after")
+    def _coherent(self) -> "PhotoComparisonV1":
+        if self.verdict is not ComparisonVerdict.COMPARABLE and \
+                not self.inconclusive_reason:
+            raise ValueError(
+                "a verdict other than 'comparable' must say why; a refusal "
+                "with no reason reads as a failure"
+            )
+        if self.verdict is ComparisonVerdict.COMPARABLE and \
+                not self.capture_consistent:
+            raise ValueError(
+                "a comparison cannot be 'comparable' while the captures are "
+                "inconsistent — that is the definition of inconclusive"
+            )
+        _reject_body_numbers(
+            [self.summary, self.confidence_basis,
+             self.inconclusive_reason or ""]
+            + [r.observation for r in self.regions]
+            + list(self.limitations)
+        )
+        return self
+
+
+#: Phrases that assert a body-composition number. Checked in the validator,
+#: because the schema has nowhere to put one and a model that wants to say
+#: it will put it in prose.
+_BODY_NUMBER_PATTERNS = (
+    re.compile(r"\b\d{1,2}(?:\.\d+)?\s*%\s*(?:body\s*fat|bf|fat)\b", re.I),
+    re.compile(r"\bbody\s*fat\b[^.]{0,30}\b\d", re.I),
+    re.compile(r"\b\d{1,2}(?:\.\d+)?\s*(?:to|-|–)\s*\d{1,2}(?:\.\d+)?\s*%", re.I),
+    re.compile(r"\b(?:around|about|roughly|approximately|circa)\s+\d{1,3}\s*"
+               r"(?:kg|lbs?|pounds?|%)\b", re.I),
+    re.compile(r"\b\d{2,3}\s*(?:kg|lbs?|pounds?)\b", re.I),
+    re.compile(r"\blean\s*mass\b[^.]{0,30}\b\d", re.I),
+    re.compile(r"\bbmi\b", re.I),
+)
+
+
+def _reject_body_numbers(texts: Sequence[str]) -> None:
+    for text_value in texts:
+        if not text_value:
+            continue
+        for pattern in _BODY_NUMBER_PATTERNS:
+            if pattern.search(text_value):
+                raise ValueError(
+                    "a photo cannot support a body-composition number "
+                    f"({pattern.pattern!r} matched); describe what you see "
+                    "instead"
+                )
+
+
+class PhotoAnalysisStatus(str, Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETE = "complete"
+    FAILED = "failed"
+    INCONCLUSIVE = "inconclusive"
+    SOURCE_GONE = "source_gone"
+
+
+class PhotoAnalysisFailure(str, Enum):
+    NO_CONSENT = "no_consent"
+    NO_VISION_CAPABILITY = "no_vision_capability"
+    MODEL_UNAVAILABLE = "model_unavailable"
+    MODEL_TIMEOUT = "model_timeout"
+    INVALID_OUTPUT = "invalid_output"
+    BODY_COMPOSITION_CLAIM = "body_composition_claim"
+    OWNER_MISMATCH = "owner_mismatch"
+    SOURCE_CHANGED = "source_changed"
+    IMAGE_UNREADABLE = "image_unreadable"
+    INTERNAL_ERROR = "internal_error"

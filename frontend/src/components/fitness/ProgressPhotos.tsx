@@ -18,19 +18,30 @@
  *    returns `deleted: false` with `pending_cleanup`, and this screen
  *    repeats that rather than showing a tick. "Deleted" when the file is
  *    still in storage is the one message it must not send.
- * 4. **No analysis affordance beyond consent.** Step 27 adds the vision
- *    pass; until then there is a consent switch and nothing that implies a
- *    model has looked. The legacy critique is shown as what it is.
+ * 4. **Analysis is opt-in per photo, and only where a model can see.**
+ *    Step 27's vision pass is offered only on a photo whose consent switch
+ *    is on, and only when `/vision-capability` says a probed endpoint is
+ *    reachable — a llama.cpp server started without `--mmproj` serves the
+ *    same model over the same API and answers the text prompt alone, so a
+ *    button that "worked" there would produce confident fiction. The legacy
+ *    critique stays shown as what it is.
  * 5. **No body-fat number anywhere.** Not in a field, not in a label, not
- *    in a prompt. A single photo cannot support one.
+ *    in a prompt, and not in a place to display one. A single photo cannot
+ *    support one, the server has no field for it, and an estimate smuggled
+ *    into prose is rejected before it reaches here.
+ * 6. **An observation says how sure it is, and inconclusive is a result.**
+ *    "These two cannot honestly be compared" is frequently the only true
+ *    reading of two photos taken in different light. It is rendered as an
+ *    answer, not as a failure to retry.
  */
 import React, { useMemo, useRef, useState } from 'react'
-import { AlertTriangle, Camera, Check, Trash2, X } from 'lucide-react'
+import { AlertTriangle, Camera, Check, Eye, Trash2, X } from 'lucide-react'
 
-import { progressPhotoApi } from '../../api/progressPhotos'
+import { photoAnalysisApi, progressPhotoApi } from '../../api/progressPhotos'
 import { useAthleteToday, useMeasurementPeriods } from '../../hooks/useFitnessCoach'
 import type {
-  PhotoComparability, PhotoView, ProgressPhoto,
+  PhotoAnalysisRow, PhotoComparability, PhotoComparison, PhotoObservation,
+  PhotoView, ProgressPhoto, VisionCapability,
 } from '../../types/fitnessCoach'
 
 const SECTION = 'text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400'
@@ -71,6 +82,97 @@ function Note({ message, tone = 'warn' }: { message: string; tone?: 'warn' | 'ok
   )
 }
 
+const CONFIDENCE_LABEL: Record<string, string> = {
+  low: 'Low confidence', moderate: 'Moderate confidence', high: 'High confidence',
+}
+
+const VERDICT_LABEL: Record<string, string> = {
+  comparable: 'Comparable',
+  inconclusive: 'Inconclusive',
+  not_comparable: 'Not comparable',
+}
+
+/**
+ * One stored observation.
+ *
+ * Shows confidence and image quality as two separate facts, because they
+ * are: a clear photo can support only a weak statement, and a confident
+ * reading of a badly lit one needs to stay visible as exactly that.
+ */
+function Observation({ row }: { row: PhotoAnalysisRow }) {
+  if (row.status === 'failed' || row.status === 'source_gone') {
+    return (
+      <div className="text-[11px] text-slate-500" data-testid="observation-failed">
+        Sara looked and could not describe it honestly
+        {row.failure_category ? ` (${row.failure_category.replace(/_/g, ' ')})` : ''}.
+        Nothing was stored.
+      </div>
+    )
+  }
+
+  const output = row.output as PhotoObservation | PhotoComparison | null
+  if (!output) return null
+  const verdict = (output as PhotoComparison).verdict
+  const reason = (output as PhotoComparison).inconclusive_reason
+
+  return (
+    <div
+      className="space-y-1.5 text-[11px] border-l-2 border-white/10 pl-3"
+      data-testid={`observation-${row.analysis_id}`}
+    >
+      {verdict && (
+        <p
+          className={
+            verdict === 'comparable' ? 'text-teal-300/90' : 'text-amber-300/90'
+          }
+          data-testid="observation-verdict"
+        >
+          {VERDICT_LABEL[verdict] ?? verdict}
+          {reason ? ` — ${reason}` : ''}
+        </p>
+      )}
+
+      <p className="text-slate-300">{output.summary}</p>
+
+      {output.regions.length > 0 && (
+        <ul className="space-y-0.5 text-slate-400">
+          {output.regions.map((region, index) => (
+            <li key={`${region.region}-${index}`}>
+              <span className="text-slate-500">{region.region}:</span>{' '}
+              {region.observation}
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {output.limitations.length > 0 && (
+        <ul className="text-slate-500 space-y-0.5" data-testid="observation-limits">
+          {output.limitations.map((limitation, index) => (
+            <li key={index}>· {limitation}</li>
+          ))}
+        </ul>
+      )}
+
+      <p className="text-[10px] text-slate-600">
+        {CONFIDENCE_LABEL[output.confidence] ?? output.confidence}
+        {' · '}image {output.image_quality}
+        {output.confidence_basis ? ` · ${output.confidence_basis}` : ''}
+      </p>
+      <p className="text-[10px] text-slate-600">
+        Described by {row.model_actual ?? 'a local model'}. A description, not
+        a measurement — nothing in your records came from it.
+        {!row.vision_verified && (
+          <span className="block text-amber-300/80">
+            This ran on an endpoint that had not passed the vision check, so
+            it may describe the prompt rather than the photo.
+          </span>
+        )}
+      </p>
+    </div>
+  )
+}
+
+
 export default function ProgressPhotos() {
   const todayQuery = useAthleteToday()
   const periodsQuery = useMeasurementPeriods()
@@ -93,6 +195,10 @@ export default function ProgressPhotos() {
   const [comparison, setComparison] = useState<PhotoComparability | null>(null)
   const [comparePair, setComparePair] = useState<[string, string] | null>(null)
 
+  const [capability, setCapability] = useState<VisionCapability | null>(null)
+  const [analyses, setAnalyses] = useState<PhotoAnalysisRow[]>([])
+  const [analysing, setAnalysing] = useState<string | null>(null)
+
   const load = React.useCallback(async () => {
     setLoadError(null)
     try {
@@ -105,7 +211,47 @@ export default function ProgressPhotos() {
     }
   }, [])
 
+  const loadAnalyses = React.useCallback(async () => {
+    try {
+      setAnalyses(await photoAnalysisApi.list())
+    } catch {
+      // Observations are an extra, not the screen. A failure to list them
+      // must not take down the gallery or the upload form — §27.5: an
+      // analysis failure cannot block capture.
+      setAnalyses([])
+    }
+  }, [])
+
   React.useEffect(() => { void load() }, [load])
+  React.useEffect(() => { void loadAnalyses() }, [loadAnalyses])
+
+  React.useEffect(() => {
+    // Asked once. If no probed endpoint is reachable, the affordance is
+    // hidden entirely rather than offered and failing — and "Sara cannot
+    // see photos right now" becomes a visible fact.
+    let cancelled = false
+    photoAnalysisApi.capability()
+      .then((result) => { if (!cancelled) setCapability(result) })
+      .catch(() => {
+        if (!cancelled) {
+          setCapability({
+            available: false, model: null, endpoint: null,
+            detail: 'Could not check whether a vision model is available.',
+          })
+        }
+      })
+    return () => { cancelled = true }
+  }, [])
+
+  const byPhoto = useMemo(() => {
+    const groups: Record<string, PhotoAnalysisRow[]> = {}
+    for (const row of analyses) {
+      if (row.kind !== 'single') continue
+      groups[row.source_photo_id] = groups[row.source_photo_id] ?? []
+      groups[row.source_photo_id].push(row)
+    }
+    return groups
+  }, [analyses])
 
   const byView = useMemo(() => {
     const groups: Record<string, ProgressPhoto[]> = {}
@@ -184,6 +330,30 @@ export default function ProgressPhotos() {
       setWarning(
         caught instanceof Error ? caught.message : 'Could not change that.',
       )
+    }
+  }
+
+  const analyse = async (photo: ProgressPhoto) => {
+    setWarning(null)
+    setNotice(null)
+    setAnalysing(photo.id)
+    try {
+      const result = await photoAnalysisApi.analyse(photo.id)
+      await loadAnalyses()
+      if (result.status === 'complete' || result.status === 'inconclusive') {
+        setNotice(result.duplicate ? 'Already described.' : 'Described.')
+      } else {
+        // The server's category, not a generic failure: "the model is
+        // unreachable" and "the model tried to state a body-fat number"
+        // call for completely different reactions.
+        setWarning(result.detail ?? 'Could not describe that photo.')
+      }
+    } catch (caught) {
+      setWarning(
+        caught instanceof Error ? caught.message : 'Could not describe that.',
+      )
+    } finally {
+      setAnalysing(null)
     }
   }
 
@@ -427,6 +597,39 @@ export default function ProgressPhotos() {
                               came from it.
                             </p>
                           </details>
+                        )}
+
+                        {/* Observations, newest first. */}
+                        {(byPhoto[photo.id] ?? []).map((row) => (
+                          <Observation key={row.analysis_id} row={row} />
+                        ))}
+
+                        {/* The affordance appears only where it can work:
+                            consent on, and a probed endpoint reachable. */}
+                        {photo.consent_analysis && capability?.available && (
+                          <button
+                            className={`${GHOST} w-full justify-center`}
+                            onClick={() => analyse(photo)}
+                            disabled={analysing === photo.id}
+                            data-testid={`analyse-${photo.id}`}
+                          >
+                            <Eye className="w-3.5 h-3.5 inline mr-1" />
+                            {analysing === photo.id
+                              ? 'Looking…'
+                              : (byPhoto[photo.id] ?? []).length > 0
+                                ? 'Describe again'
+                                : 'Describe what Sara sees'}
+                          </button>
+                        )}
+                        {photo.consent_analysis && capability
+                          && !capability.available && (
+                          <p
+                            className="text-[10px] text-slate-600"
+                            data-testid={`no-vision-${photo.id}`}
+                          >
+                            Sara cannot see photos right now — no verified
+                            vision model is reachable.
+                          </p>
                         )}
 
                         <button

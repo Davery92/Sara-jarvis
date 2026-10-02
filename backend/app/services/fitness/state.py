@@ -155,6 +155,11 @@ def build_fitness_state(
             db, uid, "measurements", lambda: _measurement_group(db, uid, end),
             MetricGroup(section=StateSection.MEASUREMENTS), degraded,
         )
+    if StateSection.PHOTOS in wanted:
+        groups[StateSection.PHOTOS] = _safe(
+            db, uid, "photos", lambda: _photo_group(db, uid),
+            MetricGroup(section=StateSection.PHOTOS), degraded,
+        )
 
     quality = analytics.data_quality(
         weight_group=groups.get(StateSection.WEIGHT),
@@ -520,6 +525,52 @@ def _training_group(
         planned_from_snapshot=planned_from_snapshot, span=span,
     )
     group.metrics.update(analytics.exercise_frequency(records, end, span=max(span, 28)))
+    return group
+
+
+def _photo_group(db: Session, user_id: str) -> MetricGroup:
+    """Validated photo observations only.
+
+    §27.4: the state summarises VALIDATED observations and nothing else. The
+    legacy free-text critique is excluded entirely — it was produced by a
+    prompt that asked for a body-fat estimate, so it is not an observation
+    and must never reach a numeric or composition field.
+
+    No image reference and no bytes. The state is read into prompts and
+    rendered on screens; a photo id here would be the first step toward one
+    of them fetching it.
+    """
+    group = MetricGroup(section=StateSection.PHOTOS)
+    try:
+        from app.services.fitness.photo_analysis import validated_observations
+        observations = validated_observations(db, user_id, limit=5)
+    except Exception as exc:
+        logger.warning(
+            "fitness state: photo observations unavailable (%s)",
+            type(exc).__name__,
+        )
+        return group
+
+    for row in observations:
+        group.items.append({
+            "kind": row.get("kind"),
+            "view": row.get("view"),
+            "status": row.get("status"),
+            "summary": row.get("summary"),
+            "confidence": row.get("confidence"),
+            "image_quality": row.get("image_quality"),
+            "verdict": row.get("verdict"),
+            "observed_at": (
+                row["evaluated_at"].isoformat()
+                if row.get("evaluated_at") else None
+            ),
+        })
+    if observations:
+        group.limitations.append(
+            "Photo observations are descriptions of what was visible, not "
+            "measurements. They carry no body-composition estimate, and a "
+            "comparison marked inconclusive could not be made at all."
+        )
     return group
 
 
