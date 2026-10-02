@@ -15,10 +15,18 @@
  */
 import { APP_CONFIG } from '../config'
 import type {
+  AcceptanceResult,
   AthleteGoal,
+  CoachRecommendation,
+  CoachReview,
+  CoachReviewDetail,
   DataQuality,
+  DecisionStatus,
   FitnessState,
   MetricGroup,
+  RecommendationPreview,
+  ReviewKind,
+  ReviewRequestInput,
   StateSection,
   CheckIn,
   CheckInPatch,
@@ -363,6 +371,85 @@ export const fitnessCoachApi = {
   getDataQuality: (opts?: { periodEnd?: string; span?: number }) =>
     request<DataQuality>(
       `/quality${query({ period_end: opts?.periodEnd, span: opts?.span })}`,
+    ),
+
+  // ── Reviews (Step 20/22) ────────────────────────────────────────────────
+
+  /**
+   * Queue a review. Returns 202 with an id and a status, not a result.
+   *
+   * The generation runs on a Celery queue, so the caller polls
+   * `getReview`. A request that waited for the model would hold the
+   * connection for up to three minutes.
+   */
+  requestReview: (input: ReviewRequestInput = {}) =>
+    request<CoachReview>('/reviews', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+
+  listReviews: (opts?: {
+    kind?: ReviewKind
+    includeSuperseded?: boolean
+    limit?: number
+  }) =>
+    request<CoachReview[]>(
+      `/reviews${query({
+        kind: opts?.kind,
+        include_superseded: opts?.includeSuperseded,
+        limit: opts?.limit,
+      })}`,
+    ),
+
+  /** `withState` adds the frozen input snapshot — what it reasoned from. */
+  getReview: (reviewId: string, opts?: { withState?: boolean }) =>
+    request<CoachReviewDetail>(
+      `/reviews/${encodeURIComponent(reviewId)}${query({
+        with_state: opts?.withState,
+      })}`,
+    ),
+
+  /** Every revision, oldest first. A rerun links rather than overwriting. */
+  getReviewChain: (reviewId: string) =>
+    request<CoachReview[]>(`/reviews/${encodeURIComponent(reviewId)}/chain`),
+
+  listRecommendations: (opts?: {
+    reviewId?: string
+    status?: DecisionStatus
+    includeExpired?: boolean
+    limit?: number
+  }) =>
+    request<CoachRecommendation[]>(
+      `/recommendations${query({
+        review_id: opts?.reviewId,
+        status: opts?.status,
+        include_expired: opts?.includeExpired,
+        limit: opts?.limit,
+      })}`,
+    ),
+
+  /** Exactly what accepting would do, including why it might not work. */
+  previewRecommendation: (recommendationId: string) =>
+    request<RecommendationPreview>(
+      `/recommendations/${encodeURIComponent(recommendationId)}/preview`,
+    ),
+
+  acceptRecommendation: (recommendationId: string, note?: string) =>
+    request<AcceptanceResult>(
+      `/recommendations/${encodeURIComponent(recommendationId)}/accept`,
+      { method: 'POST', body: JSON.stringify({ note: note ?? null }) },
+    ),
+
+  rejectRecommendation: (recommendationId: string, note?: string) =>
+    request<CoachRecommendation>(
+      `/recommendations/${encodeURIComponent(recommendationId)}/reject`,
+      { method: 'POST', body: JSON.stringify({ note: note ?? null }) },
+    ),
+
+  /** Why this target: revision → recommendation → review → frozen metrics. */
+  traceTargetRevision: (revisionId: string) =>
+    request<Record<string, unknown>>(
+      `/targets/${encodeURIComponent(revisionId)}/trace`,
     ),
 }
 

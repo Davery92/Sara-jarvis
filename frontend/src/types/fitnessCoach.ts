@@ -541,3 +541,196 @@ export interface PainItem {
   locations: string[]
   sides: string[]
 }
+
+// ── Coach reviews and recommendations (Step 19-22) ────────────────────────
+
+export type ReviewKind =
+  | 'weekly' | 'biweekly' | 'monthly' | 'on_demand'
+  | 'phase_transition' | 'photo_comparison'
+
+export type ReviewStatus =
+  | 'pending' | 'running' | 'complete' | 'failed' | 'insufficient_data'
+
+/**
+ * Why a review produced nothing. A CATEGORY, never a prompt — the backend
+ * deliberately does not store the prompt or the transcript.
+ */
+export type ReviewFailureCategory =
+  | 'model_unavailable' | 'model_timeout' | 'invalid_output'
+  | 'schema_violation' | 'ungrounded_claim' | 'safety_refused'
+  | 'state_unavailable' | 'insufficient_data' | 'internal_error'
+
+export type RequestedBy = 'schedule' | 'user' | 'system'
+
+export type RecommendationCategory =
+  | 'maintain' | 'progress' | 'reduce' | 'exercise_change'
+  | 'volume_change' | 'nutrition_change' | 'prioritize_recovery'
+  | 'request_data' | 'flag_concern'
+
+export type ConfidenceCategory = 'low' | 'moderate' | 'high'
+
+export type ProposedChangeKind =
+  | 'none' | 'target_revision' | 'data_request' | 'program_change'
+
+/**
+ * `proposed` is the initial state. `accepted` is constrained in the database
+ * to require an action receipt or the target revision it produced, so a row
+ * cannot claim an effect it did not have.
+ */
+export type DecisionStatus =
+  | 'proposed' | 'accepted' | 'rejected' | 'expired' | 'superseded'
+
+export interface ProposedChange {
+  kind: ProposedChangeKind
+  scope?: TargetScope | null
+  effective_date?: string | null
+  target_values?: TargetValues | null
+  requested_metric?: string | null
+  description?: string | null
+}
+
+export interface ReviewObservation {
+  text: string
+  metric_paths: string[]
+}
+
+export interface ReviewRecommendationOutput {
+  category: RecommendationCategory
+  headline: string
+  rationale: string
+  metric_paths: string[]
+  evidence_refs: string[]
+  confidence: ConfidenceCategory
+  confidence_basis: string
+  proposed_change: ProposedChange
+}
+
+export interface CoachReviewOutput {
+  output_version: number
+  summary: string
+  coaching_priority: string
+  observations: ReviewObservation[]
+  limitations: string[]
+  confidence: ConfidenceCategory
+  confidence_basis: string
+  recommendations: ReviewRecommendationOutput[]
+}
+
+export interface CoachReview {
+  id: string
+  user_id: string
+  kind: ReviewKind
+  period: Period
+  status: ReviewStatus
+  input_hash: string
+  state_schema_version: number
+  analytics_version: number
+  data_revision: string | null
+  collected_at: string
+  source_cutoff: string | null
+  model_requested: string | null
+  /** The model that ACTUALLY answered, which may not be the one requested. */
+  model_actual: string | null
+  provider: string | null
+  prompt_version: string
+  prompt_hash: string | null
+  output_schema_version: number | null
+  summary: string | null
+  evidence_refs: string[]
+  error_category: ReviewFailureCategory | null
+  error_detail: string | null
+  run_id: string | null
+  attempt: number
+  revision: number
+  supersedes_id: string | null
+  superseded_by_id: string | null
+  requested_by: RequestedBy
+  evaluated_at: string | null
+  created_at: string
+}
+
+export interface CoachRecommendation {
+  id: string
+  review_id: string
+  user_id: string
+  category: RecommendationCategory
+  action: ProposedChangeKind
+  title: string
+  rationale: string
+  confidence: ConfidenceCategory
+  confidence_basis: string | null
+  limitations: string | null
+  metric_paths: string[]
+  evidence_refs: string[]
+  proposed_change: ProposedChange
+  current_target_revision_id: string | null
+  current_phase_id: string | null
+  expires_at: string | null
+  decision_status: DecisionStatus
+  decided_at: string | null
+  decided_by: string | null
+  decision_note: string | null
+  /** The proof an execution happened. Present on every accepted row. */
+  action_receipt_id: string | null
+  applied_revision_id: string | null
+  priority: number
+  created_at: string
+}
+
+export interface CoachReviewDetail extends CoachReview {
+  input_state: FitnessState | null
+  output: CoachReviewOutput | null
+  recommendations: CoachRecommendation[]
+}
+
+export interface ReviewRequestInput {
+  kind?: ReviewKind
+  period_start?: string
+  /** Exclusive, athlete-local. */
+  period_end?: string
+  /** Produce a linked revision when the data has changed since. */
+  force?: boolean
+}
+
+export interface RecommendationFieldChange {
+  field: string
+  current: number | null
+  proposed: number | null
+  delta: number | null
+  unit: string
+  is_change: boolean
+}
+
+export interface RecommendationPreview {
+  recommendation: CoachRecommendation
+  /** Whether this path can perform the change at all. */
+  applicable: boolean
+  acceptable: boolean
+  changes: RecommendationFieldChange[]
+  scope: string | null
+  effective_date: string | null
+  proposed_against_revision_id: string | null
+  latest_revision_id: string | null
+  stale: boolean
+  expired: boolean
+  /** Shown BEFORE the Accept button, not discovered by pressing it. */
+  blockers: string[]
+  coverage: {
+    observed_weight_days?: number | null
+    expected_weight_days?: number | null
+    nutrition_complete_days?: number | null
+    sleep_nights?: number | null
+    period_start?: string
+    period_end?: string
+  }
+  limitations: string[]
+}
+
+export interface AcceptanceResult {
+  recommendation: CoachRecommendation
+  action_receipt_id: string
+  applied_revision_id: string | null
+  /** Rendered from the committed rows, not from the intent. */
+  message: string
+  duplicate: boolean
+}

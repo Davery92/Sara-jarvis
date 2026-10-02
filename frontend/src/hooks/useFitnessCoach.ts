@@ -28,9 +28,16 @@ import { useCallback } from 'react'
 import { fitnessCoachApi, FitnessCoachError } from '../api/fitnessCoach'
 import { useAuthStore } from '../stores/authStore'
 import type {
+  AcceptanceResult,
   AthleteGoal,
+  CoachRecommendation,
+  CoachReview,
+  CoachReviewDetail,
   DataQuality,
   FitnessState,
+  RecommendationPreview,
+  ReviewKind,
+  ReviewRequestInput,
   StateSection,
   CheckIn,
   CheckInPatch,
@@ -71,6 +78,19 @@ export const fitnessKeys = {
     ] as const,
   quality: (userId: string, periodEnd?: string, span?: number) =>
     ['fitness-coach', userId, 'quality', periodEnd ?? 'today', span ?? 7] as const,
+  reviews: (userId: string, kind?: string, includeSuperseded?: boolean) =>
+    [
+      'fitness-coach', userId, 'reviews',
+      kind ?? 'all', includeSuperseded ?? false,
+    ] as const,
+  review: (userId: string, reviewId: string, withState?: boolean) =>
+    ['fitness-coach', userId, 'review', reviewId, withState ?? false] as const,
+  reviewChain: (userId: string, reviewId: string) =>
+    ['fitness-coach', userId, 'review-chain', reviewId] as const,
+  recommendations: (userId: string, reviewId?: string) =>
+    ['fitness-coach', userId, 'recommendations', reviewId ?? 'all'] as const,
+  recommendationPreview: (userId: string, recommendationId: string) =>
+    ['fitness-coach', userId, 'recommendation-preview', recommendationId] as const,
 }
 
 /**
@@ -345,6 +365,148 @@ export function useFitnessDataQuality(opts?: { periodEnd?: string; span?: number
     queryFn: () => fitnessCoachApi.getDataQuality(opts),
     enabled: enabledFor(userId),
     staleTime: 60_000,
+  })
+}
+
+// ── Reviews (Step 22) ─────────────────────────────────────────────────────
+
+export function useCoachReviews(opts?: {
+  kind?: ReviewKind
+  includeSuperseded?: boolean
+  limit?: number
+}): UseQueryResult<CoachReview[], FitnessCoachError> {
+  const userId = useAthleteId()
+  return useQuery({
+    queryKey: fitnessKeys.reviews(
+      userId ?? 'anonymous', opts?.kind, opts?.includeSuperseded,
+    ),
+    queryFn: () => fitnessCoachApi.listReviews(opts),
+    enabled: enabledFor(userId),
+  })
+}
+
+/**
+ * One review, polled while it is in flight.
+ *
+ * The poll is BOUNDED: it stops the moment the status is terminal, and the
+ * interval is 2s rather than sub-second. An unbounded poll on a review that
+ * never finishes is a request every two seconds for as long as the tab is
+ * open, against the same database the chat lane uses.
+ */
+export function useCoachReview(
+  reviewId: string | undefined,
+  opts?: { withState?: boolean; poll?: boolean },
+): UseQueryResult<CoachReviewDetail, FitnessCoachError> {
+  const userId = useAthleteId()
+  return useQuery({
+    queryKey: fitnessKeys.review(
+      userId ?? 'anonymous', reviewId ?? 'unset', opts?.withState,
+    ),
+    queryFn: () =>
+      fitnessCoachApi.getReview(reviewId as string, {
+        withState: opts?.withState,
+      }),
+    enabled: enabledFor(userId) && Boolean(reviewId),
+    refetchInterval: (query) => {
+      if (opts?.poll === false) return false
+      const status = query.state.data?.status
+      if (status === 'pending' || status === 'running') return 2000
+      return false
+    },
+  })
+}
+
+export function useCoachReviewChain(reviewId: string | undefined) {
+  const userId = useAthleteId()
+  return useQuery({
+    queryKey: fitnessKeys.reviewChain(userId ?? 'anonymous', reviewId ?? 'unset'),
+    queryFn: () => fitnessCoachApi.getReviewChain(reviewId as string),
+    enabled: enabledFor(userId) && Boolean(reviewId),
+  })
+}
+
+export function useRequestReview(): UseMutationResult<
+  CoachReview, FitnessCoachError, ReviewRequestInput
+> {
+  const client = useQueryClient()
+  const userId = useAthleteId()
+  return useMutation({
+    mutationFn: (input: ReviewRequestInput) =>
+      fitnessCoachApi.requestReview(input),
+    onSuccess: () => {
+      if (userId) {
+        client.invalidateQueries({
+          queryKey: fitnessKeys.reviews(userId),
+        })
+      }
+    },
+  })
+}
+
+export function useRecommendationPreview(recommendationId: string | undefined) {
+  const userId = useAthleteId()
+  return useQuery({
+    queryKey: fitnessKeys.recommendationPreview(
+      userId ?? 'anonymous', recommendationId ?? 'unset',
+    ),
+    queryFn: () =>
+      fitnessCoachApi.previewRecommendation(recommendationId as string),
+    enabled: enabledFor(userId) && Boolean(recommendationId),
+    // Short, because staleness is the thing this endpoint is reporting on:
+    // a cached preview could say "acceptable" after the targets moved.
+    staleTime: 15_000,
+  })
+}
+
+/**
+ * Accepting invalidates far more than the review.
+ *
+ * The acceptance appends a target revision, so the resolved targets, the
+ * deterministic state, the Overview and the legacy dashboard are all stale
+ * the moment it lands. Invalidating only the review would leave two surfaces
+ * showing different calories until a reload — which is the exact condition
+ * Step 18 spent itself closing.
+ */
+export function useAcceptRecommendation(): UseMutationResult<
+  AcceptanceResult, FitnessCoachError, { recommendationId: string; note?: string }
+> {
+  const client = useQueryClient()
+  const userId = useAthleteId()
+  return useMutation({
+    mutationFn: ({ recommendationId, note }) =>
+      fitnessCoachApi.acceptRecommendation(recommendationId, note),
+    onSuccess: () => {
+      if (!userId) return
+      client.invalidateQueries({ queryKey: fitnessKeys.all(userId) })
+      for (const key of LEGACY_FITNESS_KEYS) {
+        client.invalidateQueries({ queryKey: key })
+      }
+    },
+  })
+}
+
+export function useRejectRecommendation(): UseMutationResult<
+  CoachRecommendation, FitnessCoachError,
+  { recommendationId: string; note?: string }
+> {
+  const client = useQueryClient()
+  const userId = useAthleteId()
+  return useMutation({
+    mutationFn: ({ recommendationId, note }) =>
+      fitnessCoachApi.rejectRecommendation(recommendationId, note),
+    onSuccess: (_data, variables) => {
+      if (!userId) return
+      // A rejection changes no target, so the invalidation stays narrow.
+      client.invalidateQueries({
+        queryKey: fitnessKeys.recommendations(userId),
+      })
+      client.invalidateQueries({
+        queryKey: fitnessKeys.recommendationPreview(
+          userId, variables.recommendationId,
+        ),
+      })
+      client.invalidateQueries({ queryKey: fitnessKeys.reviews(userId) })
+    },
   })
 }
 
