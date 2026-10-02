@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react'
 import { X, Check, PlayCircle, ChevronLeft, ChevronRight, Trophy, Timer, TrendingUp } from 'lucide-react'
 import { APP_CONFIG } from '../../config'
 import { formatSleepHours } from '../../utils/formatters'
+import FastWorkout from './FastWorkout'
+import { useWorkoutCommands } from '../../hooks/useWorkoutCommands'
 
 interface Exercise {
   name: string
@@ -88,7 +90,21 @@ interface ActiveWorkoutProps {
   onClose: () => void
 }
 
+/**
+ * FITNESS_COACH_IMPLEMENTATION_PLAN Step 14.
+ *
+ * A live v2 session is logged through `FastWorkout`, the one-screen v2
+ * controller: exactly-once commands, retries that reuse their command id,
+ * conflict reconciliation and server-clocked rest.
+ *
+ * The legacy body below stays as the adapter for a planned session that has
+ * no v2 session behind it — those are real rows a client can still open, and
+ * deleting the path would break them. §23 is explicit that contract-version
+ * changes happen only with parity checks, so this is a delegation rather
+ * than a cutover.
+ */
 export default function ActiveWorkout({ sessionId, onClose }: ActiveWorkoutProps) {
+  const liveV2 = useWorkoutCommands()
   const [session, setSession] = useState<WorkoutSession | null>(null)
   const [currentExerciseIndex, setCurrentExerciseIndex] = useState(0)
   const [loading, setLoading] = useState(true)
@@ -198,6 +214,15 @@ export default function ActiveWorkout({ sessionId, onClose }: ActiveWorkoutProps
     } catch (error) {
       console.error('Failed to complete session:', error)
     }
+  }
+
+
+  // Delegate while a v2 session is running. Checked on the hook's own
+  // projection rather than on this component's fetch, because the v2 session
+  // is the authority for what is actually in progress — a second device may
+  // have started it.
+  if (liveV2.projection && liveV2.projection.status === 'active') {
+    return <FastWorkout onClose={onClose} />
   }
 
   if (loading) {

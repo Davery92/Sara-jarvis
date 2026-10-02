@@ -2,10 +2,12 @@
 /**
  * Workout wire-contract parity check (plan §5, §14.2).
  *
- * The cross-device workout contract is written out four times — Swift on the
+ * The cross-device workout contract is written out five times — Swift on the
  * Watch, the same Swift copied into the iPhone Expo module, TypeScript in the
- * React Native app, Python in the backend. They cannot share code: different
- * languages, different processes, different devices.
+ * React Native app, TypeScript in the WEB app (added by
+ * FITNESS_COACH_IMPLEMENTATION_PLAN Step 14, which made the web a real v2
+ * controller), and Python in the backend. They cannot share code: different
+ * languages, different processes, different devices, different bundlers.
  *
  * That makes drift the single most likely way this feature breaks, and the
  * failure is silent: rename `approved_weight` in one place and the Watch shows
@@ -30,6 +32,10 @@ const PATHS = {
   swiftWatch: join(root, 'targets/watch/WorkoutWireModels.swift'),
   swiftPhone: join(root, 'modules/sara-workout-native/ios/WorkoutWireModels.swift'),
   ts: join(root, 'src/services/workoutContracts.ts'),
+  // Step 14: the web is a v2 controller too, so its copy of the contract is
+  // checked here. Without this entry the web could rename a field and
+  // nothing would notice — the whole failure mode this script exists for.
+  tsWeb: join(repo, 'frontend/src/types/workoutV2.ts'),
   pyService: join(repo, 'backend/app/services/workout_command_service.py'),
   pyRoutes: join(repo, 'backend/app/routes/workout_v2.py'),
 };
@@ -215,6 +221,65 @@ function check(label, actual, expected) {
     ].filter(Boolean);
     if (where.length) {
       failures.push(`Approval-boundary field "${required}" is missing from: ${where.join(', ')}.`);
+    }
+  }
+}
+
+// ── 6b. The web copy of the contract ──────────────────────────────────────
+// The web speaks the same protocol as the phone, so its field names and
+// command kinds have to match. Checked against the React Native TypeScript
+// copy, which is already checked against Python — so a match here is a match
+// with the backend.
+{
+  const webSource = read(PATHS.tsWeb);
+  const rnSource = read(PATHS.ts);
+
+  const webVersion = webSource.match(/WORKOUT_SCHEMA_VERSION\s*=\s*(\d+)/)?.[1];
+  const rnVersion = rnSource.match(/WORKOUT_SCHEMA_VERSION\s*=\s*(\d+)/)?.[1];
+  if (webVersion !== rnVersion) {
+    failures.push(
+      `Schema version mismatch: web=${webVersion} react-native=${rnVersion}.`
+    );
+  }
+
+  const kindsOf = (source) => {
+    const block = source.match(/export type WorkoutCommandKind =([\s\S]*?)\n\n/)?.[1]
+      ?? source.match(/export type WorkoutCommandKind =([\s\S]*?);/)?.[1]
+      ?? '';
+    return [...block.matchAll(/'([a-z_]+)'/g)].map((m) => m[1]);
+  };
+  check('Command kinds: web vs React Native', kindsOf(webSource), kindsOf(rnSource));
+
+  const interfaceKeys = (source, name) => {
+    const block = source.match(
+      new RegExp(`export interface ${name} \\{([\\s\\S]*?)\\n\\}`)
+    )?.[1] ?? '';
+    const keys = [];
+    let depth = 0;
+    for (const raw of block.split('\n')) {
+      const line = raw.trim();
+      if (!line || line.startsWith('//') || line.startsWith('*') || line.startsWith('/*')) continue;
+      const key = depth === 0 ? line.match(/^([a-z_]+)\??:/)?.[1] : null;
+      if (key) keys.push(key);
+      depth += (line.match(/\{/g) ?? []).length - (line.match(/\}/g) ?? []).length;
+    }
+    return keys;
+  };
+
+  for (const name of ['WorkoutProjection', 'ProjectionExercise', 'PerformedSet']) {
+    check(
+      `${name} fields: web vs React Native`,
+      interfaceKeys(webSource, name),
+      interfaceKeys(rnSource, name),
+    );
+  }
+
+  // The approval boundary again, for the surface that prefills the input.
+  // Reading `calculated_suggestion` where `approved_weight` was meant would
+  // put an unapproved recommendation under the bar.
+  for (const required of ['approved_weight', 'calculated_suggestion']) {
+    if (!interfaceKeys(webSource, 'ProjectionExercise').includes(required)) {
+      failures.push(`Approval-boundary field "${required}" is missing from the web copy.`);
     }
   }
 }

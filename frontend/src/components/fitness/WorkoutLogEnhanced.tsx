@@ -1,4 +1,6 @@
 import React, { useState, useEffect } from 'react'
+import FastWorkout from './FastWorkout'
+import { useWorkoutCommands } from '../../hooks/useWorkoutCommands'
 import { Dumbbell, Plus, X, TrendingUp, Calendar, FileText, Edit, ChevronRight, ChevronDown, Save, Trash2 } from 'lucide-react'
 import { APP_CONFIG } from '../../config'
 import { getLocalDateString } from '../../utils/dateUtils'
@@ -40,7 +42,17 @@ interface Exercise {
 
 type WorkoutType = 'select' | 'today' | 'template' | 'custom'
 
+/**
+ * FITNESS_COACH_IMPLEMENTATION_PLAN Step 14.
+ *
+ * When a v2 session is actually running, this surface shows the one-screen
+ * v2 logger instead of its own modal flow. The history, templates and
+ * manual-entry paths below are untouched — they are what logs a workout that
+ * was never started through v2, and the plan keeps those adapters rather
+ * than cutting over (§23: contract changes only with parity checks).
+ */
 export default function WorkoutLog() {
+  const liveV2 = useWorkoutCommands()
   const [workoutHistory, setWorkoutHistory] = useState<WorkoutSession[]>([])
   const [showModal, setShowModal] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
@@ -430,6 +442,13 @@ export default function WorkoutLog() {
   }
 
   const currentExercise = workoutExercises[currentExerciseIndex]
+
+  // A running v2 session is the authority for "what am I doing right now"
+  // — it may have been started on the phone or the Watch. Logging it here
+  // goes through the same exactly-once command protocol they use.
+  if (liveV2.projection && liveV2.projection.status === 'active') {
+    return <FastWorkout />
+  }
 
   return (
     <div className="p-6 max-w-4xl mx-auto">
