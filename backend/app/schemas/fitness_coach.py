@@ -1085,3 +1085,151 @@ class DecisionStatus(str, Enum):
     REJECTED = "rejected"
     EXPIRED = "expired"
     SUPERSEDED = "superseded"
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Stored review and recommendation rows (Step 19)
+# ─────────────────────────────────────────────────────────────────────────
+
+class ReviewKind(str, Enum):
+    WEEKLY = "weekly"
+    BIWEEKLY = "biweekly"
+    MONTHLY = "monthly"
+    ON_DEMAND = "on_demand"
+    PHASE_TRANSITION = "phase_transition"
+    PHOTO_COMPARISON = "photo_comparison"
+
+
+class ReviewFailureCategory(str, Enum):
+    """Why a review did not produce output. A CATEGORY, never a prompt.
+
+    Storing the prompt and the raw transcript would make this table the
+    largest copy of the athlete's private data in the database, kept for the
+    least useful reason. A category is what a retry decision needs.
+    """
+    MODEL_UNAVAILABLE = "model_unavailable"
+    MODEL_TIMEOUT = "model_timeout"
+    INVALID_OUTPUT = "invalid_output"
+    SCHEMA_VIOLATION = "schema_violation"
+    UNGROUNDED_CLAIM = "ungrounded_claim"
+    SAFETY_REFUSED = "safety_refused"
+    STATE_UNAVAILABLE = "state_unavailable"
+    INSUFFICIENT_DATA = "insufficient_data"
+    INTERNAL_ERROR = "internal_error"
+
+
+class RequestedBy(str, Enum):
+    SCHEDULE = "schedule"
+    USER = "user"
+    SYSTEM = "system"
+
+
+class CoachReviewOut(BaseModel):
+    """A stored review, as an API returns it.
+
+    `input_state` is not in this model by default — it is a whole
+    `FitnessStateV1` and most callers want the summary and the
+    recommendations. `CoachReviewDetail` carries it for the one screen that
+    answers "what did you reason from?".
+    """
+    id: str
+    user_id: str
+    kind: ReviewKind
+    period: Period
+    status: ReviewStatus
+    input_hash: str
+    state_schema_version: int
+    analytics_version: int
+    data_revision: Optional[str] = None
+    collected_at: datetime
+    source_cutoff: Optional[datetime] = None
+    model_requested: Optional[str] = None
+    #: The model that ACTUALLY answered. A fallback that answered as the
+    #: primary would make every comparison between runs meaningless.
+    model_actual: Optional[str] = None
+    provider: Optional[str] = None
+    prompt_version: str
+    prompt_hash: Optional[str] = None
+    output_schema_version: Optional[int] = None
+    summary: Optional[str] = None
+    evidence_refs: List[str] = Field(default_factory=list)
+    error_category: Optional[ReviewFailureCategory] = None
+    error_detail: Optional[str] = None
+    run_id: Optional[str] = None
+    attempt: int = 1
+    revision: int = 1
+    supersedes_id: Optional[str] = None
+    superseded_by_id: Optional[str] = None
+    requested_by: RequestedBy = RequestedBy.SCHEDULE
+    evaluated_at: Optional[datetime] = None
+    created_at: datetime
+
+    @property
+    def is_current(self) -> bool:
+        return self.superseded_by_id is None
+
+
+class CoachReviewDetail(CoachReviewOut):
+    """The review plus what it reasoned from and what it concluded."""
+    input_state: Optional[FitnessStateV1] = None
+    output: Optional[CoachReviewOutputV1] = None
+    recommendations: List["CoachRecommendationOut"] = Field(default_factory=list)
+
+
+class CoachRecommendationOut(BaseModel):
+    """A stored recommendation.
+
+    There is no `applied` boolean. `decision_status` is the only statement
+    about what happened, and `accepted` is constrained in the database to
+    require an action receipt or the target revision it produced — so a row
+    cannot claim an effect it did not have.
+    """
+    id: str
+    review_id: str
+    user_id: str
+    category: RecommendationCategory
+    action: ProposedChangeKind
+    title: str
+    rationale: str
+    confidence: ConfidenceCategory
+    confidence_basis: Optional[str] = None
+    limitations: Optional[str] = None
+    metric_paths: List[str] = Field(default_factory=list)
+    evidence_refs: List[str] = Field(default_factory=list)
+    proposed_change: ProposedChange = Field(default_factory=ProposedChange)
+    current_target_revision_id: Optional[str] = None
+    current_phase_id: Optional[str] = None
+    expires_at: Optional[datetime] = None
+    decision_status: DecisionStatus = DecisionStatus.PROPOSED
+    decided_at: Optional[datetime] = None
+    decided_by: Optional[str] = None
+    decision_note: Optional[str] = None
+    action_receipt_id: Optional[str] = None
+    applied_revision_id: Optional[str] = None
+    priority: int = 5
+    created_at: datetime
+
+    @property
+    def is_open(self) -> bool:
+        return self.decision_status is DecisionStatus.PROPOSED
+
+
+class ReviewRequest(BaseModel):
+    """Ask for a review. Carries no model name and no prompt.
+
+    Letting a caller choose the model or the prompt would make the stored
+    `model_actual`/`prompt_version` pair describe a run nobody can reproduce
+    from the server's own configuration.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    kind: ReviewKind = ReviewKind.WEEKLY
+    period_start: Optional[date] = None
+    #: Exclusive, athlete-local.
+    period_end: Optional[date] = None
+    #: True re-collects state and creates a linked revision when the data
+    #: changed. It never overwrites an existing review.
+    force: bool = False
+
+
+CoachReviewDetail.model_rebuild()
