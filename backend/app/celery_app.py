@@ -70,6 +70,7 @@ celery_app = Celery(
         "app.tasks.pkg_sync",
         "app.tasks.health_weekly",
         "app.tasks.fitness_coach",
+        "app.tasks.fitness_science",
         "app.tasks.health_baselines",
         "app.tasks.sara_self_queue",
         "app.tasks.subconscious_tier0",
@@ -183,6 +184,9 @@ celery_app.conf.task_routes = {
     # time limit, so it sits with the other health rollups rather than
     # competing with cognition for the cognitive lane.
     "app.tasks.fitness_coach.*": {"queue": "health"},
+    # Nothing waits on a paper being ingested, and the `health` lane
+    # carries the morning rollups.
+    "app.tasks.fitness_science.*": {"queue": "low_priority"},
     "app.tasks.health_baselines.*": {"queue": "health"},
     "app.tasks.sara_self_queue.*": {"queue": "cognitive"},
     "app.tasks.ml.*": {"queue": "cognitive"},

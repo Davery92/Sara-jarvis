@@ -90,6 +90,7 @@ from app.tools.fitness.coach import (
     FitnessMeasurementsGetTool,
     FitnessProfileGetTool,
     FitnessRecommendationDecideTool,
+    FitnessScienceSearchTool,
 )
 from app.tools.fitness.workout_mode import (
     WorkoutModeLogTool,
@@ -284,6 +285,10 @@ class ToolRegistry:
                 'fitness_measurements_get', 'fitness_coach_review_get',
                 'fitness_checkin_update', 'fitness_measurement_log',
                 'fitness_coach_review_request', 'fitness_recommendation_decide',
+                # Step 28. Accepted-only: this cannot reach an unreviewed
+                # paper, which is the point of having a library rather than
+                # a folder of PDFs.
+                'fitness_science_search',
             ]
         },
         'chess': {
@@ -668,6 +673,11 @@ class ToolRegistry:
             FitnessAnalyticsGetTool(),
             FitnessMeasurementsGetTool(),
             FitnessCoachReviewGetTool(),
+            # Accepted-only science retrieval (Step 28). A read, and it is
+            # listed here rather than beside the documents tools because
+            # `doc_chunk` is the personal document store: a paper is not a
+            # note of David's, and the two must not retrieve each other.
+            FitnessScienceSearchTool(),
             # Writes. Every one is `requires_user_origin = True`, so the
             # autonomous loop cannot log a measurement or decide a coaching
             # change on its own.

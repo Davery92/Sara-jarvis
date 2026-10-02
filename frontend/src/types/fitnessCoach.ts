@@ -942,3 +942,155 @@ export interface VisionCapability {
   endpoint: string | null
   detail: string
 }
+
+// ── Curated science library (Step 28) ──────────────────────────────────
+
+export type SourceType =
+  | 'meta_analysis'
+  | 'systematic_review'
+  | 'rct'
+  | 'observational'
+  | 'narrative_review'
+  | 'position_stand'
+  | 'secondary'
+
+export type ScienceTopic =
+  | 'hypertrophy'
+  | 'strength'
+  | 'nutrition'
+  | 'sleep'
+  | 'recovery'
+  | 'cardio'
+  | 'injury'
+  | 'supplements'
+
+export type EvidenceQuality = 'high' | 'moderate' | 'low'
+
+export type ScienceStatus =
+  | 'unreviewed'
+  | 'accepted'
+  | 'rejected'
+  | 'superseded'
+  | 'retracted'
+
+export type ScienceCurationAction =
+  | 'accept'
+  | 'reject'
+  | 'supersede'
+  | 'retract'
+  | 'reopen'
+
+export type ScienceExtractionState =
+  | 'pending'
+  | 'extracted'
+  | 'embedded'
+  | 'failed'
+
+export interface ScienceRecord {
+  id: string
+  title: string
+  authors: string | null
+  publication_year: number | null
+  journal: string | null
+  doi: string | null
+  url: string | null
+  source_type: SourceType
+  topics: ScienceTopic[]
+  population: string | null
+  limitations: string | null
+  quality: EvidenceQuality | null
+  status: ScienceStatus
+  visibility: 'owner' | 'public'
+  superseded_by_id: string | null
+  retracted_at: string | null
+  retraction_reason: string | null
+  /** 'manual' | 'upload' | 'url' | 'refresh'. A refresh-discovered record
+   *  is never accepted automatically, and a reader has to be able to tell. */
+  discovered_by: string
+  current_revision: number
+  created_at: string | null
+  extraction_state: ScienceExtractionState | null
+  chunk_count: number | null
+  failure_category: string | null
+  failure_detail: string | null
+  extracted_chars: number | null
+  embedding_model: string | null
+  annotations: number
+}
+
+export interface ScienceIngestResult {
+  record_id: string
+  revision: number
+  /** Always 'unreviewed' on ingest. Shown as that word, because "added to
+   *  the library" would imply the coach can cite it. */
+  status: ScienceStatus
+  extraction_state: string
+  chunk_count: number
+  duplicate_of: string | null
+  detail: string | null
+}
+
+export interface ScienceCoverage {
+  by_status: Record<string, number>
+  accepted_by_topic: Record<string, number>
+  accepted_total: number
+  topics_with_no_evidence: string[]
+  ranking_policy_version: number
+}
+
+export interface ScienceHit {
+  record_id: string
+  revision: number
+  chunk_id: string
+  title: string
+  authors: string | null
+  publication_year: number | null
+  journal: string | null
+  doi: string | null
+  url: string | null
+  source_type: SourceType
+  quality: EvidenceQuality | null
+  topics: ScienceTopic[]
+  population: string | null
+  limitations: string | null
+  section: string | null
+  char_start: number | null
+  char_end: number | null
+  text: string
+  /** Null when the embedding backend was unavailable and the search fell
+   *  back to lexical only — unknown, not zero. */
+  similarity: number | null
+  lexical: number | null
+  topic_match: number
+  quality_weight: number
+  /** Negative when the study population does not look like this athlete. */
+  applicability: number
+  applicability_note: string | null
+  score: number
+  ranking_policy_version: number
+}
+
+export interface ScienceSearchResponse {
+  query: string
+  hits: ScienceHit[]
+  ranking_policy_version: number
+  library: ScienceCoverage
+}
+
+export interface ScienceRefreshRun {
+  id: string
+  attempted_at: string | null
+  /** Null while a run is in flight OR after it failed. Separate from
+   *  `attempted_at` so a job that has failed every month cannot show a
+   *  recent timestamp and read as healthy. */
+  finished_at: string | null
+  succeeded: boolean
+  queried_topics: ScienceTopic[]
+  candidates_seen: number
+  queued_unreviewed: number
+  duplicates_skipped: number
+  retractions_flagged: string[]
+  affected_review_ids: string[]
+  digest_sent: boolean
+  detail: string | null
+}

@@ -7245,6 +7245,18 @@ app.include_router(
 )
 logger.info("Fitness Coach routes registered at /api/fitness/coach")
 
+# The curated science library (Step 28). Separate module from
+# `fitness_coach.py` because its storage, its SSRF-bounded fetcher and its
+# curation state machine have nothing to do with check-ins and targets, and
+# a reviewer of either should not have to read the other. Also outside the
+# try/except, for the same reason as above.
+from app.routes.fitness_science import router as fitness_science_router
+app.include_router(
+    fitness_science_router, prefix="/api/fitness/science",
+    tags=["Fitness Science"],
+)
+logger.info("Fitness Science routes registered at /api/fitness/science")
+
 # Include versioned cross-device workout routes (Apple Watch + iPhone).
 # Separate module from fitness.py so the Watch contract stays reviewable on its
 # own; it shares the same auth dependency and command service.

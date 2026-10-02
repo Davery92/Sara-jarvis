@@ -1438,3 +1438,341 @@ class PhotoAnalysisFailure(str, Enum):
     SOURCE_CHANGED = "source_changed"
     IMAGE_UNREADABLE = "image_unreadable"
     INTERNAL_ERROR = "internal_error"
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Curated science (Step 28)
+# ─────────────────────────────────────────────────────────────────────────
+#
+# Three things these types exist to prevent, each of which has a cheaper
+# wrong version that looks fine until it is read closely:
+#
+# 1. **An unreviewed paper being cited.** Ingestion is not acceptance. A
+#    record arrives `UNREVIEWED` and stays invisible to retrieval however
+#    well it matches a query, because similarity is not endorsement.
+# 2. **A citation that cannot be reconstructed.** A review cites a *chunk of
+#    a revision*, not a paper. The revision carries the content hash, so
+#    "which exact text did she read" is answerable after the PDF is replaced
+#    by a corrected version.
+# 3. **A finding applied to the wrong people.** Population is a recorded
+#    field, not an inference. A twelve-week study on untrained women is
+#    evidence about untrained women; ranking must be able to see the
+#    mismatch and say so rather than quietly averaging it away.
+
+SCIENCE_SCHEMA_VERSION = 1
+#: Bumped when the retrieval ranking changes meaning. Stored beside every
+#: citation, so an old review's evidence can be explained under the policy
+#: that actually produced it rather than today's.
+SCIENCE_RANKING_POLICY_VERSION = 1
+
+
+class SourceType(str, Enum):
+    """What kind of thing this is, which bounds what it can support."""
+    META_ANALYSIS = "meta_analysis"
+    SYSTEMATIC_REVIEW = "systematic_review"
+    RCT = "rct"
+    #: Crossover, cohort, case series — not randomised.
+    OBSERVATIONAL = "observational"
+    NARRATIVE_REVIEW = "narrative_review"
+    POSITION_STAND = "position_stand"
+    #: A textbook chapter, a coach's write-up, a conference talk. Usable,
+    #: but it is somebody's synthesis and must be labelled as one.
+    SECONDARY = "secondary"
+
+
+class ScienceTopic(str, Enum):
+    HYPERTROPHY = "hypertrophy"
+    STRENGTH = "strength"
+    NUTRITION = "nutrition"
+    SLEEP = "sleep"
+    RECOVERY = "recovery"
+    CARDIO = "cardio"
+    INJURY = "injury"
+    SUPPLEMENTS = "supplements"
+
+
+class EvidenceQuality(str, Enum):
+    """The curator's grade, recorded with a reason. Never computed from
+    `source_type` alone: a badly run RCT is worse evidence than a careful
+    meta-analysis, and the reverse happens too."""
+    HIGH = "high"
+    MODERATE = "moderate"
+    LOW = "low"
+
+
+class ScienceStatus(str, Enum):
+    #: Ingested, extracted, chunked, embedded — and invisible to retrieval.
+    UNREVIEWED = "unreviewed"
+    ACCEPTED = "accepted"
+    #: Looked at and declined. Kept, with the reason: the same paper will
+    #: arrive again from a refresh, and re-reading it each month is waste.
+    REJECTED = "rejected"
+    #: A newer revision or a better paper replaced it. Still readable,
+    #: because an old review cited it and that citation must resolve.
+    SUPERSEDED = "superseded"
+    #: Withdrawn by the journal or the authors. Excluded from retrieval and
+    #: flagged on every review that cited it.
+    RETRACTED = "retracted"
+
+
+class CurationAction(str, Enum):
+    ACCEPT = "accept"
+    REJECT = "reject"
+    SUPERSEDE = "supersede"
+    RETRACT = "retract"
+    REOPEN = "reopen"
+    ANNOTATE = "annotate"
+
+
+class ExtractionState(str, Enum):
+    PENDING = "pending"
+    EXTRACTED = "extracted"
+    EMBEDDED = "embedded"
+    #: Extraction or embedding gave up. Distinguished from `pending` so a
+    #: retry is a decision rather than an accident, and so a record stuck
+    #: here is visible instead of looking like it is still working.
+    FAILED = "failed"
+
+
+class ScienceIngestFailure(str, Enum):
+    UNSUPPORTED_TYPE = "unsupported_type"
+    TOO_LARGE = "too_large"
+    NO_TEXT = "no_text"
+    FETCH_BLOCKED = "fetch_blocked"
+    FETCH_FAILED = "fetch_failed"
+    EMBEDDING_UNAVAILABLE = "embedding_unavailable"
+    #: The backend returned vectors of a width the column cannot hold.
+    #: Padding or truncating would produce a searchable embedding that means
+    #: nothing, and the search would still work — which is the worst case.
+    EMBEDDING_DIM_MISMATCH = "embedding_dim_mismatch"
+    DUPLICATE = "duplicate"
+
+
+class ScienceAnnotationKind(str, Enum):
+    #: "This is the paper everyone cites for X, and it does not say X."
+    CAVEAT = "caveat"
+    #: How it bears on this athlete specifically.
+    APPLICATION = "application"
+    DISAGREEMENT = "disagreement"
+    NOTE = "note"
+
+
+class ScienceRegisterInput(BaseModel):
+    """A paper arriving, by upload or by URL.
+
+    Bibliographic fields are supplied by whoever registers it, never
+    inferred from the filename and never invented. §28.7: the ingesting
+    agent verifies primary-source details at ingestion time. A guessed year
+    or a guessed population is worse than a blank one, because a blank one
+    is visibly blank.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(min_length=3, max_length=500)
+    source_type: SourceType
+    topics: List[ScienceTopic] = Field(min_length=1)
+    url: Optional[str] = Field(default=None, max_length=2000)
+    doi: Optional[str] = Field(default=None, max_length=200)
+    authors: Optional[str] = Field(default=None, max_length=1000)
+    publication_year: Optional[int] = Field(default=None, ge=1900, le=2100)
+    journal: Optional[str] = Field(default=None, max_length=300)
+    #: Who was studied, in words. "n=43 resistance-trained men, 18-35".
+    population: Optional[str] = Field(default=None, max_length=1000)
+    #: What it cannot support. Required for acceptance, not for ingestion:
+    #: it is the curator's job and it is where most of the value is.
+    limitations: Optional[str] = Field(default=None, max_length=2000)
+    quality: Optional[EvidenceQuality] = None
+    notes: Optional[str] = Field(default=None, max_length=2000)
+
+    @field_validator("doi")
+    @classmethod
+    def _normalise_doi(cls, value: Optional[str]) -> Optional[str]:
+        """One DOI, one record.
+
+        DOIs arrive as `10.1234/abc`, `doi:10.1234/abc`,
+        `https://doi.org/10.1234/ABC` and with a trailing full stop from a
+        citation. All four are the same paper, and a dedup check on the raw
+        string would file four copies.
+        """
+        if value is None:
+            return None
+        text = value.strip()
+        if not text:
+            return None
+        lowered = text.lower()
+        for prefix in ("https://doi.org/", "http://doi.org/",
+                       "https://dx.doi.org/", "doi:", "doi "):
+            if lowered.startswith(prefix):
+                text = text[len(prefix):]
+                lowered = text.lower()
+                break
+        text = text.strip().rstrip(".,;")
+        if not text.lower().startswith("10."):
+            raise ValueError(
+                f"{value!r} is not a DOI. A DOI starts with '10.' — if this "
+                f"is a URL, pass it as `url`."
+            )
+        # DOIs are case-insensitive by specification; stored lowercase so
+        # the unique index actually collides.
+        return text.lower()
+
+    @field_validator("url")
+    @classmethod
+    def _http_only(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        text = value.strip()
+        if not text:
+            return None
+        if not text.lower().startswith(("http://", "https://")):
+            raise ValueError(
+                "A source URL must be http or https. A `file://` or `data:` "
+                "URL would make the fetcher read this machine."
+            )
+        return text
+
+    @model_validator(mode="after")
+    def _identifiable(self) -> "ScienceRegisterInput":
+        if not self.doi and not self.url:
+            raise ValueError(
+                "A record needs a DOI or a URL. Without one there is nothing "
+                "to cite and no way to tell a duplicate from a new paper."
+            )
+        return self
+
+
+class ScienceCurationInput(BaseModel):
+    """A curation decision. The reason is not optional.
+
+    An accept with no reason is indistinguishable from a click, and the
+    reason is what a future reader needs: what this paper is good for, and
+    what it was accepted *despite*.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    action: CurationAction
+    reason: str = Field(min_length=10, max_length=2000)
+    #: Required for SUPERSEDE: which record replaces this one.
+    superseded_by_id: Optional[str] = Field(default=None, max_length=64)
+    #: The revision being acted on. Explicit, so accepting while an
+    #: extraction is replacing the text cannot accept the new text silently.
+    revision: int = Field(ge=1)
+    quality: Optional[EvidenceQuality] = None
+    limitations: Optional[str] = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def _coherent(self) -> "ScienceCurationInput":
+        if self.action is CurationAction.SUPERSEDE and not self.superseded_by_id:
+            raise ValueError(
+                "A supersede must name the record that replaces this one, or "
+                "the chain cannot be followed from an old citation."
+            )
+        if self.action is CurationAction.ACCEPT and not self.limitations:
+            raise ValueError(
+                "Acceptance requires the limitations field. Every paper has "
+                "them, and the ones left blank are the ones later misapplied."
+            )
+        return self
+
+
+class ScienceCitation(BaseModel):
+    """What a review actually read, at the granularity it read it.
+
+    A record id alone cannot be checked: the paper is forty pages and the
+    claim came from one paragraph. This names the revision and the chunk, so
+    the exact sentences are recoverable even after the source is replaced.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    record_id: str
+    revision: int
+    chunk_id: str
+    #: Where in the extracted text, so a reader can find it in the PDF.
+    section: Optional[str] = None
+    char_start: Optional[int] = None
+    char_end: Optional[int] = None
+    #: Which ranking produced it. An old citation explained under today's
+    #: policy is a different claim about why it was shown.
+    ranking_policy_version: int = SCIENCE_RANKING_POLICY_VERSION
+
+
+class ScienceSearchHit(BaseModel):
+    """One retrieval result, carrying what is needed to judge it.
+
+    DOI, population and limitations travel with the text deliberately. A
+    snippet with no population is how "trained men gained more from higher
+    volume" becomes advice for a 52-year-old beginner.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    record_id: str
+    revision: int
+    chunk_id: str
+    title: str
+    authors: Optional[str] = None
+    publication_year: Optional[int] = None
+    journal: Optional[str] = None
+    doi: Optional[str] = None
+    url: Optional[str] = None
+    source_type: SourceType
+    quality: Optional[EvidenceQuality] = None
+    topics: List[ScienceTopic] = Field(default_factory=list)
+    population: Optional[str] = None
+    limitations: Optional[str] = None
+    section: Optional[str] = None
+    char_start: Optional[int] = None
+    char_end: Optional[int] = None
+    text: str
+    #: Component scores, kept separate rather than pre-blended, so a hit
+    #: that ranked on topic match despite weak similarity is visible as
+    #: exactly that.
+    similarity: Optional[float] = None
+    lexical: Optional[float] = None
+    topic_match: float = 0.0
+    quality_weight: float = 0.0
+    #: Negative when the study population does not look like this athlete.
+    #: Never silently dropped: a mismatch the coach can see is better than a
+    #: result that quietly vanished.
+    applicability: float = 0.0
+    applicability_note: Optional[str] = None
+    score: float = 0.0
+    ranking_policy_version: int = SCIENCE_RANKING_POLICY_VERSION
+
+
+class ScienceRefreshOutcome(BaseModel):
+    """What one refresh run did — and did not do.
+
+    `last_attempt_at` and `last_success_at` are separate fields because a
+    monthly job that has failed every month for four months otherwise shows
+    a recent timestamp and looks healthy. That is the same class of lie as
+    `DBScheduler` marking `last_status='success'` at dispatch time (§3).
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: str
+    attempted_at: datetime
+    succeeded: bool
+    queried_topics: List[ScienceTopic] = Field(default_factory=list)
+    candidates_seen: int = 0
+    #: Queued as UNREVIEWED. A refresh never accepts anything (§28.6).
+    queued_unreviewed: int = 0
+    duplicates_skipped: int = 0
+    #: Records the refresh found marked retracted upstream, with the reviews
+    #: that cited them. Flagged for a human, never auto-applied.
+    retractions_flagged: List[str] = Field(default_factory=list)
+    affected_review_ids: List[str] = Field(default_factory=list)
+    digest_sent: bool = False
+    detail: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _never_claims_acceptance(self) -> "ScienceRefreshOutcome":
+        """A structural guard, not a comment.
+
+        If a future change makes the refresh capable of accepting a record,
+        this field will stop validating and the test that asserts it will
+        name the step that did it. The alternative is a refresh that quietly
+        promotes papers nobody read.
+        """
+        if self.queued_unreviewed < 0 or self.candidates_seen < 0:
+            raise ValueError("counts cannot be negative")
+        return self

@@ -109,10 +109,11 @@ Return ONE JSON object, no prose before or after, no markdown fence. Exactly thi
 `evidence_refs` is for citations into a curated research library. There is no library attached, so leave it empty and do not cite studies, authors or papers. A fabricated citation is worse than no citation."""
 
 
-#: Appended when no curated science library is available, which is currently
-#: always (Step 28 builds it). Said explicitly rather than left implied,
-#: because a model with no corpus will otherwise cite plausible-sounding
-#: papers from memory and a fabricated citation reads exactly like a real one.
+#: Appended when no curated science library is attached — either because
+#: the athlete has accepted nothing yet, or because retrieval found nothing
+#: for this review. Said explicitly rather than left implied, because a
+#: model with no corpus will otherwise cite plausible-sounding papers from
+#: memory and a fabricated citation reads exactly like a real one.
 NO_CORPUS_NOTE = (
     "EVIDENCE SUPPORT: no curated research library is attached to this "
     "review. Say so in `limitations`. Your reasoning must rest on this "
@@ -121,11 +122,58 @@ NO_CORPUS_NOTE = (
 )
 
 
+#: The header for retrieved evidence. Each passage arrives with its id,
+#: because §28.5 validates citations against the exact supplied set: a model
+#: asked to cite will otherwise produce a real record id with the wrong
+#: chunk, or a well-formed id for a paper that suits the claim better than
+#: the one it was shown. Both resolve to real-looking text.
+EVIDENCE_HEADER = (
+    "ACCEPTED EVIDENCE: the passages below are the ONLY research you may "
+    "cite. They come from papers this athlete reviewed and accepted. For "
+    "each one you use, put its `chunk_id` in `evidence_refs` exactly as "
+    "written — an id you did not receive here is a fabricated citation and "
+    "will be stripped, along with anything that rested on it.\n"
+    "Each passage carries the population it studied and what it cannot "
+    "support. A finding from trained men is not evidence about an untrained "
+    "beginner; where the population does not match this athlete, say so "
+    "rather than applying it anyway."
+)
+
+
+def build_evidence_block(passages: List[Dict[str, Any]]) -> str:
+    """Render retrieved passages for the prompt.
+
+    Bounded by the caller. The text is included verbatim rather than
+    summarised: a summary of a study made by the same model that will then
+    cite it is a citation of its own paraphrase.
+    """
+    lines: List[str] = [EVIDENCE_HEADER]
+    for passage in passages:
+        header = " | ".join(part for part in (
+            f"chunk_id={passage['chunk_id']}",
+            passage.get("title"),
+            str(passage.get("publication_year") or ""),
+            passage.get("source_type"),
+            f"quality={passage.get('quality') or 'ungraded'}",
+            f"section={passage.get('section') or 'unlabelled'}",
+        ) if part)
+        lines.append(header)
+        if passage.get("population"):
+            lines.append(f"  population: {passage['population']}")
+        if passage.get("limitations"):
+            lines.append(f"  limitations: {passage['limitations']}")
+        if passage.get("applicability_note"):
+            lines.append(f"  MISMATCH: {passage['applicability_note']}")
+        lines.append(f"  text: {passage.get('text') or ''}")
+    return "\n".join(lines)
+
+
 def build_user_prompt(
     state_payload: Dict[str, Any],
     allowed_metric_paths: List[str],
     *,
     has_science_corpus: bool = False,
+    evidence: Optional[List[Dict[str, Any]]] = None,
     extra_notes: Optional[List[str]] = None,
 ) -> str:
     """The user turn: the state, and the exact list of citable paths.
@@ -141,7 +189,9 @@ def build_user_prompt(
         + json.dumps(sorted(allowed_metric_paths), indent=0)
     )
     sections.append("STATE:\n" + json.dumps(state_payload, indent=0, default=str))
-    if not has_science_corpus:
+    if evidence:
+        sections.append(build_evidence_block(list(evidence)))
+    elif not has_science_corpus:
         sections.append(NO_CORPUS_NOTE)
     for note in extra_notes or []:
         sections.append(note)
@@ -169,4 +219,7 @@ def build_repair_prompt(errors: List[str]) -> str:
 
 def prompt_text() -> str:
     """Everything whose change should change the stored prompt hash."""
-    return SYSTEM_PROMPT + "\n" + NO_CORPUS_NOTE + "\n" + REPAIR_INSTRUCTION
+    return (
+        SYSTEM_PROMPT + "\n" + NO_CORPUS_NOTE + "\n" + EVIDENCE_HEADER
+        + "\n" + REPAIR_INSTRUCTION
+    )

@@ -1209,3 +1209,192 @@ class FitnessRecommendationDecideTool(BaseTool):
             )
         finally:
             db.close()
+
+
+class FitnessScienceSearchTool(BaseTool):
+    """Accepted evidence from the athlete's curated library.
+
+    Step 28.5. Read-only, and it cannot reach an unreviewed paper: the
+    service filters on `status = 'accepted'` in SQL. The distinction
+    matters to this tool specifically, because a model asked "what does the
+    research say" will happily cite whatever comes back — so what comes
+    back has to be only what somebody accepted.
+
+    The hits carry population and limitations deliberately. A snippet with
+    no population is how "trained men gained more from higher volume"
+    becomes advice for a 52-year-old beginner.
+    """
+
+    @property
+    def name(self) -> str:
+        return "fitness_science_search"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Search the athlete's curated exercise-science library for "
+            "accepted evidence on a training, nutrition, sleep or recovery "
+            "question. Returns passages with their source, population and "
+            "limitations. Only papers the athlete has reviewed and accepted "
+            "are searchable — if this returns nothing, say the library has "
+            "no accepted evidence on it rather than answering from general "
+            "knowledge and implying it came from here. Read only."
+        )
+
+    @property
+    def parameters(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "The question, in words. 'training frequency for "
+                        "hypertrophy', not keywords."
+                    ),
+                },
+                "topics": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": [
+                            "hypertrophy", "strength", "nutrition", "sleep",
+                            "recovery", "cardio", "injury", "supplements",
+                        ],
+                    },
+                    "description": "Optional topic filter.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Passages to return (1-10, default 5).",
+                },
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        }
+
+    async def execute(self, user_id: str, **kwargs) -> ToolResult:
+        db = _session()
+        try:
+            from app.schemas.fitness_coach import ScienceTopic
+            from app.services.fitness import science
+
+            query = (kwargs.get("query") or "").strip()
+            if len(query) < 3:
+                return ToolResult(
+                    success=False,
+                    message="A search needs at least three characters.",
+                )
+
+            topics = []
+            for slug in kwargs.get("topics") or []:
+                try:
+                    topics.append(ScienceTopic(str(slug).strip().lower()))
+                except ValueError:
+                    return ToolResult(
+                        success=False,
+                        message=(
+                            f"{slug!r} is not a topic. Known: "
+                            f"{', '.join(t.value for t in ScienceTopic)}."
+                        ),
+                    )
+
+            limit = kwargs.get("limit") or 5
+            try:
+                limit = max(1, min(int(limit), 10))
+            except (TypeError, ValueError):
+                limit = 5
+
+            hits = await science.search(
+                db, user_id, query, topics=topics or None,
+                athlete=_science_athlete(db, user_id), limit=limit,
+            )
+            library = science.coverage(db, user_id)
+
+            if not hits:
+                # The two reasons for an empty result are different answers,
+                # and collapsing them is how "no evidence found" becomes
+                # "the research is unclear".
+                if library["accepted_total"] == 0:
+                    message = (
+                        "The science library has no accepted papers at all "
+                        "yet, so there is nothing to search. Say that "
+                        "plainly — do not answer from general knowledge as "
+                        "though it came from the library."
+                    )
+                else:
+                    message = (
+                        f"Nothing in the {library['accepted_total']} accepted "
+                        f"papers matches that. Topics with no accepted "
+                        f"evidence: "
+                        f"{', '.join(library['topics_with_no_evidence']) or 'none'}."
+                    )
+                return ToolResult(
+                    success=True, data={"hits": [], "library": library},
+                    message=message,
+                )
+
+            data = {
+                "hits": [hit.model_dump(mode="json") for hit in hits],
+                "library": library,
+                "ranking_policy_version": science.SCIENCE_RANKING_POLICY_VERSION,
+            }
+            notes = [
+                f"{hit.title[:60]}"
+                + (f" ({hit.publication_year})" if hit.publication_year else "")
+                + (f" — {hit.applicability_note}" if hit.applicability_note else "")
+                for hit in hits
+            ]
+            return ToolResult(
+                success=True, data=data,
+                message=(
+                    f"{len(hits)} passage(s) from accepted sources: "
+                    + "; ".join(notes)
+                    + ". Cite the source by title; the population and "
+                      "limitations are in the data and belong in the answer "
+                      "when they bear on it."
+                ),
+            )
+        except Exception as exc:
+            logger.warning(
+                "fitness_science_search failed (%s): %s",
+                type(exc).__name__, exc,
+            )
+            return ToolResult(
+                success=False,
+                message=f"Could not search the library: {exc}",
+            )
+        finally:
+            db.close()
+
+
+def _science_athlete(db, user_id: str):
+    """Applicability context from the profile.
+
+    Shared by the tool and the route rather than duplicated: an
+    applicability comparison that reads different fields in two places
+    would rank the same paper differently depending on who asked.
+    """
+    from sqlalchemy import text
+
+    from app.services.fitness.science import AthleteContext
+
+    row = db.execute(text("""
+        SELECT training_level, calculation_sex, date_of_birth
+        FROM fitness_athlete_profile WHERE user_id = :u
+    """), {"u": user_id}).fetchone()
+    if row is None:
+        return AthleteContext()
+    age = None
+    if row.date_of_birth:
+        from app.core.timezone import now as local_now
+        today = local_now().date()
+        born = row.date_of_birth
+        age = today.year - born.year - (
+            (today.month, today.day) < (born.month, born.day)
+        )
+    sex = row.calculation_sex
+    if sex in ("unknown", "prefer_not_to_say"):
+        sex = None
+    level = row.training_level if row.training_level != "unknown" else None
+    return AthleteContext(training_level=level, sex=sex, age=age)

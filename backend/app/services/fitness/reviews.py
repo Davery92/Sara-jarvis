@@ -36,7 +36,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from sqlalchemy.orm import Session
 
@@ -50,9 +50,12 @@ from app.schemas.fitness_coach import (
     ReviewFailureCategory,
     ReviewKind,
     ReviewStatus,
+    ScienceCitation,
+    ScienceSearchHit,
+    ScienceTopic,
     StateSection,
 )
-from app.services.fitness import review_audit, safety
+from app.services.fitness import review_audit, safety, science
 from app.services.fitness.data_access import FitnessDataError, _require_user
 
 logger = logging.getLogger(__name__)
@@ -327,9 +330,23 @@ async def generate(
     review_audit.mark_running(db, uid, review_id)
     db.commit()
 
+    # Accepted evidence for this review's own questions (Step 28.5).
+    # Retrieved BEFORE the call and bounded, because the passages are the
+    # citable set: the validator later keeps only ids from exactly this
+    # list, so a model shown more than it can be checked against would have
+    # its extra citations stripped and the text resting on them kept.
+    evidence = await _retrieve_evidence(db, uid, state)
+    # Those reads opened an implicit transaction. Ending it is not
+    # housekeeping: holding one across the model call pins a database
+    # connection for the length of a generation, and the fitness lane
+    # shares that pool with chat — a review stuck on a slow Mac Studio
+    # would degrade the thing David is actually using. A rollback is the
+    # right verb because nothing above wrote anything.
+    db.rollback()
+
     # No transaction from here until the result is stored.
     try:
-        parsed, model_actual, errors = await _call_and_parse(state)
+        parsed, model_actual, errors = await _call_and_parse(state, evidence)
     except Exception as exc:
         logger.warning(
             "fitness review %s: model call failed (%s): %s",
@@ -367,8 +384,26 @@ async def generate(
         return GenerationResult(review=failed, notes=report.rejections)
 
     output = report.output or parsed
+
+    # §28.5: only the exact supplied ids survive. A model asked to cite its
+    # sources produces a real record with the wrong chunk, or a well-formed
+    # id for a paper that suits the claim better than the one it was shown;
+    # both resolve to real-looking text, and the offered set is the only
+    # check that does not require reading every citation by hand.
+    citations, rejected_citations = science.validate_citations(
+        db, uid, _cited_science(output), evidence,
+    )
+    if rejected_citations:
+        logger.info(
+            "fitness review %s: %d fabricated citation(s) stripped: %s",
+            review_id, len(rejected_citations), "; ".join(rejected_citations),
+        )
+
     complete = review_audit.mark_complete(
         db, uid, review_id, output=output, model_actual=model_actual,
+    )
+    _store_citations(
+        db, uid, review_id, citations, offered=len(evidence),
     )
     recommendations = review_audit.record_recommendations(
         db, uid, review_id, output,
@@ -380,18 +415,195 @@ async def generate(
     db.commit()
     return GenerationResult(
         review=complete, output=output,
-        recommendations=recommendations, notes=report.downgrades,
+        recommendations=recommendations,
+        notes=report.downgrades + rejected_citations,
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Step 28.5: bounded accepted evidence
+# ─────────────────────────────────────────────────────────────────────────
+
+#: At most this many passages reach the prompt. Bounded for two reasons,
+#: and the second is the real one: the context budget, and the fact that
+#: the offered set IS the citable set. Twenty passages a reviewer cannot
+#: check is how an unverifiable bibliography appears under a weekly review.
+MAX_EVIDENCE_PASSAGES = 4
+
+#: What a weekly review is actually deciding about. Retrieval is scoped to
+#: these rather than run on the summary text: a free-text query built from
+#: the model's own framing would retrieve whatever supports it.
+REVIEW_EVIDENCE_QUERIES: Tuple[Tuple[str, Tuple[ScienceTopic, ...]], ...] = (
+    (
+        "rate of weight change and calorie adjustment during a fat loss or "
+        "gaining phase",
+        (ScienceTopic.NUTRITION,),
+    ),
+    (
+        "protein intake and training volume for muscle growth in trained "
+        "lifters",
+        (ScienceTopic.NUTRITION, ScienceTopic.HYPERTROPHY),
+    ),
+    (
+        "sleep duration and recovery effects on strength and training "
+        "performance",
+        (ScienceTopic.SLEEP, ScienceTopic.RECOVERY),
+    ),
+)
+
+
+async def _retrieve_evidence(
+    db: Session, user_id: str, state: FitnessStateV1,
+) -> List[ScienceSearchHit]:
+    """Accepted passages relevant to this review's questions.
+
+    Never fails the review. An empty list is a normal outcome — most
+    libraries are empty, and the prompt says so explicitly in that case
+    (`NO_CORPUS_NOTE`) rather than letting the model fill the gap from
+    memory. A retrieval error is logged and treated the same way: a review
+    without evidence is worth having, and a review that did not happen
+    because the GPU host was down is not.
+    """
+    # No feature-flag check here: `generate` already refuses to run with
+    # FITNESS_COACH_REVIEW off, and a second gate would only make this
+    # helper return nothing for a reason that has nothing to do with the
+    # library.
+    try:
+        if science.coverage(db, user_id)["accepted_total"] == 0:
+            return []
+    except Exception as exc:
+        logger.info("fitness review: science coverage unreadable: %s", exc)
+        return []
+
+    athlete = _science_athlete_context(state)
+    collected: Dict[str, ScienceSearchHit] = {}
+    for query, topics in REVIEW_EVIDENCE_QUERIES:
+        try:
+            hits = await science.search(
+                db, user_id, query, topics=topics, athlete=athlete, limit=2,
+            )
+        except Exception as exc:
+            logger.info(
+                "fitness review: science retrieval failed for %r: %s",
+                query[:40], exc,
+            )
+            continue
+        for hit in hits:
+            # One passage per record across all three queries. Three
+            # paragraphs of one paper read as three sources, which is the
+            # quiet way a single study becomes "the literature".
+            collected.setdefault(hit.record_id, hit)
+
+    ranked = sorted(
+        collected.values(), key=lambda hit: hit.score, reverse=True,
+    )
+    return ranked[:MAX_EVIDENCE_PASSAGES]
+
+
+def _science_athlete_context(state: FitnessStateV1) -> science.AthleteContext:
+    """Applicability context from the state's own profile section.
+
+    Taken from the state rather than re-queried so the evidence is scored
+    against the same snapshot the review reasons over. A profile edited
+    mid-review would otherwise rank the evidence against one athlete
+    description and the review text against another.
+    """
+    profile = state.profile
+    if profile is None:
+        return science.AthleteContext()
+    level = getattr(profile, "training_level", None)
+    level = getattr(level, "value", level)
+    sex = getattr(profile, "calculation_sex", None)
+    sex = getattr(sex, "value", sex)
+    if sex in ("unknown", "prefer_not_to_say"):
+        sex = None
+    if level == "unknown":
+        level = None
+    # Age from `date_of_birth`, which is the field the profile actually
+    # carries — there is no `age_years`, and a getattr for one would have
+    # silently returned None and dropped the older/youth signal entirely.
+    age = None
+    born = getattr(profile, "date_of_birth", None)
+    if born is not None:
+        today = state.athlete_local_date
+        age = today.year - born.year - (
+            (today.month, today.day) < (born.month, born.day)
+        )
+    return science.AthleteContext(training_level=level, sex=sex, age=age)
+
+
+def _cited_science(output: CoachReviewOutputV1) -> List[Dict[str, Any]]:
+    """Citations the model claimed, as raw dicts for validation.
+
+    `evidence_refs` carries both metric paths (checked by
+    `safety.validate_references`) and science chunk ids. They are told
+    apart by shape: a metric path contains a dot and a chunk id is a uuid.
+    Anything that is neither is left for the metric validator to reject, so
+    a malformed ref cannot slip through by failing both checks.
+    """
+    cited: List[Dict[str, Any]] = []
+    for ref in output.referenced_evidence():
+        token = (ref or "").strip()
+        if not token or "." in token:
+            continue
+        cited.append({"chunk_id": token})
+    return cited
+
+
+def _store_citations(
+    db: Session,
+    user_id: str,
+    review_id: str,
+    citations: Sequence["ScienceCitation"],
+    *,
+    offered: int,
+) -> None:
+    """Persist the validated citation trail on the review row.
+
+    `science_offered` is stored even when nothing was cited, because a
+    review that was given no evidence and one where retrieval never ran are
+    different things: the first is a fact about the library, the second is
+    a bug, and one NULL cannot say which.
+    """
+    from sqlalchemy import text as sql_text
+
+    try:
+        db.execute(sql_text("""
+            UPDATE fitness_coach_review SET
+                science_citations = CAST(:citations AS JSONB),
+                science_policy_version = :policy,
+                science_offered = :offered
+            WHERE id = :id AND user_id = :u
+        """), {
+            "citations": json.dumps([
+                citation.model_dump(mode="json") for citation in citations
+            ]),
+            "policy": science.SCIENCE_RANKING_POLICY_VERSION,
+            "offered": offered, "id": review_id, "u": user_id,
+        })
+    except Exception as exc:
+        # The review itself is already complete and worth keeping. A lost
+        # citation trail is a gap in the audit, not a reason to fail a
+        # review the athlete is waiting for — and the log says which review.
+        logger.warning(
+            "fitness review %s: citation trail not stored: %s",
+            review_id, exc,
+        )
 
 
 async def _call_and_parse(
     state: FitnessStateV1,
+    evidence: Optional[Sequence[ScienceSearchHit]] = None,
 ) -> Tuple[Optional[CoachReviewOutputV1], Optional[str], List[str]]:
     """One call, then at most one repair. Returns (output, model, errors)."""
     payload = compact_for_prompt(state)
     allowed = state.metric_paths()
+    passages = [
+        hit.model_dump(mode="json") for hit in (evidence or [])
+    ]
     user_prompt = prompt_module.build_user_prompt(
-        payload, allowed, has_science_corpus=False,
+        payload, allowed,
+        has_science_corpus=bool(passages), evidence=passages or None,
     )
 
     content, model_actual = await _chat(
@@ -409,6 +621,9 @@ async def _call_and_parse(
             return output, model_actual, []
         errors = reference_errors
 
+    # The repair turn re-sends the same evidence. Dropping it would let the
+    # repaired output cite ids it can no longer see, which the validator
+    # then strips — a repair that silently loses the citations.
     repair_prompt = (
         user_prompt + "\n\n" + prompt_module.build_repair_prompt(errors)
     )
