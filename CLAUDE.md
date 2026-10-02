@@ -125,7 +125,7 @@ production, which is what the 2026-09-29 incident was. Use `scripts/sara-prod`.
   registrations go OUTSIDE any try/except (gotcha 3 below); the older ones are
   wrapped, which is how a router can vanish silently.
 - `app/services/` — 355 modules. This is where the system actually is.
-- `app/tools/` — 263 registered tools across 46 categories in
+- `app/tools/` — 272 registered tools across 46 categories in
   `app/tools/registry.py`. `tool_retrieval.MAX_TOOLS_PER_CALL = 35` caps the per-turn
   menu. `tool_mutation.gate_mutating_tools` filters mutating tools at the final
   tool-schema boundary; it has several call sites (the post-branch chat call, the
@@ -236,7 +236,7 @@ blocked via `sara_interest.blocked`, not deleted.
 - **Migration scripts** at `backend/migrate_users.py`, `add_folder_column.py`,
   `add_note_connections.py` exist but are historical one-shots from the
   SQLite→Postgres era. Schema changes go through alembic in
-  `backend/alembic/versions/` (head: `158_reminder_delivery_state`).
+  `backend/alembic/versions/` (head: `174_fitness_automation`).
   `DATABASE_URL` must be set explicitly; there is no default target.
 
 ## 9. Environment variables

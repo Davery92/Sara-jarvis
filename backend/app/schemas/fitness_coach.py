@@ -2415,6 +2415,21 @@ class AutomationOutcome(BaseModel):
         return self
 
 
+class PeriodCoverage(str, Enum):
+    """How much of a period was actually recorded.
+
+    Its own enum rather than `Quality`, which is a per-metric flag set
+    (stale, sparse, outlier_present) and has no grade in it — reusing it
+    here was wrong and failed on the first read. Not `ReadinessCoverage`
+    either: that one is about one day's check-in.
+    """
+    #: Most days recorded. A comparison between two of these is defensible.
+    GOOD = "good"
+    PARTIAL = "partial"
+    #: A claim from this much is a claim about this much.
+    SPARSE = "sparse"
+
+
 class LongitudinalPeriod(BaseModel):
     """One comparable stretch of training.
 
@@ -2443,7 +2458,7 @@ class LongitudinalPeriod(BaseModel):
     sleep_mean: Optional[Metric] = None
     #: Observed days over expected, for the period as a whole. A
     #: longitudinal claim from 20% coverage is a claim about the 20%.
-    coverage: Optional[Quality] = None
+    coverage: Optional[PeriodCoverage] = None
     coverage_ratio: Optional[float] = None
     notes: List[str] = Field(default_factory=list)
 

@@ -1499,3 +1499,284 @@ def _draft_payload(stored: "Any") -> Dict[str, Any]:
         "resulting_revision_id": stored.resulting_revision_id,
         "decision_reason": stored.decision_reason,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Approved automation, longitudinal history, privacy (Step 30)
+# ─────────────────────────────────────────────────────────────────────────
+
+
+@router.get("/automation/policies")
+def list_automation_policies(
+    user_id: str = Depends(current_athlete),
+    db: Session = Depends(get_db),
+) -> List[Dict[str, Any]]:
+    """Every policy, revoked ones included.
+
+    Revoked included deliberately: "what did I turn off, and when" is a
+    question somebody asks, and a list that hid them would make a revoked
+    policy indistinguishable from one that never existed.
+    """
+    from app.services.fitness import automation
+
+    return [
+        policy.model_dump(mode="json")
+        for policy in automation.list_policies(db, user_id)
+    ]
+
+
+@router.post("/automation/policies")
+def grant_automation_policy(
+    payload: Dict[str, Any] = Body(...),
+    user_id: str = Depends(current_athlete),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Grant one permission.
+
+    `approved_by` is the authenticated athlete, never a parameter: a route
+    that took a caller-supplied approver would let the autonomous loop
+    approve its own permissions, which is what
+    `ck_automation_approved_by` refuses at the database.
+    """
+    from app.schemas.fitness_coach import AutomationPolicyIn
+    from app.services.fitness import automation
+
+    try:
+        parsed = AutomationPolicyIn.model_validate(payload)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    try:
+        policy = automation.grant_policy(
+            db, user_id, parsed, approved_by=user_id,
+        )
+    except automation.AutomationError as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc))
+    return policy.model_dump(mode="json")
+
+
+@router.post("/automation/policies/{action}/enabled")
+def set_automation_enabled(
+    action: str,
+    enabled: bool = Body(..., embed=True),
+    user_id: str = Depends(current_athlete),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Switch a policy off or on.
+
+    Off means the next attempt is denied — the gate reads `enabled` on
+    every action, so there is no in-flight window to drain.
+    """
+    from app.schemas.fitness_coach import AutomationAction
+    from app.services.fitness import automation
+
+    try:
+        parsed = AutomationAction(action)
+    except ValueError:
+        raise HTTPException(
+            status_code=422, detail=f"{action!r} is not an automation action",
+        )
+    try:
+        policy = automation.set_enabled(db, user_id, parsed, enabled)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="No such policy")
+    return policy.model_dump(mode="json")
+
+
+@router.delete("/automation/policies/{action}")
+def revoke_automation_policy(
+    action: str,
+    reason: str = Query(..., min_length=3, max_length=500),
+    user_id: str = Depends(current_athlete),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Withdraw a permission permanently, with its reason kept."""
+    from app.schemas.fitness_coach import AutomationAction
+    from app.services.fitness import automation
+
+    try:
+        parsed = AutomationAction(action)
+    except ValueError:
+        raise HTTPException(
+            status_code=422, detail=f"{action!r} is not an automation action",
+        )
+    try:
+        return automation.revoke_policy(db, user_id, parsed, reason=reason)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="No such policy")
+
+
+@router.get("/automation/actions")
+def list_automation_actions(
+    limit: int = Query(30, ge=1, le=200),
+    user_id: str = Depends(current_athlete),
+    db: Session = Depends(get_db),
+) -> List[Dict[str, Any]]:
+    """What the automation did and did not do.
+
+    Denials included: "why did nothing happen on Tuesday" is the question
+    this answers, and a log of successes answers it with silence.
+    """
+    from app.services.fitness import automation
+
+    return automation.recent_actions(db, user_id, limit=limit)
+
+
+@router.get("/automation/health")
+def automation_health(
+    days: int = Query(30, ge=1, le=365),
+    user_id: str = Depends(current_athlete),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """§30.5. Denials grouped by reason.
+
+    An automation denied every day for insufficient coverage is not working
+    as agreed — it is configured for data that does not exist, and the fix
+    is a conversation rather than a wider bound.
+    """
+    from app.services.fitness import automation
+
+    return automation.health(db, user_id, days=days)
+
+
+@router.get("/longitudinal")
+def longitudinal_summary(
+    start: date = Query(...),
+    end: date = Query(...),
+    user_id: str = Depends(current_athlete),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Multi-month history, split by goal and qualified by coverage.
+
+    §30.1. The `not_compared` list is the result, not an apology: "these
+    two blocks cannot be compared because one of them has eleven food logs"
+    is more useful than a number computed anyway.
+    """
+    from app.services.fitness import longitudinal
+
+    try:
+        return longitudinal.compare(db, user_id, start, end).model_dump(
+            mode="json"
+        )
+    except FitnessDataError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.get("/sources")
+def list_sources(
+    user_id: str = Depends(current_athlete),
+    db: Session = Depends(get_db),
+) -> List[Dict[str, Any]]:
+    """Registered data sources and what each may write.
+
+    HealthKit is here as the baseline: §30.4 keeps it supported, and the
+    way to keep that true is for it to be described by the same contract a
+    future source will be.
+    """
+    from sqlalchemy import text as sql_text
+
+    from app.services.fitness import sources
+
+    try:
+        sources.ensure_healthkit(db, None)
+    except Exception as exc:
+        logger.info("healthkit contract not ensured: %s", exc)
+
+    rows = db.execute(sql_text("""
+        SELECT id, user_id, kind, vendor, external_id_field, writes_metrics,
+               timestamp_convention, requires_consent, may_overwrite,
+               consented_at, enabled
+        FROM fitness_source_adapter
+        WHERE user_id = :u OR user_id IS NULL
+        ORDER BY vendor ASC
+    """), {"u": user_id}).fetchall()
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        item = dict(row._mapping)
+        if item.get("consented_at"):
+            item["consented_at"] = item["consented_at"].isoformat()
+        out.append(item)
+    return out
+
+
+@router.post("/sources/{vendor}/consent")
+def set_source_consent(
+    vendor: str,
+    consented: bool = Body(..., embed=True),
+    user_id: str = Depends(current_athlete),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Grant or withdraw consent for one source.
+
+    Withdrawing disables it in the same statement: a source that keeps
+    writing after consent is withdrawn is the failure this field exists to
+    prevent.
+    """
+    from app.services.fitness import sources
+
+    try:
+        return sources.set_consent(db, user_id, vendor, consented)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="No such source")
+
+
+@router.get("/export")
+def export_fitness(
+    user_id: str = Depends(current_athlete),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Everything the fitness subsystem holds about this athlete.
+
+    The response says what it could not read and what it truncated. A
+    partial export presented as complete is worse than a failed one:
+    somebody checking whether their data is all there would conclude it is.
+    """
+    from app.services.fitness import privacy
+
+    result = privacy.export_fitness_data(db, user_id)
+    return {
+        "user_id": result.user_id,
+        "generated_at": result.generated_at.isoformat(),
+        "complete": result.complete,
+        "counts": result.counts,
+        "unreadable": result.unreadable,
+        "truncated": result.truncated,
+        "absent": result.absent,
+        "tables": result.tables,
+    }
+
+
+@router.post("/delete-my-data")
+def delete_fitness(
+    confirm_user_id: str = Body(..., embed=True),
+    user_id: str = Depends(current_athlete),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Delete this athlete's fitness data.
+
+    The confirmation is the athlete's own id rather than a boolean: a stray
+    `true` from a mis-parsed request deletes a training history, and the id
+    is the one value a caller cannot supply by accident.
+
+    `health_metric` and `action_receipt` are kept and named in the
+    response — the first is the authority for body numbers across the whole
+    system, and emptying it from a fitness-scoped call would take the
+    health history with it.
+    """
+    from app.services.fitness import privacy
+
+    try:
+        result = privacy.delete_fitness_data(
+            db, user_id, confirm=confirm_user_id,
+        )
+    except FitnessDataError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return {
+        "user_id": result.user_id,
+        "complete": result.complete,
+        "deleted": result.deleted,
+        "failed": result.failed,
+        "pending_cleanup": result.pending_cleanup,
+        "kept_tables": result.kept_tables,
+        "absent": result.absent,
+    }
