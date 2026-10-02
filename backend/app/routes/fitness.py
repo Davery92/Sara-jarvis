@@ -5435,7 +5435,19 @@ async def check_and_record_pr(
               {live_only}
         """), {"user_id": user_id, "exercise_name": exercise_name}).fetchone()
 
-        is_pr = current_best is None or current_best.best_1rm is None or estimated_1rm > current_best.best_1rm
+        # `float(...)` on the stored value is load-bearing, not tidying.
+        #
+        # `estimated_1rm` is a Python float and `best_1rm` comes back as a
+        # Decimal. Python compares the two EXACTLY, and the float nearest to
+        # 253.12 is 253.12000000000000454…, which is strictly greater than
+        # Decimal('253.12'). So repeating a lift at the same weight and reps
+        # registered as a new PR every single time — the record was "broken"
+        # by matching it, which is the one thing a PR must not do. Comparing
+        # float to float makes the tie a tie.
+        best = float(current_best.best_1rm) if (
+            current_best is not None and current_best.best_1rm is not None
+        ) else None
+        is_pr = best is None or estimated_1rm > best
 
         if is_pr:
             pr_id = str(uuid.uuid4())
@@ -5445,8 +5457,22 @@ async def check_and_record_pr(
             extra_cols = (
                 ", pr_kind, formula_version, load_unit" if has_withdrawal else ""
             )
+            # `brzycki_v1`, because `calculate_estimated_1rm` above IS
+            # Brzycki — `weight * 36/(37-reps)`, capped at 12 reps. Labelling
+            # it Epley would be worse than labelling nothing: a stored
+            # formula version is only useful if it names the formula that was
+            # actually applied, and a wrong one would silently reinterpret
+            # every historical record.
+            #
+            # `app/services/fitness/analytics.py` uses Epley for its own
+            # e1RM, per the plan's §9.5. The two deliberately differ for now:
+            # changing the PR ledger's formula would retroactively re-rank
+            # every record an athlete already has, which is their decision
+            # rather than a side effect of this refactor. Step 18's
+            # consumer-parity work is where that gets reconciled, and the
+            # version column is what makes it reconcilable at all.
             extra_vals = (
-                ", 'estimated_1rm', 'epley_v1', 'lb'" if has_withdrawal else ""
+                ", 'estimated_1rm', 'brzycki_v1', 'lb'" if has_withdrawal else ""
             )
             db.execute(text(f"""
                 INSERT INTO exercise_pr (id, user_id, exercise_name, weight, reps, estimated_1rm, achieved_at, workout_set_id{extra_cols})
@@ -5466,7 +5492,7 @@ async def check_and_record_pr(
                 "is_pr": True,
                 "pr_id": pr_id,
                 "estimated_1rm": estimated_1rm,
-                "previous_best": current_best.best_1rm if current_best and current_best.best_1rm else None
+                "previous_best": best
             }
 
         return {"is_pr": False, "estimated_1rm": estimated_1rm}

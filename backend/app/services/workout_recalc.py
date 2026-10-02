@@ -404,8 +404,15 @@ def _promote_next_pr(
               OR (CAST(:canon AS VARCHAR) IS NULL
                   AND LOWER(TRIM(w.exercise_id)) = LOWER(TRIM(CAST(:name AS VARCHAR))))
           )
-        -- Epley ordering, matching the stored formula: load * (1 + reps/30).
-        ORDER BY COALESCE(w.load_value, w.weight) * (1 + w.reps::numeric / 30) DESC,
+        -- Brzycki, matching `routes/fitness.calculate_estimated_1rm` exactly:
+        -- `weight * 36/(37 - reps)`, with reps capped at 12 as that function
+        -- caps it. Ordering by a DIFFERENT formula than the writer records
+        -- would promote a set the writer would not have chosen, so the
+        -- athlete's displayed best and their stored record would disagree.
+        -- (app/services/fitness/analytics.py uses Epley for its own e1RM;
+        -- see the note at the PR insert for why the two are not yet one.)
+        ORDER BY COALESCE(w.load_value, w.weight)
+                 * 36.0 / (37 - LEAST(w.reps, 12)) DESC,
                  COALESCE(w.session_time, w.created_at) DESC
         LIMIT 1
     """), {"uid": user_id, "canon": canonical_id, "name": exercise_name,
