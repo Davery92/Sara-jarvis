@@ -47,26 +47,48 @@ const RecoveryTrendChart: React.FC<RecoveryTrendChartProps> = ({ days = 30, comp
     }
   }
 
+  /**
+   * Minimum readings before a first-half/second-half comparison is called a
+   * trend. Four readings means two per half, and two numbers differing is
+   * not a direction — it is the gap between two days.
+   */
+  const MIN_READINGS_FOR_TREND = 6
+
+  /**
+   * Stats, with `null` for "not recorded" rather than 0.
+   *
+   * Returning `{avg: 0}` and rendering it through `avg > 0 ? … : '--'` worked
+   * by accident: it also hides a genuine zero, and `trend: 0` made the arrow
+   * vanish for a metric that really had not moved, which is a different
+   * statement from having no data.
+   */
   const calculateStats = (metric: keyof RecoveryData) => {
     const values = recoveryData
       .map(d => d[metric] as number)
       .filter(v => v !== null && v !== undefined && !isNaN(v))
 
-    if (values.length === 0) return { avg: 0, min: 0, max: 0, trend: 0 }
+    const observed = values.length
+    const expected = recoveryData.length
+    if (observed === 0) {
+      return { avg: null, min: null, max: null, trend: null, observed, expected }
+    }
 
-    const avg = values.reduce((a, b) => a + b, 0) / values.length
+    const avg = values.reduce((a, b) => a + b, 0) / observed
     const min = Math.min(...values)
     const max = Math.max(...values)
 
-    // Calculate trend: compare first half vs second half
-    const midpoint = Math.floor(values.length / 2)
+    if (observed < MIN_READINGS_FOR_TREND) {
+      return { avg, min, max, trend: null, observed, expected }
+    }
+
+    const midpoint = Math.floor(observed / 2)
     const firstHalf = values.slice(0, midpoint)
     const secondHalf = values.slice(midpoint)
     const firstAvg = firstHalf.reduce((a, b) => a + b, 0) / firstHalf.length
     const secondAvg = secondHalf.reduce((a, b) => a + b, 0) / secondHalf.length
-    const trend = ((secondAvg - firstAvg) / firstAvg) * 100
+    const trend = firstAvg === 0 ? null : ((secondAvg - firstAvg) / firstAvg) * 100
 
-    return { avg, min, max, trend }
+    return { avg, min, max, trend, observed, expected }
   }
 
   const getMetricColor = (metric: string) => {
@@ -113,6 +135,50 @@ const RecoveryTrendChart: React.FC<RecoveryTrendChartProps> = ({ days = 30, comp
     const minValue = Math.min(...values)
     const range = maxValue - minValue || 1
 
+    // x is placed by DATE, not by row index. Index spacing drew a reading on
+    // the 1st, the 2nd and the 29th as three evenly spaced points, so the
+    // three-week gap vanished and the line read as a steady trend.
+    const times = recoveryData
+      .map(d => new Date(d.log_date).getTime())
+      .filter(t => !isNaN(t))
+    const firstTime = times.length ? Math.min(...times) : 0
+    const lastTime = times.length ? Math.max(...times) : 0
+    const timeSpan = lastTime - firstTime || 1
+
+    const points = recoveryData.map(d => {
+      const value = d[selectedMetric] as number
+      const time = new Date(d.log_date).getTime()
+      if (value === null || value === undefined || isNaN(value) || isNaN(time)) {
+        return null
+      }
+      return {
+        log_date: d.log_date,
+        value,
+        x: ((time - firstTime) / timeSpan) * 100,
+        y: 100 - ((value - minValue) / range) * 100,
+      }
+    })
+
+    // Contiguous runs, so the line BREAKS at a gap. Filtering the missing
+    // rows out of one polyline joined the readings either side of a gap and
+    // drew a segment through days nobody logged — the same invented data a
+    // Recharts `connectNulls={true}` produces.
+    const runs: Array<Array<{ x: number; y: number }>> = []
+    let run: Array<{ x: number; y: number }> = []
+    for (const point of points) {
+      if (point === null) {
+        if (run.length) runs.push(run)
+        run = []
+        continue
+      }
+      run.push({ x: point.x, y: point.y })
+    }
+    if (run.length) runs.push(run)
+
+    const plotted = points.filter(Boolean) as Array<{
+      log_date: string; value: number; x: number; y: number
+    }>
+
     return (
       <div className="relative h-64">
         {/* Y-axis labels */}
@@ -133,41 +199,35 @@ const RecoveryTrendChart: React.FC<RecoveryTrendChartProps> = ({ days = 30, comp
 
           {/* Data points and line */}
           <svg className="absolute inset-0 w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none">
-            {/* Line */}
-            <polyline
-              points={recoveryData.map((d, i) => {
-                const value = d[selectedMetric] as number
-                if (value === null || value === undefined) return null
-                const x = (i / (recoveryData.length - 1 || 1)) * 100
-                const y = 100 - ((value - minValue) / range) * 100
-                return `${x},${y}`
-              }).filter(Boolean).join(' ')}
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              className={getMetricColor(selectedMetric)}
-              vectorEffect="non-scaling-stroke"
-            />
-
+            {/* One polyline per contiguous run. A gap in the log is a gap in
+                the line, not a straight segment across it. */}
+            {runs.map((segment, index) => (
+              <polyline
+                key={index}
+                points={segment.map(p => `${p.x},${p.y}`).join(' ')}
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                className={getMetricColor(selectedMetric)}
+                vectorEffect="non-scaling-stroke"
+              />
+            ))}
           </svg>
 
           {/* Data point markers — rendered as HTML so they stay perfectly round
               regardless of the chart's width (SVG circles get stretched by
               preserveAspectRatio="none") */}
-          {recoveryData.map((d, i) => {
-            const value = d[selectedMetric] as number
-            if (value === null || value === undefined) return null
-            const x = (i / (recoveryData.length - 1 || 1)) * 100
-            const y = 100 - ((value - minValue) / range) * 100
-            return (
-              <div
-                key={i}
-                className={`absolute w-1.5 h-1.5 rounded-full ring-2 ring-[#0f1a2c] ${getMetricBgColor(selectedMetric)}`}
-                style={{ left: `${x}%`, top: `${y}%`, transform: 'translate(-50%, -50%)' }}
-                title={`${new Date(d.log_date).toLocaleDateString()}: ${value}`}
-              />
-            )
-          })}
+          {plotted.map((point) => (
+            <div
+              key={point.log_date}
+              className={`absolute w-1.5 h-1.5 rounded-full ring-2 ring-[#0f1a2c] ${getMetricBgColor(selectedMetric)}`}
+              style={{
+                left: `${point.x}%`, top: `${point.y}%`,
+                transform: 'translate(-50%, -50%)',
+              }}
+              title={`${new Date(point.log_date).toLocaleDateString()}: ${point.value}`}
+            />
+          ))}
         </div>
 
         {/* X-axis labels (dates) */}
@@ -182,6 +242,20 @@ const RecoveryTrendChart: React.FC<RecoveryTrendChartProps> = ({ days = 30, comp
           )}
         </div>
       </div>
+    )
+  }
+
+  /** Coverage for whatever the chart is currently showing. */
+  const renderCoverage = () => {
+    const stats = calculateStats(selectedMetric)
+    if (stats.observed === 0) return null
+    return (
+      <p className="text-[11px] text-slate-500 mt-2" data-testid="recovery-coverage">
+        {stats.observed} of the last {days} days have a
+        {' '}{selectedMetric.replace(/_/g, ' ')} reading. Points sit on their
+        real dates and the line breaks where nothing was logged — a flat
+        stretch means flat, not missing.
+      </p>
     )
   }
 
@@ -228,7 +302,9 @@ const RecoveryTrendChart: React.FC<RecoveryTrendChartProps> = ({ days = 30, comp
             >
               <div className="flex items-center justify-between mb-2">
                 <Icon className="w-5 h-5" />
-                {stats.trend !== 0 && (
+                {/* No arrow without enough readings to call it a direction.
+                    Two numbers differing is the gap between two days. */}
+                {stats.trend !== null && stats.trend !== 0 && (
                   stats.trend > 0 ? (
                     <TrendingUp className="w-4 h-4 text-green-400" />
                   ) : (
@@ -239,12 +315,15 @@ const RecoveryTrendChart: React.FC<RecoveryTrendChartProps> = ({ days = 30, comp
               <div className="text-left">
                 <div className="text-xs font-medium mb-1">{metric.label}</div>
                 <div className="text-lg font-bold">
-                  {stats.avg > 0 ? stats.avg.toFixed(1) : '--'}
+                  {stats.avg !== null ? stats.avg.toFixed(1) : '--'}
                   <span className="text-xs font-normal ml-1">{metric.unit}</span>
                 </div>
-                {stats.avg > 0 && (
+                {stats.avg !== null && stats.min !== null && stats.max !== null && (
                   <div className="text-xs opacity-75 mt-1">
                     {stats.min.toFixed(0)}-{stats.max.toFixed(0)} {metric.unit}
+                    {/* The denominator, so a mean of two days does not read
+                        like a mean of thirty. */}
+                    <span className="ml-1">· {stats.observed}d</span>
                   </div>
                 )}
               </div>
@@ -255,6 +334,7 @@ const RecoveryTrendChart: React.FC<RecoveryTrendChartProps> = ({ days = 30, comp
 
       {/* Chart */}
       {renderChart()}
+      {renderCoverage()}
 
       {/* Stats summary */}
       {recoveryData.length > 0 && (
@@ -267,19 +347,28 @@ const RecoveryTrendChart: React.FC<RecoveryTrendChartProps> = ({ days = 30, comp
             <div>
               <div className="text-slate-400 mb-1">Avg HRV</div>
               <div className="text-white font-semibold">
-                {calculateStats('hrv').avg > 0 ? `${calculateStats('hrv').avg.toFixed(0)} ms` : '--'}
+                {(() => {
+                  const s = calculateStats('hrv')
+                  return s.avg !== null ? `${s.avg.toFixed(0)} ms · ${s.observed}d` : '--'
+                })()}
               </div>
             </div>
             <div>
               <div className="text-slate-400 mb-1">Avg Sleep</div>
               <div className="text-white font-semibold">
-                {calculateStats('sleep_hours').avg > 0 ? `${calculateStats('sleep_hours').avg.toFixed(1)} hrs` : '--'}
+                {(() => {
+                  const s = calculateStats('sleep_hours')
+                  return s.avg !== null ? `${s.avg.toFixed(1)} hrs · ${s.observed}d` : '--'
+                })()}
               </div>
             </div>
             <div>
               <div className="text-slate-400 mb-1">Avg Soreness</div>
               <div className="text-white font-semibold">
-                {calculateStats('soreness_level').avg > 0 ? `${calculateStats('soreness_level').avg.toFixed(1)}/10` : '--'}
+                {(() => {
+                  const s = calculateStats('soreness_level')
+                  return s.avg !== null ? `${s.avg.toFixed(1)}/10 · ${s.observed}d` : '--'
+                })()}
               </div>
             </div>
           </div>

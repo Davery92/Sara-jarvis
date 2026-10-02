@@ -347,6 +347,21 @@ def weight_metrics(
             goal_rate_unit or Unit.KG_PER_WEEK,
         )
 
+    # The plotted series, over the longest window this function summarises.
+    # Real dates with real gaps: a chart built by spacing the readings evenly
+    # would draw a smooth line through days nobody weighed in on, and a
+    # plateau is exactly what a reader would then conclude from the invented
+    # segment.
+    plot_period = window(as_of, 28)
+    for value in sorted(_in(plot_period, values), key=lambda v: v.day):
+        group.items.append({
+            "date": value.day.isoformat(),
+            "value": value.value,
+            "unit": value.unit.value,
+            "source_count": value.source_count,
+            "quality_flags": [flag.value for flag in value.quality_flags],
+        })
+
     if goal_changed_on is not None and window(as_of, 28).contains(goal_changed_on):
         # A window spanning a goal change describes two different intents, so
         # the aggregate over it is not evidence about either.

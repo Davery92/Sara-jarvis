@@ -702,6 +702,15 @@ def load_training_sessions(
     active session with no planned parent is an unplanned session. Two
     sessions on the same date stay two sessions — a two-a-day is not a
     duplicate, which is why the key is the session id and not the date.
+
+    The legacy `workout` aggregate counts too, and had to be added for Step
+    18: the chat tool (`WorkoutLogCreateTool`) writes a `workout` row with no
+    `workout_session` behind it, so a session David logged by talking existed
+    nowhere in this projection and "how many times did I train" came back
+    short. It is included only when its sets are not already attributed to a
+    planned or active session, because `workout_log` rows carry all three
+    foreign keys and counting them twice is the failure this function exists
+    to prevent.
     """
     uid = _require_user(user_id)
     validate_span(start_date, end_date)
@@ -774,6 +783,53 @@ def load_training_sessions(
             was_planned=False,
             total_sets_completed=int(a.get("total_sets_completed") or 0),
             snapshot=_as_json(a.get("workout_snapshot")) or {},
+        ))
+
+    # The legacy `workout` aggregate, for bouts that exist only there.
+    legacy = db.execute(text("""
+        SELECT w.id,
+               w.title,
+               w.status,
+               w.created_at,
+               MIN(wl.session_date)                        AS session_date,
+               COUNT(wl.id)                                AS sets_logged,
+               COUNT(DISTINCT wl.session_id)               AS planned_links,
+               COUNT(DISTINCT wl.active_session_id)        AS active_links,
+               MIN(wl.session_id)                          AS a_planned_id,
+               MIN(wl.active_session_id)                   AS an_active_id
+        FROM workout w
+        JOIN workout_log wl ON wl.workout_id = w.id AND wl.user_id = w.user_id
+        WHERE w.user_id = :uid
+          AND wl.session_date >= :start AND wl.session_date < :end
+          AND wl.voided_at IS NULL
+        GROUP BY w.id, w.title, w.status, w.created_at
+        ORDER BY MIN(wl.session_date) ASC
+        LIMIT :lim
+    """), {"uid": uid, "start": start_date, "end": end_date, "lim": MAX_ROWS}).fetchall()
+
+    seen_planned = {s.planned_session_id for s in out if s.planned_session_id}
+    seen_active = {s.active_session_id for s in out if s.active_session_id}
+    for r in legacy:
+        m = dict(r._mapping)
+        if m.get("a_planned_id") in seen_planned and m.get("planned_links"):
+            continue
+        if m.get("an_active_id") in seen_active and m.get("active_links"):
+            continue
+        out.append(TrainingSessionRow(
+            key=m["id"],
+            user_id=uid,
+            session_date=m["session_date"],
+            planned_session_id=None,
+            active_session_id=None,
+            template_id=None,
+            status=m.get("status") or "unknown",
+            started_at=None,
+            completed_at=None,
+            # No `workout_session` row means nothing prescribed it, so it is
+            # an unplanned bout as far as adherence is concerned.
+            was_planned=False,
+            total_sets_completed=int(m.get("sets_logged") or 0),
+            snapshot={},
         ))
 
     out.sort(key=lambda s: (s.session_date or date.min, s.started_at or datetime.min.replace(tzinfo=UTC)))

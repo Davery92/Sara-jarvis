@@ -4413,10 +4413,25 @@ async def get_today_nutrition_target(
     db: Session = Depends(get_db),
 ):
     """
-    Return today's nutrition target, picking training-day vs rest-day macros from
-    the active phase based on whether a workout_session is scheduled for the date.
+    Return today's nutrition target and whether today is a training day.
 
-    Falls back to single (weekly average) targets if no cycling is configured.
+    FITNESS_COACH_IMPLEMENTATION_PLAN Step 18: both answers now come from the
+    shared resolvers, so the dashboard cannot disagree with the chat context,
+    the Coach API or a coach review about what today prescribes.
+
+    What this used to do, and why it drifted:
+
+    * it re-implemented training-day detection inline (its own
+      `workout_session` lookup plus its own `scheduled_days` scan) rather
+      than calling `training_day.is_training_day()`, which already unified
+      those two signals. Any fix to one was not a fix to the other;
+    * it read the phase's macro columns directly. Those are mutable and track
+      the CURRENT target, so a question about a past date got today's macros
+      and a dated revision was ignored entirely.
+
+    The response shape is unchanged — the web dashboard, the food log and the
+    iOS app all read it — with `target_provenance` added so a caller can tell
+    an approved revision from a legacy column.
     """
     # Use Eastern (user) date — date.today() would use the server's UTC clock
     # and roll over hours early/late, mislabeling the day near midnight.
@@ -4426,60 +4441,26 @@ async def get_today_nutrition_target(
     phase = reconcile_active_program_phase_statuses(db, user_id, target_date)
     db.commit()
 
-    if not phase:
+    from app.services.fitness.targets import resolve_day_type, resolve_targets
+
+    day_type = resolve_day_type(db, user_id, target_date)
+    resolved = resolve_targets(db, user_id, target_date, day_type)
+    values = resolved.values
+    target = {
+        "calories": values.calories,
+        "protein": values.protein_g,
+        "carbs": values.carbs_g,
+        "fat": values.fat_g,
+    }
+
+    if not phase and not any(target.values()):
         return {
             "date": target_date.isoformat(),
-            "is_training_day": False,
+            "is_training_day": day_type.value == "training",
+            "day_type": day_type.value,
             "phase": None,
             "target": None,
-        }
-
-    # Is today a training day? Two independent signals, either one counts:
-    #   1. A materialized workout_session exists for the date (created by
-    #      activate_phase / toggle-training-day / actually logging a workout).
-    #   2. A template is *scheduled* for this weekday (plan-imported phases set
-    #      status='active' without ever materializing sessions, so the schedule
-    #      is the only signal). Mirrors /templates/today and the iOS fallback.
-    sess = db.execute(text("""
-        SELECT id FROM workout_session
-        WHERE user_id = :uid AND session_date = :d
-        LIMIT 1
-    """), {"uid": user_id, "d": target_date}).fetchone()
-    is_training = sess is not None
-
-    if not is_training:
-        import json as _json
-        weekday = target_date.strftime("%A").lower()
-        # Templates from the active phase, or standalone (no phase) templates.
-        sched_templates = db.execute(text("""
-            SELECT scheduled_days
-            FROM fitness_template
-            WHERE user_id = :uid
-              AND (phase_id = :pid OR phase_id IS NULL)
-        """), {"uid": user_id, "pid": phase["id"]}).fetchall()
-        for trow in sched_templates:
-            try:
-                days = _json.loads(trow.scheduled_days or "[]")
-            except (ValueError, TypeError):
-                days = []
-            if weekday in [str(d).lower() for d in days]:
-                is_training = True
-                break
-
-    # Pick the right macros
-    if is_training:
-        target = {
-            "calories": phase.get("calories_training_day") or phase.get("calories_target"),
-            "protein": phase.get("protein_target"),
-            "carbs": phase.get("carbs_training_day") or phase.get("carbs_target"),
-            "fat": phase.get("fat_training_day") or phase.get("fat_target"),
-        }
-    else:
-        target = {
-            "calories": phase.get("calories_rest_day") or phase.get("calories_target"),
-            "protein": phase.get("protein_target"),
-            "carbs": phase.get("carbs_rest_day") or phase.get("carbs_target"),
-            "fat": phase.get("fat_rest_day") or phase.get("fat_target"),
+            "target_provenance": resolved.provenance.value,
         }
 
     # Compute deload state too — useful for the food log to show why training-day
@@ -4489,15 +4470,20 @@ async def get_today_nutrition_target(
 
     return {
         "date": target_date.isoformat(),
-        "is_training_day": is_training,
+        # Kept for the existing readers. `day_type` is the richer answer: it
+        # can say "unknown", which a boolean cannot, and a rest-day calorie
+        # target applied to a training day is a real misstatement.
+        "is_training_day": day_type.value == "training",
+        "day_type": day_type.value,
         "is_deload": deload["is_deload"],
         "week_of_phase": deload["week_of_phase"],
         "phase": {
             "id": phase["id"],
             "name": phase["name"],
             "daily_steps_target": phase.get("daily_steps_target"),
-        },
+        } if phase else None,
         "target": target,
+        "target_provenance": resolved.provenance.value,
     }
 
 

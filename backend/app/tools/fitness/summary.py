@@ -16,6 +16,39 @@ def get_fitness_db():
     return next(get_db())
 
 
+def _session_volume(day_sets) -> float:
+    """Tonnage for one session, from effective loads only.
+
+    A set whose effective load is unknown is left out rather than counted at
+    its recorded number: a dumbbell press logged as 40 is 80 moved, and an
+    assisted pull-up logged as 30 is 30 of *help*. Counting either as written
+    makes the volume wrong in a direction a reader cannot see.
+    """
+    total = 0.0
+    for item in day_sets:
+        load = item.get("effective_load")
+        reps = item.get("reps")
+        if load is None or not reps:
+            continue
+        total += float(load) * int(reps)
+    return round(total, 1)
+
+
+def _session_title(db, user_id: str, row) -> str:
+    """The session's template name, or a plain date label."""
+    if row.get("template_id"):
+        try:
+            name = db.execute(text("""
+                SELECT name FROM fitness_template
+                WHERE id = :id AND user_id = :uid
+            """), {"id": row["template_id"], "uid": user_id}).scalar()
+            if name:
+                return name
+        except Exception:
+            pass
+    return f"Session {row.get('date') or ''}".strip()
+
+
 class FitnessSummaryTool(BaseTool):
     """Get current fitness status and recent activity"""
 
@@ -45,138 +78,106 @@ class FitnessSummaryTool(BaseTool):
         days_back = kwargs.get("days_back", 3)
 
         db = get_fitness_db()
-        today = datetime.now(timezone.utc).date()
-        lookback_date = today - timedelta(days=days_back)
 
         try:
+            from app.services.fitness.consumers import (
+                athlete_local_today, nutrition_day, training_window,
+            )
+
+            # The athlete's today, not the server's UTC date. This used to be
+            # `datetime.now(timezone.utc).date()`, so from 20:00 ET onward it
+            # asked for tomorrow and "today's nutrition" came back empty every
+            # evening — the hours David is most likely to ask.
+            today = athlete_local_today(db, user_id)
+            lookback_date = today - timedelta(days=days_back)
+
             summary = {}
 
             # === TODAY'S NUTRITION ===
-            nutrition_sql = text("""
-                SELECT
-                    meal_type,
-                    food_items,
-                    calories,
-                    protein,
-                    carbs,
-                    fats,
-                    created_at
-                FROM food_log
-                WHERE user_id = :user_id
-                AND DATE(created_at) = :today
-                ORDER BY created_at DESC
-            """)
-
-            nutrition_result = db.execute(nutrition_sql, {
-                "user_id": user_id,
-                "today": today
-            })
-
-            meals = []
-            total_cals = 0
-            total_protein = 0
-            total_carbs = 0
-            total_fats = 0
-
-            for row in nutrition_result.fetchall():
-                # Parse food_items JSON to get food names
-                food_items = row.food_items
-                if isinstance(food_items, str):
-                    try:
-                        food_items = json.loads(food_items)
-                    except:
-                        food_items = []
-
-                # Extract food names from items
-                if isinstance(food_items, list):
-                    food_names = [item.get('name', str(item)) if isinstance(item, dict) else str(item) for item in food_items]
-                    food_display = ", ".join(food_names) if food_names else "Unknown"
-                else:
-                    food_display = str(food_items) if food_items else "Unknown"
-
-                meal = {
-                    "meal_type": row.meal_type,
-                    "food": food_display,
-                    "calories": row.calories or 0,
-                    "protein": row.protein or 0,
-                    "carbs": row.carbs or 0,
-                    "fats": row.fats or 0,
-                    "time": row.created_at.strftime("%H:%M") if row.created_at else None
+            # Delegated to the one implementation (Step 18). It resolves the
+            # day from `logged_at` (naive ET wall-clock), not `created_at`
+            # (naive UTC insert time): those are different days for every meal
+            # logged before 20:00 ET and for every meal entered after the fact,
+            # so this tool and the chat context used to report two different
+            # totals in the same turn.
+            day = nutrition_day(db, user_id, today)
+            meals = [
+                {
+                    "meal_type": meal["meal_type"],
+                    "food": meal["food"],
+                    "calories": meal["calories"] or 0,
+                    "protein": meal["protein"] or 0,
+                    "carbs": meal["carbs"] or 0,
+                    "fats": meal["fats"] or 0,
+                    "time": meal["time"],
                 }
-                meals.append(meal)
-                total_cals += row.calories or 0
-                total_protein += row.protein or 0
-                total_carbs += row.carbs or 0
-                total_fats += row.fats or 0
-
+                for meal in day["meals"]
+            ]
             summary["today_nutrition"] = {
                 "meals": meals,
                 "totals": {
-                    "calories": round(total_cals, 1),
-                    "protein": round(total_protein, 1),
-                    "carbs": round(total_carbs, 1),
-                    "fats": round(total_fats, 1)
+                    "calories": round(day["eaten"]["calories"], 1),
+                    "protein": round(day["eaten"]["protein"], 1),
+                    "carbs": round(day["eaten"]["carbs"], 1),
+                    "fats": round(day["eaten"]["fat"], 1),
                 },
-                "meal_count": len(meals)
+                # Which macros were actually recorded, so a reader can tell an
+                # unlogged macro from a zero one.
+                "known_fields": day["known_fields"],
+                "targets": day["target"],
+                "target_provenance": day["target_provenance"],
+                "day_type": day["day_type"],
+                "meal_count": day["meal_count"],
             }
 
             # === RECENT WORKOUTS ===
-            recent_workouts_sql = text("""
-                SELECT DISTINCT
-                    w.id,
-                    w.title,
-                    w.phase,
-                    w.week,
-                    w.day_of_week,
-                    w.status,
-                    w.created_at,
-                    COUNT(wl.id) as sets_logged,
-                    SUM(wl.weight * wl.reps) as total_volume
-                FROM workout w
-                LEFT JOIN workout_log wl ON w.id = wl.workout_id
-                WHERE w.user_id = :user_id
-                AND w.created_at >= :lookback_date
-                GROUP BY w.id, w.title, w.phase, w.week, w.day_of_week, w.status, w.created_at
-                ORDER BY w.created_at DESC
-                LIMIT 10
-            """)
-
-            recent_result = db.execute(recent_workouts_sql, {
-                "user_id": user_id,
-                "lookback_date": lookback_date
-            })
+            # Delegated to `training_window`, which de-duplicates the three
+            # tables that can each describe one training bout (`workout`,
+            # `workout_session`, `active_workout_session`) and dates a session
+            # by `session_date` rather than by the `workout` row's `created_at`
+            # — a program importer writes a whole block's rows in one
+            # transaction, so `created_at` ordering between them is arbitrary.
+            window = training_window(db, user_id, lookback_date, today + timedelta(days=1))
 
             recent_workouts = []
-            for row in recent_result.fetchall():
-                workout = {
-                    "id": row.id,
-                    "title": row.title,
-                    "phase": row.phase,
-                    "week": row.week,
-                    "day": row.day_of_week,
-                    "status": row.status,
-                    "sets_logged": row.sets_logged or 0,
-                    "volume": round(row.total_volume, 1) if row.total_volume else 0,
-                    "date": row.created_at.strftime("%Y-%m-%d") if row.created_at else None
-                }
-                recent_workouts.append(workout)
+            for row in window["session_rows"][:10]:
+                day_sets = window["by_date"].get(row["date"] or "", [])
+                recent_workouts.append({
+                    "id": row["key"],
+                    "title": _session_title(db, user_id, row),
+                    "phase": None,
+                    "week": None,
+                    "day": (
+                        datetime.fromisoformat(row["date"]).strftime("%A").lower()
+                        if row["date"] else None
+                    ),
+                    "status": row["status"],
+                    "sets_logged": len(day_sets) or row["sets_completed"] or 0,
+                    # The volume for this session only, from effective loads.
+                    # `SUM(weight * reps)` over the integer column dropped
+                    # fractional plates, counted one dumbbell, and counted an
+                    # assisted pull-up's assistance as work.
+                    "volume": _session_volume(day_sets),
+                    "date": row["date"],
+                })
 
             summary["recent_workouts"] = {
                 "count": len(recent_workouts),
                 "workouts": recent_workouts,
-                "days_back": days_back
+                "days_back": days_back,
             }
 
             # === LAST WORKOUT ===
-            if recent_workouts:
-                last_workout = recent_workouts[0]
+            dated = [w for w in recent_workouts if w["date"]]
+            if dated:
+                last_workout = max(dated, key=lambda w: w["date"])
                 days_since = (today - datetime.fromisoformat(last_workout["date"]).date()).days
                 summary["last_workout"] = {
                     "title": last_workout["title"],
                     "date": last_workout["date"],
                     "days_ago": days_since,
                     "sets_logged": last_workout["sets_logged"],
-                    "volume": last_workout["volume"]
+                    "volume": last_workout["volume"],
                 }
             else:
                 summary["last_workout"] = None
@@ -282,27 +283,21 @@ class FitnessSummaryTool(BaseTool):
             }
 
             # === WEEKLY STATS ===
-            week_start = today - timedelta(days=today.weekday())  # Monday
-            weekly_stats_sql = text("""
-                SELECT
-                    COUNT(DISTINCT w.id) as workouts_this_week,
-                    COUNT(wl.id) as total_sets,
-                    SUM(wl.weight * wl.reps) as total_volume
-                FROM workout w
-                LEFT JOIN workout_log wl ON w.id = wl.workout_id
-                WHERE w.user_id = :user_id
-                AND w.created_at >= :week_start
-            """)
-
-            weekly_result = db.execute(weekly_stats_sql, {
-                "user_id": user_id,
-                "week_start": week_start
-            }).fetchone()
+            # Monday of the athlete's current local week, through today
+            # inclusive. The old query bounded on `workout.created_at >=
+            # week_start` with a UTC `today`, so on Monday it could report
+            # Sunday's session and on Sunday evening it reported none.
+            week_start = today - timedelta(days=today.weekday())
+            week = training_window(db, user_id, week_start, today + timedelta(days=1))
 
             summary["this_week"] = {
-                "workouts": weekly_result.workouts_this_week or 0,
-                "total_sets": weekly_result.total_sets or 0,
-                "total_volume": round(weekly_result.total_volume, 1) if weekly_result.total_volume else 0
+                "workouts": week["sessions"],
+                "total_sets": week["sets"],
+                "total_volume": week["tonnage"] or 0,
+                "volume_unit": week["tonnage_unit"],
+                # A tonnage with excluded sets is a floor, not a total, and
+                # saying so is the difference between a number and a claim.
+                "sets_excluded_from_volume": week["sets_excluded_from_tonnage"],
             }
 
             # Build response message

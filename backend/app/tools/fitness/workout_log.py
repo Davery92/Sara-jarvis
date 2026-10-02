@@ -545,8 +545,13 @@ class WorkoutStatsTool(BaseTool):
         start_date_str = kwargs.get("start_date")
         end_date_str = kwargs.get("end_date")
 
-        # Default to last week
-        today = datetime.now(timezone.utc).date()
+        db = get_fitness_db()
+
+        # Default to last week, on the athlete's calendar. A UTC `today` is
+        # tomorrow from 20:00 ET onward, so "this week" silently included a
+        # day that had not happened and excluded the one just trained.
+        from app.services.fitness.consumers import athlete_local_today
+        today = athlete_local_today(db, user_id)
         if period == "month":
             start_date = today - timedelta(days=30)
             end_date = today
@@ -569,57 +574,33 @@ class WorkoutStatsTool(BaseTool):
             except:
                 pass
 
-        db = get_fitness_db()
-
         try:
-            # Get workout log statistics
-            stats_sql = text("""
-                SELECT
-                    COUNT(DISTINCT wl.workout_id) as total_workouts,
-                    COUNT(*) as total_sets,
-                    SUM(wl.weight * wl.reps) as total_volume,
-                    AVG(wl.rpe) as avg_rpe
-                FROM workout_log wl
-                WHERE wl.user_id = :user_id
-                AND wl.created_at >= :start_date
-                AND wl.created_at < :end_date
-                AND wl.voided_at IS NULL
-            """)
+            # Step 18: delegated to the one implementation, so this tool, the
+            # weekly health report and the Coach API report the same numbers
+            # for the same week. Three things change:
+            #
+            # * sessions are de-duplicated across `workout`,
+            #   `workout_session` and `active_workout_session` rather than
+            #   counted as distinct `workout_id`s — all three can describe the
+            #   same bout;
+            # * sets are dated by `session_date`, not by `created_at`, which
+            #   is naive UTC insert time and put a late-evening session on the
+            #   next day;
+            # * volume uses the effective load, so fractional plates survive,
+            #   a dumbbell counts both hands, and assisted work is excluded
+            #   instead of counting the assistance as load.
+            from app.services.fitness.consumers import training_window
 
-            result = db.execute(stats_sql, {
-                "user_id": user_id,
-                "start_date": start_date,
-                "end_date": end_date + timedelta(days=1)
-            })
-
-            row = result.fetchone()
-
-            # Get completed workouts
-            workouts_sql = text("""
-                SELECT w.id, w.title, w.status, w.created_at,
-                       COUNT(wl.id) as sets_logged
-                FROM workout w
-                LEFT JOIN workout_log wl ON w.id = wl.workout_id
-                WHERE w.user_id = :user_id
-                AND w.created_at >= :start_date
-                AND w.created_at < :end_date
-                GROUP BY w.id, w.title, w.status, w.created_at
-                ORDER BY w.created_at DESC
-            """)
-
-            workouts_result = db.execute(workouts_sql, {
-                "user_id": user_id,
-                "start_date": start_date,
-                "end_date": end_date + timedelta(days=1)
-            })
+            window = training_window(db, user_id, start_date, end_date + timedelta(days=1))
 
             workouts = []
-            for w in workouts_result.fetchall():
+            for row in window["session_rows"]:
+                day_sets = window["by_date"].get(row["date"] or "", [])
                 workouts.append({
-                    "workout_id": w.id,
-                    "title": w.title,
-                    "status": w.status,
-                    "sets_logged": w.sets_logged
+                    "workout_id": row["key"],
+                    "title": row["date"] or "session",
+                    "status": row["status"],
+                    "sets_logged": len(day_sets) or row["sets_completed"] or 0,
                 })
 
             stats = {
@@ -633,10 +614,15 @@ class WorkoutStatsTool(BaseTool):
                     # nothing matched. `or 0` collapsed that into "avg RPE 0",
                     # which reads as a logged effort of zero rather than as no
                     # logged effort at all (D10) — so nulls stay null.
-                    "total_workouts": int(row.total_workouts or 0),
-                    "total_sets": int(row.total_sets or 0),
-                    "total_volume": round(float(row.total_volume), 1) if row.total_volume is not None else None,
-                    "avg_rpe": round(float(row.avg_rpe), 1) if row.avg_rpe is not None else None,
+                    "total_workouts": window["sessions"],
+                    "total_sets": window["sets"],
+                    "working_sets": window["working_sets"],
+                    "total_volume": window["tonnage"],
+                    "total_volume_unit": window["tonnage_unit"],
+                    # Named, so the volume reads as a floor rather than a
+                    # total when some sets could not be counted.
+                    "sets_excluded_from_volume": window["sets_excluded_from_tonnage"],
+                    "avg_rpe": window["avg_rpe"],
                 },
                 "workouts": workouts
             }

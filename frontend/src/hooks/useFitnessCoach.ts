@@ -29,6 +29,9 @@ import { fitnessCoachApi, FitnessCoachError } from '../api/fitnessCoach'
 import { useAuthStore } from '../stores/authStore'
 import type {
   AthleteGoal,
+  DataQuality,
+  FitnessState,
+  StateSection,
   CheckIn,
   CheckInPatch,
   Measurement,
@@ -61,6 +64,13 @@ export const fitnessKeys = {
     ['fitness-coach', userId, 'targets', onDate ?? 'today', dayType ?? 'auto'] as const,
   targetHistory: (userId: string, scope?: TargetScope, phaseId?: string) =>
     ['fitness-coach', userId, 'target-history', scope ?? 'all', phaseId ?? 'all'] as const,
+  state: (userId: string, periodEnd?: string, span?: number, sections?: string) =>
+    [
+      'fitness-coach', userId, 'state',
+      periodEnd ?? 'today', span ?? 7, sections ?? 'all',
+    ] as const,
+  quality: (userId: string, periodEnd?: string, span?: number) =>
+    ['fitness-coach', userId, 'quality', periodEnd ?? 'today', span ?? 7] as const,
 }
 
 /**
@@ -299,6 +309,45 @@ export function useCreateTargetRevision(): UseMutationResult<
  * and keeps rendering it until a refetch lands, which means one person's
  * bodyweight can be on screen after another has signed in.
  */
+/**
+ * The deterministic state.
+ *
+ * `staleTime` is short and deliberate. The backend caches on a data-revision
+ * fingerprint, so a stale browser copy is the only unbounded staleness left;
+ * keeping it to a minute means a weigh-in logged on the phone shows up here
+ * without a reload.
+ */
+export function useFitnessState(opts?: {
+  periodEnd?: string
+  span?: number
+  sections?: StateSection[]
+  enabled?: boolean
+}): UseQueryResult<FitnessState, FitnessCoachError> {
+  const userId = useAthleteId()
+  const sectionKey = opts?.sections?.length ? [...opts.sections].sort().join(',') : undefined
+  return useQuery({
+    queryKey: fitnessKeys.state(userId ?? 'anonymous', opts?.periodEnd, opts?.span, sectionKey),
+    queryFn: () =>
+      fitnessCoachApi.getState({
+        periodEnd: opts?.periodEnd,
+        span: opts?.span,
+        sections: opts?.sections,
+      }),
+    enabled: enabledFor(userId) && opts?.enabled !== false,
+    staleTime: 60_000,
+  })
+}
+
+export function useFitnessDataQuality(opts?: { periodEnd?: string; span?: number }) {
+  const userId = useAthleteId()
+  return useQuery({
+    queryKey: fitnessKeys.quality(userId ?? 'anonymous', opts?.periodEnd, opts?.span),
+    queryFn: () => fitnessCoachApi.getDataQuality(opts),
+    enabled: enabledFor(userId),
+    staleTime: 60_000,
+  })
+}
+
 export function useClearFitnessCache(): (userId?: string) => void {
   const client = useQueryClient()
   const currentId = useAthleteId()

@@ -626,18 +626,29 @@ def _body_training_live(user_id: str, away: bool = False) -> str:
                 lines.append(f"- Recovery: {factor_label} ({', '.join(bits)})." if bits
                               else f"- Recovery: {factor_label}.")
 
-            last = db.execute(text("""
-                SELECT COALESCE(el.name, wl.exercise_id, 'Exercise') AS exercise_name,
-                       wl.weight, wl.reps, wl.created_at
-                FROM workout_log wl
-                LEFT JOIN exercise_library el ON el.id = wl.exercise_library_id
-                WHERE wl.user_id = :uid AND wl.voided_at IS NULL AND wl.set_kind = 'working'
-                ORDER BY wl.created_at DESC LIMIT 1
-            """), {"uid": user_id}).first()
+            # Step 18: delegated, so the brief and the strength analytics
+            # describe the same set the same way. Reading `wl.weight` (the
+            # legacy integer) spoke a 102.5 kg squat as 102 and a 40 kg
+            # dumbbell press as 40 rather than the 80 it moved.
+            from app.services.fitness.consumers import latest_working_set
+            last = latest_working_set(db, user_id)
             if last:
+                load = last["effective_load"]
+                if load is not None and load != last["load"]:
+                    # Both numbers, because the athlete typed one and lifted
+                    # the other. Showing only the total makes David think the
+                    # log is wrong; showing only the entry understates the work.
+                    load_text = (
+                        f"{_trim(last['load'])}{last['load_unit']} "
+                        f"({_trim(load)}{last['load_unit']} total)"
+                    )
+                elif load is not None:
+                    load_text = f"{_trim(load)}{last['load_unit']}"
+                else:
+                    load_text = f"{_trim(last['load'])}{last['load_unit']}"
                 lines.append(
-                    f"- Last logged: {last.exercise_name} {last.weight}x{last.reps} "
-                    f"({render_relative(last.created_at)})."
+                    f"- Last logged: {last['exercise_name']} {load_text} "
+                    f"x{last['reps']} ({render_relative(last['created_at'])})."
                 )
     except Exception as e:
         logger.debug(f"[world_brief] body/training live section failed: {e}")
@@ -645,6 +656,18 @@ def _body_training_live(user_id: str, away: bool = False) -> str:
     if not lines:
         return "- No fitness plan on file."
     return "\n".join(lines)
+
+
+def _trim(value) -> str:
+    """102.5 stays 102.5; 225.0 renders as 225.
+
+    A trailing `.0` on every load reads as a precision the entry does not
+    have, and it is the difference between a log line and a spec sheet.
+    """
+    if value is None:
+        return "?"
+    number = float(value)
+    return str(int(number)) if number.is_integer() else f"{number:g}"
 
 
 async def _body_training_live_async(user_id: str) -> str:

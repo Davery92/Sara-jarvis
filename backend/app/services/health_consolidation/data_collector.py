@@ -13,6 +13,10 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 def previous_iso_week(today: date) -> tuple[date, date]:
     """Return (Mon, Sun) of the most recently completed ISO week relative to `today`.
@@ -46,6 +50,12 @@ class RecoveryStats:
     weight_lbs_start: Optional[float] = None
     weight_lbs_end: Optional[float] = None
     weight_delta_lbs: Optional[float] = None
+    # Coverage for that delta. A change between two readings five days apart
+    # is a different claim from one across a full week, and without these the
+    # report stated both identically.
+    weight_days_observed: int = 0
+    weight_days_expected: int = 0
+    weight_delta_span_days: Optional[int] = None
     daily_rows: List[Dict[str, Any]] = field(default_factory=list)
 
 
@@ -67,6 +77,14 @@ class ActivityStats:
     daily_calories: Dict[str, float] = field(default_factory=dict)
     workouts_by_date: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
     food_by_date: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    # Volume from effective loads, with what could not be counted named.
+    total_volume_lbs: Optional[float] = None
+    sets_excluded_from_volume: Dict[str, int] = field(default_factory=dict)
+    # Complete and partial logging days are separate counts: a week with one
+    # confirmed day and a week with seven are not the same week.
+    food_complete_days: int = 0
+    food_partial_days: int = 0
+    macro_average_unavailable: Optional[str] = None
 
 
 @dataclass
@@ -87,6 +105,25 @@ class WeeklyDataset:
             "activity": asdict(self.activity),
             "fitness_daily": self.fitness_daily,
         }
+
+
+def _as_lbs(value: Any, unit: Optional[str]) -> Optional[float]:
+    """A logged body weight in pounds, whatever unit it was entered in.
+
+    Refuses to guess when the unit is something neither recognised nor
+    blank: "a weight around 180 is probably pounds" is exactly the inference
+    that must not be made here, because 180 kg is a real bodyweight.
+    """
+    if value is None:
+        return None
+    label = (unit or "lbs").strip().lower()
+    if label in ("lb", "lbs", "pound", "pounds", ""):
+        return float(value)
+    if label in ("kg", "kgs", "kilogram", "kilograms"):
+        from app.schemas.fitness_coach import Unit, convert
+        return round(convert(float(value), Unit.KG, Unit.LB), 2)
+    logger.warning("unrecognised weight unit %r — reading dropped", unit)
+    return None
 
 
 def _safe_avg(xs: List[float]) -> Optional[float]:
@@ -111,9 +148,9 @@ def collect_recovery(db: Session, user_id: str, ws: date, we: date) -> RecoveryS
     ).all()
 
     s = RecoveryStats()
-    if not rows:
-        return s
-
+    # NOT an early return. Body weight comes from the canonical observation
+    # stream below, and an athlete can be weighing himself without filling in
+    # a check-in row — returning here reported no weight data for him.
     daily = []
     hrvs, rhrs, sleeps, weights = [], [], [], []
     for r in rows:
@@ -122,7 +159,11 @@ def collect_recovery(db: Session, user_id: str, ws: date, we: date) -> RecoveryS
             "hrv": r.hrv,
             "rhr": r.heart_rate,
             "sleep_hours": float(r.sleep_hours) if r.sleep_hours is not None else None,
-            "body_weight_lbs": float(r.body_weight) if r.body_weight is not None and (r.weight_unit or "lbs") == "lbs" else None,
+            # Converted, not discarded. This used to read
+            # `(r.weight_unit or "lbs") == "lbs"` and drop anything else, so a
+            # week logged in kg reported no weight data at all — and the
+            # consolidation prompt was told David had not weighed himself.
+            "body_weight_lbs": _as_lbs(r.body_weight, r.weight_unit),
         }
         daily.append(rec)
         if r.hrv is not None:
@@ -157,100 +198,120 @@ def collect_recovery(db: Session, user_id: str, ws: date, we: date) -> RecoveryS
         s.sleep_avg_hours = round(mean(sleeps), 2)
         s.sleep_min_hours = round(min(sleeps), 2)
         s.sleep_under_6h_count = sum(1 for x in sleeps if x < 6.0)
-    if weights:
-        s.weight_lbs_start = weights[0]
-        s.weight_lbs_end = weights[-1]
-        s.weight_delta_lbs = round(weights[-1] - weights[0], 2)
+    # Body weight comes from the canonical observation stream, not from this
+    # projection column, so this cannot disagree with the Coach API about what
+    # David weighed. The projection is still read above for `daily_rows`,
+    # which is the per-day table the report renders.
+    try:
+        from app.services.fitness.consumers import weight_window
+        canonical = weight_window(db, user_id, ws, we + timedelta(days=1))
+        s.weight_days_observed = canonical["observed_days"]
+        s.weight_days_expected = canonical["expected_days"]
+        s.weight_lbs_start = canonical["start_lbs"]
+        s.weight_lbs_end = canonical["end_lbs"]
+        s.weight_delta_lbs = canonical["delta_lbs"]
+        s.weight_delta_span_days = canonical["delta_span_days"]
+    except Exception as exc:
+        logger.warning(
+            "weekly weight from canonical observations unavailable (%s): %s",
+            type(exc).__name__, exc,
+        )
+        if weights:
+            s.weight_lbs_start = weights[0]
+            s.weight_lbs_end = weights[-1]
+            s.weight_delta_lbs = round(weights[-1] - weights[0], 2)
+            s.weight_days_observed = len(weights)
+            s.weight_days_expected = (we - ws).days + 1
 
     return s
 
 
 def collect_activity(db: Session, user_id: str, ws: date, we: date) -> ActivityStats:
+    """Training and intake for the completed week `[ws, we]` (we is inclusive).
+
+    Step 18 moved the arithmetic to `services/fitness/consumers`, which is
+    where the Coach API and `FitnessStateV1` get the same figures. Three
+    things this fixes:
+
+    * `workouts_count` was `len(set_rows)` — the field named "workouts" held
+      the number of SETS, so one session of 24 sets told the consolidation
+      prompt David trained 24 times.
+    * volume was absent here but computed as `SUM(weight * reps)` in the two
+      sibling readers, over the legacy integer column. Now it is the
+      effective load, with the excluded sets named so the figure reads as a
+      floor rather than a total.
+    * macro averages counted every day with any row, so a logged breakfast
+      counted as a day's eating and a cut looked like a crash diet. They now
+      average over days the athlete confirmed were fully logged, and the
+      partial days are reported separately rather than folded in.
+    """
     s = ActivityStats()
+    end_exclusive = we + timedelta(days=1)
 
-    # Workouts (set-level, aggregate to day-level)
-    wo_rows = db.execute(
-        text("""
-            SELECT session_date, exercise_id, set_index, weight, reps, rpe, day_of_week
-            FROM workout_log
-            WHERE user_id = :uid AND session_date BETWEEN :ws AND :we
-              AND COALESCE(skipped, false) = false
-              AND voided_at IS NULL
-            ORDER BY session_date ASC, set_index ASC
-        """),
-        {"uid": user_id, "ws": ws, "we": we},
-    ).all()
+    from app.services.fitness.consumers import food_days_payload, training_window
 
-    rpes = []
-    by_date: Dict[str, List[Dict[str, Any]]] = {}
-    for r in wo_rows:
-        d = r.session_date.isoformat() if r.session_date else None
-        if not d:
-            continue
-        by_date.setdefault(d, []).append({
-            "exercise_id": r.exercise_id,
-            "set": r.set_index,
-            "weight": r.weight,
-            "reps": r.reps,
-            "rpe": r.rpe,
-        })
-        s.total_sets += 1
-        if r.reps:
-            s.total_reps += int(r.reps)
-        if r.rpe is not None:
-            rpes.append(int(r.rpe))
+    window = training_window(db, user_id, ws, end_exclusive)
+    by_date = window["by_date"]
 
-    s.workouts_count = len(wo_rows)
-    s.workout_dates = sorted(by_date.keys())
+    s.total_sets = window["sets"]
+    s.total_reps = window["total_reps"]
+    s.workouts_count = window["sessions"]
+    s.workout_dates = window["session_dates"] or sorted(by_date.keys())
     s.workout_days = len(s.workout_dates)
     s.workouts_by_date = by_date
-    if rpes:
-        s.avg_rpe = round(mean(rpes), 2)
-        # Flag any day where the max set RPE was 9+
-        for d, sets in by_date.items():
-            day_rpes = [x["rpe"] for x in sets if x.get("rpe") is not None]
-            if day_rpes and max(day_rpes) >= 9:
-                s.high_rpe_days.append(d)
-        s.high_rpe_days.sort()
+    s.avg_rpe = window["avg_rpe"]
+    s.total_volume_lbs = window["tonnage"]
+    s.sets_excluded_from_volume = window["sets_excluded_from_tonnage"]
 
-    # Food logs (day-aggregate)
-    food_rows = db.execute(
-        text("""
-            SELECT logged_at::date AS d,
-                   COUNT(*)            AS entries,
-                   SUM(calories)       AS cal,
-                   SUM(protein)        AS pro,
-                   SUM(carbs)          AS car,
-                   SUM(fats)           AS fat
-            FROM food_log
-            WHERE user_id = :uid AND logged_at::date BETWEEN :ws AND :we
-            GROUP BY logged_at::date
-            ORDER BY d ASC
-        """),
-        {"uid": user_id, "ws": ws, "we": we},
-    ).all()
+    # Flag any day where the hardest set was RPE 9+.
+    for d, sets in by_date.items():
+        day_rpes = [x["rpe"] for x in sets if x.get("rpe") is not None]
+        if day_rpes and max(day_rpes) >= 9:
+            s.high_rpe_days.append(d)
+    s.high_rpe_days.sort()
 
-    cals, pros, cars, fats = [], [], [], []
-    for r in food_rows:
-        ds = r.d.isoformat()
-        cal = float(r.cal) if r.cal is not None else 0.0
-        pro = float(r.pro) if r.pro is not None else 0.0
-        car = float(r.car) if r.car is not None else 0.0
-        fat = float(r.fat) if r.fat is not None else 0.0
-        s.food_logs_count += int(r.entries or 0)
-        s.daily_calories[ds] = round(cal, 1)
-        s.food_by_date[ds] = {"entries": int(r.entries or 0), "calories": round(cal, 1),
-                              "protein": round(pro, 1), "carbs": round(car, 1), "fats": round(fat, 1)}
-        if cal: cals.append(cal)
-        if pro: pros.append(pro)
-        if car: cars.append(car)
-        if fat: fats.append(fat)
+    # Food, by athlete-local day from `logged_at`.
+    days = food_days_payload(db, user_id, ws, end_exclusive)
+    complete_cals, complete_pros, complete_cars, complete_fats = [], [], [], []
+    for ds, row in days.items():
+        s.food_logs_count += int(row["entries"] or 0)
+        s.daily_calories[ds] = row["calories"] if row["calories"] is not None else 0.0
+        s.food_by_date[ds] = {
+            "entries": int(row["entries"] or 0),
+            "calories": row["calories"],
+            "protein": row["protein"],
+            "carbs": row["carbs"],
+            "fats": row["fats"],
+            "status": row["status"],
+            "complete": row["complete"],
+        }
+        if not row["complete"]:
+            s.food_partial_days += 1
+            continue
+        if row["calories"] is not None:
+            complete_cals.append(row["calories"])
+        if row["protein"] is not None:
+            complete_pros.append(row["protein"])
+        if row["carbs"] is not None:
+            complete_cars.append(row["carbs"])
+        if row["fats"] is not None:
+            complete_fats.append(row["fats"])
 
-    s.food_days = len(food_rows)
-    s.avg_calories = _safe_avg(cals)
-    s.avg_protein = _safe_avg(pros)
-    s.avg_carbs = _safe_avg(cars)
-    s.avg_fats = _safe_avg(fats)
+    s.food_days = len(days)
+    s.food_complete_days = len(days) - s.food_partial_days
+    if complete_cals:
+        s.avg_calories = _safe_avg(complete_cals)
+        s.avg_protein = _safe_avg(complete_pros)
+        s.avg_carbs = _safe_avg(complete_cars)
+        s.avg_fats = _safe_avg(complete_fats)
+    else:
+        # No confirmed day. An average over partial days is not an estimate
+        # of what David ate, it is an estimate of what he remembered to log,
+        # and the report would read it as the former.
+        s.macro_average_unavailable = (
+            "no day was confirmed fully logged, so a weekly average would "
+            "describe logging habits rather than intake"
+        )
 
     return s
 

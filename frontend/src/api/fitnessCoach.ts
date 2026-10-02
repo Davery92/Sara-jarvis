@@ -16,6 +16,10 @@
 import { APP_CONFIG } from '../config'
 import type {
   AthleteGoal,
+  DataQuality,
+  FitnessState,
+  MetricGroup,
+  StateSection,
   CheckIn,
   CheckInPatch,
   Measurement,
@@ -318,6 +322,47 @@ export const fitnessCoachApi = {
         site: opts?.site,
         side: opts?.side,
       })}`,
+    ),
+
+  // ── State and analytics (Step 17/18) ────────────────────────────────────
+
+  /**
+   * The one deterministic projection every surface reads.
+   *
+   * `periodEnd` is exclusive and athlete-local, so a partial current day is
+   * never averaged in. `sections` narrows the work; it changes which
+   * sections come back, never what a present one says.
+   */
+  getState: (opts?: {
+    periodEnd?: string
+    span?: number
+    sections?: StateSection[]
+    fresh?: boolean
+  }) =>
+    request<FitnessState>(
+      `/state${query({
+        period_end: opts?.periodEnd,
+        span: opts?.span,
+        sections: opts?.sections?.length ? opts.sections.join(',') : undefined,
+        fresh: opts?.fresh,
+      })}`,
+    ),
+
+  getSectionAnalytics: (
+    section: StateSection,
+    opts?: { periodEnd?: string; span?: number },
+  ) =>
+    request<MetricGroup>(
+      `/analytics/${encodeURIComponent(section)}${query({
+        period_end: opts?.periodEnd,
+        span: opts?.span,
+      })}`,
+    ),
+
+  /** Coverage, kept separate from any confidence in an interpretation. */
+  getDataQuality: (opts?: { periodEnd?: string; span?: number }) =>
+    request<DataQuality>(
+      `/quality${query({ period_end: opts?.periodEnd, span: opts?.span })}`,
     ),
 }
 

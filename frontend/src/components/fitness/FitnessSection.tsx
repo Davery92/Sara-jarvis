@@ -13,6 +13,7 @@ import CardioSection from './CardioSection'
 import AthleteSettings from './AthleteSettings'
 import DailyCheckIn from './DailyCheckIn'
 import Measurements from './Measurements'
+import CoachOverview from './CoachOverview'
 import { Upload } from 'lucide-react'
 import { APP_CONFIG } from '../../config'
 import { getLocalDateString } from '../../utils/dateUtils'
@@ -21,10 +22,15 @@ import { getLocalDateString } from '../../utils/dateUtils'
 // target history, limitations) — FITNESS_COACH_IMPLEMENTATION_PLAN Step 7.
 // Added as a subview inside this existing surface rather than a new
 // top-level view, per §7: no second app shell, no second router.
-type FitnessView = 'dashboard' | 'food' | 'workout' | 'notes' | 'templates' | 'recovery' | 'programs' | 'plan' | 'nutrition' | 'cardio' | 'settings' | 'today' | 'measurements'
+// 'overview' is the Coach Overview (Step 18) — the one surface that reads
+// `/api/fitness/coach/state` and therefore cannot disagree with the chat
+// capsule, the weekly report or a coach review. It sits FIRST, ahead of the
+// legacy dashboard, because the legacy dashboard computes some of its own
+// numbers and the two will differ until Step 18's follow-on retires it.
+type FitnessView = 'overview' | 'dashboard' | 'food' | 'workout' | 'notes' | 'templates' | 'recovery' | 'programs' | 'plan' | 'nutrition' | 'cardio' | 'settings' | 'today' | 'measurements'
 
 export default function FitnessSection() {
-  const [currentView, setCurrentView] = useState<FitnessView>('dashboard')
+  const [currentView, setCurrentView] = useState<FitnessView>('overview')
   const [dashboardKey, setDashboardKey] = useState(0)
   const [nutritionKey, setNutritionKey] = useState(0)
   const [showImporter, setShowImporter] = useState(false)
@@ -53,6 +59,7 @@ export default function FitnessSection() {
   }
 
   const tabs = [
+    { id: 'overview' as FitnessView, label: 'Overview' },
     { id: 'dashboard' as FitnessView, label: 'Dashboard' },
     { id: 'today' as FitnessView, label: 'Today' },
     { id: 'plan' as FitnessView, label: 'Plan' },
@@ -111,6 +118,11 @@ export default function FitnessSection() {
 
       {/* Content */}
       <div className="flex-1 overflow-auto">
+        {currentView === 'overview' && (
+          <div className="p-6">
+            <CoachOverview />
+          </div>
+        )}
         {currentView === 'dashboard' && (
           <FitnessDashboard key={dashboardKey} onLogMeal={handleLogMealFromDashboard} />
         )}

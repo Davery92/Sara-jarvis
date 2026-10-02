@@ -441,3 +441,103 @@ export interface MeasurementInput {
   idempotency_key?: string | null
   corrects_observation_id?: string | null
 }
+
+// ── Fitness state (Step 17/18) ────────────────────────────────────────────
+
+export type StateSection =
+  | 'profile' | 'targets' | 'weight' | 'nutrition' | 'sleep' | 'recovery'
+  | 'training' | 'performance' | 'measurements' | 'pain' | 'photos'
+  | 'changes' | 'quality'
+
+/**
+ * `degraded` means a dependency failed — it is NOT a smaller state.
+ *
+ * The distinction is the whole point: fewer metrics because a query broke is
+ * indistinguishable from the athlete having less data, and a reader would
+ * then draw a conclusion from an absence nobody caused. A component showing
+ * a degraded state has to say so rather than render empty charts.
+ */
+export type Freshness = 'fresh' | 'stale' | 'degraded'
+
+export interface MetricGroup {
+  section: StateSection
+  metrics: Record<string, Metric>
+  items: Array<Record<string, unknown>>
+  limitations: string[]
+}
+
+export interface DataQuality {
+  observed_weight_days: number | null
+  expected_weight_days: number | null
+  sleep_nights: number | null
+  nutrition_complete_days: number
+  nutrition_partial_days: number
+  nutrition_unknown_days: number
+  missing_fields: string[]
+  unresolved_units: number
+  unresolved_exercise_identities: number
+  source_conflicts: number
+  incomplete_workouts: number
+  overdue_cadences: string[]
+  stale_profile: boolean
+  no_effective_target: boolean
+  insufficient_comparable_exposures: string[]
+  notes: string[]
+}
+
+export interface FitnessState {
+  schema_version: number
+  analytics_version: number
+  user_id: string
+  as_of: string
+  athlete_local_date: string
+  timezone: string
+  period: Period | null
+  freshness: Freshness
+  data_revision: string | null
+  profile: AthleteProfile | null
+  goals: AthleteGoal[]
+  limitations: AthleteLimitation[]
+  targets: ResolvedTargets | null
+  program: {
+    program?: {
+      id?: string | null
+      name?: string | null
+      goal?: string | null
+      start_date?: string | null
+      end_date?: string | null
+    }
+    phase?: {
+      id?: string | null
+      name?: string | null
+      goal?: string | null
+      start_date?: string | null
+      /**
+       * Reported as stored, which is INCLUSIVE. The backend's resolver
+       * converts to half-open exactly once; exposing the converted value
+       * here would make two surfaces show different block end dates.
+       */
+      end_date_inclusive?: string | null
+      deload_week?: number | null
+    }
+    day_type?: string
+  }
+  sections: Partial<Record<StateSection, MetricGroup>>
+  quality: DataQuality
+  recent_changes: Array<Record<string, unknown>>
+  evidence_refs: string[]
+  degraded_dependencies: string[]
+}
+
+export interface PainItem {
+  exercise: string
+  exercise_library_id: string | null
+  sessions_with_pain: number
+  /** The denominator. A pattern from 2 of 20 sessions is not 2 of 2. */
+  sessions_with_report: number
+  sessions_total: number
+  reporting_coverage: number | null
+  max_severity: number | null
+  locations: string[]
+  sides: string[]
+}
