@@ -156,6 +156,68 @@ was *refused by our own gate* for the phrase "take a deload" — which found a
 real bug in `safety.TREATMENT_TERMS` (a bare `"take a"` substring), now
 replaced with named substances plus shaped regexes.
 
+**Program draft generation (Step 29).** Run 2026-10-02 via
+`backend/scripts/fitness_draft_smoke.py`, which follows the Step 20 pattern:
+synthetic constraints, a synthetic library and hand-written computed
+performance, talking to the model and nothing else, so a failure is
+transport, schema adherence or a validator rule rather than fixture data.
+
+It found **five production defects in five runs**, every one of which the
+step's 80 stubbed tests had passed over:
+
+| Defect | Evidence |
+|---|---|
+| `MAX_OUTPUT_TOKENS = 3600` below a single week | measured 3,970 tokens for one week; even one week truncated and parsed as nothing |
+| `DRAFT_TIMEOUT_SECONDS = 180` below a single week, and tighter than the lane's own 600s budget so the client's timeout could never apply | measured 196.7s; the first run was a bare `TimeoutError` with nothing produced |
+| `allowed_exercises` offered a CONTRAINDICATED exercise | an Overhead Press went to an athlete with a recorded shoulder limitation, the model used it, and `validate_draft` blocked the whole draft for using what it had been handed |
+| **the draft path never called `safety` at all** | §29.3 and the prompt both forbid interpreting a limitation; nothing checked. The schema has no field for a diagnosis, so prose is the only place one can appear, and prose was ungated |
+| **the model invented a diagnosis, and a leaking draft was still stored** | the recorded note says "left shoulder complains on heavy flat pressing"; the draft said "to avoid aggravating shoulder **impingement**" in two fields. Caught by the gate above — but the draft was then persisted with a warning beside it, and a warning beside a diagnosis is still a diagnosis in the database and on a screen |
+
+Fixed: 7000 tokens, 540s (still under the lane's 600),
+`allowed_exercises` withholds contraindicated exercises with the validator
+kept as the backstop for an invented name or a later-recorded limitation,
+`validate_draft` runs `safety.check_text` over every free-text field down to
+a set note, and `generate_draft` now applies the review path's own rule — a
+draft whose prose names a condition gets one repair turn and is otherwise
+**not stored at all**. `check_text` was extracted from `check_language`
+rather than written twice; see §6 for why that mattered. Thirteen tests
+cover the new behaviour and the programming suite is 101.
+
+The fifth defect is the one worth dwelling on, because it is a direct
+consequence of fixing the third. Three runs produced careful language. The
+fourth, with the contraindicated exercises now withheld, forced the model to
+explain WHY it was avoiding something — and it reached for a clinical reason
+it had never been given. A fix that changes what the model has to account
+for can surface a failure mode the previous runs had no occasion to show,
+which is an argument for running a smoke test again after every change to
+its inputs rather than once at the end.
+
+Also scoped `performance_summary` to the offered list: the model noticed the
+gap itself ("Overhead Press — not in allowed list but noted in recent
+performance"), and history for a lift it may not prescribe is the same
+landmine as offering the exercise, one wrapper over.
+
+Two smaller things the run surfaced. The prompt's shape block only ever
+showed a rep set, so the model expressed a 45-second plank as `reps_low:
+45, reps_high: 60` — the schema has supported `metric: "time"` all along
+and the prompt simply never said so. And a draft cut off at the cap now
+raises `TruncatedDraft`, which names the budget rather than reporting "the
+output was not JSON", and deliberately does not spend the repair turn: a
+repair prompt is longer than the original, so retrying a budget failure
+burns another three minutes to fail identically.
+
+What the model did well, which is worth recording because it is the half a
+validator cannot tell you: it held the schema on the first attempt every
+run, respected the shoulder limitation by substituting incline and dumbbell
+pressing without ever naming a condition, and asked for the bench 1RM and
+whether the limitation extended to dumbbell pressing rather than guessing
+either.
+
+Final run: PASS, 189.5s, 3,841 tokens of a 7,000 cap, one week of three
+sessions (13 slots, 32 working sets), nothing blocking and no clinical
+language — "to mitigate left shoulder strain on heavy flat pressing",
+quoting the athlete's own note rather than interpreting it.
+
 **Vision (Step 27).** `backend/scripts/fitness_vision_probe.py` draws a
 synthetic coloured shape in-process — no athlete photo goes near a test —
 and checks the answer names it.
@@ -301,10 +363,25 @@ Three things a release would need that this verification does not supply:
 * **No discovery source for the monthly refresh.** It records an attempt and
   explains why it did nothing. That is deliberate, and the test
   `test_no_discovery_source_is_an_honest_no_op` pins it.
-* **Draft generation has not been run against the live model.** The
-  generator, prompt, validator and acceptance path are tested with a stubbed
-  model (including prose-instead-of-JSON and an invented field). A live
-  roundtrip is the obvious next check before enabling it for real use.
+* **A four-week block cannot be generated in one call on this hardware.**
+  Measured: one week is ~3,970 output tokens and ~180-210s on the deployed
+  27B, so four weeks is roughly 16,000 tokens and 13 minutes.
+  `generate_draft` still defaults to `kind=BLOCK`, which invites exactly
+  that ask. The failure is self-diagnosing (`TruncatedDraft` names the
+  budget) but the default is unchanged, because whether a draft means a
+  week or a block is a product decision rather than a bug. The schema
+  already supports both, and `PrescribedWeek.program_week` keying matches
+  how `set_plan` stores per-week loading tables — so assembling a block
+  from accepted weeks is the cheaper half of the choice.
+* **A smoke script must not re-implement the control it tests.** The first
+  version of the draft script carried its own diagnosis word list and
+  immediately flagged "rotator cuff health" as a diagnosis — where
+  `safety.DIAGNOSIS_TERMS` holds "rotator cuff tear", the condition, and
+  leaves the anatomy alone, because face pulls for cuff health is ordinary
+  gym language. That is the same over-breadth as the `"take a"` substring
+  the Step 20 live run caught, reintroduced one file over in the script
+  whose job was testing it. The script now reports production's finding.
+  Same class of error, same fix: one implementation.
 * **`fitness_coaching_run` does not exist.** The cadence ledger table is
   `fitness_coaching_job_run`; the privacy export list had the wrong name and
   it is fixed. Noted because the wrong name was in a draft of this document.

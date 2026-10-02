@@ -65,6 +65,7 @@ from app.schemas.fitness_coach import (
     SetRole,
     Unit,
 )
+from app.services.fitness import safety
 from app.services.fitness.data_access import FitnessDataError, _require_user
 
 logger = logging.getLogger(__name__)
@@ -92,6 +93,16 @@ LB_PER_KG = 2.2046226218
 
 class ProgrammingError(FitnessDataError):
     """A refusal a caller can show."""
+
+
+class TruncatedDraft(ProgrammingError):
+    """The model ran out of output budget mid-draft.
+
+    Distinct from a parse failure because the remedy is different: a smaller
+    ask or a bigger budget, not a better prompt. `generate_draft` does NOT
+    spend its repair turn on one — a repair prompt makes the output longer,
+    which is the opposite of what a truncated draft needs.
+    """
 
 
 class RevisionConflict(FitnessDataError):
@@ -822,6 +833,63 @@ def _known_exercises(
     return found
 
 
+def prose_findings(draft: ProgramDraftV1) -> List[Any]:
+    """Every language finding over a draft's prose, severity intact.
+
+    One traversal with two readers: `validate_draft` turns these into
+    `DraftFinding`s, and `generate_draft` filters to the rejecting ones to
+    decide whether the draft may be stored at all. Two traversals would
+    eventually disagree about which fields count.
+    """
+    out: List[Any] = []
+    for where, prose in _draft_text(draft):
+        out.extend(safety.check_text(where, prose))
+    return out
+
+
+def _draft_text(draft: ProgramDraftV1) -> List[Tuple[str, str]]:
+    """Every free-text field in a draft, with where it came from.
+
+    The schema has no field for a diagnosis, so prose is the only place one
+    can appear — which makes this list the whole surface the language gate
+    has to cover.
+    """
+    parts: List[Tuple[str, str]] = [
+        ("title", draft.title),
+        ("rationale", draft.rationale),
+    ]
+    if draft.note:
+        parts.append(("note", draft.note))
+    parts.extend(
+        (f"questions[{index}]", one)
+        for index, one in enumerate(draft.questions)
+    )
+    parts.extend(
+        (f"limitations_respected[{index}]", one)
+        for index, one in enumerate(draft.limitations_respected)
+    )
+    for week_index, week in enumerate(draft.weeks):
+        if week.note:
+            parts.append((f"weeks[{week_index}].note", week.note))
+        for session_index, session in enumerate(week.sessions):
+            where = f"weeks[{week_index}].sessions[{session_index}]"
+            if session.note:
+                parts.append((f"{where}.note", session.note))
+            for slot_index, slot in enumerate(session.slots):
+                if slot.note:
+                    parts.append(
+                        (f"{where}.slots[{slot_index}].note", slot.note)
+                    )
+                for one in slot.sets:
+                    if one.note:
+                        parts.append((
+                            f"{where}.slots[{slot_index}].sets[{one.index}]"
+                            f".note",
+                            one.note,
+                        ))
+    return parts
+
+
 def validate_draft(
     db: Session,
     user_id: str,
@@ -937,6 +1005,23 @@ def validate_draft(
                 findings.extend(_validate_slot(
                     slot, slot_path, library, constraints,
                 ))
+
+    # §29.3: respect the limitation without interpreting it. The prompt
+    # says so and, until the 2026-10-02 live run, nothing checked it — the
+    # draft path never called `safety` at all. Reusing `safety.check_text`
+    # rather than carrying a second list: that module already learned the
+    # distinction between "rotator cuff tear" (a condition) and "rotator
+    # cuff health" (ordinary gym language), and a second list would have to
+    # learn it again.
+    for finding in prose_findings(draft):
+        findings.append(DraftFinding(
+            code=DraftValidationCode.DIAGNOSTIC_LANGUAGE,
+            message=finding.message,
+            # An overclaim is downgrade-severity in the review path and the
+            # same here: worth saying, not worth refusing a block over.
+            blocking=finding.severity == "reject",
+            path=finding.path,
+        ))
 
     if not constraints.equipment:
         findings.append(DraftFinding(
@@ -2113,7 +2198,19 @@ def progression_for(
 # nothing below this line touches `fitness_template`.
 
 MAX_ALLOWED_EXERCISES = 80
-DRAFT_TIMEOUT_SECONDS = 180.0
+#: Measured, not guessed. `scripts/fitness_draft_smoke.py` against the
+#: deployed 27B on 2026-10-02: ONE week (3 sessions, 13 slots, 34 working
+#: sets) took 196.7s and ~3,970 output tokens at ~20 tok/s decode. The
+#: first value here was 180.0, copied from `reviews.REVIEW_TIMEOUT_SECONDS`
+#: where it works — a review is a summary and a handful of
+#: recommendations, while a draft writes out every set because the prompt
+#: forbids "3x8". So every live draft timed out before producing anything.
+#:
+#: 540 leaves room for a denser week at the output cap below (~350s of
+#: decode) and still sits under `settings.bg_llm_request_timeout` (600.0).
+#: A `wait_for` tighter than the client's own budget means the client's
+#: timeout can never apply, which is what 180 did.
+DRAFT_TIMEOUT_SECONDS = 540.0
 
 
 def allowed_exercises(
@@ -2129,7 +2226,8 @@ def allowed_exercises(
     """
     owner = _require_user(user_id)
     rows = db.execute(text("""
-        SELECT id, name, equipment_required, movement_pattern
+        SELECT id, name, equipment_required, injury_contraindications,
+               movement_pattern
         FROM exercise_library
         WHERE (owner_user_id = :u OR owner_user_id IS NULL
                OR visibility = 'public')
@@ -2142,6 +2240,18 @@ def allowed_exercises(
             name ASC
     """), {"u": owner}).fetchall()
 
+    # Areas with an active limitation. An exercise contraindicated for one
+    # is withheld, for the same reason unavailable equipment is: the live
+    # run on 2026-10-02 offered an Overhead Press to an athlete with a
+    # recorded shoulder limitation, the model dutifully used it, and
+    # `validate_draft` then blocked the whole draft for using what it had
+    # been handed. The offered list and the validator must not disagree —
+    # the validator is the backstop for a name the model INVENTED, or for a
+    # limitation recorded after the draft, not the first line of defence.
+    limited_areas = {
+        one["area"] for one in constraints.limitations if one.get("area")
+    }
+
     out: List[str] = []
     for row in rows:
         if str(row.id) in constraints.excluded_exercise_ids:
@@ -2151,6 +2261,12 @@ def allowed_exercises(
             for item in (_as_json(row.equipment_required) or [])
         }
         if required and constraints.equipment and (required - constraints.equipment):
+            continue
+        contraindications = {
+            str(item).strip().lower()
+            for item in (_as_json(row.injury_contraindications) or [])
+        }
+        if contraindications & limited_areas:
             continue
         out.append(str(row.name))
         if len(out) >= limit:
@@ -2263,8 +2379,15 @@ async def generate_draft(
                 if isinstance(spec, dict) and spec.get("name"):
                     existing_names.append(str(spec["name"]))
 
+    # Scoped to the OFFERED list. The live run noticed the gap and said so
+    # out loud — "Overhead Press (not in allowed list but noted in recent
+    # performance)" — which is the same landmine as offering an exercise
+    # it may not use, one wrapper over: history for a lift it cannot
+    # prescribe is an invitation to prescribe it.
+    offerable = set(names)
     performance = performance_summary(
-        db, owner, existing_names or names[:20],
+        db, owner,
+        [one for one in (existing_names or names[:20]) if one in offerable],
     )
     payload = constraints_payload(constraints)
     passages = [
@@ -2280,6 +2403,9 @@ async def generate_draft(
     # Reads are done; nothing is held while the model thinks.
     db.rollback()
 
+    # A truncated draft propagates rather than being repaired: a repair
+    # prompt is longer than the original, so retrying a draft that already
+    # ran out of budget spends another three minutes to fail the same way.
     content, model_actual = await _chat(
         prompt_module.SYSTEM_PROMPT, user_prompt,
     )
@@ -2297,6 +2423,51 @@ async def generate_draft(
                 + "; ".join((errors + repair_errors)[:4])
             )
 
+    # §29.3, and the review path's rule applied verbatim: a draft whose
+    # prose names a condition is NOT stored. "A sentence containing a
+    # diagnosis cannot be repaired by deleting a word — the whole reasoning
+    # behind it assumed the diagnosis, and shipping the rest would leave
+    # advice built on a clinical claim with the claim edited out."
+    #
+    # The 2026-10-02 live run is why this exists. With the contraindicated
+    # exercises withheld, the model had to explain WHY it was avoiding
+    # something and invented one: the athlete's note says "left shoulder
+    # complains on heavy flat pressing" and the draft said "to avoid
+    # aggravating shoulder impingement". Storing it would have put an
+    # invented diagnosis in the database and on a screen, with a warning
+    # beside it — and a warning beside a diagnosis is still a diagnosis.
+    #
+    # One repair turn, like the photo-analysis path, then refused.
+    leaks = [
+        one for one in prose_findings(draft) if one.severity == "reject"
+    ]
+    if leaks:
+        logger.info(
+            "[programming] draft leaked clinical language, repairing: %s",
+            "; ".join(one.message for one in leaks[:2]),
+        )
+        repaired_content, repair_model = await _chat(
+            prompt_module.SYSTEM_PROMPT,
+            user_prompt + "\n\n" + prompt_module.build_repair_prompt(
+                [one.message for one in leaks]
+            ),
+        )
+        model_actual = repair_model or model_actual
+        candidate, _ = _parse_draft(repaired_content, kind)
+        still_leaking = (
+            [one for one in prose_findings(candidate) if one.severity == "reject"]
+            if candidate is not None else leaks
+        )
+        if candidate is None or still_leaking:
+            raise ProgrammingError(
+                "The draft named a clinical condition and said so again "
+                "after being told not to, so nothing was stored: "
+                + "; ".join(
+                    one.message for one in (still_leaking or leaks)[:2]
+                )
+            )
+        draft = candidate
+
     return store_draft(
         db, owner, draft, program_id=program_id, phase_id=phase_id,
         model_actual=model_actual,
@@ -2310,13 +2481,23 @@ async def generate_draft(
     )
 
 
-async def _chat(system: str, user: str) -> Tuple[str, Optional[str]]:
+async def _chat(
+    system: str,
+    user: str,
+    *,
+    timeout: Optional[float] = None,
+    max_tokens: Optional[int] = None,
+) -> Tuple[str, Optional[str]]:
     """One bounded call to the local background model.
 
     `enable_thinking: False` nested in `chat_template_kwargs` — without it
     Qwen returns an empty `content` for structured output (§9). `max_tokens`
     is always set: `llama-server` keeps generating after a non-streaming
     client disconnects.
+
+    `timeout` and `max_tokens` are overridable so the smoke script can
+    MEASURE what a draft actually costs rather than guessing at the
+    constants. The defaults are what production uses.
     """
     import asyncio
 
@@ -2330,15 +2511,31 @@ async def _chat(system: str, user: str) -> Tuple[str, Optional[str]]:
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            max_tokens=prompt_module.MAX_OUTPUT_TOKENS,
+            max_tokens=max_tokens or prompt_module.MAX_OUTPUT_TOKENS,
             temperature=prompt_module.TEMPERATURE,
             extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         ),
-        timeout=DRAFT_TIMEOUT_SECONDS,
+        timeout=timeout or DRAFT_TIMEOUT_SECONDS,
     )
     choices = (response or {}).get("choices") or [{}]
     message = choices[0].get("message") or {}
-    return (message.get("content") or "").strip(), (response or {}).get("model")
+    answer = (message.get("content") or "").strip()
+
+    # A draft cut off at the cap is not malformed JSON, and reporting it as
+    # "the output was not JSON" sends the next reader to the prompt instead
+    # of to the budget. A four-week block is roughly four times the measured
+    # one-week output — about 16,000 tokens — so this is the failure a large
+    # ask produces, and it has to name itself.
+    if choices[0].get("finish_reason") == "length":
+        raise TruncatedDraft(
+            f"the model hit the {max_tokens or prompt_module.MAX_OUTPUT_TOKENS}"
+            f"-token output cap with {len(answer)} characters written. Every "
+            f"set is enumerated, so a multi-week block does not fit in one "
+            f"call: ask for fewer weeks, or raise MAX_OUTPUT_TOKENS and "
+            f"DRAFT_TIMEOUT_SECONDS together."
+        )
+
+    return answer, (response or {}).get("model")
 
 
 def _parse_draft(

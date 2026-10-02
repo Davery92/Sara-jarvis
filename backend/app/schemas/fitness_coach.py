@@ -1864,6 +1864,10 @@ class DraftValidationCode(str, Enum):
     IMPLAUSIBLE_INTENSITY = "implausible_intensity"
     CONTRADICTORY_METRIC = "contradictory_metric"
     MISSING_LOAD_UNIT = "missing_load_unit"
+    #: A diagnosis, a treatment, or an invented citation in the draft's
+    #: prose. §29.3 forbids interpreting a limitation, and until the live
+    #: run on 2026-10-02 the prompt asked for that and nothing enforced it.
+    DIAGNOSTIC_LANGUAGE = "diagnostic_language"
     #: Not an error: something the coach must ask before the draft can be
     #: judged. §29.3 — a missing constraint produces a question, not a
     #: default.

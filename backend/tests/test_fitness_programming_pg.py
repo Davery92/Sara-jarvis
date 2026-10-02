@@ -2321,3 +2321,426 @@ def test_a_template_with_no_usable_exercise_refuses_rather_than_emptying(
     with pytest.raises(programming.ProgrammingError) as excinfo:
         programming.read_session(pg, alice, template_id)
     assert "no usable exercises" in str(excinfo.value)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# What the live roundtrip taught (2026-10-02)
+# ─────────────────────────────────────────────────────────────────────────
+
+def test_the_output_cap_fits_a_measured_week():
+    """`scripts/fitness_draft_smoke.py` against the deployed 27B measured
+    one week — three sessions, thirteen slots, thirty-four working sets — at
+    ~3,970 output tokens in 196.7s.
+
+    Both constants were originally below that, so every live draft failed:
+    the cap truncated the JSON and the timeout fired before anything came
+    back. A stub cannot catch either, which is why the live run exists.
+    """
+    from app.prompts import fitness_program_draft as prompts
+    from app.services.fitness.programming import DRAFT_TIMEOUT_SECONDS
+
+    measured_tokens = 3970
+    measured_seconds = 197
+
+    assert prompts.MAX_OUTPUT_TOKENS > measured_tokens, (
+        "the output cap is below a measured single week; the draft will "
+        "truncate mid-object and parse as nothing"
+    )
+    assert DRAFT_TIMEOUT_SECONDS > measured_seconds * 1.5, (
+        "the timeout leaves no headroom over a measured single week"
+    )
+    # And the wait must not be tighter than the client's own budget, or the
+    # client's timeout can never apply — which is what 180s did.
+    from app.core.config import settings
+    assert DRAFT_TIMEOUT_SECONDS < settings.bg_llm_request_timeout
+
+
+def test_a_truncated_draft_names_the_budget_not_the_prompt():
+    """A draft cut off at the cap is not malformed JSON.
+
+    Reporting it as "the output was not JSON" sends the next reader to the
+    prompt instead of to the budget, and the remedy is different: a smaller
+    ask or a bigger cap, not better wording.
+    """
+    import asyncio
+
+    from app.services.fitness import programming
+
+    async def truncating_client(*args, **kwargs):
+        return {
+            "model": "qwen3.8-27b",
+            "choices": [{
+                "message": {"content": '{"kind": "week", "title": "Week 1'},
+                "finish_reason": "length",
+            }],
+        }
+
+    class _Client:
+        chat_completion = staticmethod(truncating_client)
+
+    import app.core.llm as llm_module
+    original = llm_module.get_background_llm_client
+    llm_module.get_background_llm_client = lambda: _Client()
+    try:
+        with pytest.raises(programming.TruncatedDraft) as excinfo:
+            asyncio.run(programming._chat("system", "user"))
+    finally:
+        llm_module.get_background_llm_client = original
+
+    message = str(excinfo.value)
+    assert "output cap" in message
+    assert "multi-week block does not fit" in message
+    # It names both knobs, because raising one without the other just moves
+    # the failure from truncation to timeout.
+    assert "MAX_OUTPUT_TOKENS" in message
+    assert "DRAFT_TIMEOUT_SECONDS" in message
+
+
+def test_a_truncated_draft_is_not_repaired(pg, ready, monkeypatch):
+    """The repair prompt is LONGER than the original, so retrying a draft
+    that already ran out of budget spends another three minutes to fail the
+    same way."""
+    from app.services.fitness import programming
+
+    alice, _, program_id, phase_id = ready
+    calls = []
+
+    async def truncating(system, user, **kwargs):
+        calls.append(user)
+        raise programming.TruncatedDraft("the model hit the 7000-token cap")
+
+    monkeypatch.setattr(programming, "_chat", truncating)
+    with pytest.raises(programming.TruncatedDraft):
+        asyncio.run(programming.generate_draft(
+            pg, alice, program_id=program_id, phase_id=phase_id,
+        ))
+    assert len(calls) == 1, "a truncated draft spent the repair turn"
+
+
+@requires_pg
+def test_the_offered_list_never_includes_unavailable_equipment(pg, ready):
+    """The live run's one blocking finding was the smoke script's fault, not
+    the model's: it offered all twenty exercises while production filters by
+    equipment first. The model picked a leg extension it had been handed.
+
+    This is the property that made that a fixture bug rather than a real
+    one, so it is worth pinning: an exercise the athlete cannot perform is
+    never offered, and the validator's equipment rule is the backstop for a
+    name the model invented rather than the first line of defence.
+    """
+    from app.services.fitness import programming
+
+    alice, _, _, _ = ready
+    _library(pg, alice, "Leg Extension", equipment=("leg extension machine",))
+    constraints = programming.load_constraints(pg, alice)
+    offered = programming.allowed_exercises(pg, alice, constraints)
+
+    assert "Leg Extension" not in offered
+    assert "Barbell Bench Press" in offered
+    for name in offered:
+        row = pg.execute(text("""
+            SELECT equipment_required FROM exercise_library
+            WHERE name = :name AND owner_user_id = :u
+        """), {"name": name, "u": alice}).fetchone()
+        if row is None or not row.equipment_required:
+            continue
+        required = {
+            str(item).strip().lower()
+            for item in json.loads(row.equipment_required)
+            if item
+        } if isinstance(row.equipment_required, str) else {
+            str(item).strip().lower() for item in row.equipment_required
+        }
+        assert not (required - constraints.equipment), name
+
+
+@requires_pg
+def test_a_contraindicated_exercise_is_never_offered(pg, two_athletes):
+    """The 2026-10-02 live run's real finding.
+
+    An Overhead Press was offered to an athlete with a recorded shoulder
+    limitation, the model used it, and `validate_draft` blocked the entire
+    draft for using what it had been handed. The offered list and the
+    validator must not disagree: the validator is the backstop for a name
+    the model INVENTED, or for a limitation recorded after the draft — not
+    the first line of defence.
+    """
+    from app.services.fitness import programming
+
+    alice, _ = two_athletes
+    _profile(pg, alice)
+    _goal(pg, alice)
+    _library(pg, alice, "Barbell Row", equipment=("barbell",))
+    _library(pg, alice, "Overhead Press", equipment=("barbell", "rack"),
+             contraindications=("shoulder",))
+    pg.execute(text("""
+        INSERT INTO fitness_athlete_limitation (
+            id, user_id, area, description, excluded_exercise_ids,
+            modified_exercise_ids, severity_flag, effective_from, status,
+            created_at, updated_at
+        ) VALUES (
+            :id, :u, 'shoulder', 'left shoulder on heavy pressing',
+            '[]'::jsonb, '[]'::jsonb, 'moderate', CURRENT_DATE - 10,
+            'active', NOW(), NOW()
+        )
+    """), {"id": str(uuid.uuid4()), "u": alice})
+    pg.commit()
+
+    constraints = programming.load_constraints(pg, alice)
+    offered = programming.allowed_exercises(pg, alice, constraints)
+    assert "Overhead Press" not in offered
+    assert "Barbell Row" in offered
+
+
+@requires_pg
+def test_a_contraindicated_exercise_is_still_blocked_if_it_appears(
+    pg, two_athletes,
+):
+    """Withholding it from the list does not retire the validator rule: a
+    draft can name an exercise it was never offered, and a limitation can
+    be recorded after the draft was written."""
+    from app.schemas.fitness_coach import DraftValidationCode
+    from app.services.fitness import programming
+
+    alice, _ = two_athletes
+    _profile(pg, alice)
+    _goal(pg, alice)
+    _library(pg, alice, "Barbell Bench Press", equipment=("barbell", "bench"),
+             contraindications=("shoulder",))
+    pg.execute(text("""
+        INSERT INTO fitness_athlete_limitation (
+            id, user_id, area, description, excluded_exercise_ids,
+            modified_exercise_ids, severity_flag, effective_from, status,
+            created_at, updated_at
+        ) VALUES (
+            :id, :u, 'shoulder', 'left shoulder on heavy pressing',
+            '[]'::jsonb, '[]'::jsonb, 'moderate', CURRENT_DATE - 10,
+            'active', NOW(), NOW()
+        )
+    """), {"id": str(uuid.uuid4()), "u": alice})
+    pg.commit()
+
+    validation = programming.validate_draft(pg, alice, _draft())
+    assert DraftValidationCode.LIMITATION_CONFLICT in {
+        one.code for one in validation.blocking
+    }
+
+
+@requires_pg
+def test_a_diagnosis_in_the_drafts_prose_is_refused(pg, two_athletes):
+    """§29.3 enforced rather than requested.
+
+    Until the 2026-10-02 live run the draft path never called `safety` at
+    all: the prompt said "you are reading a list, not an MRI" and nothing
+    checked. The schema has no field for a diagnosis, so prose is the only
+    place one can appear.
+    """
+    from app.schemas.fitness_coach import DraftValidationCode
+    from app.services.fitness import programming
+
+    alice, _ = two_athletes
+    _profile(pg, alice)
+    _goal(pg, alice)
+    _library(pg, alice, "Barbell Bench Press", equipment=("barbell", "bench"))
+
+    diagnosing = _draft(
+        rationale=(
+            "The left shoulder pain is impingement, so this block works "
+            "around it."
+        ),
+    )
+    validation = programming.validate_draft(pg, alice, diagnosing)
+    blocking = [
+        one for one in validation.blocking
+        if one.code is DraftValidationCode.DIAGNOSTIC_LANGUAGE
+    ]
+    assert blocking
+    assert "names a condition" in blocking[0].message
+    assert blocking[0].path == "rationale"
+
+
+@requires_pg
+def test_treatment_advice_in_a_slot_note_is_refused(pg, two_athletes):
+    """Every free-text field is covered, not just the top-level ones — a
+    set note is as publishable as a rationale."""
+    from app.schemas.fitness_coach import (
+        DraftValidationCode, EffortTarget, PrescribedSet, PrescribedSlot,
+        SetRole,
+    )
+    from app.services.fitness import programming
+
+    alice, _ = two_athletes
+    _profile(pg, alice)
+    _goal(pg, alice)
+    _library(pg, alice, "Barbell Bench Press", equipment=("barbell", "bench"))
+
+    slot = PrescribedSlot(
+        order=0, exercise_name="Barbell Bench Press",
+        note="Take 400 mg ibuprofen beforehand if the shoulder is sore.",
+        sets=[PrescribedSet(
+            index=index, role=SetRole.WORKING, reps_low=5, reps_high=8,
+            effort=EffortTarget.RPE, rpe=8.5, rest_seconds=180,
+        ) for index in range(4)],
+    )
+    validation = programming.validate_draft(pg, alice, _draft(slots=[slot]))
+    blocking = [
+        one for one in validation.blocking
+        if one.code is DraftValidationCode.DIAGNOSTIC_LANGUAGE
+    ]
+    assert blocking
+    assert "slots[0].note" in blocking[0].path
+
+
+@requires_pg
+def test_ordinary_shoulder_care_language_still_passes(pg, two_athletes):
+    """The distinction that matters, and the one my first smoke script got
+    wrong: "face pulls for rotator cuff health" is gym language, and
+    `DIAGNOSIS_TERMS` holds "rotator cuff tear" — the condition — not the
+    anatomy. A check that fires on this is an outage, exactly like the
+    `"take a"` substring was."""
+    from app.schemas.fitness_coach import DraftValidationCode
+    from app.services.fitness import programming
+
+    alice, _ = two_athletes
+    _profile(pg, alice)
+    _goal(pg, alice)
+    _library(pg, alice, "Barbell Bench Press", equipment=("barbell", "bench"))
+
+    careful = _draft(
+        rationale=(
+            "Bench has stalled, so this adds incline volume and face pulls "
+            "to support rotator cuff health and keep the shoulder quiet."
+        ),
+        limitations_respected=[
+            "Kept heavy flat pressing out of the top set to reduce shoulder "
+            "stress.",
+        ],
+    )
+    validation = programming.validate_draft(pg, alice, careful)
+    assert DraftValidationCode.DIAGNOSTIC_LANGUAGE not in {
+        one.code for one in validation.findings
+    }
+
+
+def test_the_prompt_shows_how_to_express_a_hold():
+    """The live model expressed a 45-second plank as `reps_low: 45,
+    reps_high: 60`, because the shape block only ever showed a rep set. The
+    schema has supported `metric: "time"` all along; the prompt simply
+    never said so."""
+    from app.prompts import fitness_program_draft as prompts
+
+    assert '"metric": "time"' in prompts.SYSTEM_PROMPT
+    assert '"seconds": 45' in prompts.SYSTEM_PROMPT
+    lowered = prompts.SYSTEM_PROMPT.lower()
+    assert "a plank is 45 seconds, not 45 reps" in lowered
+
+
+@requires_pg
+def test_a_clinical_leak_is_repaired_once_then_refused(pg, ready, monkeypatch):
+    """The 2026-10-02 live run's most important finding.
+
+    With the contraindicated exercises withheld, the model had to explain
+    WHY it was avoiding something and invented a condition: the athlete's
+    note says "left shoulder complains on heavy flat pressing" and the
+    draft said "to avoid aggravating shoulder impingement".
+
+    The review path's rule applies verbatim — a sentence containing a
+    diagnosis cannot be repaired by deleting a word — so the draft is NOT
+    stored. A warning beside a diagnosis is still a diagnosis.
+    """
+    from app.services.fitness import programming
+
+    alice, _, program_id, phase_id = ready
+    leaking = _draft(
+        rationale=(
+            "Excluded the overhead press to avoid aggravating shoulder "
+            "impingement."
+        ),
+    ).model_dump(mode="json")
+
+    calls = []
+
+    async def always_leaks(system, user, **kwargs):
+        calls.append(user)
+        return json.dumps(leaking), "qwen3.8-27b"
+
+    monkeypatch.setattr(programming, "_chat", always_leaks)
+    with pytest.raises(programming.ProgrammingError) as excinfo:
+        asyncio.run(programming.generate_draft(
+            pg, alice, program_id=program_id, phase_id=phase_id,
+        ))
+
+    assert len(calls) == 2, "the clinical leak got exactly one repair turn"
+    assert "said so again after being told not to" in str(excinfo.value)
+    # And nothing was stored: an invented diagnosis must not reach the
+    # database or a screen.
+    assert pg.execute(text("""
+        SELECT COUNT(*) FROM fitness_program_draft WHERE user_id = :u
+    """), {"u": alice}).scalar() == 0
+
+    # The repair turn told it to remove the name rather than soften it.
+    assert "REMOVE the name" in calls[1]
+    assert "no acceptable way to phrase one" in calls[1]
+
+
+@requires_pg
+def test_a_repaired_draft_is_stored(pg, ready, monkeypatch):
+    """The repair has to be able to succeed, or the gate is just an outage."""
+    from app.services.fitness import programming
+
+    alice, _, program_id, phase_id = ready
+    leaking = _draft(
+        rationale="Excluded the press to avoid aggravating impingement.",
+    ).model_dump(mode="json")
+    clean = _draft(
+        rationale=(
+            "Excluded the overhead press because of the recorded shoulder "
+            "limitation."
+        ),
+    ).model_dump(mode="json")
+
+    answers = [leaking, clean]
+
+    async def leaks_then_complies(system, user, **kwargs):
+        return json.dumps(answers.pop(0)), "qwen3.8-27b"
+
+    monkeypatch.setattr(programming, "_chat", leaks_then_complies)
+    stored = asyncio.run(programming.generate_draft(
+        pg, alice, program_id=program_id, phase_id=phase_id,
+    ))
+    assert "impingement" not in stored.draft.rationale
+    assert stored.validation.acceptable, [
+        one.message for one in stored.validation.findings
+    ]
+
+
+@requires_pg
+def test_performance_history_is_scoped_to_what_may_be_prescribed(
+    pg, two_athletes,
+):
+    """The live run said it out loud: "Overhead Press (not in allowed list
+    but noted in recent performance)". History for a lift the model cannot
+    prescribe is an invitation to prescribe it — the same landmine as
+    offering the exercise, one wrapper over."""
+    from app.services.fitness import programming
+
+    alice, _ = two_athletes
+    _profile(pg, alice)
+    _goal(pg, alice)
+    bench = _library(pg, alice, "Barbell Bench Press",
+                     equipment=("barbell", "bench"))
+    press = _library(pg, alice, "Leg Press",
+                     equipment=("leg press machine",))
+    _log_session(pg, alice, bench, days_ago=3, reps=6, load=100.0)
+    _log_session(pg, alice, press, days_ago=4, reps=10, load=180.0)
+
+    constraints = programming.load_constraints(pg, alice)
+    offered = programming.allowed_exercises(pg, alice, constraints)
+    assert "Leg Press" not in offered
+
+    scoped = programming.performance_summary(
+        pg, alice, [one for one in ["Barbell Bench Press", "Leg Press"]
+                    if one in set(offered)],
+    )
+    assert "Barbell Bench Press" in scoped
+    assert "Leg Press" not in scoped

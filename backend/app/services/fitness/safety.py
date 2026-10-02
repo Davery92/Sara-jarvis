@@ -319,6 +319,87 @@ def _review_text(output: CoachReviewOutputV1) -> List[Tuple[str, str]]:
     return parts
 
 
+def check_text(where: str, text: str) -> List[Finding]:
+    """Every language rule, over one piece of free text.
+
+    Extracted from `check_language` so the program-draft path can reuse it
+    (Step 29 §29.3) instead of carrying a second list. The first version of
+    the draft smoke script DID carry one, and it immediately made the
+    mistake this module already learned: it flagged "rotator cuff health"
+    as a diagnosis. `DIAGNOSIS_TERMS` holds "rotator cuff tear" — the
+    condition — and not the bare anatomy, because face pulls for cuff
+    health is ordinary gym language. One implementation, one chance to get
+    that distinction right.
+    """
+    findings: List[Finding] = []
+    if not text:
+        return findings
+    lowered = text.lower()
+
+    for term in DIAGNOSIS_TERMS:
+        if term in lowered:
+            findings.append(Finding(
+                code="diagnosis", severity="reject", path=where,
+                message=(
+                    f"{where} names a condition ({term.strip()!r}). Pain is "
+                    f"what the athlete reported; describe it and suggest "
+                    f"they get it looked at, but do not name a cause."
+                ),
+            ))
+    for pattern in DIAGNOSTIC_ASSERTIONS:
+        match = pattern.search(text)
+        if match:
+            findings.append(Finding(
+                code="diagnostic_claim", severity="reject", path=where,
+                message=(
+                    f"{where} asserts a clinical judgement "
+                    f"({match.group(0).strip()!r}). Report what was "
+                    f"logged; do not conclude what it is."
+                ),
+            ))
+    for term in TREATMENT_TERMS:
+        if term in lowered:
+            findings.append(Finding(
+                code="treatment_advice", severity="reject", path=where,
+                message=(
+                    f"{where} gives treatment advice ({term.strip()!r}). "
+                    f"Recommending they see someone is right; telling them "
+                    f"what to take or do is not."
+                ),
+            ))
+    for pattern in TREATMENT_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            findings.append(Finding(
+                code="treatment_advice", severity="reject", path=where,
+                message=(
+                    f"{where} gives treatment advice "
+                    f"({match.group(0).strip()!r})."
+                ),
+            ))
+    for pattern in CITATION_PATTERNS:
+        if pattern.search(text):
+            findings.append(Finding(
+                code="fabricated_citation", severity="reject", path=where,
+                message=(
+                    f"{where} cites research. No curated library is "
+                    f"attached, so the citation is invented — and an "
+                    f"invented one reads exactly like a real one."
+                ),
+            ))
+    for pattern in OVERCLAIM_PATTERNS:
+        if pattern.search(text):
+            findings.append(Finding(
+                code="overclaim", severity="downgrade", path=where,
+                message=(
+                    f"{where} overstates certainty "
+                    f"({pattern.pattern!r}). A week of data cannot support "
+                    f"a guarantee."
+                ),
+            ))
+    return findings
+
+
 def check_language(output: CoachReviewOutputV1) -> List[Finding]:
     """Reject medical claims, prescriptions and fabricated citations.
 
@@ -329,71 +410,7 @@ def check_language(output: CoachReviewOutputV1) -> List[Finding]:
     """
     findings: List[Finding] = []
     for where, text in _review_text(output):
-        if not text:
-            continue
-        lowered = text.lower()
-
-        for term in DIAGNOSIS_TERMS:
-            if term in lowered:
-                findings.append(Finding(
-                    code="diagnosis", severity="reject", path=where,
-                    message=(
-                        f"{where} names a condition ({term.strip()!r}). Pain is "
-                        f"what the athlete reported; describe it and suggest "
-                        f"they get it looked at, but do not name a cause."
-                    ),
-                ))
-        for pattern in DIAGNOSTIC_ASSERTIONS:
-            match = pattern.search(text)
-            if match:
-                findings.append(Finding(
-                    code="diagnostic_claim", severity="reject", path=where,
-                    message=(
-                        f"{where} asserts a clinical judgement "
-                        f"({match.group(0).strip()!r}). Report what was "
-                        f"logged; do not conclude what it is."
-                    ),
-                ))
-        for term in TREATMENT_TERMS:
-            if term in lowered:
-                findings.append(Finding(
-                    code="treatment_advice", severity="reject", path=where,
-                    message=(
-                        f"{where} gives treatment advice ({term.strip()!r}). "
-                        f"Recommending they see someone is right; telling them "
-                        f"what to take or do is not."
-                    ),
-                ))
-        for pattern in TREATMENT_PATTERNS:
-            match = pattern.search(text)
-            if match:
-                findings.append(Finding(
-                    code="treatment_advice", severity="reject", path=where,
-                    message=(
-                        f"{where} gives treatment advice "
-                        f"({match.group(0).strip()!r})."
-                    ),
-                ))
-        for pattern in CITATION_PATTERNS:
-            if pattern.search(text):
-                findings.append(Finding(
-                    code="fabricated_citation", severity="reject", path=where,
-                    message=(
-                        f"{where} cites research. No curated library is "
-                        f"attached, so the citation is invented — and an "
-                        f"invented one reads exactly like a real one."
-                    ),
-                ))
-        for pattern in OVERCLAIM_PATTERNS:
-            if pattern.search(text):
-                findings.append(Finding(
-                    code="overclaim", severity="downgrade", path=where,
-                    message=(
-                        f"{where} overstates certainty "
-                        f"({pattern.pattern!r}). A week of data cannot support "
-                        f"a guarantee."
-                    ),
-                ))
+        findings.extend(check_text(where, text))
     return findings
 
 

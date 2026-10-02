@@ -21,7 +21,17 @@ import json
 from typing import Any, Dict, List, Optional
 
 PROMPT_VERSION = "fitness_program_draft_v1"
-MAX_OUTPUT_TOKENS = 3600
+#: Measured, not guessed. `scripts/fitness_draft_smoke.py` against the
+#: deployed 27B on 2026-10-02: one week of three sessions came to ~3,970
+#: tokens. The first value here was 3600, so even a SINGLE week truncated
+#: at the cap and parsed as nothing — and the prompt is what makes it
+#: large, deliberately: every set is written out because the person
+#: reviewing the draft is checking the sets.
+#:
+#: 7000 fits a denser week (four sessions, six slots) with headroom. It
+#: does NOT fit a four-week block, which measures around 16,000 — that ask
+#: raises `TruncatedDraft`, which says so.
+MAX_OUTPUT_TOKENS = 7000
 TEMPERATURE = 0.3
 
 SYSTEM_PROMPT = """You draft training programs for one athlete, as JSON, for a human to review.
@@ -58,6 +68,14 @@ Return ONLY a JSON object:
                   "reps_low": 5, "reps_high": 8,
                   "effort": "rpe", "rpe": 8,
                   "rest_seconds": 180
+                },
+                {
+                  "index": 1,
+                  "role": "working",
+                  "metric": "time",
+                  "seconds": 45,
+                  "effort": "none",
+                  "rest_seconds": 60
                 }
               ]
             }
@@ -78,7 +96,8 @@ Rules, each of which is also checked in code:
 4. **Ask instead of assuming.** If something you need is not in the constraints — a reference max for percentage work, which days are available, whether an injury still limits anything — put it in `questions`. A question costs a day. A guessed constraint costs the block.
 5. **Program for the lifter on file.** If the constraints show years of training or hundreds of logged sessions, do not draft a novice plan: no plan where nothing goes above RPE 8 and nothing carries more than three working sets. That draft is rejected outright.
 6. **A rep range is a range, an RPE is an effort target, and a percentage needs a reference.** Do not prescribe both a weight and a percentage for the same set.
-7. **No nutrition, no calories, no body-composition claims.** This is a training draft. Targets are decided one at a time, elsewhere.
+7. **A hold is `"metric": "time"` with `seconds`, never reps.** A plank is 45 seconds, not 45 reps — the second set in the shape above is the template. Expressing a hold as a rep range is the one shape error the live model made, and it reads as a 45-rep set to everything downstream.
+8. **No nutrition, no calories, no body-composition claims.** This is a training draft. Targets are decided one at a time, elsewhere.
 
 Every set is written out. Do not write "3x8" and leave the sets implied: three sets at eight reps is three entries, because the person reviewing this is checking the sets."""
 
@@ -131,7 +150,9 @@ REPAIR_INSTRUCTION = """Your previous draft was rejected. Reasons:
 
 Return ONLY the corrected JSON object, same shape, no prose, no fence.
 
-If a rejection was about an exercise name, replace it with one from ALLOWED_EXERCISES or drop the slot — do not rename it to something that sounds closer. If it was about a missing constraint, move it into `questions` rather than choosing a value: a draft with an open question is reviewable, and a draft built on a guess is not."""
+If a rejection was about an exercise name, replace it with one from ALLOWED_EXERCISES or drop the slot — do not rename it to something that sounds closer. If it was about a missing constraint, move it into `questions` rather than choosing a value: a draft with an open question is reviewable, and a draft built on a guess is not.
+
+If a rejection was about naming a condition, REMOVE the name — do not soften it. The constraints told you which exercises to avoid and nothing about why. "Excluded the overhead press because of the recorded shoulder limitation" is correct; "to avoid aggravating shoulder impingement" is a diagnosis you inferred, and there is no acceptable way to phrase one."""
 
 
 def build_repair_prompt(errors: List[str]) -> str:
