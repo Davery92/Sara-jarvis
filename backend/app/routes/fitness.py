@@ -5069,8 +5069,40 @@ def _sync_template_exercises_json(db: Session, template_id: str, user_id: str) -
     already verify the template before mutating its children, but a writer
     that rebuilds a whole JSON column should not be able to address a row by
     id alone — that is the shape a later caller gets wrong.
+
+    Step 29.1 asks for ONE writer across the JSON column and the relational
+    rows, and `services/fitness/programming.sync_projections` is it: it
+    types the rows, writes both projections from the typed source, and
+    records a template revision — so an edit made here is versioned like one
+    made through a draft. This delegates to it and keeps the local rebuild
+    below only as the fallback for a template whose rows cannot be typed
+    (an exercise with no name, which exists in older data). Falling back
+    rather than failing matters: the alternative is a 500 on an edit to a
+    template somebody imported years ago.
     """
     import json as _json
+
+    from app.services.fitness.programming import (
+        ProgrammingError, sync_projections,
+    )
+
+    try:
+        sync_projections(db, user_id, template_id)
+        return
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Template not found")
+    except ProgrammingError as exc:
+        logger.info(
+            "template %s could not be typed (%s); rebuilding the JSON "
+            "projection only", template_id, exc,
+        )
+    except Exception as exc:
+        logger.warning(
+            "typed template sync failed for %s (%s): %s — falling back to "
+            "the JSON rebuild",
+            template_id, type(exc).__name__, exc,
+        )
+
     existing_row = db.execute(text(
         "SELECT exercises FROM fitness_template WHERE id = :tid AND user_id = :uid"),
         {"tid": template_id, "uid": user_id}).fetchone()

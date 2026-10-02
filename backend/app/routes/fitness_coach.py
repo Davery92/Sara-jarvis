@@ -1205,3 +1205,297 @@ async def list_cadence_runs(
         }
         for row in rows
     ]
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Program drafts (Step 29)
+# ─────────────────────────────────────────────────────────────────────────
+#
+# Four routes, and the split between them is the point. Generating a draft
+# is cheap and reversible. Previewing one is free. Accepting one rewrites
+# every session it touches, so it is a separate call that takes a reason
+# and records who made it — and `ck_program_draft_decided_by` refuses one
+# attributed to a model.
+
+
+@router.post("/program-drafts")
+async def create_program_draft(
+    request: Optional[str] = Body(default=None, embed=True),
+    kind: str = Body(default="block", embed=True),
+    program_id: Optional[str] = Body(default=None, embed=True),
+    phase_id: Optional[str] = Body(default=None, embed=True),
+    user_id: str = Depends(current_athlete),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Draft a program, block or week. Activates nothing.
+
+    The response carries the validation findings and the open questions,
+    because a draft with an unanswered question is the normal outcome and
+    the thing worth showing first: §29.3 says a missing constraint produces
+    a question rather than a default.
+    """
+    from app.schemas.fitness_coach import DraftBlockKind
+    from app.services.fitness import programming
+
+    try:
+        draft_kind = DraftBlockKind(kind)
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{kind!r} is not a draft kind (program, block, week)",
+        )
+
+    evidence = []
+    try:
+        from app.services.fitness import science
+
+        if science.coverage(db, user_id)["accepted_total"]:
+            evidence = await science.search(
+                db, user_id,
+                "training programme design volume and frequency for "
+                "hypertrophy and strength",
+                limit=3,
+            )
+    except Exception as exc:
+        # Evidence is a bonus. A draft without it is worth having; a draft
+        # that did not happen because the library was unreachable is not.
+        logger.info("program draft: evidence unavailable (%s)", exc)
+
+    try:
+        stored = await programming.generate_draft(
+            db, user_id, request=request, kind=draft_kind,
+            program_id=program_id, phase_id=phase_id, evidence=evidence,
+        )
+    except programming.ProgrammingError as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        db.rollback()
+        logger.warning(
+            "program draft failed (%s): %s", type(exc).__name__, exc,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="The model did not produce a usable draft. Nothing was changed.",
+        )
+    return _draft_payload(stored)
+
+
+@router.get("/program-drafts")
+def list_program_drafts(
+    status: Optional[str] = Query(None),
+    limit: int = Query(20, ge=1, le=100),
+    user_id: str = Depends(current_athlete),
+    db: Session = Depends(get_db),
+) -> List[Dict[str, Any]]:
+    from app.schemas.fitness_coach import DraftStatus
+    from app.services.fitness import programming
+
+    parsed = None
+    if status:
+        try:
+            parsed = DraftStatus(status)
+        except ValueError:
+            raise HTTPException(
+                status_code=422, detail=f"{status!r} is not a draft status",
+            )
+    return programming.list_drafts(db, user_id, status=parsed, limit=limit)
+
+
+@router.get("/program-drafts/{draft_id}")
+def get_program_draft(
+    draft_id: str,
+    user_id: str = Depends(current_athlete),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    from app.services.fitness import programming
+
+    try:
+        return _draft_payload(programming.get_draft(db, user_id, draft_id))
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Draft not found")
+
+
+@router.get("/program-drafts/{draft_id}/preview")
+def preview_program_draft(
+    draft_id: str,
+    user_id: str = Depends(current_athlete),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Exactly what accepting this draft would do.
+
+    §29.5. "It will update your program" is not something anybody can agree
+    to; the dates, the per-session changes and the resulting revision are
+    the agreement.
+    """
+    from app.services.fitness import programming
+
+    try:
+        preview = programming.preview_draft(db, user_id, draft_id)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    return preview.model_dump(mode="json")
+
+
+@router.post("/program-drafts/{draft_id}/accept")
+def accept_program_draft(
+    draft_id: str,
+    reason: str = Body(..., embed=True, min_length=5, max_length=2000),
+    effect_scope: str = Body(default="forward", embed=True),
+    effective_from: Optional[date] = Body(default=None, embed=True),
+    user_id: str = Depends(current_athlete),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Version and activate a draft, atomically.
+
+    `decided_by` is the authenticated athlete, never a parameter: a route
+    that accepted a caller-supplied decider would let the autonomous loop
+    name itself the decision-maker, which is exactly what §29.2 forbids and
+    what `ck_program_draft_decided_by` refuses at the database.
+    """
+    from app.services.fitness import programming
+
+    try:
+        return programming.accept_draft(
+            db, user_id, draft_id, decided_by=user_id, reason=reason,
+            effect_scope=effect_scope, effective_from=effective_from,
+        )
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    except programming.RevisionConflict as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail={
+            "message": str(exc), "base_revision": exc.base,
+            "current_revision": exc.current,
+        })
+    except programming.ProgrammingError as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.post("/program-drafts/{draft_id}/reject")
+def reject_program_draft(
+    draft_id: str,
+    reason: str = Body(..., embed=True, min_length=5, max_length=2000),
+    user_id: str = Depends(current_athlete),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Decline a draft, with the reason kept.
+
+    The reason is required because the same proposal will be generated
+    again, and "we looked at this and said no, because X" is the only thing
+    that stops it coming back every week.
+    """
+    from app.services.fitness import programming
+
+    try:
+        return programming.reject_draft(
+            db, user_id, draft_id, decided_by=user_id, reason=reason,
+        )
+    except programming.ProgrammingError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@router.get("/program-revisions")
+def list_program_revisions(
+    program_id: Optional[str] = Query(None),
+    limit: int = Query(20, ge=1, le=100),
+    user_id: str = Depends(current_athlete),
+    db: Session = Depends(get_db),
+) -> List[Dict[str, Any]]:
+    """The revision history. Activated revisions are immutable.
+
+    What a reader needs from this is "what was the plan on that date",
+    which is why `effective_from` and `effect_scope` are here: a backdated
+    revision has to say so rather than leaving a reader to infer it from
+    `created_at`.
+    """
+    from sqlalchemy import text as sql_text
+
+    rows = db.execute(sql_text("""
+        SELECT id, program_id, revision, label, source, draft_id,
+               effective_from, effective_to, effect_scope, activated_at,
+               activated_by, superseded_by_id, notes, created_at
+        FROM fitness_program_revision
+        WHERE user_id = :u
+          AND (CAST(:program AS VARCHAR) IS NULL
+               OR program_id = CAST(:program AS VARCHAR))
+        ORDER BY created_at DESC
+        LIMIT :limit
+    """), {"u": user_id, "program": program_id, "limit": limit}).fetchall()
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        item = dict(row._mapping)
+        for key in ("activated_at", "created_at"):
+            if item.get(key):
+                item[key] = item[key].isoformat()
+        for key in ("effective_from", "effective_to"):
+            if item.get(key):
+                item[key] = item[key].isoformat()
+        out.append(item)
+    return out
+
+
+@router.get("/templates/{template_id}/progression")
+def template_progression(
+    template_id: str,
+    on: Optional[date] = Query(None),
+    user_id: str = Depends(current_athlete),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Deterministic progression for each exercise in one session.
+
+    No model. The rule is configured per exercise, the inputs are the last
+    comparable performance and the recovery state, and each decision names
+    which rule fired — "add 5kg" with no reason is indistinguishable from a
+    guess.
+    """
+    from app.services.fitness import programming
+
+    try:
+        session = programming.read_session(db, user_id, template_id)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Template not found")
+    except programming.ProgrammingError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    decisions = [
+        programming.progression_for(db, user_id, slot, on_date=on).model_dump(
+            mode="json"
+        )
+        for slot in session.slots
+    ]
+    return {
+        "template_id": template_id,
+        "session": session.name,
+        "decisions": decisions,
+    }
+
+
+def _draft_payload(stored: "Any") -> Dict[str, Any]:
+    return {
+        "id": stored.id,
+        "kind": stored.kind.value,
+        "status": stored.status.value,
+        "program_id": stored.program_id,
+        "phase_id": stored.phase_id,
+        "base_revision": stored.base_revision,
+        "model_actual": stored.model_actual,
+        "draft": stored.draft.model_dump(mode="json"),
+        "validation": stored.validation.model_dump(mode="json"),
+        # Surfaced separately because they are what a reviewer acts on
+        # first, and because an acceptance is refused while any remain.
+        "blocking": [
+            one.model_dump(mode="json") for one in stored.validation.blocking
+        ],
+        "questions": [
+            one.message for one in stored.validation.questions
+        ],
+        "acceptable": stored.validation.acceptable,
+        "created_at": (
+            stored.created_at.isoformat() if stored.created_at else None
+        ),
+        "resulting_revision_id": stored.resulting_revision_id,
+        "decision_reason": stored.decision_reason,
+    }
