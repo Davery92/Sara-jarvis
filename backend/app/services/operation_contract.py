@@ -900,6 +900,28 @@ _EXPLICIT_KIND: Dict[str, OperationKind] = {
     "device_send_notification": OperationKind.CONTROL,
     "standing_order_create": OperationKind.RECURRING,
     "home_schedule_action": OperationKind.CREATE,
+    # --- Major plan changes (FITNESS_COACH_IMPLEMENTATION_PLAN Step 21.5) ---
+    #
+    # These classified as UPDATE by name shape ("activate", "end"), which is
+    # the one kind a bare CORRECTION can authorize. So "make that the
+    # hypertrophy one" would have switched the athlete's entire training
+    # plan on a phrasing the contract reads as a fix to a previous
+    # statement — the same class of error as a reschedule request
+    # authorizing a cancellation.
+    #
+    # Activating a program or a phase installs a plan that every downstream
+    # reader follows until it is changed again: the dashboard's targets, the
+    # scheduled sessions, the brief, the weekly report and the coach's own
+    # state. That is standing authority, which is what RECURRING means here,
+    # and it needs an instruction or an explicit confirmation.
+    "program_activate": OperationKind.RECURRING,
+    "phase_activate": OperationKind.RECURRING,
+    # Ending a block early stops something that was scheduled to keep
+    # running. "Cancel" and "end" are one intent with two implementations.
+    "phase_end_block": OperationKind.CANCEL,
+    # Inserting a block brings a new training period into being rather than
+    # editing a field of an existing one.
+    "phase_insert_block": OperationKind.CREATE,
 }
 
 #: `notes_edit`-shaped tools: the kind depends on WHICH argument was passed.

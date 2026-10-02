@@ -160,7 +160,7 @@ All services use systemd with:
 - Environment variables for database and LLM access
 
 <!-- BEGIN GENERATED -->
-_Regenerated 2026-10-01 by truth-maintenance._
+_Regenerated 2026-10-02 by truth-maintenance._
 
 ## Scheduled Jobs
 

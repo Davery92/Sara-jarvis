@@ -22,7 +22,7 @@ import logging
 from datetime import date
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
@@ -836,3 +836,169 @@ async def list_coach_recommendations(
         db, user_id, review_id=review_id, status=status,
         include_expired=include_expired, limit=limit,
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Recommendation decisions (Step 21)
+# ─────────────────────────────────────────────────────────────────────────
+
+class DecisionBody(BaseModel):
+    """Accept or reject, as separate owner actions.
+
+    Deliberately not a single `applied: bool` field: accepting and rejecting
+    are different operations with different audit meaning, and a boolean
+    makes "I did not decide yet" and "I rejected it" the same value.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    note: Optional[str] = Field(default=None, max_length=1000)
+
+
+@router.get("/recommendations/{recommendation_id}/preview")
+async def preview_recommendation(
+    recommendation_id: str,
+    user_id: str = Depends(current_athlete),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Exactly what accepting this would do: the typed old → proposed diff.
+
+    `blockers` is here so a client can show "this is out of date, ask for a
+    fresh review" rather than offering an Accept button that 409s. A button
+    that fails is worse than one that is not there.
+    """
+    from app.services.fitness import recommendations as recommendation_service
+
+    try:
+        view = recommendation_service.preview(db, user_id, recommendation_id)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Recommendation not found")
+
+    return {
+        "recommendation": view.recommendation.model_dump(mode="json"),
+        "applicable": view.applicable,
+        "acceptable": view.acceptable,
+        "changes": [
+            {
+                "field": change.field,
+                "current": change.current,
+                "proposed": change.proposed,
+                "delta": change.delta,
+                "unit": change.unit,
+                "is_change": change.is_change,
+            }
+            for change in view.changes
+        ],
+        "scope": view.scope,
+        "effective_date": view.effective_date.isoformat() if view.effective_date else None,
+        "proposed_against_revision_id": view.current_revision_id,
+        "latest_revision_id": view.latest_revision_id,
+        "stale": view.stale,
+        "expired": view.expired,
+        "blockers": view.blockers,
+        # Coverage travels with the proposal: the confidence label is the
+        # model's interpretation, this is how much data is behind it, and a
+        # reader needs the pair.
+        "coverage": view.coverage,
+        "limitations": view.limitations,
+    }
+
+
+@router.post("/recommendations/{recommendation_id}/accept")
+async def accept_recommendation(
+    recommendation_id: str,
+    body: DecisionBody = Body(default_factory=DecisionBody),
+    user_id: str = Depends(current_athlete),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Apply the proposal and record the decision, atomically.
+
+    Idempotent: a double-tap returns the first acceptance's receipt rather
+    than appending a second revision to the athlete's history.
+
+    The returned `message` is rendered from the COMMITTED rows, not from the
+    intent — a confirmation composed before the write would describe a change
+    that may not have landed.
+    """
+    from app.services.fitness import recommendations as recommendation_service
+
+    try:
+        result = recommendation_service.accept(
+            db, user_id, recommendation_id, note=body.note,
+        )
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Recommendation not found")
+    except recommendation_service.RecommendationStale as exc:
+        # 409 naming what moved, with the recompute option. A bare 409 forces
+        # a blind retry of something that will fail the same way.
+        raise HTTPException(status_code=409, detail={
+            "code": exc.code,
+            "message": str(exc),
+            "recommendation_id": exc.recommendation_id,
+            "current": exc.current,
+            "remedy": "request a new review for the current period",
+        })
+    except recommendation_service.RecommendationUnsupported as exc:
+        # 422, not 500 and not a silent no-op: the proposal is real and
+        # readable, this path just cannot perform it yet.
+        raise HTTPException(status_code=422, detail={
+            "code": "unsupported_action",
+            "message": str(exc),
+            "action": exc.action,
+            "remedy": "make the change yourself in the plan editor",
+        })
+    except FitnessDataError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    return {
+        "recommendation": result.recommendation.model_dump(mode="json"),
+        "action_receipt_id": result.action_receipt_id,
+        "applied_revision_id": result.applied_revision_id,
+        "message": result.message,
+        "duplicate": result.duplicate,
+    }
+
+
+@router.post("/recommendations/{recommendation_id}/reject",
+             response_model=CoachRecommendationOut)
+async def reject_recommendation(
+    recommendation_id: str,
+    body: DecisionBody = Body(default_factory=DecisionBody),
+    user_id: str = Depends(current_athlete),
+    db: Session = Depends(get_db),
+) -> CoachRecommendationOut:
+    """Record a rejection. Changes nothing, keeps the row.
+
+    Retained because "what did you suggest and what did I do about it" has
+    to stay answerable — and because a rejected proposal is the strongest
+    signal available about what this athlete does not want.
+    """
+    from app.services.fitness import recommendations as recommendation_service
+
+    try:
+        return recommendation_service.reject(
+            db, user_id, recommendation_id, note=body.note,
+        )
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Recommendation not found")
+    except FitnessDataError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@router.get("/targets/{revision_id}/trace")
+async def trace_target_revision(
+    revision_id: str,
+    user_id: str = Depends(current_athlete),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Why this target: revision → recommendation → review → frozen metrics.
+
+    The chain is only useful if something follows it, which is what this is.
+    A revision set by hand says so explicitly rather than returning an empty
+    object that reads as a gap.
+    """
+    from app.services.fitness import recommendations as recommendation_service
+
+    try:
+        return recommendation_service.trace(db, user_id, revision_id)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Target revision not found")

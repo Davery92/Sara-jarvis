@@ -411,6 +411,7 @@ def create_target_revision(
     expected_revision: Optional[str] = None,
     approved_by: Optional[str] = None,
     sync_legacy: bool = True,
+    commit: bool = True,
 ) -> TargetRevisionOut:
     """Append an approved revision and close the previous one, atomically.
 
@@ -530,6 +531,12 @@ def create_target_revision(
     if sync_legacy and (payload.valid_until is None or payload.valid_until > date.today()):
         _sync_legacy_projection(db, uid, payload)
 
+    # `commit=False` lets a caller extend this transaction rather than end
+    # it. Accepting a coach recommendation has to append the revision, write
+    # the action receipt and transition the decision together: a receipt
+    # that committed while the revision rolled back would claim an effect
+    # that never happened, which is the one thing a receipt must never do.
+
     # Macro numbers are a prescription the athlete or a review set, not an
     # observation of their body, so they may appear in a world fact. The
     # version is included because that is what tells a consumer whether it
@@ -550,7 +557,10 @@ def create_target_revision(
         logical_date=payload.valid_from,
         actor_type="user" if payload.source == "user" else "system",
     )
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
     return get_revision(db, uid, rid)
 
 
