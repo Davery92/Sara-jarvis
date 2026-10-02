@@ -188,9 +188,20 @@ class TestUpsertFactHealthGuard:
             assert result is None, f"{metric}={value} was minted"
             assert not [c for c in mock_session.run.call_args_list if "CREATE" in c.args[0]]
 
-    def test_numeric_intention_is_not_a_measurement(self, pkg):
-        """A number David *chose* is not a number his body produced. Targets and
-        goals have no other home and must survive the measurement filter."""
+    def test_a_numeric_target_is_refused_now_that_a_table_owns_it(self, pkg):
+        """Coach Step 23 §23.5 reversed this case, deliberately.
+
+        This test used to assert the opposite, and the reason it did was
+        sound at the time: a number David *chose* is not a number his body
+        produced, and a chosen number had nowhere else to live, so the PKG
+        held it.
+
+        `fitness_target_revision` and `fitness_athlete_goal` own them now —
+        dated, revisioned, and able to be absent. A graph copy is a second
+        authority that never expires, which is the 2026-08-31 fabrication
+        shape one table over: the copy says 2760 while the table says 2600,
+        and the copy is the one with no date on it.
+        """
         mock_session = _mock_session_with_match(None)
         mock_driver = MagicMock()
         mock_driver.session.return_value = mock_session
@@ -201,6 +212,31 @@ class TestUpsertFactHealthGuard:
             result = pkg.upsert_fact(
                 "Health",
                 {"metric": "daily_calorie_target", "current_value": "2760"},
+                confidence=0.95,
+            )
+
+        assert result is None, "a numeric target was minted into the graph"
+        assert not [
+            c for c in mock_session.run.call_args_list if "CREATE" in c.args[0]
+        ]
+
+    def test_a_qualitative_goal_still_passes(self, pkg):
+        """The half of the old rule that still holds. "Upper-body thickness"
+        has no numeric home and is the rationale a structured goal
+        preserves — refusing it would lose the only copy."""
+        mock_session = _mock_session_with_match(None)
+        mock_driver = MagicMock()
+        mock_driver.session.return_value = mock_session
+
+        with patch.object(pkg, "_ensure_driver", return_value=True), \
+             patch.object(pkg, "driver", mock_driver), \
+             patch.object(pkg, "_schedule_embedding"):
+            result = pkg.upsert_fact(
+                "Health",
+                {
+                    "metric": "training goal",
+                    "current_value": "upper-body thickness, not more pulling",
+                },
                 confidence=0.95,
             )
 

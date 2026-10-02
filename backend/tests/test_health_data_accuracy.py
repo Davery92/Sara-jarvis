@@ -73,14 +73,44 @@ class TestMeasurementDetector:
         ("soreness", "sore quads after squats"),
         ("sleep", "diagnosed with mild apnea"),
         ("recovery", "feels better after two rest days"),
-        # A number David chose, not one his body produced.
-        ("daily_calorie_target", "2760"),
-        ("goal weight", "225 lbs"),
+        # A QUALITATIVE goal still passes: it has no numeric home, and it is
+        # the rationale a structured goal preserves. The numeric cases that
+        # used to live here moved to
+        # `test_a_numeric_target_is_now_owned_by_a_dated_table` below —
+        # Coach Step 23 §23.5 gave chosen numbers an owning table, which
+        # they did not have when this list was written.
+        ("goal", "upper-body thickness before the wedding"),
+        ("training goal", "squat more than I pull"),
     ])
     def test_keeps_qualitative_and_intentional_facts(self, metric, value):
         from app.services.personal_knowledge_graph import is_authoritative_health_copy
         assert is_authoritative_health_copy(metric, value) is False
 
+
+    @pytest.mark.parametrize("metric,value", [
+        ("daily_calorie_target", "2760"),
+        ("goal weight", "225 lbs"),
+        ("protein target", "180g"),
+        ("weekly rate", "-0.4 kg"),
+    ])
+    def test_a_numeric_target_is_now_owned_by_a_dated_table(self, metric, value):
+        """Coach Step 23 §23.5 reversed this case, deliberately.
+
+        When this file was written a chosen number had nowhere else to live,
+        so the PKG held it and the measurement filter had to let it past.
+        `fitness_target_revision` and `fitness_athlete_goal` own them now —
+        dated, revisioned, and able to be absent — so a graph copy is a
+        second authority that never expires. That is the 2026-08-31
+        fabrication shape one table over: the copy says 2760 while the
+        table says 2600, and the copy is the one with no date on it.
+
+        The qualitative half of the old rule still holds, in the test above.
+        """
+        from app.services.personal_knowledge_graph import (
+            is_authoritative_health_copy, is_owned_target_metric,
+        )
+        assert is_owned_target_metric(metric) is True
+        assert is_authoritative_health_copy(metric, value) is True
     def test_handles_non_string_values(self):
         """Neo4j returns properties in their stored type; an int used to raise."""
         from app.services.personal_knowledge_graph import is_numeric_health_value

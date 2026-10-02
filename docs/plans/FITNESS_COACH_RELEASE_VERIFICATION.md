@@ -80,6 +80,31 @@ backend/scripts/disposable_compose.sh sara-fitness-test \
 # 1513 passed, 9 skipped
 ```
 
+And the whole suite, which is what caught the two stale tests §6 records —
+a `-k` filter selects on the test id, so `test_health_data_accuracy.py` was
+never in any of the per-step sweeps:
+
+```bash
+backend/scripts/disposable_compose.sh sara-fitness-test \
+  -f docker-compose.test.yml run --rm --no-deps backend-test pytest -q -p no:randomly
+# before the §6 fix:  4368 passed, 57 failed, 25 errors
+# after:              4374 passed, 54 pre-existing failures, 25 errors
+```
+
+The two runs were diffed by test id rather than compared by count, which
+is how the next item was found: **two tests fail on any second run against
+the same database.**
+`test_chat_pending_proposal.py::test_refusal_then_confirmation_reexecutes_the_original_arguments`
+and
+`test_execution_boundary_mutation_authorization.py::test_explicit_request_still_executes`
+leave `action_receipt` rows for `standing_order_create` behind, and the
+idempotency guard in `main_simple` then correctly declines to re-execute —
+so the tests see an empty call record. The guard is right and the tests are
+state-dependent. `DELETE FROM action_receipt WHERE action_type LIKE
+'%standing_order%'` makes both pass again. Pre-existing, unrelated to this
+work, and noted because a count comparison would have read it as a
+regression from the fix above.
+
 Per-step suites, each run green in isolation and in the sweep:
 
 1149 test functions across 37 `tests/test_fitness_*.py` files. The ones
@@ -283,6 +308,17 @@ Three things a release would need that this verification does not supply:
 * **`fitness_coaching_run` does not exist.** The cadence ledger table is
   `fitness_coaching_job_run`; the privacy export list had the wrong name and
   it is fixed. Noted because the wrong name was in a draft of this document.
+* **Two stale tests were left failing by Step 23 and are now fixed.** §23.5
+  reversed a rule deliberately — a numeric target used to be allowed into the
+  PKG because a chosen number had nowhere else to live, and
+  `fitness_target_revision` owns them now. The behaviour change was
+  intentional and documented in the commit; the two tests encoding the old
+  rule (`test_health_data_accuracy.py`,
+  `test_personal_knowledge_graph_upsert_fact.py`) were not updated, and the
+  per-step sweeps did not select them because `-k "fitness"` does not match
+  those filenames. Both now assert the new rule with the reason, and the
+  qualitative half of the old rule — "goal: upper-body thickness", which has
+  no numeric home — is kept as its own case.
 * **Pre-existing failures, confirmed not caused by this work:**
   `test_context_router.py` (6) and `test_personality_engine.py` (7) test a
   `body_state` feature that no longer exists — `body_state` appears zero
@@ -291,6 +327,16 @@ Three things a release would need that this verification does not supply:
   collection errors), `test_checkin_builder.py` (3),
   `test_system_wiring_check.py::test_the_check_is_quiet_right_now`, and
   `test_unified_notification.py::TestCooldownDefaults::test_category_specific_cooldowns`.
+  The full suite reports 54 failures and 25 errors on a clean database;
+  each was traced to a cause outside this work. `test_memory_service.py` imports `MemoryTrace`
+  from `main_simple`, removed in April 2026 (`8c9a07e8`);
+  `test_karma.py` imports `app.services.karma`, which has never existed in
+  git history; `test_dream_consolidation.py` fails at collection the same
+  way. `test_chat_tool_loop.py::test_actually_executing_a_mutating_tool_authorizes_it`
+  turns on `_CHAT_INVOKED_MUTATING_TOOL_NAMES`, which no commit in this work
+  touches. The `body_state` group in `test_context_router.py` and
+  `test_personality_engine.py` tests a feature that is absent from both
+  modules as of the commit before this work began.
 * **CLAUDE.md needs two corrections** this work made true: §8 records the
   alembic head as `158_reminder_delivery_state` (now `174_fitness_automation`)
   and §4 records 263 registered tools (now 272).
