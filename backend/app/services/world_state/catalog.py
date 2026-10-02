@@ -42,6 +42,16 @@ _register("food", "fitness_health", "food.logged food.updated food.interpretatio
 _register("food", "fitness_health", "food.deleted", sensitivity="health")
 _register("workout", "fitness_health", "workout.started workout.set_logged workout.completed workout.abandoned workout.updated", sensitivity="health", attention_base=0.15, coalesce=True)
 _register("health", "fitness_health", "health.sync_completed health.metric_transitioned health.workout_imported sleep.imported recovery.logged", sensitivity="health", attention_base=0.15, coalesce=True)
+# Fitness Coach (Step 17). Deliberately `interpret=False`: these announce
+# that an owned record changed, and the interpreter's job is to find
+# obligations in text. Pointing it at body numbers is how it invents a due
+# date nobody set (the Laura failure, in a worse place — a weight reading is
+# not a commitment). The coach reads the deterministic FitnessState instead.
+_register("fitness", "fitness_health", "fitness.observation_ingested fitness.check_in_logged fitness.measurement_logged", sensitivity="health", attention_base=0.05, coalesce=True, interpret=False)
+# Goal and target changes DO carry attention: they change what every later
+# recommendation is measured against, so a silent one makes the adherence
+# numbers mean something different without anything saying so.
+_register("fitness", "fitness_health", "fitness.goal_changed fitness.target_changed fitness.limitation_changed", sensitivity="health", attention_base=0.2, interpret=False)
 _register("tasks", "active_work", "task.queued task.started task.progressed task.completed task.failed", attention_base=0.3, coalesce=True)
 _register("reminders", "open_threads", "reminder.created reminder.completed reminder.cancelled", attention_base=0.25)
 _register("goals", "open_threads", "goal.created goal.updated goal.completed goal.progress_logged", attention_base=0.2)

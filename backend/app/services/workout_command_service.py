@@ -43,6 +43,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.core.timezone import today as local_today
+from app.services.fitness.events import queue_invalidation
 
 logger = logging.getLogger(__name__)
 
@@ -374,6 +375,11 @@ class WorkoutCommandService:
                          "origin_device": origin_device,
                          "started_at": (projection or {}).get("started_at")},
             )
+            # The deterministic fitness state counts this session, so its
+            # cached copy is now wrong. Queued, not dropped here: dropping it
+            # before the commit lets a concurrent reader repopulate it from
+            # the pre-commit view and the invalidation leaves a stale entry.
+            queue_invalidation(db, user_id)
             db.commit()
             return {"status": "accepted", "projection": projection}
 
@@ -688,6 +694,7 @@ class WorkoutCommandService:
                     "summary": result.get("summary"),
                 },
             )
+            queue_invalidation(db, user_id)
             db.commit()
 
             # Coaching happens strictly after the commit (§6.7): the set is

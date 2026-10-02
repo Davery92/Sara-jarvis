@@ -587,6 +587,102 @@ def test_deleting_a_meal_revokes_the_days_confirmation(pg, two_athletes):
 
 
 @requires_pg
+def test_editing_a_meal_leaves_it_on_the_day_it_was_eaten(pg, two_athletes):
+    """A PUT that omits `logged_at` must not move the meal.
+
+    The route used to fall back to `naive_local_now()`, so correcting the
+    name of yesterday's lunch moved its calories out of yesterday's totals
+    and into today's — and the nutrition-complete mark it then revoked was
+    today's, leaving the real day still counted as complete with totals that
+    no longer matched what was confirmed. Caught when the calendar rolled
+    over mid-development: the bug was invisible on the day it was written.
+    """
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from app.core.auth import create_access_token
+    from app.routes.fitness import router
+
+    alice, _ = two_athletes
+    app = FastAPI()
+    app.include_router(router, prefix="/api/fitness")
+    client = TestClient(app)
+    headers = {"Authorization": f"Bearer {create_access_token({'sub': alice})}"}
+
+    eaten_at = datetime(2026, 9, 28, 12, 30)
+    meal_id = str(uuid.uuid4())
+    pg.execute(text("""
+        INSERT INTO food_log
+            (id, user_id, meal_type, food_items, calories, protein, carbs, fats,
+             logged_at, created_at, updated_at)
+        VALUES (:id, :u, 'lunch', '[]', 900, 60, 90, 30, :logged, NOW(), NOW())
+    """), {"id": meal_id, "u": alice, "logged": eaten_at})
+    pg.commit()
+    _patch(pg, alice, day=eaten_at.date(), nutrition_status="complete")
+
+    response = client.put(f"/api/fitness/food-log/{meal_id}", headers=headers, json={
+        "meal_type": "lunch",
+        "food_items": [{"name": "chicken", "quantity": 2, "unit": "serving"}],
+    })
+    assert response.status_code == 200, response.text
+
+    assert pg.execute(text("""
+        SELECT logged_at FROM food_log WHERE id = :id
+    """), {"id": meal_id}).scalar() == eaten_at
+
+    # And it is THAT day whose confirmation was revoked.
+    assert pg.execute(text("""
+        SELECT nutrition_status FROM daily_recovery_log
+        WHERE user_id = :u AND log_date = :d
+    """), {"u": alice, "d": eaten_at.date()}).scalar() == "partial"
+
+
+@requires_pg
+def test_moving_a_meal_to_another_day_revokes_both_days(pg, two_athletes):
+    """The day it left lost a meal; the day it arrived on gained one. Either
+    change is enough to make a previous confirmation stale."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from app.core.auth import create_access_token
+    from app.routes.fitness import router
+
+    alice, _ = two_athletes
+    app = FastAPI()
+    app.include_router(router, prefix="/api/fitness")
+    client = TestClient(app)
+    headers = {"Authorization": f"Bearer {create_access_token({'sub': alice})}"}
+
+    was = datetime(2026, 9, 28, 12, 30)
+    now_on = datetime(2026, 9, 29, 12, 30)
+    meal_id = str(uuid.uuid4())
+    pg.execute(text("""
+        INSERT INTO food_log
+            (id, user_id, meal_type, food_items, calories, logged_at,
+             created_at, updated_at)
+        VALUES (:id, :u, 'lunch', '[]', 900, :logged, NOW(), NOW())
+    """), {"id": meal_id, "u": alice, "logged": was})
+    pg.commit()
+    _patch(pg, alice, day=was.date(), nutrition_status="complete")
+    _patch(pg, alice, day=now_on.date(), nutrition_status="complete")
+
+    response = client.put(f"/api/fitness/food-log/{meal_id}", headers=headers, json={
+        "meal_type": "lunch",
+        "food_items": [{"name": "chicken", "quantity": 2, "unit": "serving"}],
+        "logged_at": now_on.isoformat(),
+    })
+    assert response.status_code == 200, response.text
+
+    statuses = {
+        r.log_date: r.nutrition_status
+        for r in pg.execute(text("""
+            SELECT log_date, nutrition_status FROM daily_recovery_log
+            WHERE user_id = :u AND log_date = ANY(:days)
+        """), {"u": alice, "days": [was.date(), now_on.date()]}).fetchall()
+    }
+    assert statuses[was.date()] == "partial"
+    assert statuses[now_on.date()] == "partial"
+
+
+@requires_pg
 def test_relabelling_a_meal_does_not_revoke_the_confirmation(pg, two_athletes):
     """`PATCH` changes `meal_type`/`notes` only.
 

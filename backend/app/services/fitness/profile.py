@@ -37,6 +37,7 @@ from app.schemas.fitness_coach import (
     Unit,
     present_fields,
 )
+from app.services.fitness.events import queue_invalidation, record_fitness_event
 from app.services.fitness.data_access import (
     FitnessDataError,
     _require_user,
@@ -292,6 +293,10 @@ def patch_athlete_profile(
             _record_changes(db, uid, dict(before._mapping), fields,
                             int(current.row_version), new_version)
 
+    # No event: a profile edit is not news. But it CAN change the timezone
+    # the athlete's days are cut on, which moves every logical date — so the
+    # cached state has to go.
+    queue_invalidation(db, uid)
     db.commit()
     return get_athlete_profile(db, uid)
 
@@ -521,6 +526,23 @@ def create_goal(db: Session, user_id: str, payload: AthleteGoalIn) -> AthleteGoa
         "vf": payload.valid_from, "vu": payload.valid_until,
         "sup": supersedes, "src": payload.source,
     })
+    # A goal change carries real attention: every adherence number after it
+    # is measured against something different, and a silent change makes
+    # those numbers mean something new with nothing saying so. The rate
+    # itself is a prescription, not a body measurement, so it may travel.
+    record_fitness_event(
+        db, uid, "fitness.goal_changed",
+        dedupe_key=f"fitness.goal:{gid}",
+        source_ref=gid, aggregate_type="fitness_athlete_goal", aggregate_id=gid,
+        payload={
+            "action": "created", "kind": payload.kind.value,
+            "is_primary": payload.is_primary,
+            "rate_basis": payload.rate_basis.value,
+            "supersedes_id": supersedes,
+            "valid_from": payload.valid_from.isoformat(),
+        },
+        logical_date=payload.valid_from,
+    )
     db.commit()
 
     row = db.execute(text(f"SELECT {_GOAL_COLUMNS} FROM fitness_athlete_goal WHERE id = :id"),
@@ -549,6 +571,14 @@ def close_goal(
     db.execute(text("""
         UPDATE fitness_athlete_goal SET valid_until = :vu WHERE id = :id AND user_id = :uid
     """), {"vu": valid_until, "id": goal_id, "uid": uid})
+    record_fitness_event(
+        db, uid, "fitness.goal_changed",
+        dedupe_key=f"fitness.goal:{goal_id}:closed:{valid_until.isoformat()}",
+        source_ref=goal_id, aggregate_type="fitness_athlete_goal",
+        aggregate_id=goal_id,
+        payload={"action": "closed", "valid_until": valid_until.isoformat()},
+        logical_date=valid_until,
+    )
     db.commit()
     return _goal_out(db.execute(text(
         f"SELECT {_GOAL_COLUMNS} FROM fitness_athlete_goal WHERE id = :id"
@@ -634,6 +664,21 @@ def create_limitation(
         "ef": payload.effective_from, "eu": payload.effective_until,
         "notes": payload.notes,
     })
+    # The area, not the description. "left shoulder" is what a consumer needs
+    # to route around; the athlete's own words about it stay in the owned row.
+    record_fitness_event(
+        db, uid, "fitness.limitation_changed",
+        dedupe_key=f"fitness.limitation:{lid}",
+        source_ref=lid, aggregate_type="fitness_athlete_limitation",
+        aggregate_id=lid,
+        payload={
+            "action": "created", "area": payload.area,
+            "severity_flag": payload.severity_flag,
+            "excluded_count": len(payload.excluded_exercise_ids),
+            "modified_count": len(payload.modified_exercise_ids),
+        },
+        logical_date=payload.effective_from,
+    )
     db.commit()
     return _limitation_out(db.execute(text(
         f"SELECT {_LIMITATION_COLUMNS} FROM fitness_athlete_limitation WHERE id = :id"
@@ -666,6 +711,14 @@ def resolve_limitation(
             SET status = 'resolved', effective_until = :eu, updated_at = NOW()
             WHERE id = :id AND user_id = :uid
         """), {"eu": end, "id": limitation_id, "uid": uid})
+    record_fitness_event(
+        db, uid, "fitness.limitation_changed",
+        dedupe_key=f"fitness.limitation:{limitation_id}:resolved",
+        source_ref=limitation_id,
+        aggregate_type="fitness_athlete_limitation", aggregate_id=limitation_id,
+        payload={"action": "resolved"},
+        logical_date=end,
+    )
     db.commit()
     return _limitation_out(db.execute(text(
         f"SELECT {_LIMITATION_COLUMNS} FROM fitness_athlete_limitation WHERE id = :id"

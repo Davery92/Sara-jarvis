@@ -55,6 +55,7 @@ from app.schemas.fitness_coach import (
     TargetScope,
     TargetValues,
 )
+from app.services.fitness.events import record_fitness_event
 from app.services.fitness.data_access import FitnessDataError, _require_user
 
 logger = logging.getLogger(__name__)
@@ -529,6 +530,26 @@ def create_target_revision(
     if sync_legacy and (payload.valid_until is None or payload.valid_until > date.today()):
         _sync_legacy_projection(db, uid, payload)
 
+    # Macro numbers are a prescription the athlete or a review set, not an
+    # observation of their body, so they may appear in a world fact. The
+    # version is included because that is what tells a consumer whether it
+    # has already seen this change.
+    record_fitness_event(
+        db, uid, "fitness.target_changed",
+        dedupe_key=f"fitness.target:{rid}",
+        source_ref=rid, aggregate_type="fitness_target_revision",
+        aggregate_id=rid,
+        payload={
+            "scope": payload.scope.value, "phase_id": payload.phase_id,
+            "valid_from": payload.valid_from.isoformat(),
+            "valid_until": payload.valid_until.isoformat() if payload.valid_until else None,
+            "source": payload.source,
+            "from_recommendation": bool(payload.review_recommendation_id),
+            "has_rest_variant": payload.rest is not None,
+        },
+        logical_date=payload.valid_from,
+        actor_type="user" if payload.source == "user" else "system",
+    )
     db.commit()
     return get_revision(db, uid, rid)
 

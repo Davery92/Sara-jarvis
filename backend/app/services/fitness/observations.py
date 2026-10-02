@@ -51,6 +51,7 @@ from app.schemas.fitness_coach import (
     convert,
     ensure_finite,
 )
+from app.services.fitness.events import queue_invalidation, record_fitness_event
 from app.services.fitness.data_access import (
     SLEEP_METRIC_ALIASES,
     WEIGHT_METRIC_ALIASES,
@@ -308,6 +309,25 @@ def ingest_observation(
             WHERE id = :old AND user_id = :uid
         """), {"new": obs_id, "old": superseded, "uid": uid,
                "reason": correction_reason})
+
+    # Same transaction as the row it describes, and carrying no value — see
+    # `fitness/events.py`. A backdated correction changes `logical_date`,
+    # which is what tells a consumer that an OLD day moved rather than a new
+    # one arriving.
+    record_fitness_event(
+        db, uid, "fitness.observation_ingested",
+        dedupe_key=f"fitness.obs:{obs_id}",
+        source_ref=obs_id,
+        aggregate_type="health_metric", aggregate_id=obs_id,
+        payload={
+            "metric_type": metric_type,
+            "source": source,
+            "is_correction": bool(superseded),
+            "source_quality": source_quality,
+        },
+        logical_date=logical,
+        actor_type="user" if source in ("manual", "user", "chat") else "system",
+    )
 
     return IngestResult(obs_id, stored=True, superseded_id=superseded)
 
@@ -1036,6 +1056,19 @@ def patch_check_in(
             WHERE user_id = :uid AND log_date = :d
         """), params)
 
+    record_fitness_event(
+        db, uid, "fitness.check_in_logged",
+        dedupe_key=(
+            f"fitness.checkin:{uid}:{log_date.isoformat()}:"
+            f"{(current.row_version if current else -1)}"
+        ),
+        payload={
+            "fields": sorted(row_fields),
+            "delegated": sorted(delegated),
+            "day_existed": current is not None,
+        },
+        logical_date=log_date, aggregate_type="daily_recovery_log",
+    )
     db.commit()
     return get_check_in(db, uid, log_date, timezone_name=tz_name)
 
@@ -1103,6 +1136,9 @@ def invalidate_nutrition_completion(
         "uid": uid, "d": log_date,
         "entry": json.dumps({"nutrition_status": f"invalidated:{reason}"}),
     })
+    # A meal edit changes the nutrition averages whether or not a completion
+    # was revoked, so the cached state goes either way.
+    queue_invalidation(db, uid)
     return result.rowcount > 0
 
 
@@ -1352,6 +1388,18 @@ def log_measurement(db: Session, user_id: str, payload):
     )
     if not result.stored and not result.duplicate:
         raise FitnessDataError(result.reason or "the measurement was not stored")
+    record_fitness_event(
+        db, uid, "fitness.measurement_logged",
+        dedupe_key=f"fitness.measurement:{result.observation_id}",
+        source_ref=result.observation_id,
+        aggregate_type="health_metric", aggregate_id=result.observation_id,
+        payload={
+            "type_code": descriptor.code,
+            "site": payload.site, "side": payload.side.value,
+            "period_id": payload.period_id,
+            "is_correction": bool(payload.corrects_observation_id),
+        },
+    )
     db.commit()
 
     row = db.execute(text("""

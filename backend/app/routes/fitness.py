@@ -785,6 +785,26 @@ async def update_food_log_entry(
 
         totals = await _resolve_food_log_totals(request, "food_log.update")
 
+        # The day this meal is on, BEFORE the update. Two things depend on it.
+        #
+        # First, an omitted `logged_at` must leave the meal where it was. It
+        # used to fall back to `naive_local_now()`, so editing the name of
+        # yesterday's lunch silently moved it to today — which moves its
+        # calories out of yesterday's totals and into today's.
+        #
+        # Second, the nutrition-complete mark to revoke belongs to the
+        # ORIGINAL day. Resolving it from the updated row revokes the wrong
+        # day's confirmation (and, before the fix above, always revoked
+        # today's), leaving the real day still counted as complete with
+        # totals that no longer match what was confirmed.
+        previous = db.execute(text("""
+            SELECT logged_at FROM food_log WHERE id = :id AND user_id = :uid
+        """), {"id": log_id, "uid": user_id}).fetchone()
+        previous_day = (
+            previous.logged_at.date()
+            if previous is not None and previous.logged_at is not None else None
+        )
+
         query = text("""
             UPDATE food_log
             SET meal_type = :meal_type,
@@ -812,7 +832,11 @@ async def update_food_log_entry(
             "carbs": totals["carbs"],
             "fats": totals["fats"],
             "notes": request.notes or "",
-            "logged_at": _coerce_logged_at(request.logged_at) or naive_local_now()
+            "logged_at": (
+                _coerce_logged_at(request.logged_at)
+                or (previous.logged_at if previous is not None else None)
+                or naive_local_now()
+            ),
         })
 
         updated = result.fetchone()
@@ -829,8 +853,14 @@ async def update_food_log_entry(
                          "notes": request.notes or ""},
             )
         if updated:
+            # Both days when the edit moved the meal: the day it left stops
+            # being confirmed because a meal was removed from it, and the day
+            # it arrived on stops being confirmed because one was added.
             _invalidate_nutrition_completion_for(
-                db, user_id, log_id, reason="meal_edited"
+                db, user_id, log_id, reason="meal_edited", day=previous_day,
+            )
+            _invalidate_nutrition_completion_for(
+                db, user_id, log_id, reason="meal_edited",
             )
         db.commit()
 
@@ -906,7 +936,8 @@ async def patch_food_log_entry(
 
 
 def _invalidate_nutrition_completion_for(
-    db: Session, user_id: str, log_id: str, *, reason: str
+    db: Session, user_id: str, log_id: str, *, reason: str,
+    day: Optional[date] = None,
 ) -> None:
     """Revoke a day's nutrition-complete mark after its meals changed.
 
@@ -921,15 +952,16 @@ def _invalidate_nutrition_completion_for(
     Never raises: the meal edit is what the athlete asked for.
     """
     try:
-        row = db.execute(text("""
-            SELECT logged_at FROM food_log WHERE id = :id AND user_id = :uid
-        """), {"id": log_id, "uid": user_id}).fetchone()
-        if row is None or row.logged_at is None:
-            return
+        affected = day
+        if affected is None:
+            row = db.execute(text("""
+                SELECT logged_at FROM food_log WHERE id = :id AND user_id = :uid
+            """), {"id": log_id, "uid": user_id}).fetchone()
+            if row is None or row.logged_at is None:
+                return
+            affected = row.logged_at.date()
         from app.services.fitness.observations import invalidate_nutrition_completion
-        invalidate_nutrition_completion(
-            db, user_id, row.logged_at.date(), reason=reason
-        )
+        invalidate_nutrition_completion(db, user_id, affected, reason=reason)
     except Exception as exc:
         logger.warning(
             "nutrition completion not invalidated after %s on food_log %s (%s): %s",
@@ -1272,7 +1304,12 @@ async def get_recent_foods(
         def _score_and_reason(food_key: str):
             freq = food_frequency[food_key]
             last = food_last_logged.get(food_key)
-            days_since = (now - last).days if last else 999
+            # Calendar days, not elapsed hours, and never negative. A meal
+            # can carry a timestamp later in today than "now" — the app lets
+            # you log dinner at breakfast time, and `(now - last).days` is
+            # then -1, which labelled it "Recent" instead of "Logged today"
+            # and pushed its recency weight above 1.
+            days_since = max(0, (now.date() - last.date()).days) if last else 999
             recency = max(0.0, 1 - days_since / 14.0)  # decays to 0 over two weeks
 
             meal_counter = food_meal_types.get(food_key) or Counter()

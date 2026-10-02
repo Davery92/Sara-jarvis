@@ -895,7 +895,15 @@ async def test_a_withdrawn_record_does_not_block_a_later_real_one(pg, svc, athle
 @requires_pg
 @pytest.mark.asyncio
 async def test_a_new_pr_records_its_formula_version(pg, svc, athlete):
-    """So a later change to the e1RM formula cannot reinterpret old records."""
+    """So a later change to the e1RM formula cannot reinterpret old records.
+
+    The stamp is `brzycki_v1`, not `epley_v1`: the PR ledger's writer is
+    `calculate_estimated_1rm`, which is Brzycki (`weight * 36 / (37 - reps)`,
+    capped at 12 reps). It was labelled `epley_v1` until Step 16 — a
+    mislabel, and exactly the kind the version stamp exists to prevent, since
+    a reader reconciling old rows would have applied the wrong formula.
+    The analytics module uses Epley deliberately; Step 18 reconciles the two.
+    """
     run = await _start(svc, pg, athlete, [
         {"name": "M7TEST Bench Press", "sets": 3, "reps": 5},
     ])
@@ -907,5 +915,5 @@ async def test_a_new_pr_records_its_formula_version(pg, svc, athlete):
         WHERE user_id = :u
     """), {"u": athlete}).fetchone()
     assert row.pr_kind == "estimated_1rm"
-    assert row.formula_version == "epley_v1"
+    assert row.formula_version == "brzycki_v1"
     assert row.load_unit == "lb"

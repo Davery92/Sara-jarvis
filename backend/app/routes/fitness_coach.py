@@ -45,7 +45,11 @@ from app.schemas.fitness_coach import (
     AthleteLimitationOut,
     AthleteProfileOut,
     AthleteProfilePatch,
+    DataQuality,
     DayType,
+    FitnessStateV1,
+    MetricGroup,
+    StateSection,
     ResolvedTargets,
     TargetRevisionIn,
     TargetRevisionOut,
@@ -53,6 +57,7 @@ from app.schemas.fitness_coach import (
 )
 from app.services.fitness import observations as observation_service
 from app.services.fitness import profile as profile_service
+from app.services.fitness import state as state_service
 from app.services.fitness import targets as target_service
 from app.services.fitness.data_access import FitnessDataError
 
@@ -519,3 +524,141 @@ async def measurement_change(
     return observation_service.measurement_change(
         db, user_id, type_code, site=site, side=side
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# State and analytics (Step 17)
+# ─────────────────────────────────────────────────────────────────────────
+
+def _state_cache():
+    """A shared blocking Redis client, or None.
+
+    None is a supported answer, not a failure: the state is computed from
+    records and the cache only saves the computation. Note the `redis<5.0.0`
+    pin — the async client here has `.close()`, not `.aclose()`.
+    """
+    try:
+        from app.core.redis import get_redis_sync
+        return get_redis_sync()
+    except Exception as exc:
+        logger.debug("fitness state cache unavailable (%s)", type(exc).__name__)
+        return None
+
+
+@router.get("/state", response_model=FitnessStateV1)
+async def get_fitness_state(
+    period_end: Optional[date] = Query(
+        None,
+        description="Exclusive, athlete-local. Defaults to the athlete's "
+                    "today, so a partial current day is never averaged in.",
+    ),
+    span: int = Query(7, ge=1, le=90),
+    sections: Optional[str] = Query(
+        None, description="Comma-separated section names. Narrowing changes "
+                          "which sections are present, never what one says.",
+    ),
+    fresh: bool = Query(False, description="Bypass the cache."),
+    user_id: str = Depends(current_athlete),
+    db: Session = Depends(get_db),
+) -> FitnessStateV1:
+    """The athlete's deterministic state — the one projection every surface reads.
+
+    `freshness` is `degraded` when a dependency failed, and
+    `degraded_dependencies` names which. That is deliberately not the same
+    as returning fewer metrics: a smaller state is indistinguishable from
+    the athlete having less data, and a reader would then draw conclusions
+    from an absence that is really an outage.
+    """
+    wanted = None
+    if sections:
+        try:
+            wanted = [
+                StateSection(name.strip())
+                for name in sections.split(",") if name.strip()
+            ]
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Unknown section: {exc}. Valid: "
+                       + ", ".join(s.value for s in StateSection),
+            )
+    try:
+        return state_service.build_fitness_state(
+            db, user_id,
+            period_end=period_end, sections=wanted, span=span, fresh=fresh,
+            redis_client=_state_cache(),
+        )
+    except FitnessDataError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.get("/capsule")
+async def get_fitness_capsule(
+    char_budget: int = Query(1500, ge=200, le=8000),
+    user_id: str = Depends(current_athlete),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """The same state, rendered for a prompt within a character budget.
+
+    Exposed so the chat capsule and the UI cannot drift: both render from
+    one state, and if this endpoint's text is wrong the dashboard above it
+    is wrong in the same way, which is how such a bug gets noticed.
+    """
+    state = state_service.build_fitness_state(
+        db, user_id, redis_client=_state_cache(),
+    )
+    capsule = state_service.render_fitness_capsule(state, char_budget)
+    return {
+        "capsule": capsule,
+        "chars": len(capsule),
+        "char_budget": char_budget,
+        "freshness": state.freshness.value,
+        "athlete_local_date": state.athlete_local_date.isoformat(),
+        "data_revision": state.data_revision,
+    }
+
+
+@router.get("/analytics/{section}", response_model=MetricGroup)
+async def get_section_analytics(
+    section: StateSection,
+    period_end: Optional[date] = Query(None),
+    span: int = Query(7, ge=1, le=90),
+    user_id: str = Depends(current_athlete),
+    db: Session = Depends(get_db),
+) -> MetricGroup:
+    """One section's metrics, bounded by `span`.
+
+    The bound is a real limit, not a default: an unbounded window over a
+    multi-year history is the shape of request that takes a shared database
+    down, and a coach never needs one to answer a question about this week.
+    """
+    state = state_service.build_fitness_state(
+        db, user_id, period_end=period_end, sections=[section], span=span,
+        redis_client=_state_cache(),
+    )
+    group = state.sections.get(section)
+    if group is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Section {section.value} has no computed analytics",
+        )
+    return group
+
+
+@router.get("/quality", response_model=DataQuality)
+async def get_data_quality(
+    period_end: Optional[date] = Query(None),
+    span: int = Query(7, ge=1, le=90),
+    user_id: str = Depends(current_athlete),
+    db: Session = Depends(get_db),
+) -> DataQuality:
+    """Coverage, kept separate from any confidence in an interpretation.
+
+    Folding the two together is how a confident conclusion drawn from two
+    days of data stops being visible as such.
+    """
+    state = state_service.build_fitness_state(
+        db, user_id, period_end=period_end, span=span,
+        redis_client=_state_cache(),
+    )
+    return state.quality
