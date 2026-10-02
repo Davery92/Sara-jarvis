@@ -828,6 +828,10 @@ async def update_food_log_entry(
                          "carbs": totals["carbs"], "fats": totals["fats"],
                          "notes": request.notes or ""},
             )
+        if updated:
+            _invalidate_nutrition_completion_for(
+                db, user_id, log_id, reason="meal_edited"
+            )
         db.commit()
 
         if not updated:
@@ -849,7 +853,15 @@ async def patch_food_log_entry(
     user_id: str = Depends(get_current_user_id),
     db: Session = Depends(get_db)
 ):
-    """Partial update of a food log entry (e.g. change meal_type)"""
+    """Partial update of a food log entry (e.g. change meal_type).
+
+    Deliberately does NOT invalidate the day's nutrition-complete mark, unlike
+    PUT and DELETE (FITNESS_COACH_IMPLEMENTATION_PLAN Step 9). The allowed
+    fields here are `meal_type` and `notes`, and neither changes what was
+    eaten — re-labelling lunch as dinner leaves the day's totals exactly as
+    the athlete confirmed them. Revoking the confirmation for a relabel would
+    drop a genuinely complete day out of the nutrition denominator.
+    """
     try:
         allowed_fields = {"meal_type", "notes"}
         fields_to_update = {k: v for k, v in updates.items() if k in allowed_fields}
@@ -893,6 +905,38 @@ async def patch_food_log_entry(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _invalidate_nutrition_completion_for(
+    db: Session, user_id: str, log_id: str, *, reason: str
+) -> None:
+    """Revoke a day's nutrition-complete mark after its meals changed.
+
+    FITNESS_COACH_IMPLEMENTATION_PLAN Step 9. A day the athlete confirmed as
+    fully logged stops being confirmed the moment a meal on it is edited or
+    removed — otherwise that day stays in the "complete days" denominator
+    with totals that no longer match what was confirmed, and every nutrition
+    average built on it is quietly wrong.
+
+    Resolves the day from `food_log.logged_at`, which is naive ET wall-clock
+    (not `created_at`, which is naive UTC and is when the row was inserted).
+    Never raises: the meal edit is what the athlete asked for.
+    """
+    try:
+        row = db.execute(text("""
+            SELECT logged_at FROM food_log WHERE id = :id AND user_id = :uid
+        """), {"id": log_id, "uid": user_id}).fetchone()
+        if row is None or row.logged_at is None:
+            return
+        from app.services.fitness.observations import invalidate_nutrition_completion
+        invalidate_nutrition_completion(
+            db, user_id, row.logged_at.date(), reason=reason
+        )
+    except Exception as exc:
+        logger.warning(
+            "nutrition completion not invalidated after %s on food_log %s (%s): %s",
+            reason, log_id, type(exc).__name__, exc,
+        )
+
+
 @router.delete("/food-log/{log_id}")
 async def delete_food_log_entry(
     log_id: str,
@@ -906,9 +950,18 @@ async def delete_food_log_entry(
         # this," independent of whether he ever brings it up in chat, and a
         # hard DELETE leaves no other way to answer "what was that again?"
         existing_row = db.execute(text("""
-            SELECT food_items, meal_type FROM food_log
+            SELECT food_items, meal_type, logged_at FROM food_log
             WHERE id = :log_id AND user_id = :user_id
         """), {"log_id": log_id, "user_id": user_id}).fetchone()
+
+        # Step 9: resolve the affected day BEFORE the row is deleted, for the
+        # same reason the description above is captured first — afterwards
+        # there is nothing left to resolve it from.
+        affected_day = (
+            existing_row.logged_at.date()
+            if existing_row is not None and existing_row.logged_at is not None
+            else None
+        )
 
         query = text("""
             DELETE FROM food_log
@@ -926,6 +979,19 @@ async def delete_food_log_entry(
                 actor_type="user", actor_id=str(user_id), dedupe_key=f"food-deleted:{log_id}",
                 payload={"log_id": log_id},
             )
+            if affected_day is not None:
+                try:
+                    from app.services.fitness.observations import (
+                        invalidate_nutrition_completion,
+                    )
+                    invalidate_nutrition_completion(
+                        db, user_id, affected_day, reason="meal_deleted"
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "nutrition completion not invalidated after deleting "
+                        "food_log %s (%s): %s", log_id, type(exc).__name__, exc,
+                    )
         db.commit()
 
         if not deleted:
@@ -5416,57 +5482,102 @@ async def log_weight(
     user_id: str = Depends(get_current_user_id),
     db: Session = Depends(get_db)
 ):
-    """Log a weight entry and update trend"""
+    """Log a weight entry and update trend.
+
+    FITNESS_COACH_IMPLEMENTATION_PLAN Step 8. This used to write ONLY
+    `weight_trend`, so a weight typed into the web app never became a
+    canonical `health_metric` observation — the Coach, the weekly health
+    report and the iOS app would each see a different set of weigh-ins
+    depending on which table they read. The canonical observation is written
+    first and the trend projection is rebuilt *from* it, so there is one
+    source and one calculation rather than two of each.
+
+    `weight_trend.trend_weight` stays an explicitly-labelled EWMA display
+    series (alpha=0.1, unchanged, so the existing chart does not change
+    shape). Coach analytics compute calendar-window means from the selected
+    observations and never read these stored values — an EWMA is not a weekly
+    average and substituting one for the other misstates velocity.
+
+    Rebuilding forward from the entry's own date is what makes a backdated
+    correction consistent: every EWMA value after it was computed from the
+    series as it stood, so they all have to be recomputed.
+    """
     try:
-        # Get recent weights for trend calculation (7-day exponential moving average)
-        recent = db.execute(text("""
-            SELECT raw_weight, trend_weight, date
-            FROM weight_trend
-            WHERE user_id = :user_id AND date < :date
-            ORDER BY date DESC
-            LIMIT 7
-        """), {"user_id": user_id, "date": entry.date}).fetchall()
+        from datetime import datetime as _dt, time as _time
+        from app.schemas.fitness_coach import Unit as _Unit
+        from app.services.fitness.data_access import (
+            FitnessDataError as _DataError, athlete_zone,
+        )
+        from app.services.fitness.observations import (
+            ingest_observation, rebuild_weight_trend,
+        )
+        from app.services.fitness.profile import profile_timezone
 
-        # Calculate trend using exponential smoothing (alpha = 0.1)
-        alpha = 0.1
-        if recent and recent[0].trend_weight:
-            trend_weight = round(alpha * entry.raw_weight + (1 - alpha) * float(recent[0].trend_weight), 2)
-        else:
-            trend_weight = entry.raw_weight
+        entry_date = entry.date
+        if isinstance(entry_date, str):
+            entry_date = _dt.strptime(entry_date, "%Y-%m-%d").date()
 
-        # Calculate weekly delta
-        weekly_delta = None
-        if len(recent) >= 7:
-            week_ago_weight = recent[6].raw_weight
-            weekly_delta = round(entry.raw_weight - float(week_ago_weight), 2)
+        tz_name = profile_timezone(db, user_id)
+        tz = athlete_zone(tz_name)
+        # A date-only entry becomes an observation at 07:00 athlete-local —
+        # a morning weigh-in, which is what a date-only manual entry means.
+        # `source_quality='manual'` records that this time was chosen by the
+        # app rather than measured, so nothing later treats it as the instant
+        # the athlete stood on the scale.
+        recorded_at = _dt.combine(entry_date, _time(hour=7), tzinfo=tz)
 
-        weight_id = str(uuid.uuid4())
+        try:
+            ingest_observation(
+                db, user_id,
+                metric_type="weight",
+                value=float(entry.raw_weight),
+                unit=_Unit.LB,
+                recorded_at=recorded_at,
+                source="manual",
+                metadata={"entered_via": "web_weight_form"},
+                source_quality="manual",
+                timezone_name=tz_name,
+            )
+        except _DataError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
 
-        # Upsert (in case logging for same date twice)
-        db.execute(text("""
-            INSERT INTO weight_trend (id, user_id, date, raw_weight, trend_weight, weekly_delta)
-            VALUES (:id, :user_id, :date, :raw_weight, :trend_weight, :weekly_delta)
-            ON CONFLICT (user_id, date)
-            DO UPDATE SET
-                raw_weight = EXCLUDED.raw_weight,
-                trend_weight = EXCLUDED.trend_weight,
-                weekly_delta = EXCLUDED.weekly_delta
-        """), {
-            "id": weight_id,
-            "user_id": user_id,
-            "date": entry.date,
-            "raw_weight": entry.raw_weight,
-            "trend_weight": trend_weight,
-            "weekly_delta": weekly_delta
-        })
+        rebuild_weight_trend(db, user_id, from_date=entry_date, timezone_name=tz_name)
+
+        # Weekly delta, kept for the existing response contract. Compares
+        # against the reading seven *calendar* days back where one exists —
+        # the old implementation compared against "the seventh previous row",
+        # which on sparse logging could be a month earlier and was reported
+        # as a weekly change regardless.
+        week_ago = db.execute(text("""
+            SELECT raw_weight FROM weight_trend
+            WHERE user_id = :uid AND date <= :d
+            ORDER BY date DESC LIMIT 1
+        """), {"uid": user_id, "d": entry_date - timedelta(days=7)}).fetchone()
+        weekly_delta = (
+            round(float(entry.raw_weight) - float(week_ago.raw_weight), 2)
+            if week_ago and week_ago.raw_weight is not None else None
+        )
+
+        current = db.execute(text("""
+            SELECT raw_weight, trend_weight FROM weight_trend
+            WHERE user_id = :uid AND date = :d
+        """), {"uid": user_id, "d": entry_date}).fetchone()
+
         db.commit()
 
         return {
             "success": True,
-            "raw_weight": entry.raw_weight,
-            "trend_weight": trend_weight,
-            "weekly_delta": weekly_delta
+            "raw_weight": float(current.raw_weight) if current else entry.raw_weight,
+            "trend_weight": (
+                round(float(current.trend_weight), 2)
+                if current and current.trend_weight is not None
+                else entry.raw_weight
+            ),
+            "weekly_delta": weekly_delta,
         }
+    except HTTPException:
+        db.rollback()
+        raise
     except Exception as e:
         db.rollback()
         logger.error(f"Failed to log weight: {e}")
@@ -5669,52 +5780,15 @@ async def create_or_update_recovery_log(
                 "notes": recovery_data.notes
             }).fetchone()
 
-        # If body_weight was logged, also sync to weight_trend table for dashboard
-        if recovery_data.body_weight:
-            # Check if weight_trend entry exists for this date
-            existing_weight = db.execute(text("""
-                SELECT id FROM weight_trend WHERE user_id = :user_id AND date = :date
-            """), {"user_id": user_id, "date": log_date}).fetchone()
-
-            # Get previous weight for trend calculation
-            prev_weight = db.execute(text("""
-                SELECT trend_weight FROM weight_trend
-                WHERE user_id = :user_id AND date < :date
-                ORDER BY date DESC LIMIT 1
-            """), {"user_id": user_id, "date": log_date}).fetchone()
-
-            prev_trend = prev_weight.trend_weight if prev_weight else recovery_data.body_weight
-            alpha = 0.1  # Smoothing factor
-            trend_weight = round(alpha * recovery_data.body_weight + (1 - alpha) * float(prev_trend), 2)
-
-            if existing_weight:
-                db.execute(text("""
-                    UPDATE weight_trend
-                    SET raw_weight = :raw_weight, trend_weight = :trend_weight, updated_at = CURRENT_TIMESTAMP
-                    WHERE user_id = :user_id AND date = :date
-                """), {
-                    "user_id": user_id,
-                    "date": log_date,
-                    "raw_weight": recovery_data.body_weight,
-                    "trend_weight": trend_weight
-                })
-            else:
-                db.execute(text("""
-                    INSERT INTO weight_trend (id, user_id, date, raw_weight, trend_weight)
-                    VALUES (:id, :user_id, :date, :raw_weight, :trend_weight)
-                """), {
-                    "id": str(uuid.uuid4()),
-                    "user_id": user_id,
-                    "date": log_date,
-                    "raw_weight": recovery_data.body_weight,
-                    "trend_weight": trend_weight
-                })
-
-        # A number David types into the recovery card is still the day's HRV —
-        # mirror it into `health_metric`, the authority for body numbers.
-        from app.services.health_metric_mirror import mirror_hrv_morning
-        mirror_hrv_morning(db, user_id, recovery_data.hrv, on_date=log_date,
-                           source="manual", via="recovery-log")
+        # FITNESS_COACH_IMPLEMENTATION_PLAN Step 8: numbers typed into the
+        # recovery card are observations, so they go through the canonical
+        # ingest and the legacy projections are rebuilt FROM it.
+        #
+        # This replaced a second, independent alpha=0.1 EWMA implementation
+        # that lived right here. Two implementations of the same smoothing,
+        # fed from two different tables, is how the recovery card and the
+        # dashboard came to show different trend weights for the same day.
+        _sync_recovery_observations(db, user_id, log_date, recovery_data)
 
         db.commit()
 
@@ -5727,6 +5801,91 @@ async def create_or_update_recovery_log(
         db.rollback()
         logger.error(f"Failed to save recovery log: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def _sync_recovery_observations(
+    db: Session, user_id: str, log_date, recovery_data
+) -> None:
+    """Mirror a recovery-card entry into `health_metric` and the projections.
+
+    Never raises into the caller: the recovery row has already been written
+    and is what the athlete asked for. A failed mirror is logged with its
+    real exception class (so a catch-all cannot hide which import or column
+    was wrong) and leaves the recovery row intact.
+
+    Each field is a separate savepoint, so one bad value does not abort the
+    others — in Postgres any error poisons the whole transaction otherwise,
+    and the caller's commit would fail behind us.
+    """
+    from datetime import datetime as _dt, time as _time
+    from app.schemas.fitness_coach import Unit as _Unit
+    from app.services.fitness.data_access import athlete_zone
+    from app.services.fitness.observations import (
+        ingest_observation, rebuild_weight_trend,
+    )
+    from app.services.fitness.profile import profile_timezone
+
+    try:
+        tz_name = profile_timezone(db, user_id)
+        tz = athlete_zone(tz_name)
+    except Exception as exc:
+        logger.warning(
+            "recovery observation mirror skipped (%s): %s", type(exc).__name__, exc
+        )
+        return
+
+    # 07:00 athlete-local for a date-only manual entry, labelled `manual` so
+    # nothing downstream treats the stamp as a measurement time.
+    stamp = _dt.combine(log_date, _time(hour=7), tzinfo=tz)
+
+    fields = []
+    if recovery_data.body_weight is not None:
+        unit = _Unit.KG if (recovery_data.weight_unit or "lbs").lower().startswith("kg") \
+            else _Unit.LB
+        fields.append(("weight", float(recovery_data.body_weight), unit))
+    if recovery_data.sleep_hours is not None:
+        fields.append(("sleep_hours", float(recovery_data.sleep_hours), _Unit.HOUR))
+    if recovery_data.heart_rate is not None:
+        fields.append(("resting_heart_rate", float(recovery_data.heart_rate), _Unit.BPM))
+
+    for metric_type, value, unit in fields:
+        try:
+            with db.begin_nested():
+                ingest_observation(
+                    db, user_id,
+                    metric_type=metric_type, value=value, unit=unit,
+                    recorded_at=stamp, source="manual",
+                    metadata={"entered_via": "recovery_card"},
+                    source_quality="manual", timezone_name=tz_name,
+                )
+        except Exception as exc:
+            logger.warning(
+                "recovery %s observation not stored (%s): %s",
+                metric_type, type(exc).__name__, exc,
+            )
+
+    if recovery_data.body_weight is not None:
+        try:
+            with db.begin_nested():
+                rebuild_weight_trend(
+                    db, user_id, from_date=log_date, timezone_name=tz_name
+                )
+        except Exception as exc:
+            logger.warning(
+                "weight trend not rebuilt after recovery entry (%s): %s",
+                type(exc).__name__, exc,
+            )
+
+    # HRV keeps its existing dedicated mirror, which stamps the canonical
+    # 06:00 ET `hrv_morning` row the iOS app and morning brief already read.
+    # Migration 162 labels that stamp `synthesized_stamp`, because 06:00 is
+    # not when the reading was taken.
+    try:
+        from app.services.health_metric_mirror import mirror_hrv_morning
+        mirror_hrv_morning(db, user_id, recovery_data.hrv, on_date=log_date,
+                           source="manual", via="recovery-log")
+    except Exception as exc:
+        logger.warning("hrv mirror failed (%s): %s", type(exc).__name__, exc)
 
 
 @router.get("/recovery/{log_date}", response_model=Optional[RecoveryLogResponse])

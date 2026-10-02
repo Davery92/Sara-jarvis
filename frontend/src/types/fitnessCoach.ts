@@ -278,3 +278,166 @@ export interface FitnessApiError {
   /** Field-level messages from a 422, keyed by field path. */
   fieldErrors?: Record<string, string>
 }
+
+// ── Check-ins ─────────────────────────────────────────────────────────────
+
+export type NutritionStatus = 'unknown' | 'partial' | 'complete'
+
+/**
+ * How much of the readiness formula's input was actually present.
+ *
+ * `recovery_score.compute_readiness({})` returns 100/"Excellent". That is
+ * correct arithmetic on no information, so an `unknown` coverage means the
+ * score is absent entirely rather than optimistic.
+ */
+export type ReadinessCoverage = 'unknown' | 'partial' | 'full'
+
+export interface ComputedReadiness {
+  score: number
+  label: string
+  status: string
+  color: string
+  factors: string[]
+  inputs_used: string[]
+  inputs_missing: string[]
+  coverage: ReadinessCoverage
+}
+
+export interface CheckIn {
+  user_id: string
+  log_date: string
+  bedtime_at: string | null
+  wake_at: string | null
+  sleep_quality: number | null
+  energy: number | null
+  fatigue: number | null
+  soreness_level: number | null
+  stress: number | null
+  motivation: number | null
+  subjective_readiness: number | null
+  notes: string | null
+  nutrition_status: NutritionStatus
+  nutrition_completed_at: string | null
+  row_version: number
+  /** {field: 'manual' | 'apple_health' | 'correction' | ...} */
+  field_sources: Record<string, string>
+  /** Resolved from health_metric, not stored on the daily row. */
+  weight: Metric | null
+  sleep_duration: Metric | null
+  steps: Metric | null
+  water: Metric | null
+  hrv: Metric | null
+  resting_heart_rate: Metric | null
+  /** Absent — not zero, not 100 — when nothing eligible was recorded. */
+  computed_readiness: ComputedReadiness | null
+  readiness_coverage: ReadinessCoverage
+}
+
+/**
+ * A partial daily update.
+ *
+ * An omitted key is left alone; an explicit `null` clears it. The
+ * physiological four (`hrv`, `heart_rate`, `sleep_hours`, `body_weight`) are
+ * accepted but are *not* check-in columns — the backend reroutes them to the
+ * canonical observation store, so there is one answer to "what did I weigh".
+ * Clearing one is refused: removing an observation is a correction.
+ */
+export interface CheckInPatch {
+  hrv?: number
+  heart_rate?: number
+  sleep_hours?: number
+  body_weight?: number
+  bedtime_at?: string | null
+  wake_at?: string | null
+  sleep_quality?: number | null
+  energy?: number | null
+  fatigue?: number | null
+  soreness_level?: number | null
+  stress?: number | null
+  motivation?: number | null
+  subjective_readiness?: number | null
+  notes?: string | null
+  nutrition_status?: NutritionStatus
+  expected_version?: number
+}
+
+// ── Measurements ──────────────────────────────────────────────────────────
+
+export type Quantity = 'mass' | 'length' | 'time' | 'count' | 'volume' | 'rate' | 'score'
+export type Side = 'left' | 'right' | 'none'
+
+export interface MeasurementType {
+  id: string
+  code: string
+  label: string
+  quantity: Quantity
+  canonical_unit: Unit
+  allows_side: boolean
+  allowed_sites: string[]
+  /** What makes two readings comparable. Shown next to the input. */
+  protocol_guidance: string | null
+  /** null = a global seed; otherwise this athlete's private definition. */
+  owner_user_id: string | null
+  is_active: boolean
+}
+
+export interface MeasurementTypeInput {
+  code: string
+  label: string
+  quantity: Quantity
+  canonical_unit: Unit
+  allows_side?: boolean
+  allowed_sites?: string[]
+  protocol_guidance?: string | null
+}
+
+export interface MeasurementPeriod {
+  id: string
+  user_id: string
+  measured_on: string
+  measured_at: string | null
+  protocol: string | null
+  notes: string | null
+  photo_period_label: string | null
+  created_at: string
+}
+
+export interface MeasurementPeriodInput {
+  measured_on: string
+  measured_at?: string | null
+  protocol?: string | null
+  notes?: string | null
+  photo_period_label?: string | null
+}
+
+export interface Measurement {
+  id: string
+  user_id: string
+  type_code: string
+  label: string
+  value: number
+  unit: Unit
+  canonical_value: number | null
+  canonical_unit: Unit
+  measured_at: string
+  logical_date: string
+  site: string | null
+  side: Side
+  period_id: string | null
+  protocol: string | null
+  source: string
+  superseded_by_id: string | null
+}
+
+export interface MeasurementInput {
+  type_code: string
+  value: number
+  unit: Unit
+  measured_at: string
+  site?: string | null
+  side?: Side
+  period_id?: string | null
+  protocol?: string | null
+  idempotency_key?: string | null
+  corrects_observation_id?: string | null
+}

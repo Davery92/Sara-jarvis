@@ -11,7 +11,7 @@ Handles:
 import uuid
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from app.services.health_metric_mirror import mirror_hrv_morning
 from app.core.timezone import (
     naive_local_now,
@@ -79,6 +79,17 @@ class MetricInput(BaseModel):
     recorded_at: str  # ISO timestamp
     source: str = "apple_health"
     metadata: Optional[dict] = None
+    # Additive (FITNESS_COACH_IMPLEMENTATION_PLAN Step 8). Both optional, so
+    # the shipped iOS build keeps working byte-for-byte:
+    #   `unit`        — what the value is actually in. Absent means "the
+    #                   canonical unit for this type", which is what the
+    #                   existing writers have always implicitly meant.
+    #                   Never inferred from the magnitude.
+    #   `external_id` — the provider's own sample id. With it, a replayed
+    #                   sync batch is idempotent without depending on
+    #                   timestamps matching to the microsecond.
+    unit: Optional[str] = None
+    external_id: Optional[str] = None
 
 
 class DailyRecoveryInput(BaseModel):
@@ -161,33 +172,76 @@ async def ingest_metrics_batch(
     skipped_invalid = 0
 
     try:
+        # FITNESS_COACH_IMPLEMENTATION_PLAN Step 8: this delegates to the
+        # shared ingest so units, provenance, athlete-local logical dates and
+        # source-conflict recording are identical whether a number arrives
+        # from HealthKit, the web, chat or a tool. The response contract is
+        # unchanged — `inserted_count`/`duplicate_count` still mean what the
+        # shipped iOS build expects.
+        #
+        # The one behavioural difference: a collision between two genuinely
+        # different sources at the same instant is now *recorded* in
+        # `source_conflict` instead of vanishing into `DO NOTHING`. It still
+        # counts as a duplicate here, because from the client's point of view
+        # nothing new was stored.
         import math
+        from datetime import datetime as _dt
+        from app.schemas.fitness_coach import Unit as _Unit
+        from app.services.fitness.data_access import FitnessDataError as _DataError
+        from app.services.fitness.observations import ingest_observation
+
         for metric in request.metrics:
             # Skip rows with bad value (NaN, None, infinity). These come through
             # when HealthKit returns nullable samples for some types.
             if metric.value is None or not math.isfinite(metric.value):
                 skipped_invalid += 1
                 continue
-            metric_id = str(uuid.uuid4())
 
-            # Try to insert, skip duplicates
-            metadata_json = json.dumps(metric.metadata) if metric.metadata else None
-            result = db.execute(text("""
-                INSERT INTO health_metric (id, user_id, metric_type, value, recorded_at, source, metadata)
-                VALUES (:id, :user_id, :metric_type, :value, :recorded_at, :source, CAST(:metadata AS jsonb))
-                ON CONFLICT (user_id, metric_type, recorded_at) DO NOTHING
-                RETURNING id
-            """), {
-                "id": metric_id,
-                "user_id": user_id,
-                "metric_type": metric.metric_type,
-                "value": metric.value,
-                "recorded_at": metric.recorded_at,
-                "source": metric.source,
-                "metadata": metadata_json,
-            })
+            try:
+                recorded_at = _dt.fromisoformat(
+                    metric.recorded_at.replace("Z", "+00:00")
+                )
+            except (TypeError, ValueError):
+                skipped_invalid += 1
+                continue
+            if recorded_at.tzinfo is None:
+                # HealthKit sends offsets; a naive stamp here would have to be
+                # assumed to be in some zone, and that assumption is what
+                # moves an observation onto the wrong calendar day.
+                recorded_at = recorded_at.replace(tzinfo=timezone.utc)
 
-            if result.fetchone():
+            unit = None
+            if metric.unit:
+                try:
+                    unit = _Unit(metric.unit)
+                except ValueError:
+                    # An unrecognised unit string is a conflict to surface,
+                    # not something to reinterpret. Reject the row rather
+                    # than store a value whose unit nobody knows.
+                    skipped_invalid += 1
+                    continue
+
+            try:
+                result = ingest_observation(
+                    db, user_id,
+                    metric_type=metric.metric_type,
+                    value=metric.value,
+                    unit=unit,
+                    recorded_at=recorded_at,
+                    source=metric.source,
+                    external_id=metric.external_id,
+                    metadata=metric.metadata,
+                    source_quality="measured",
+                )
+            except (_DataError, LookupError) as exc:
+                logger.warning(
+                    "health metric rejected (%s): type=%s source=%s: %s",
+                    type(exc).__name__, metric.metric_type, metric.source, exc,
+                )
+                skipped_invalid += 1
+                continue
+
+            if result.stored:
                 inserted_count += 1
             else:
                 duplicate_count += 1

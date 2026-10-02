@@ -150,10 +150,15 @@ class RecoveryLogCreateTool(BaseTool):
                                   body_weight, weight_unit, notes
                     """)
                     result = db.execute(query, params).first()
-                    # A number David types in is still the day's HRV — mirror it
-                    # into the authoritative store.
-                    mirror_hrv_morning(db, user_id, hrv, on_date=log_date,
-                                       source="manual", via="recovery-log")
+                    # Step 8: one mirror for every field, not just HRV. A
+                    # weight or a sleep figure typed in from chat is an
+                    # observation on the same footing as one from HealthKit.
+                    from app.routes.fitness import _sync_recovery_observations
+                    from types import SimpleNamespace as _NS
+                    _sync_recovery_observations(db, user_id, log_date, _NS(
+                        hrv=hrv, heart_rate=heart_rate, sleep_hours=sleep_hours,
+                        body_weight=body_weight, weight_unit=weight_unit,
+                    ))
                     db.commit()
 
                     return ToolResult(
@@ -195,8 +200,18 @@ class RecoveryLogCreateTool(BaseTool):
                         "notes": notes
                     }
                 )
-                mirror_hrv_morning(db, user_id, hrv, on_date=log_date,
-                                   source="manual", via="recovery-log")
+                # FITNESS_COACH_IMPLEMENTATION_PLAN Step 8: the tool path
+                # mirrors through the same canonical ingest as the two HTTP
+                # paths, so a weight Sara logs from chat and a weight typed
+                # on the Recovery card land as the same observation.
+                # `_sync_recovery_observations` already handles the HRV
+                # mirror, so the direct call is no longer needed here.
+                from app.routes.fitness import _sync_recovery_observations
+                from types import SimpleNamespace as _NS
+                _sync_recovery_observations(db, user_id, log_date, _NS(
+                    hrv=hrv, heart_rate=heart_rate, sleep_hours=sleep_hours,
+                    body_weight=body_weight, weight_unit=weight_unit,
+                ))
                 db.commit()
 
                 return ToolResult(

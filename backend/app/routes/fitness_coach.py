@@ -31,6 +31,15 @@ from app.db.session import get_db
 from app.models.user import User
 from app.schemas.fitness_coach import (
     AthleteGoalIn,
+    CheckInOut,
+    CheckInPatch,
+    MeasurementIn,
+    MeasurementOut,
+    MeasurementPeriodIn,
+    MeasurementPeriodOut,
+    MeasurementTypeIn,
+    MeasurementTypeOut,
+    Metric,
     AthleteGoalOut,
     AthleteLimitationIn,
     AthleteLimitationOut,
@@ -42,6 +51,7 @@ from app.schemas.fitness_coach import (
     TargetRevisionOut,
     TargetScope,
 )
+from app.services.fitness import observations as observation_service
 from app.services.fitness import profile as profile_service
 from app.services.fitness import targets as target_service
 from app.services.fitness.data_access import FitnessDataError
@@ -334,3 +344,178 @@ async def create_target_revision(
         raise _target_conflict(exc)
     except FitnessDataError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Daily check-ins
+# ─────────────────────────────────────────────────────────────────────────
+
+@router.get("/check-ins/{log_date}", response_model=CheckInOut)
+async def get_check_in(
+    log_date: date,
+    user_id: str = Depends(current_athlete),
+    db: Session = Depends(get_db),
+) -> CheckInOut:
+    """One athlete-local day.
+
+    Subjective answers come from the daily row; weight, sleep, steps, water,
+    HRV and resting heart rate are resolved from `health_metric` through the
+    selection rules, each as a `Metric` that can say why it has no value.
+
+    `computed_readiness` is absent — not zero, and not 100 — when nothing
+    eligible was recorded. `recovery_score.compute_readiness({})` returns
+    100/"Excellent", which is correct arithmetic on no information and has
+    been shown to someone who logged nothing.
+    """
+    return observation_service.get_check_in(db, user_id, log_date)
+
+
+@router.patch("/check-ins/{log_date}", response_model=CheckInOut)
+async def patch_check_in(
+    log_date: date,
+    patch: CheckInPatch,
+    user_id: str = Depends(current_athlete),
+    db: Session = Depends(get_db),
+) -> CheckInOut:
+    """Update part of a day.
+
+    An omitted field is left alone; an explicit `null` clears exactly that
+    field. A PATCH sending only `energy` must not erase the HRV HealthKit
+    wrote this morning, which is why the two cases are distinguishable at the
+    DTO level rather than being collapsed into `Optional[int] = None`.
+
+    Marking nutrition complete is explicit. It is never inferred from how
+    many meals were logged or from the calorie total looking plausible —
+    complete days are the denominator for every nutrition average, so
+    guessing one inflates the sample.
+    """
+    try:
+        return observation_service.patch_check_in(db, user_id, log_date, patch)
+    except observation_service.CheckInConflict as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "version_conflict",
+                "message": "This day was updated somewhere else while you were editing.",
+                "current_version": exc.current_version,
+            },
+        )
+    except FitnessDataError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Measurements
+# ─────────────────────────────────────────────────────────────────────────
+
+@router.get("/measurement-types", response_model=List[MeasurementTypeOut])
+async def list_measurement_types(
+    user_id: str = Depends(current_athlete),
+    db: Session = Depends(get_db),
+) -> List[MeasurementTypeOut]:
+    """Global seeds plus this athlete's own definitions.
+
+    Another athlete's custom code is not listed and cannot be logged
+    against: its label is something they wrote.
+    """
+    return observation_service.list_measurement_types(db, user_id)
+
+
+@router.post("/measurement-types", response_model=MeasurementTypeOut, status_code=201)
+async def create_measurement_type(
+    payload: MeasurementTypeIn,
+    user_id: str = Depends(current_athlete),
+    db: Session = Depends(get_db),
+) -> MeasurementTypeOut:
+    """Add a private measurement definition.
+
+    No migration needed, which is the point of the descriptor table: a
+    column per circumference cannot hold "forearm at the widest point,
+    standing" without a deploy.
+    """
+    try:
+        return observation_service.create_measurement_type(db, user_id, payload)
+    except FitnessDataError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@router.get("/measurement-periods", response_model=List[MeasurementPeriodOut])
+async def list_measurement_periods(
+    limit: int = Query(50, ge=1, le=200),
+    user_id: str = Depends(current_athlete),
+    db: Session = Depends(get_db),
+) -> List[MeasurementPeriodOut]:
+    return observation_service.list_measurement_periods(db, user_id, limit=limit)
+
+
+@router.post("/measurement-periods", response_model=MeasurementPeriodOut,
+             status_code=201)
+async def create_measurement_period(
+    payload: MeasurementPeriodIn,
+    user_id: str = Depends(current_athlete),
+    db: Session = Depends(get_db),
+) -> MeasurementPeriodOut:
+    """Group one tape session or photo set.
+
+    So "waist 81.5, chest 104, arm 38.5" reads as one sitting rather than
+    three unrelated points.
+    """
+    return observation_service.create_measurement_period(db, user_id, payload)
+
+
+@router.get("/measurements", response_model=List[MeasurementOut])
+async def list_measurements(
+    type_code: Optional[str] = Query(None),
+    start_date: Optional[date] = Query(None),
+    end_date: Optional[date] = Query(None, description="exclusive"),
+    limit: int = Query(100, ge=1, le=500),
+    user_id: str = Depends(current_athlete),
+    db: Session = Depends(get_db),
+) -> List[MeasurementOut]:
+    try:
+        return observation_service.list_measurements(
+            db, user_id, type_code=type_code, start_date=start_date,
+            end_date=end_date, limit=limit,
+        )
+    except FitnessDataError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.post("/measurements", response_model=MeasurementOut, status_code=201)
+async def log_measurement(
+    payload: MeasurementIn,
+    user_id: str = Depends(current_athlete),
+    db: Session = Depends(get_db),
+) -> MeasurementOut:
+    """Record one tape reading.
+
+    Stored as a canonical observation in `health_metric` — there is no
+    separate measurement value table, because body observations have one
+    authority and a second numeric store could immediately disagree with it.
+    """
+    try:
+        return observation_service.log_measurement(db, user_id, payload)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Measurement type not found")
+    except FitnessDataError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.get("/measurements/{type_code}/change", response_model=Metric)
+async def measurement_change(
+    type_code: str,
+    site: Optional[str] = Query(None),
+    side: str = Query("none"),
+    user_id: str = Depends(current_athlete),
+    db: Session = Depends(get_db),
+) -> Metric:
+    """The difference between the two most recent *comparable* readings.
+
+    Comparable means same type, site, side, protocol and unit. A waist
+    measured at the navel and one at the narrowest point differ by
+    centimetres, and that difference is not a change in the athlete — so
+    those return `not_comparable` rather than a number.
+    """
+    return observation_service.measurement_change(
+        db, user_id, type_code, site=site, side=side
+    )

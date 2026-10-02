@@ -11,6 +11,8 @@ import NutritionGuide from './NutritionGuide'
 import PlanImporter from './PlanImporter'
 import CardioSection from './CardioSection'
 import AthleteSettings from './AthleteSettings'
+import DailyCheckIn from './DailyCheckIn'
+import Measurements from './Measurements'
 import { Upload } from 'lucide-react'
 import { APP_CONFIG } from '../../config'
 import { getLocalDateString } from '../../utils/dateUtils'
@@ -19,7 +21,7 @@ import { getLocalDateString } from '../../utils/dateUtils'
 // target history, limitations) — FITNESS_COACH_IMPLEMENTATION_PLAN Step 7.
 // Added as a subview inside this existing surface rather than a new
 // top-level view, per §7: no second app shell, no second router.
-type FitnessView = 'dashboard' | 'food' | 'workout' | 'notes' | 'templates' | 'recovery' | 'programs' | 'plan' | 'nutrition' | 'cardio' | 'settings'
+type FitnessView = 'dashboard' | 'food' | 'workout' | 'notes' | 'templates' | 'recovery' | 'programs' | 'plan' | 'nutrition' | 'cardio' | 'settings' | 'today' | 'measurements'
 
 export default function FitnessSection() {
   const [currentView, setCurrentView] = useState<FitnessView>('dashboard')
@@ -52,6 +54,7 @@ export default function FitnessSection() {
 
   const tabs = [
     { id: 'dashboard' as FitnessView, label: 'Dashboard' },
+    { id: 'today' as FitnessView, label: 'Today' },
     { id: 'plan' as FitnessView, label: 'Plan' },
     { id: 'programs' as FitnessView, label: 'Programs' },
     { id: 'templates' as FitnessView, label: 'Templates' },
@@ -61,6 +64,7 @@ export default function FitnessSection() {
     { id: 'food' as FitnessView, label: 'Food Log' },
     { id: 'workout' as FitnessView, label: 'Workouts' },
     { id: 'notes' as FitnessView, label: 'Notes' },
+    { id: 'measurements' as FitnessView, label: 'Measurements' },
     { id: 'settings' as FitnessView, label: 'Settings' },
   ]
 
@@ -126,6 +130,10 @@ export default function FitnessSection() {
         )}
         {currentView === 'workout' && <WorkoutLog />}
         {currentView === 'notes' && <FitnessNotes />}
+        {currentView === 'today' && (
+          <DailyCheckIn onOpenFoodLog={() => handleViewChange('food')} />
+        )}
+        {currentView === 'measurements' && <Measurements />}
         {currentView === 'settings' && <AthleteSettings />}
       </div>
 

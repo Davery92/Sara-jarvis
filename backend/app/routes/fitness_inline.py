@@ -126,6 +126,23 @@ async def create_fitness_recovery(
                 "weight_unit": recovery_data.get('weight_unit', 'lbs'),
                 "notes": recovery_data.get('notes', '')
             }).fetchone()
+
+        # FITNESS_COACH_IMPLEMENTATION_PLAN Step 8: the inline recovery
+        # writer is a third path into daily_recovery_log (alongside
+        # routes/fitness.py and the recovery_log tool). All three now mirror
+        # through the same canonical ingest, so a weight typed here and one
+        # typed on the Recovery card produce the same observation rather than
+        # two rows that only one reader each can see.
+        from app.routes.fitness import _sync_recovery_observations
+        from types import SimpleNamespace as _NS
+        _sync_recovery_observations(db, current_user.id, log_date, _NS(
+            hrv=recovery_data.get('hrv'),
+            heart_rate=recovery_data.get('heart_rate'),
+            sleep_hours=recovery_data.get('sleep_hours'),
+            body_weight=recovery_data.get('body_weight'),
+            weight_unit=recovery_data.get('weight_unit', 'lbs'),
+        ))
+
         db.commit()
         row = result._mapping
         return {

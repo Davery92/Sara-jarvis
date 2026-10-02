@@ -29,6 +29,14 @@ import { fitnessCoachApi, FitnessCoachError } from '../api/fitnessCoach'
 import { useAuthStore } from '../stores/authStore'
 import type {
   AthleteGoal,
+  CheckIn,
+  CheckInPatch,
+  Measurement,
+  MeasurementInput,
+  MeasurementPeriod,
+  MeasurementPeriodInput,
+  MeasurementType,
+  MeasurementTypeInput,
   AthleteGoalInput,
   AthleteLimitation,
   AthleteLimitationInput,
@@ -302,4 +310,135 @@ export function useClearFitnessCache(): (userId?: string) => void {
     },
     [client, currentId],
   )
+}
+
+// ── Check-ins ─────────────────────────────────────────────────────────────
+
+export const checkInKeys = {
+  day: (userId: string, logDate: string) =>
+    ['fitness-coach', userId, 'check-in', logDate] as const,
+}
+
+export function useCheckIn(logDate: string | undefined) {
+  const userId = useAthleteId()
+  return useQuery<CheckIn, FitnessCoachError>({
+    queryKey: checkInKeys.day(userId ?? 'anonymous', logDate ?? 'unset'),
+    queryFn: () => fitnessCoachApi.getCheckIn(logDate as string),
+    enabled: enabledFor(userId) && Boolean(logDate),
+    // A day's wearable data arrives through the morning; a short stale time
+    // means opening Today after a sync shows the new reading.
+    staleTime: 30_000,
+  })
+}
+
+export function usePatchCheckIn(
+  logDate: string | undefined,
+): UseMutationResult<CheckIn, FitnessCoachError, CheckInPatch> {
+  const client = useQueryClient()
+  const userId = useAthleteId()
+  return useMutation({
+    mutationFn: (patch: CheckInPatch) =>
+      fitnessCoachApi.patchCheckIn(logDate as string, patch),
+    onSuccess: (checkIn) => {
+      if (userId && logDate) {
+        // The response IS the new state, including the incremented
+        // row_version the next edit needs for its concurrency check.
+        client.setQueryData(checkInKeys.day(userId, logDate), checkIn)
+        // A delegated weight/sleep value became an observation, which the
+        // targets and measurement views read too.
+        client.invalidateQueries({ queryKey: fitnessKeys.all(userId) })
+      }
+    },
+    onError: (error) => {
+      if (error.kind === 'conflict' && userId && logDate) {
+        client.invalidateQueries({ queryKey: checkInKeys.day(userId, logDate) })
+      }
+    },
+    retry: false,
+  })
+}
+
+// ── Measurements ──────────────────────────────────────────────────────────
+
+export const measurementKeys = {
+  types: (userId: string) => ['fitness-coach', userId, 'measurement-types'] as const,
+  periods: (userId: string) =>
+    ['fitness-coach', userId, 'measurement-periods'] as const,
+  list: (userId: string, typeCode?: string) =>
+    ['fitness-coach', userId, 'measurements', typeCode ?? 'all'] as const,
+  change: (userId: string, typeCode: string, side: string) =>
+    ['fitness-coach', userId, 'measurement-change', typeCode, side] as const,
+}
+
+export function useMeasurementTypes() {
+  const userId = useAthleteId()
+  return useQuery<MeasurementType[], FitnessCoachError>({
+    queryKey: measurementKeys.types(userId ?? 'anonymous'),
+    queryFn: () => fitnessCoachApi.listMeasurementTypes(),
+    enabled: enabledFor(userId),
+    // Global seeds plus the athlete's own definitions: stable data.
+    staleTime: 10 * 60_000,
+  })
+}
+
+export function useMeasurementPeriods() {
+  const userId = useAthleteId()
+  return useQuery<MeasurementPeriod[], FitnessCoachError>({
+    queryKey: measurementKeys.periods(userId ?? 'anonymous'),
+    queryFn: () => fitnessCoachApi.listMeasurementPeriods(),
+    enabled: enabledFor(userId),
+  })
+}
+
+export function useMeasurements(typeCode?: string) {
+  const userId = useAthleteId()
+  return useQuery<Measurement[], FitnessCoachError>({
+    queryKey: measurementKeys.list(userId ?? 'anonymous', typeCode),
+    queryFn: () => fitnessCoachApi.listMeasurements({ typeCode }),
+    enabled: enabledFor(userId),
+  })
+}
+
+export function useCreateMeasurementType(): UseMutationResult<
+  MeasurementType,
+  FitnessCoachError,
+  MeasurementTypeInput
+> {
+  const invalidate = useInvalidateFitness()
+  return useMutation({
+    mutationFn: (type: MeasurementTypeInput) =>
+      fitnessCoachApi.createMeasurementType(type),
+    onSuccess: () => invalidate(),
+    retry: false,
+  })
+}
+
+export function useCreateMeasurementPeriod(): UseMutationResult<
+  MeasurementPeriod,
+  FitnessCoachError,
+  MeasurementPeriodInput
+> {
+  const invalidate = useInvalidateFitness()
+  return useMutation({
+    mutationFn: (period: MeasurementPeriodInput) =>
+      fitnessCoachApi.createMeasurementPeriod(period),
+    onSuccess: () => invalidate(),
+    retry: false,
+  })
+}
+
+export function useLogMeasurement(): UseMutationResult<
+  Measurement,
+  FitnessCoachError,
+  MeasurementInput
+> {
+  const invalidate = useInvalidateFitness()
+  return useMutation({
+    mutationFn: (measurement: MeasurementInput) =>
+      fitnessCoachApi.logMeasurement(measurement),
+    // A new reading changes the listing, the period's contents and the
+    // comparable-change figure.
+    onSuccess: () => invalidate(),
+    retry: false,
+  })
 }

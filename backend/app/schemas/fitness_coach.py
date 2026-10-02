@@ -642,7 +642,23 @@ class NutritionStatus(str, Enum):
 
 
 class CheckInPatch(BaseModel):
+    """A partial daily update.
+
+    The physiological fields (`hrv`, `heart_rate`, `sleep_hours`,
+    `body_weight`) are accepted here because that is how a Today screen or a
+    chat turn supplies them — but they are **not** check-in columns. The
+    service reroutes them to `health_metric` through the canonical ingest, so
+    there is one answer to "what did I weigh on 1 October" rather than one
+    here and one there. Clearing one is refused: removing an observation is a
+    correction, which needs a target and a reason.
+    """
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
+
+    # Rerouted to health_metric, not stored on the daily row.
+    hrv: Patchable = UNSET
+    heart_rate: Patchable = UNSET
+    sleep_hours: Patchable = UNSET
+    body_weight: Patchable = UNSET
 
     bedtime_at: Patchable = UNSET
     wake_at: Patchable = UNSET
@@ -669,6 +685,18 @@ class CheckInPatch(BaseModel):
         ns = p.get("nutrition_status", UNSET)
         if not isinstance(ns, _Unset) and ns is not None:
             NutritionStatus(ns)
+        # Physiological values must be finite and positive before they reach
+        # the ingest, which would otherwise be the first thing to notice.
+        for f in ("hrv", "heart_rate", "sleep_hours", "body_weight"):
+            v = p.get(f, UNSET)
+            if isinstance(v, _Unset) or v is None:
+                continue
+            ensure_finite(float(v), f)
+            if float(v) <= 0:
+                raise ValueError(f"{f} must be positive")
+        if (sleep := p.get("sleep_hours", UNSET)) is not None and \
+                not isinstance(sleep, _Unset) and float(sleep) > 24:
+            raise ValueError("sleep_hours cannot exceed 24 in one night")
         bed, wake = p.get("bedtime_at", UNSET), p.get("wake_at", UNSET)
         if all(not isinstance(x, _Unset) and x is not None for x in (bed, wake)):
             b = bed if isinstance(bed, datetime) else datetime.fromisoformat(str(bed))

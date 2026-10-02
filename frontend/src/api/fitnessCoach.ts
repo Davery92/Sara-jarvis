@@ -16,6 +16,15 @@
 import { APP_CONFIG } from '../config'
 import type {
   AthleteGoal,
+  CheckIn,
+  CheckInPatch,
+  Measurement,
+  MeasurementInput,
+  MeasurementPeriod,
+  MeasurementPeriodInput,
+  MeasurementType,
+  MeasurementTypeInput,
+  Metric,
   AthleteGoalInput,
   AthleteLimitation,
   AthleteLimitationInput,
@@ -242,6 +251,74 @@ export const fitnessCoachApi = {
       method: 'POST',
       body: JSON.stringify(revision),
     }),
+
+  // ── Check-ins ───────────────────────────────────────────────────────────
+
+  getCheckIn: (logDate: string) =>
+    request<CheckIn>(`/check-ins/${encodeURIComponent(logDate)}`),
+
+  /**
+   * Send only what changed.
+   *
+   * An omitted key is left alone; an explicit `null` clears that field. A
+   * caller that spreads the whole check-in back in would turn every
+   * untouched answer into an assertion and could erase the wearable's
+   * morning reading.
+   */
+  patchCheckIn: (logDate: string, patch: CheckInPatch) =>
+    request<CheckIn>(`/check-ins/${encodeURIComponent(logDate)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    }),
+
+  // ── Measurements ────────────────────────────────────────────────────────
+
+  listMeasurementTypes: () => request<MeasurementType[]>('/measurement-types'),
+
+  createMeasurementType: (type: MeasurementTypeInput) =>
+    request<MeasurementType>('/measurement-types', {
+      method: 'POST',
+      body: JSON.stringify(type),
+    }),
+
+  listMeasurementPeriods: (limit?: number) =>
+    request<MeasurementPeriod[]>(`/measurement-periods${query({ limit })}`),
+
+  createMeasurementPeriod: (period: MeasurementPeriodInput) =>
+    request<MeasurementPeriod>('/measurement-periods', {
+      method: 'POST',
+      body: JSON.stringify(period),
+    }),
+
+  listMeasurements: (opts?: {
+    typeCode?: string
+    startDate?: string
+    endDate?: string
+    limit?: number
+  }) =>
+    request<Measurement[]>(
+      `/measurements${query({
+        type_code: opts?.typeCode,
+        start_date: opts?.startDate,
+        end_date: opts?.endDate,
+        limit: opts?.limit,
+      })}`,
+    ),
+
+  logMeasurement: (measurement: MeasurementInput) =>
+    request<Measurement>('/measurements', {
+      method: 'POST',
+      body: JSON.stringify(measurement),
+    }),
+
+  /** The change between the two most recent *comparable* readings. */
+  measurementChange: (typeCode: string, opts?: { site?: string; side?: string }) =>
+    request<Metric>(
+      `/measurements/${encodeURIComponent(typeCode)}/change${query({
+        site: opts?.site,
+        side: opts?.side,
+      })}`,
+    ),
 }
 
 export type FitnessCoachApi = typeof fitnessCoachApi
