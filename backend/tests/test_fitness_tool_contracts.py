@@ -385,3 +385,129 @@ def test_a_read_tool_with_an_unknown_owner_writes_nothing(registry):
         assert after == before
     finally:
         db.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Metric keys are a contract
+# ─────────────────────────────────────────────────────────────────────────
+
+def _state_metric_paths():
+    """Every path the state can produce, from the analytics directly."""
+    from datetime import date, timedelta
+
+    from app.services.fitness import analytics
+    from app.schemas.fitness_coach import Unit
+
+    as_of = date(2026, 10, 1)
+    days = [
+        analytics.DailyValue(day=as_of - timedelta(days=n), value=81.0,
+                             unit=Unit.KG)
+        for n in range(1, 15)
+    ]
+    nutrition = [
+        analytics.NutritionDay(
+            day=as_of - timedelta(days=n), calories=3000, protein_g=200,
+            carbs_g=300, fat_g=90, status="complete", meal_count=3,
+        )
+        for n in range(1, 8)
+    ]
+    nights = [
+        analytics.SleepNight(day=as_of - timedelta(days=n), hours=7.5,
+                             bedtime_minutes=1380, wake_minutes=420)
+        for n in range(1, 8)
+    ]
+    sessions = [
+        analytics.SessionRecord(key=f"s{n}", day=as_of - timedelta(days=n),
+                                status="completed", was_planned=True)
+        for n in range(1, 4)
+    ]
+    sets = [
+        analytics.SetRecord(
+            set_id=f"x{n}", day=as_of - timedelta(days=1),
+            exercise_id="ex", exercise_name="Bench", occurrence_id=None,
+            session_key="s1", reps=5, load=100.0, load_unit=Unit.KG,
+            set_kind="working",
+        )
+        for n in range(3)
+    ]
+
+    paths = set()
+    for section, group in (
+        ("weight", analytics.weight_metrics(days, as_of)),
+        ("nutrition", analytics.nutrition_metrics(nutrition, as_of)),
+        ("sleep", analytics.sleep_metrics(nights, as_of, target_hours=8.0)),
+        ("training", analytics.training_metrics(
+            sessions, sets, as_of, planned_from_snapshot=4,
+        )),
+    ):
+        paths.update(f"{section}.{key}" for key in group.metrics)
+    return paths
+
+
+def test_the_metric_keys_the_ui_and_the_coach_cite_actually_exist():
+    """A cited path that does not exist renders as nothing, silently.
+
+    `CoachOverview` referenced `sleep.mean_hours` and
+    `nutrition.protein_mean`; the real keys are `sleep.duration_mean` and
+    `nutrition.protein_g_mean`, so both tiles rendered blank with no error
+    anywhere. `proactive` pointed an evidence ref at the same wrong path.
+    Both were found by a Step 25 integration test noticing a sleep night
+    that was logged and not counted.
+    """
+    import os
+    import re
+
+    available = _state_metric_paths()
+
+    overview_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "..", "frontend", "src", "components", "fitness", "CoachOverview.tsx",
+    )
+    if not os.path.exists(overview_path):
+        # The disposable stack mounts only `backend/` by default. Mount the
+        # frontend to run this half:
+        #
+        #   backend/scripts/disposable_compose.sh sara-fitness-test \
+        #     -f docker-compose.test.yml run --rm --no-deps \
+        #     -v "$PWD/frontend:/frontend:ro" backend-test \
+        #     pytest tests/test_fitness_tool_contracts.py -k metric_keys
+        #
+        # Skipped rather than failed when it is absent, because the frontend
+        # half is also pinned by `CoachOverview.test.tsx` rendering the real
+        # key names — this check is the one that catches a BACKEND rename.
+        pytest.skip(
+            "the frontend tree is not mounted; see the docstring for the "
+            "-v invocation that runs this"
+        )
+    overview = open(overview_path).read()
+    cited = set()
+    for match in re.finditer(
+        r"metric=\{(\w+)\.metrics\.(\w+)\}", overview,
+    ):
+        group, key = match.group(1), match.group(2)
+        section = {
+            "weight": "weight", "nutrition": "nutrition",
+            "sleep": "sleep", "training": "training",
+        }.get(group)
+        if section:
+            cited.add(f"{section}.{key}")
+    assert cited, "the metric scan found nothing — the pattern changed"
+    missing = sorted(cited - available)
+    assert missing == [], f"the Overview cites paths that do not exist: {missing}"
+
+
+def test_the_proactive_evidence_refs_point_at_real_metrics():
+    """An evidence ref naming nothing makes the artifact's "why" unresolvable
+    — the one thing a coaching question has to be able to show."""
+    from app.services.fitness import proactive
+
+    available = _state_metric_paths()
+    cited = set()
+    import re
+    source = open(proactive.__file__).read()
+    for match in re.finditer(r'evidence=\[([^\]]*)\]', source):
+        for literal in re.findall(r'"([a-z_]+\.[a-z0-9_]+)"', match.group(1)):
+            cited.add(literal)
+    assert cited, "the evidence scan found nothing"
+    missing = sorted(cited - available)
+    assert missing == [], f"proactive cites paths that do not exist: {missing}"

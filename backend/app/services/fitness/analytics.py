@@ -901,7 +901,13 @@ def _circular_stats(minutes: Sequence[int]) -> Tuple[float, float]:
     mean_angle = math.atan2(sin_sum / n, cos_sum / n)
     if mean_angle < 0:
         mean_angle += 2 * math.pi
-    resultant = math.hypot(sin_sum / n, cos_sum / n)
+    # Clamped to 1.0. Identical times give a resultant of 1 plus floating
+    # point error, and `log()` of anything above 1 is positive — so
+    # `sqrt(-2 * log(resultant))` raised a math domain error on the most
+    # ordinary input there is: an athlete with a perfectly consistent
+    # bedtime. Found by a metric-key contract test seeding seven identical
+    # nights.
+    resultant = min(math.hypot(sin_sum / n, cos_sum / n), 1.0)
     return mean_angle * 1440.0 / (2 * math.pi), resultant
 
 

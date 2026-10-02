@@ -380,68 +380,68 @@ def run_scheduled_review(db, user_id: str, run_id: str, context) -> Dict[str, An
         raise
 
     result = asyncio.run(reviews.generate(db, user_id, review.id))
-    coaching_jobs.complete_run(db, user_id, run_id, review_id=review.id)
+
+    # The review is stored and readable in the Coach tab from here on,
+    # whatever the delivery gates decide. Suppressing a notification is not
+    # suppressing the work, and conflating the two is how a push preference
+    # silently becomes a "do not coach me" setting.
+    notice = None
+    if result.review.status.value == "complete":
+        from app.services.fitness import proactive
+        from app.services.fitness.review_audit import get_review
+        detail = get_review(db, user_id, review.id)
+        notice = asyncio.run(proactive.deliver_review_notice(db, user_id, detail))
+
+    coaching_jobs.complete_run(
+        db, user_id, run_id, review_id=review.id,
+        candidate_id=notice.candidate_id if notice else None,
+    )
     return {
         "status": result.review.status.value,
         "review_id": review.id,
+        "notified": bool(notice and notice.delivered),
+        "notice_suppressed": notice.noop_reason if notice else None,
     }
 
 
 @_occurrence_task("app.tasks.fitness_coach.run_daily_checkin")
 def run_daily_checkin(db, user_id: str, run_id: str, context) -> Dict[str, Any]:
-    """Ask for ONE missing thing, chosen from the data.
+    """Ask for ONE missing thing, through the existing delivery gates.
 
     One, not all of them. A morning message asking about sleep, weight, food
     and soreness at once is a form, and David has been explicit that a
     repeated question he has already answered is worse than no question.
 
-    Recomputed here rather than at claim time: if he logged his weight
-    between the sweep and this task, the question is already answered and
-    asking it is the nag.
+    `proactive.deliver_gap_question` recomputes the state before choosing,
+    so a weigh-in logged between the sweep and this task answers the
+    question and silences it. A suppression — quiet mode, a directive, a
+    disabled category, a recent question — is RECORDED as a noop with its
+    reason rather than passing silently.
     """
-    from app.services.fitness import coaching_jobs
-    from app.services.fitness.state import build_fitness_state
+    import asyncio
 
-    state = build_fitness_state(db, user_id, fresh=True, redis_client=None)
-    gap = _priority_gap(state)
-    if gap is None:
-        coaching_jobs.noop_run(db, user_id, run_id, "nothing_missing")
-        return {"status": "noop", "reason": "nothing_missing"}
+    from app.core.feature_flags import Flag, is_enabled
+    from app.services.fitness import coaching_jobs, proactive
 
-    coaching_jobs.complete_run(db, user_id, run_id, candidate_id=gap["key"])
-    return {"status": "completed", "asked_about": gap["metric"]}
+    if not is_enabled(Flag.FITNESS_COACH_PROACTIVE):
+        coaching_jobs.noop_run(db, user_id, run_id, "proactive_disabled")
+        return {"status": "noop", "reason": "proactive_disabled"}
 
+    outcome = asyncio.run(proactive.deliver_gap_question(db, user_id))
+    if not outcome.delivered:
+        coaching_jobs.noop_run(
+            db, user_id, run_id, outcome.noop_reason or "suppressed",
+        )
+        return {"status": "noop", "reason": outcome.noop_reason}
 
-def _priority_gap(state) -> Optional[Dict[str, Any]]:
-    """The single most useful missing thing, deterministically chosen.
-
-    Ordered by what unblocks the most: a weigh-in gates the weekly rate,
-    confirmed food days gate every intake average, and pain is last because
-    it is only askable when there was a session to ask about.
-    """
-    quality = state.quality
-    day = state.athlete_local_date.isoformat()
-
-    observed = quality.observed_weight_days
-    if observed is not None and observed < 3:
-        return {
-            "metric": "weight",
-            "key": f"fitness_gap:{day}:weight",
-            "question": "Did you weigh in this morning?",
-        }
-    if quality.nutrition_complete_days < 3:
-        return {
-            "metric": "nutrition",
-            "key": f"fitness_gap:{day}:nutrition",
-            "question": "Was yesterday's food log complete?",
-        }
-    if (quality.sleep_nights or 0) < 3:
-        return {
-            "metric": "sleep",
-            "key": f"fitness_gap:{day}:sleep",
-            "question": "How did you sleep?",
-        }
-    return None
+    coaching_jobs.complete_run(
+        db, user_id, run_id, candidate_id=outcome.candidate_id,
+    )
+    return {
+        "status": "completed",
+        "asked_about": outcome.question.metric if outcome.question else None,
+        "deep_link": proactive.deep_link(outcome),
+    }
 
 
 @_occurrence_task("app.tasks.fitness_coach.run_measurement_nudge")

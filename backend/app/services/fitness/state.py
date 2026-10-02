@@ -386,9 +386,23 @@ def _sleep_group(
     for day in sorted(set(series) | set(check_ins)):
         chosen = series.get(day)
         row = check_ins.get(day) or {}
+        # The canonical observation first, then the legacy check-in column.
+        #
+        # `daily_recovery_log.sleep_hours` is what the iOS app and the
+        # recovery log have always written, and §5.2 keeps it as a
+        # compatibility mirror. Reading only the observation stream made a
+        # night logged through the older path invisible — so a week with
+        # seven recorded sleeps reported zero nights, and the coach asked
+        # "how did you sleep?" about a night already in the log.
+        hours = chosen.value if chosen else None
+        if hours is None and row.get("sleep_hours") is not None:
+            try:
+                hours = float(row["sleep_hours"])
+            except (TypeError, ValueError):
+                hours = None
         nights.append(analytics.SleepNight(
             day=day,
-            hours=chosen.value if chosen else None,
+            hours=hours,
             bedtime_minutes=_clock_minutes(row.get("bedtime_at"), timezone_name),
             wake_minutes=_clock_minutes(row.get("wake_at"), timezone_name),
             quality=row.get("sleep_quality"),

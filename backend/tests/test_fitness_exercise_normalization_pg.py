@@ -167,22 +167,70 @@ def test_an_unknown_name_resolves_to_nothing_rather_than_a_guess(pg, two_athlete
 
 
 @requires_pg
-def test_the_migration_seeded_every_exercises_own_name_as_an_alias(pg):
-    """So `resolve("Bench Press")` needs no separate name-matching path."""
-    sample = pg.execute(text("""
-        SELECT e.id, e.name, e.normalized_name FROM exercise_library e
+def test_every_exercise_has_its_own_name_as_an_alias_in_its_own_scope(pg):
+    """So `resolve("Bench Press")` needs no separate name-matching path.
+
+    The alias is scoped the way the exercise is: a GLOBAL exercise gets a
+    global alias (migration 165 seeded those), and a PRIVATE one gets an
+    alias owned by its athlete — which is the point of
+    `create_custom_exercise`, because the name is something the athlete
+    wrote.
+
+    An earlier version of this test sampled any five rows and demanded a
+    global alias for each. It passed only because another test leaked
+    private exercises into the table; with those cleaned up, the disposable
+    stack's schema fixture seeds no exercise catalogue at all, so there was
+    nothing to sample. It now checks the invariant per scope and says so
+    when the catalogue is empty.
+    """
+    rows = pg.execute(text("""
+        SELECT e.id, e.name, e.normalized_name, e.owner_user_id
+        FROM exercise_library e
         WHERE e.normalized_name IS NOT NULL AND e.normalized_name <> ''
           AND (SELECT COUNT(*) FROM exercise_library d
                WHERE d.normalized_name = e.normalized_name) = 1
-        LIMIT 5
+        LIMIT 10
     """)).fetchall()
-    for row in sample:
+    if not rows:
+        pytest.skip(
+            "this stack seeds no exercise catalogue; the resolve-by-own-name "
+            "path is covered by the tests below, which create their own"
+        )
+    for row in rows:
         alias = pg.execute(text("""
             SELECT exercise_library_id FROM fitness_exercise_alias
-            WHERE normalized_alias = :n AND owner_user_id IS NULL
-              AND review_status = 'reviewed'
-        """), {"n": row.normalized_name}).scalar()
-        assert alias == row.id, f"{row.name!r} has no self-alias"
+            WHERE normalized_alias = :n
+              AND owner_user_id IS NOT DISTINCT FROM :owner
+        """), {"n": row.normalized_name, "owner": row.owner_user_id}).scalar()
+        assert alias == row.id, (
+            f"{row.name!r} has no self-alias in its own scope "
+            f"(owner={row.owner_user_id})"
+        )
+
+
+@requires_pg
+def test_a_privately_created_exercise_resolves_by_its_own_name(pg, two_athletes):
+    """The invariant that matters at runtime, with a row this test owns.
+
+    `create_custom_exercise` writes the self-alias; without it the athlete
+    would have to resolve their own exercise by id, which nothing in a
+    conversation has.
+    """
+    from app.services.fitness.exercises import create_custom_exercise, resolve_exercise
+
+    alice, _ = two_athletes
+    created = create_custom_exercise(pg, alice, "Zercher Carry Thing")
+    pg.commit()
+
+    resolved = resolve_exercise(pg, alice, "zercher carry thing")
+    assert resolved is not None
+    assert resolved.id == created.id
+    # Private: the name is something the athlete wrote.
+    owner = pg.execute(text("""
+        SELECT owner_user_id FROM fitness_exercise_alias
+        WHERE exercise_library_id = :id
+    """), {"id": created.id}).scalar()
+    assert owner == alice
 
 
 # ─────────────────────────────────────────────────────────────────────────

@@ -81,13 +81,20 @@ def athlete(pg):
                        {"ids": [uid]})
         except Exception:
             pg.rollback()
-    # exercise_library's owner column is `owner_user_id`, not `user_id`.
+    # exercise_library's owner column is `owner_user_id`, not `user_id`, and
+    # the alias table is `fitness_exercise_alias`. Both were wrong, so the
+    # custom exercises leaked between tests and broke the global-alias
+    # assertion in test_fitness_exercise_normalization_pg.py — the FK from
+    # the alias blocked the exercise delete and the try/except swallowed it.
     try:
         pg.execute(text("""
-            DELETE FROM exercise_alias WHERE exercise_library_id IN (
+            DELETE FROM fitness_exercise_alias WHERE exercise_library_id IN (
                 SELECT id FROM exercise_library WHERE owner_user_id = :u
             )
         """), {"u": uid})
+    except Exception:
+        pg.rollback()
+    try:
         pg.execute(text(
             "DELETE FROM exercise_library WHERE owner_user_id = :u"
         ), {"u": uid})

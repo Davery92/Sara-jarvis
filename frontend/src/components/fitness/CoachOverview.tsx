@@ -256,7 +256,7 @@ function TargetsCard({ state }: { state: FitnessState }) {
         <div className="pt-2 mt-1 border-t border-white/[0.06] flex flex-col gap-1">
           <span className={SECTION}>Logged</span>
           <InlineMetric label="Calories" metric={nutrition.metrics.calories_mean} />
-          <InlineMetric label="Protein" metric={nutrition.metrics.protein_mean} />
+          <InlineMetric label="Protein" metric={nutrition.metrics.protein_g_mean} />
           <span className="text-[11px] text-slate-500" data-testid="nutrition-coverage">
             {state.quality.nutrition_complete_days} fully logged ·{' '}
             {state.quality.nutrition_partial_days} partial ·{' '}
@@ -400,7 +400,7 @@ function RecoveryCard({ state }: { state: FitnessState }) {
       <span className={SECTION}>Sleep &amp; recovery</span>
       {sleep ? (
         <>
-          <InlineMetric label="Sleep" metric={sleep.metrics.mean_hours} />
+          <InlineMetric label="Sleep" metric={sleep.metrics.duration_mean} />
           <InlineMetric label="Bedtime spread" metric={sleep.metrics.bedtime_consistency} />
           <span className="text-[11px] text-slate-500" data-testid="sleep-coverage">
             {state.quality.sleep_nights ?? 0} nights recorded

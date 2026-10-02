@@ -208,6 +208,50 @@ describe('with data', () => {
     expect(screen.getByTestId('day-type').textContent).toContain('training')
   })
 
+  it('renders sleep and protein from the real metric keys', async () => {
+    // The keys the backend actually produces are `sleep.duration_mean` and
+    // `nutrition.protein_g_mean`. The Overview cited `mean_hours` and
+    // `protein_mean`, so both tiles rendered blank with no error anywhere —
+    // a cited path that does not exist renders as nothing, silently. This
+    // pins the names from the UI side; a backend rename is caught by
+    // `test_fitness_tool_contracts.py`.
+    served = state({
+      sections: {
+        sleep: {
+          section: 'sleep',
+          metrics: {
+            duration_mean: metric('sleep.duration_mean', {
+              value: 7.4, unit: 'h', observed_days: 6, expected_days: 7,
+            }),
+            bedtime_consistency: metric('sleep.bedtime_consistency', {
+              value: 34, unit: 'min', observed_days: 6, expected_days: 7,
+            }),
+          },
+          items: [], limitations: [],
+        },
+        nutrition: {
+          section: 'nutrition',
+          metrics: {
+            calories_mean: metric('nutrition.calories_mean', {
+              value: 3010, unit: 'kcal', observed_days: 5, expected_days: 7,
+            }),
+            protein_g_mean: metric('nutrition.protein_g_mean', {
+              value: 198, unit: 'g', observed_days: 5, expected_days: 7,
+            }),
+          },
+          items: [], limitations: [],
+        },
+      },
+      quality: quality({ sleep_nights: 6, nutrition_complete_days: 5 }),
+    })
+    wrap(<CoachOverview />)
+    await waitFor(() => expect(screen.getByTestId('recovery-card')).toBeTruthy())
+
+    expect(screen.getByTestId('recovery-card').textContent).toContain('7.4')
+    expect(screen.getByTestId('recovery-card').textContent).toContain('34')
+    expect(screen.getByTestId('targets-card').textContent).toContain('198')
+  })
+
   it('plots the weight series and says gaps are gaps', async () => {
     served = state({ sections: { weight: weightGroup() } })
     wrap(<CoachOverview />)

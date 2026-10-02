@@ -878,7 +878,11 @@ def test_profile_timezone_drives_the_athletes_today(pg, two_athletes):
     # Kiritimati is UTC+14, Niue is UTC-11: 25 hours apart, so these cannot
     # both be the same calendar day at any instant.
     assert kiritimati >= niue
-    assert (kiritimati - niue).days in (0, 1)
+    # Kiritimati (+14) and Niue (-11) are 25 hours apart, so their local
+    # dates differ by one day for most of the UTC day and by TWO for the
+    # hour where the spread straddles two midnights. Asserting (0, 1) made
+    # this test fail for one hour in twenty-four.
+    assert (kiritimati - niue).days in (1, 2)
 
 
 @requires_pg

@@ -976,3 +976,37 @@ def test_an_invalidation_failure_never_reaches_the_caller(pg, two_athletes,
     queue_invalidation(pg, alice)
     pg.execute(text("SELECT 1"))
     pg.commit()   # must not raise
+
+
+@requires_pg
+def test_a_sleep_logged_through_the_legacy_column_still_counts(pg, two_athletes):
+    """`daily_recovery_log.sleep_hours` is what the iOS app and the recovery
+    log have always written, and §5.2 keeps it as a compatibility mirror.
+
+    Reading only the canonical observation stream made a night logged
+    through the older path invisible — a week with seven recorded sleeps
+    reported zero nights, and the coach asked "how did you sleep?" about a
+    night already in the log. Caught by the Step 25 daily-loop test.
+    """
+    from app.schemas.fitness_coach import StateSection
+    from app.services.fitness.state import build_fitness_state
+
+    alice, _ = two_athletes
+    _profile(pg, alice)
+    for offset in range(1, 6):
+        day = TODAY - timedelta(days=offset)
+        pg.execute(text("""
+            INSERT INTO daily_recovery_log
+                (id, user_id, log_date, sleep_hours, created_at, updated_at)
+            VALUES (:i, :u, :d, 7.5, NOW(), NOW())
+            ON CONFLICT (user_id, log_date) DO UPDATE SET sleep_hours = 7.5
+        """), {"i": str(uuid.uuid4()), "u": alice, "d": day})
+    pg.commit()
+
+    state = build_fitness_state(
+        pg, alice, period_end=TODAY, fresh=True, redis_client=None,
+    )
+    sleep = state.sections[StateSection.SLEEP]
+    assert sleep.metrics["nights_observed"].value == 5
+    assert sleep.metrics["duration_mean"].value == pytest.approx(7.5)
+    assert state.quality.sleep_nights == 5
