@@ -69,6 +69,7 @@ celery_app = Celery(
         "app.tasks.calendar_prep",
         "app.tasks.pkg_sync",
         "app.tasks.health_weekly",
+        "app.tasks.fitness_coach",
         "app.tasks.health_baselines",
         "app.tasks.sara_self_queue",
         "app.tasks.subconscious_tier0",
@@ -178,6 +179,10 @@ celery_app.conf.task_routes = {
     "app.tasks.research.*": {"queue": "cognitive"},
     "app.tasks.attention.*": {"queue": "cognitive"},
     "app.tasks.health_weekly.*": {"queue": "cognitive"},
+    # The health lane. A review is a bounded single model call with a hard
+    # time limit, so it sits with the other health rollups rather than
+    # competing with cognition for the cognitive lane.
+    "app.tasks.fitness_coach.*": {"queue": "health"},
     "app.tasks.health_baselines.*": {"queue": "health"},
     "app.tasks.sara_self_queue.*": {"queue": "cognitive"},
     "app.tasks.ml.*": {"queue": "cognitive"},

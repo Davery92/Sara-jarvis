@@ -89,6 +89,17 @@ class Flag(str, Enum):
     WORLD_COGNITION_READ = "WORLD_COGNITION_READ"
     WORLD_SURFACES_READ = "WORLD_SURFACES_READ"
 
+    # FITNESS_COACH_IMPLEMENTATION_PLAN Step 20. Off by default, and it gates
+    # the GENERATOR only: the deterministic state, the analytics and the
+    # stored audit all work with it off. Flipping it off stops Sara producing
+    # new coaching opinions without touching a single recorded number, and
+    # without hiding reviews she has already produced.
+    FITNESS_COACH_REVIEW = "FITNESS_COACH_REVIEW"
+    # Separate flag for the scheduled sweep. An on-demand review David asked
+    # for and an unprompted weekly one are different consents, and "stop
+    # bringing this up on your own" must not also mean "refuse when asked".
+    FITNESS_COACH_PROACTIVE = "FITNESS_COACH_PROACTIVE"
+
 
 ALL_FLAGS: List[str] = [f.value for f in Flag]
 _TRUE_VALUES = {"1", "true", "yes", "on"}

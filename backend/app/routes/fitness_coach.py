@@ -45,12 +45,18 @@ from app.schemas.fitness_coach import (
     AthleteLimitationOut,
     AthleteProfileOut,
     AthleteProfilePatch,
+    CoachRecommendationOut,
+    CoachReviewDetail,
+    CoachReviewOut,
     DataQuality,
+    DecisionStatus,
     DayType,
     FitnessStateV1,
     MetricGroup,
     StateSection,
     ResolvedTargets,
+    ReviewKind,
+    ReviewRequest,
     TargetRevisionIn,
     TargetRevisionOut,
     TargetScope,
@@ -662,3 +668,171 @@ async def get_data_quality(
         redis_client=_state_cache(),
     )
     return state.quality
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Reviews (Step 20)
+# ─────────────────────────────────────────────────────────────────────────
+
+@router.post("/reviews", response_model=CoachReviewOut, status_code=202)
+async def request_coach_review(
+    payload: ReviewRequest,
+    user_id: str = Depends(current_athlete),
+    db: Session = Depends(get_db),
+) -> CoachReviewOut:
+    """Queue a review and return its id and status. **202, not 200.**
+
+    The result is not here yet, and saying 200 would invite a client to read
+    `summary` from the response. Generation runs on the `health` Celery
+    queue: waiting for the model would hold this connection for up to three
+    minutes, and a client-side timeout would leave a running generation that
+    nobody is waiting for.
+
+    Idempotent. A double-tap produces one review and one model call.
+    """
+    from app.schemas.fitness_coach import Period, RequestedBy
+    from app.services.fitness import reviews as review_service
+    from app.services.fitness.review_audit import ReviewConflict
+
+    period = None
+    if payload.period_start and payload.period_end:
+        if payload.period_end <= payload.period_start:
+            raise HTTPException(
+                status_code=422,
+                detail="period_end is exclusive and must be after period_start",
+            )
+        period = Period(start=payload.period_start, end=payload.period_end)
+    elif payload.period_start or payload.period_end:
+        raise HTTPException(
+            status_code=422,
+            detail="give both period_start and period_end, or neither",
+        )
+
+    try:
+        review = review_service.request_review(
+            db, user_id, kind=payload.kind, period=period,
+            requested_by=RequestedBy.USER, force=payload.force,
+        )
+    except ReviewConflict as exc:
+        # 409 with the review id, so a client can show the existing one or
+        # retry with force. A bare 409 forces a blind guess.
+        raise HTTPException(status_code=409, detail={
+            "code": "review_exists",
+            "message": str(exc),
+            "review_id": exc.review_id,
+            "status": exc.status.value,
+        })
+    except FitnessDataError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    _dispatch_review(user_id, review.id)
+    return review
+
+
+def _dispatch_review(user_id: str, review_id: str) -> None:
+    """Hand the review to the worker. A dispatch failure is not a data loss.
+
+    The row is already committed with `status='pending'`, so a failed
+    dispatch leaves something a later sweep can pick up — which is why this
+    logs rather than raising. Raising would roll the request back and lose
+    the only durable record that David asked.
+    """
+    try:
+        from app.celery_app import celery_app
+        celery_app.send_task(
+            "app.tasks.fitness_coach.generate_review",
+            kwargs={"user_id": user_id, "review_id": review_id},
+            queue="health",
+        )
+    except Exception as exc:
+        logger.warning(
+            "fitness review %s queued but not dispatched (%s): %s",
+            review_id, type(exc).__name__, exc,
+        )
+
+
+@router.get("/reviews", response_model=List[CoachReviewOut])
+async def list_coach_reviews(
+    kind: Optional[ReviewKind] = Query(None),
+    include_superseded: bool = Query(False),
+    limit: int = Query(20, ge=1, le=100),
+    user_id: str = Depends(current_athlete),
+    db: Session = Depends(get_db),
+) -> List[CoachReviewOut]:
+    """This athlete's reviews, newest period first.
+
+    Superseded revisions are excluded by default and available with the
+    flag — the chain is retained because "what did you tell me in September"
+    has to stay answerable, not because every list should carry it.
+    """
+    from app.services.fitness.review_audit import list_reviews
+    return list_reviews(
+        db, user_id, kind=kind, include_superseded=include_superseded,
+        limit=limit,
+    )
+
+
+@router.get("/reviews/{review_id}", response_model=CoachReviewDetail)
+async def get_coach_review(
+    review_id: str,
+    with_state: bool = Query(
+        False,
+        description="Include the frozen input snapshot — what the review "
+                    "actually reasoned from.",
+    ),
+    user_id: str = Depends(current_athlete),
+    db: Session = Depends(get_db),
+) -> CoachReviewDetail:
+    """One review, its output and its recommendations.
+
+    Poll this for a queued review: `status` moves pending → running →
+    complete/failed/insufficient_data. A `failed` review carries an
+    `error_category`, and `insufficient_data` is deliberately not a failure —
+    the answer to it is to log more, not to retry.
+    """
+    from app.services.fitness.review_audit import get_review
+    try:
+        return get_review(db, user_id, review_id, with_state=with_state)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Review not found")
+
+
+@router.get("/reviews/{review_id}/chain", response_model=List[CoachReviewOut])
+async def get_review_chain(
+    review_id: str,
+    user_id: str = Depends(current_athlete),
+    db: Session = Depends(get_db),
+) -> List[CoachReviewOut]:
+    """Every revision of this review, oldest first.
+
+    A rerun after corrected data creates a linked revision rather than
+    overwriting: the earlier review was a correct reading of the data it had,
+    and it is the only record of why a decision was made at the time.
+    """
+    from app.services.fitness.review_audit import revision_chain
+    chain = revision_chain(db, user_id, review_id)
+    if not chain:
+        raise HTTPException(status_code=404, detail="Review not found")
+    return chain
+
+
+@router.get("/recommendations", response_model=List[CoachRecommendationOut])
+async def list_coach_recommendations(
+    review_id: Optional[str] = Query(None),
+    status: Optional[DecisionStatus] = Query(None),
+    include_expired: bool = Query(False),
+    limit: int = Query(50, ge=1, le=200),
+    user_id: str = Depends(current_athlete),
+    db: Session = Depends(get_db),
+) -> List[CoachRecommendationOut]:
+    """Proposals, not applied changes.
+
+    `decision_status` is the only statement about what happened to each one,
+    and the database refuses an `accepted` row without the action receipt or
+    the target revision that proves an execution.
+    """
+    from app.services.fitness.review_audit import list_recommendations
+    return list_recommendations(
+        db, user_id, review_id=review_id, status=status,
+        include_expired=include_expired, limit=limit,
+    )

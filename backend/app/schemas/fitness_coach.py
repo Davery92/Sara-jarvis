@@ -1131,7 +1131,14 @@ class CoachReviewOut(BaseModel):
     `FitnessStateV1` and most callers want the summary and the
     recommendations. `CoachReviewDetail` carries it for the one screen that
     answers "what did you reason from?".
+
+    `protected_namespaces=()` because `model_requested` and `model_actual`
+    are the names this subsystem uses everywhere — the column, the log line
+    and the API field. Renaming them to dodge Pydantic's `model_` warning
+    would put a third vocabulary in front of a reader for no gain.
     """
+    model_config = ConfigDict(protected_namespaces=())
+
     id: str
     user_id: str
     kind: ReviewKind
