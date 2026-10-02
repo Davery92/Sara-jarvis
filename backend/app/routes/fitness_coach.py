@@ -19,7 +19,7 @@ failure mode is "the feature quietly does not exist".
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
@@ -1002,3 +1002,206 @@ async def trace_target_revision(
         return recommendation_service.trace(db, user_id, revision_id)
     except LookupError:
         raise HTTPException(status_code=404, detail="Target revision not found")
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Coaching cadence (Step 24)
+# ─────────────────────────────────────────────────────────────────────────
+
+class CadencePatch(BaseModel):
+    """What an athlete may change about their own cadence.
+
+    Note what is NOT here: `task_name`, `queue`, `kwargs`, `user_id`. The
+    sweep is one global `scheduled_job` and the per-kind task is a mapping
+    in code. A task name behind a user-facing API is arbitrary code
+    execution with extra steps, and `extra="forbid"` means an attempt to
+    send one is a 422 rather than something silently ignored.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: Optional[bool] = None
+    consented: Optional[bool] = None
+    #: Athlete-local wall clock, "HH:MM".
+    local_time: Optional[str] = Field(default=None, pattern=r"^\d{2}:\d{2}$")
+    timezone: Optional[str] = Field(default=None, max_length=64)
+    #: ISO weekdays, 1 = Monday.
+    weekdays: Optional[List[int]] = None
+    #: For 14/28-day cadences. An anchor plus a count, because a cron's
+    #: `*/14` day-of-month is not every fourteen days.
+    cadence_days: Optional[int] = Field(default=None, ge=1, le=365)
+    anchor_date: Optional[date] = None
+    expected_version: Optional[int] = None
+
+
+class SnoozeBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    until: datetime
+
+
+def _cadence_payload(schedule) -> Dict[str, Any]:
+    return {
+        "kind": schedule.kind,
+        "enabled": schedule.enabled,
+        "consented": schedule.consented,
+        "consented_at": (
+            schedule.consented_at.isoformat() if schedule.consented_at else None
+        ),
+        "local_time": schedule.local_time.strftime("%H:%M"),
+        "timezone": schedule.timezone,
+        "weekdays": schedule.weekdays,
+        "cadence_days": schedule.cadence_days,
+        "anchor_date": (
+            schedule.anchor_date.isoformat() if schedule.anchor_date else None
+        ),
+        "next_due_at": (
+            schedule.next_due_at.isoformat() if schedule.next_due_at else None
+        ),
+        # Separate fields, deliberately. `DBScheduler` marks a job successful
+        # at DISPATCH time; this subsystem refuses to repeat that — looking
+        # at a cadence and completing its work are different events.
+        "last_evaluated_at": (
+            schedule.last_evaluated_at.isoformat()
+            if schedule.last_evaluated_at else None
+        ),
+        "last_completed_at": (
+            schedule.last_completed_at.isoformat()
+            if schedule.last_completed_at else None
+        ),
+        "snoozed_until": (
+            schedule.snoozed_until.isoformat() if schedule.snoozed_until else None
+        ),
+        "version": schedule.version,
+    }
+
+
+@router.get("/cadences")
+async def list_cadences(
+    user_id: str = Depends(current_athlete),
+    db: Session = Depends(get_db),
+) -> List[Dict[str, Any]]:
+    """Every cadence, including the ones never switched on.
+
+    Returned without creating anything: a read that wrote would mean opening
+    a settings screen enrolled the athlete in six cadences. All of them
+    default to off AND unconsented — those are different questions, and one
+    switch would make a weigh-in nudge and a weekly model call the same
+    decision.
+    """
+    from app.services.fitness.coaching_jobs import list_schedules
+    return [_cadence_payload(s) for s in list_schedules(db, user_id)]
+
+
+@router.patch("/cadences/{kind}")
+async def patch_cadence(
+    kind: str,
+    body: CadencePatch = Body(default_factory=CadencePatch),
+    user_id: str = Depends(current_athlete),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Change one of the requester's own cadences.
+
+    The owner is the authenticated requester and nothing else. Every write
+    bumps `version`, and a queued occurrence compares it before acting: one
+    claimed at 06:58 must not run at 07:00 if the cadence was switched off at
+    06:59.
+    """
+    from datetime import time as _time
+    from app.services.fitness.coaching_jobs import CadenceConflict, set_schedule
+
+    parsed_time = None
+    if body.local_time:
+        hour, minute = body.local_time.split(":")
+        if not (0 <= int(hour) <= 23 and 0 <= int(minute) <= 59):
+            raise HTTPException(status_code=422, detail="local_time must be HH:MM")
+        parsed_time = _time(int(hour), int(minute))
+
+    try:
+        schedule = set_schedule(
+            db, user_id, kind,
+            enabled=body.enabled, consented=body.consented,
+            local_time=parsed_time, timezone_name=body.timezone,
+            weekdays=body.weekdays, cadence_days=body.cadence_days,
+            anchor_date=body.anchor_date,
+            expected_version=body.expected_version,
+        )
+        db.commit()
+    except CadenceConflict as exc:
+        raise HTTPException(status_code=409, detail={
+            "code": "cadence_conflict",
+            "message": str(exc),
+            "current_version": exc.current_version,
+        })
+    except FitnessDataError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return _cadence_payload(schedule)
+
+
+@router.post("/cadences/{kind}/snooze")
+async def snooze_cadence(
+    kind: str,
+    body: SnoozeBody,
+    user_id: str = Depends(current_athlete),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Push a cadence out without switching it off.
+
+    A distinct operation because "not this week" and "stop asking" are
+    different statements, and collapsing them means someone who wanted a
+    week's quiet has to re-enable from scratch.
+    """
+    from app.services.fitness.coaching_jobs import snooze
+
+    if body.until.tzinfo is None:
+        raise HTTPException(
+            status_code=422,
+            detail="until needs a timezone offset",
+        )
+    try:
+        schedule = snooze(db, user_id, kind, body.until)
+        db.commit()
+    except LookupError:
+        raise HTTPException(
+            status_code=404,
+            detail="That cadence has never been configured, so there is "
+                   "nothing to snooze.",
+        )
+    except FitnessDataError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return _cadence_payload(schedule)
+
+
+@router.get("/cadences/{kind}/runs")
+async def list_cadence_runs(
+    kind: str,
+    limit: int = Query(20, ge=1, le=100),
+    user_id: str = Depends(current_athlete),
+    db: Session = Depends(get_db),
+) -> List[Dict[str, Any]]:
+    """What this cadence actually did, per occurrence.
+
+    `status` here is the only record of whether the work happened: a green
+    `scheduled_job` row proves the sweep was dispatched and nothing more, and
+    a `noop` carries the reason so a suppression is visible rather than
+    looking like a bug.
+    """
+    from app.services.fitness.coaching_jobs import recent_runs
+
+    try:
+        rows = recent_runs(db, user_id, kind=kind, limit=limit)
+    except FitnessDataError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return [
+        {
+            "id": row["id"], "kind": row["kind"],
+            "occurrence_at": row["occurrence_at"].isoformat(),
+            "status": row["status"], "attempts": row["attempts"],
+            "review_id": row["review_id"],
+            "error_category": row["error_category"],
+            "noop_reason": row["noop_reason"],
+            "completed_at": (
+                row["completed_at"].isoformat() if row["completed_at"] else None
+            ),
+        }
+        for row in rows
+    ]

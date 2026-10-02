@@ -17,6 +17,10 @@ import { APP_CONFIG } from '../config'
 import type {
   AcceptanceResult,
   AthleteGoal,
+  CadenceKind,
+  CadencePatchInput,
+  CoachingCadence,
+  CoachingRun,
   CoachRecommendation,
   CoachReview,
   CoachReviewDetail,
@@ -450,6 +454,37 @@ export const fitnessCoachApi = {
   traceTargetRevision: (revisionId: string) =>
     request<Record<string, unknown>>(
       `/targets/${encodeURIComponent(revisionId)}/trace`,
+    ),
+
+  // ── Coaching cadence (Step 24) ──────────────────────────────────────────
+
+  /** Every cadence, including the ones never switched on. */
+  listCadences: () => request<CoachingCadence[]>('/cadences'),
+
+  /**
+   * Change one of the requester's own cadences.
+   *
+   * There is no parameter here for a task name, a queue or an owner: the
+   * sweep is one global scheduled row and the per-kind task is a mapping in
+   * backend code. The API rejects an attempt to send one.
+   */
+  patchCadence: (kind: CadenceKind, patch: CadencePatchInput) =>
+    request<CoachingCadence>(`/cadences/${encodeURIComponent(kind)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    }),
+
+  /** Push a cadence out without switching it off. */
+  snoozeCadence: (kind: CadenceKind, until: string) =>
+    request<CoachingCadence>(
+      `/cadences/${encodeURIComponent(kind)}/snooze`,
+      { method: 'POST', body: JSON.stringify({ until }) },
+    ),
+
+  /** What each occurrence actually did, including why it did nothing. */
+  listCadenceRuns: (kind: CadenceKind, limit?: number) =>
+    request<CoachingRun[]>(
+      `/cadences/${encodeURIComponent(kind)}/runs${query({ limit })}`,
     ),
 }
 

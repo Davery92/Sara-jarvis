@@ -30,6 +30,10 @@ import { useAuthStore } from '../stores/authStore'
 import type {
   AcceptanceResult,
   AthleteGoal,
+  CadenceKind,
+  CadencePatchInput,
+  CoachingCadence,
+  CoachingRun,
   CoachRecommendation,
   CoachReview,
   CoachReviewDetail,
@@ -91,6 +95,9 @@ export const fitnessKeys = {
     ['fitness-coach', userId, 'recommendations', reviewId ?? 'all'] as const,
   recommendationPreview: (userId: string, recommendationId: string) =>
     ['fitness-coach', userId, 'recommendation-preview', recommendationId] as const,
+  cadences: (userId: string) => ['fitness-coach', userId, 'cadences'] as const,
+  cadenceRuns: (userId: string, kind: string) =>
+    ['fitness-coach', userId, 'cadence-runs', kind] as const,
 }
 
 /**
@@ -507,6 +514,59 @@ export function useRejectRecommendation(): UseMutationResult<
       })
       client.invalidateQueries({ queryKey: fitnessKeys.reviews(userId) })
     },
+  })
+}
+
+// ── Coaching cadence (Step 24) ────────────────────────────────────────────
+
+export function useCoachingCadences(): UseQueryResult<
+  CoachingCadence[], FitnessCoachError
+> {
+  const userId = useAthleteId()
+  return useQuery({
+    queryKey: fitnessKeys.cadences(userId ?? 'anonymous'),
+    queryFn: () => fitnessCoachApi.listCadences(),
+    enabled: enabledFor(userId),
+  })
+}
+
+export function usePatchCadence(): UseMutationResult<
+  CoachingCadence, FitnessCoachError,
+  { kind: CadenceKind; patch: CadencePatchInput }
+> {
+  const client = useQueryClient()
+  const userId = useAthleteId()
+  return useMutation({
+    mutationFn: ({ kind, patch }) => fitnessCoachApi.patchCadence(kind, patch),
+    onSuccess: () => {
+      if (userId) {
+        client.invalidateQueries({ queryKey: fitnessKeys.cadences(userId) })
+      }
+    },
+  })
+}
+
+export function useSnoozeCadence(): UseMutationResult<
+  CoachingCadence, FitnessCoachError, { kind: CadenceKind; until: string }
+> {
+  const client = useQueryClient()
+  const userId = useAthleteId()
+  return useMutation({
+    mutationFn: ({ kind, until }) => fitnessCoachApi.snoozeCadence(kind, until),
+    onSuccess: () => {
+      if (userId) {
+        client.invalidateQueries({ queryKey: fitnessKeys.cadences(userId) })
+      }
+    },
+  })
+}
+
+export function useCadenceRuns(kind: CadenceKind | undefined) {
+  const userId = useAthleteId()
+  return useQuery({
+    queryKey: fitnessKeys.cadenceRuns(userId ?? 'anonymous', kind ?? 'unset'),
+    queryFn: () => fitnessCoachApi.listCadenceRuns(kind as CadenceKind),
+    enabled: enabledFor(userId) && Boolean(kind),
   })
 }
 

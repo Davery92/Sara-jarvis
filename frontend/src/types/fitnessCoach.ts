@@ -734,3 +734,64 @@ export interface AcceptanceResult {
   message: string
   duplicate: boolean
 }
+
+// ── Coaching cadence (Step 24) ────────────────────────────────────────────
+
+export type CadenceKind =
+  | 'daily_checkin' | 'weekly_review' | 'biweekly_review'
+  | 'monthly_review' | 'tape_measurement' | 'progress_photo'
+
+export interface CoachingCadence {
+  kind: CadenceKind
+  /** Is this cadence switched on. */
+  enabled: boolean
+  /**
+   * May we contact you about it. Deliberately separate from `enabled`: a
+   * cadence that computes and stores without delivering is a legitimate
+   * state, and one switch would make a weigh-in nudge and a weekly model
+   * call the same decision.
+   */
+  consented: boolean
+  consented_at: string | null
+  /** Athlete-local wall clock, "HH:MM". */
+  local_time: string
+  timezone: string
+  /** ISO weekdays, 1 = Monday. */
+  weekdays: number[]
+  /** For 14/28-day cadences: an anchor plus a count, never a cron. */
+  cadence_days: number | null
+  anchor_date: string | null
+  next_due_at: string | null
+  /**
+   * When the sweep last LOOKED. Separate from `last_completed_at` because a
+   * green scheduled row proves a dispatch and nothing about the work.
+   */
+  last_evaluated_at: string | null
+  last_completed_at: string | null
+  snoozed_until: string | null
+  version: number
+}
+
+export interface CadencePatchInput {
+  enabled?: boolean
+  consented?: boolean
+  local_time?: string
+  timezone?: string
+  weekdays?: number[]
+  cadence_days?: number
+  anchor_date?: string
+  expected_version?: number
+}
+
+export interface CoachingRun {
+  id: string
+  kind: CadenceKind
+  occurrence_at: string
+  status: 'claimed' | 'enqueued' | 'running' | 'completed' | 'failed' | 'noop'
+  attempts: number
+  review_id: string | null
+  error_category: string | null
+  /** Why nothing was delivered. A suppression is recorded, never silent. */
+  noop_reason: string | null
+  completed_at: string | null
+}

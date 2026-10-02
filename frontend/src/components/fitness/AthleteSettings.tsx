@@ -33,6 +33,10 @@ import {
   usePatchProfile,
   useResolveLimitation,
   useTargetHistory,
+  useCadenceRuns,
+  useCoachingCadences,
+  usePatchCadence,
+  useSnoozeCadence,
 } from '../../hooks/useFitnessCoach'
 import type {
   AthleteProfilePatch,
@@ -41,6 +45,9 @@ import type {
   Metric,
   RateBasis,
   TrainingLevel,
+  CadenceKind,
+  CadencePatchInput,
+  CoachingCadence,
 } from '../../types/fitnessCoach'
 
 const SECTION = 'text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400'
@@ -477,6 +484,7 @@ export default function AthleteSettings() {
       <GoalsSection athleteToday={athleteToday} />
       <TargetsSection athleteToday={athleteToday} />
       <LimitationsSection athleteToday={athleteToday} />
+      <CadenceSection />
     </div>
   )
 }
@@ -927,6 +935,320 @@ function LimitationsSection({ athleteToday }: { athleteToday: string }) {
           </div>
         ))}
       </div>
+    </section>
+  )
+}
+
+
+// ── Coaching cadence (Step 24) ────────────────────────────────────────────
+
+/**
+ * Two switches per cadence, and they are different questions.
+ *
+ * `enabled` is "is this on". `consented` is "may Sara contact you about it".
+ * A single toggle would make a weigh-in nudge and a weekly minute of GPU
+ * time the same decision, and it would make "stop messaging me" also mean
+ * "stop computing" — which is not what anyone means.
+ *
+ * Everything here defaults to OFF. Nothing in this subsystem contacts the
+ * athlete until they switch it on themselves.
+ */
+const CADENCE_LABELS: Record<CadenceKind, { label: string; blurb: string }> = {
+  daily_checkin: {
+    label: 'Daily check-in',
+    blurb:
+      'One question each morning about the single most useful thing that is ' +
+      'missing — never a list, and never something already in your log.',
+  },
+  weekly_review: {
+    label: 'Weekly review',
+    blurb:
+      'Reads the last seven complete days and proposes changes for you to ' +
+      'accept or reject. Changes nothing by itself.',
+  },
+  biweekly_review: {
+    label: 'Fortnightly review',
+    blurb: 'The same review, every fourteen days from an anchor date.',
+  },
+  monthly_review: {
+    label: 'Monthly review',
+    blurb: 'The same review, every twenty-eight days.',
+  },
+  tape_measurement: {
+    label: 'Tape measurement reminder',
+    blurb:
+      'A reminder to measure, skipped automatically if you already have.',
+  },
+  progress_photo: {
+    label: 'Progress photo reminder',
+    blurb:
+      'A reminder to take photos, skipped automatically if you already have.',
+  },
+}
+
+const WEEKDAY_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+
+const ANCHORED_KINDS: CadenceKind[] = [
+  'biweekly_review', 'monthly_review', 'tape_measurement', 'progress_photo',
+]
+
+function CadenceRow({ cadence }: { cadence: CoachingCadence }) {
+  const patch = usePatchCadence()
+  const snooze = useSnoozeCadence()
+  const [open, setOpen] = useState(false)
+  const runs = useCadenceRuns(open ? cadence.kind : undefined)
+  const meta = CADENCE_LABELS[cadence.kind]
+  const anchored = ANCHORED_KINDS.includes(cadence.kind)
+
+  const apply = (next: CadencePatchInput) =>
+    patch.mutate({
+      kind: cadence.kind,
+      patch: { ...next, expected_version: cadence.version || undefined },
+    })
+
+  const snoozedUntil =
+    cadence.snoozed_until && new Date(cadence.snoozed_until) > new Date()
+      ? cadence.snoozed_until.slice(0, 10)
+      : null
+
+  return (
+    <div
+      className="rounded-xl border border-white/10 bg-white/[0.03] p-4"
+      data-testid={`cadence-${cadence.kind}`}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-sm text-slate-100">{meta.label}</p>
+          <p className="text-xs text-slate-500 mt-0.5">{meta.blurb}</p>
+        </div>
+        <label className="flex items-center gap-2 text-xs text-slate-400 flex-shrink-0">
+          <input
+            type="checkbox"
+            checked={cadence.enabled}
+            disabled={patch.isPending}
+            onChange={(e) => apply({ enabled: e.target.checked })}
+            data-testid={`cadence-${cadence.kind}-enabled`}
+          />
+          On
+        </label>
+      </div>
+
+      {cadence.enabled && (
+        <div className="mt-3 pt-3 border-t border-white/[0.06] space-y-3">
+          {/* The second switch. Said in words, because "on" and "may contact
+              me" being the same thing is the assumption this breaks. */}
+          <label className="flex items-start gap-2 text-xs text-slate-300">
+            <input
+              type="checkbox"
+              checked={cadence.consented}
+              disabled={patch.isPending}
+              onChange={(e) => apply({ consented: e.target.checked })}
+              data-testid={`cadence-${cadence.kind}-consent`}
+              className="mt-0.5"
+            />
+            <span>
+              Sara may contact me about this.
+              {!cadence.consented && (
+                <span className="block text-amber-300/80 mt-0.5">
+                  Off: nothing will be sent, and nothing will run.
+                </span>
+              )}
+            </span>
+          </label>
+
+          <div className="flex flex-wrap items-center gap-3">
+            <label className="text-xs text-slate-400">
+              At{' '}
+              <input
+                type="time"
+                value={cadence.local_time}
+                disabled={patch.isPending}
+                onChange={(e) => apply({ local_time: e.target.value })}
+                data-testid={`cadence-${cadence.kind}-time`}
+                className="bg-white/[0.04] border border-white/10 rounded px-2 py-1 text-slate-100"
+              />
+            </label>
+            <span className="text-[11px] text-slate-500">
+              {cadence.timezone}
+            </span>
+          </div>
+
+          {!anchored && cadence.kind !== 'daily_checkin' && (
+            <div className="flex flex-wrap gap-1.5" data-testid={`cadence-${cadence.kind}-weekdays`}>
+              {WEEKDAY_NAMES.map((name, index) => {
+                const iso = index + 1
+                const selected = cadence.weekdays.includes(iso)
+                return (
+                  <button
+                    key={name}
+                    type="button"
+                    disabled={patch.isPending}
+                    onClick={() =>
+                      apply({
+                        weekdays: selected
+                          ? cadence.weekdays.filter((d) => d !== iso)
+                          : [...cadence.weekdays, iso].sort(),
+                      })
+                    }
+                    className={`px-2 py-1 rounded text-[11px] border ${
+                      selected
+                        ? 'border-teal-400/40 bg-teal-400/[0.08] text-teal-200'
+                        : 'border-white/10 text-slate-400'
+                    }`}
+                  >
+                    {name}
+                  </button>
+                )
+              })}
+            </div>
+          )}
+
+          {anchored && (
+            <div className="flex flex-wrap items-center gap-3 text-xs text-slate-400">
+              <label>
+                Every{' '}
+                <input
+                  type="number"
+                  min={1}
+                  max={365}
+                  value={cadence.cadence_days ?? ''}
+                  disabled={patch.isPending}
+                  onChange={(e) => {
+                    const parsed = Number(e.target.value)
+                    if (Number.isFinite(parsed) && parsed >= 1) {
+                      apply({ cadence_days: parsed })
+                    }
+                  }}
+                  data-testid={`cadence-${cadence.kind}-days`}
+                  className="w-16 bg-white/[0.04] border border-white/10 rounded px-2 py-1 text-slate-100"
+                />{' '}
+                days
+              </label>
+              {/* Said out loud: this is counted from an anchor, not from a
+                  calendar pattern. A cron's "every 14th day of the month"
+                  gives 14 days, 14 days, then 3. */}
+              {cadence.anchor_date && (
+                <span className="text-[11px] text-slate-500">
+                  counted from {cadence.anchor_date}
+                </span>
+              )}
+            </div>
+          )}
+
+          <div className="flex flex-wrap items-center gap-3 text-[11px] text-slate-500">
+            {cadence.next_due_at && !snoozedUntil && (
+              <span data-testid={`cadence-${cadence.kind}-next`}>
+                Next: {cadence.next_due_at.slice(0, 16).replace('T', ' ')}
+              </span>
+            )}
+            {snoozedUntil && (
+              <span className="text-amber-300/80" data-testid={`cadence-${cadence.kind}-snoozed`}>
+                Snoozed until {snoozedUntil}
+              </span>
+            )}
+            {/* Two separate facts. A dispatched sweep is not completed work,
+                and this subsystem does not conflate them. */}
+            {cadence.last_completed_at && (
+              <span data-testid={`cadence-${cadence.kind}-completed`}>
+                Last ran: {cadence.last_completed_at.slice(0, 10)}
+              </span>
+            )}
+            {cadence.last_evaluated_at && !cadence.last_completed_at && (
+              <span data-testid={`cadence-${cadence.kind}-evaluated`}>
+                Last checked: {cadence.last_evaluated_at.slice(0, 10)} (nothing
+                has run yet)
+              </span>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              className={GHOST}
+              disabled={snooze.isPending}
+              onClick={() => {
+                const until = new Date()
+                until.setDate(until.getDate() + 7)
+                snooze.mutate({ kind: cadence.kind, until: until.toISOString() })
+              }}
+              data-testid={`cadence-${cadence.kind}-snooze`}
+            >
+              Pause a week
+            </button>
+            <button
+              type="button"
+              className={GHOST}
+              onClick={() => setOpen((prev) => !prev)}
+              data-testid={`cadence-${cadence.kind}-history`}
+            >
+              {open ? 'Hide history' : 'What has it done?'}
+            </button>
+          </div>
+
+          {open && (
+            <div data-testid={`cadence-${cadence.kind}-runs`}>
+              {runs.isLoading ? (
+                <p className="text-[11px] text-slate-500">Loading…</p>
+              ) : (runs.data ?? []).length === 0 ? (
+                <p className="text-[11px] text-slate-500">
+                  Nothing has run yet.
+                </p>
+              ) : (
+                <ul className="flex flex-col gap-1">
+                  {(runs.data ?? []).map((run) => (
+                    <li key={run.id} className="text-[11px] text-slate-500">
+                      {run.occurrence_at.slice(0, 16).replace('T', ' ')} —{' '}
+                      {run.status}
+                      {/* Why nothing happened. A suppression is a recorded
+                          result, not a silent bypass — and without this
+                          "why didn't Sara say anything" has no answer. */}
+                      {run.noop_reason
+                        ? `: ${run.noop_reason.replace(/_/g, ' ')}`
+                        : ''}
+                      {run.error_category
+                        ? `: ${run.error_category.replace(/_/g, ' ')}`
+                        : ''}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {patch.isError && <ErrorNote message={patch.error.message} />}
+      {snooze.isError && <ErrorNote message={snooze.error.message} />}
+    </div>
+  )
+}
+
+function CadenceSection() {
+  const cadences = useCoachingCadences()
+
+  return (
+    <section className="space-y-4" data-testid="cadence-section">
+      <div>
+        <h2 className={SECTION}>When Sara checks in</h2>
+        <p className="text-xs text-slate-500 mt-1">
+          Everything here is off until you turn it on. Each one has a separate
+          switch for whether it runs and whether Sara may contact you about
+          it — turning off the second stops the messages without losing the
+          setting.
+        </p>
+      </div>
+
+      {cadences.isLoading ? (
+        <p className="text-sm text-slate-500">Loading…</p>
+      ) : cadences.isError ? (
+        <ErrorNote message={cadences.error.message} />
+      ) : (
+        <div className="space-y-3">
+          {(cadences.data ?? []).map((cadence) => (
+            <CadenceRow key={cadence.kind} cadence={cadence} />
+          ))}
+        </div>
+      )}
     </section>
   )
 }
