@@ -12,6 +12,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
 from fastapi.responses import Response
+from sqlalchemy import text as _sql
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
@@ -24,14 +25,29 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/fitness/progress-photos", tags=["Progress Photos"])
 
 
+# FITNESS_COACH_IMPLEMENTATION_PLAN §26.5: the body-fat request is removed.
+#
+# It asked for "an estimated body-fat range", and a model will always give
+# one — from a single photo, with no calipers, no scan and no scale. The
+# number then lands in a text field that reads like an observation, and
+# `health_metric` (the actual authority for David's numbers) never sees it
+# and cannot contradict it. §5.5 is explicit that photo analysis has "no
+# body-fat percentage field or diagnosis"; a prompt asking for one in prose
+# is the same claim through a gap in the schema.
+#
+# What is left is what a photo can honestly support: what stands out, what
+# is lagging, and what to do about it.
 CRITIQUE_PROMPT = (
     "You are an experienced physique and bodybuilding coach reviewing a client's "
     "progress photo. Give a concise, honest, and constructive critique. Cover:\n"
-    "1. Overall physique impression and an estimated body-fat range.\n"
+    "1. Overall impression — proportions, structure, what stands out.\n"
     "2. Strongest muscle groups / standout areas.\n"
     "3. Lagging areas or imbalances to prioritize.\n"
     "4. Two or three specific, actionable next steps (training focus, nutrition, "
     "or posing).\n"
+    "Do NOT estimate body fat, body weight, lean mass or any other number. A "
+    "single photo cannot support one, and their actual measurements are "
+    "recorded elsewhere. Do not diagnose anything.\n"
     "Be direct and motivating, not flattering. Use 120-180 words, plain text, no "
     "markdown headers. If the image is not a physique/body photo, say so briefly "
     "and do not invent a critique."
@@ -56,45 +72,33 @@ def _to_summary(row: ProgressPhoto) -> dict:
         "critiqued_at": row.critiqued_at.isoformat() if row.critiqued_at else None,
         "has_critique": bool(row.critique),
         "created_at": row.created_at.isoformat() if row.created_at else None,
+        # Step 26 capture metadata. Every field is additive: the iOS app
+        # reads the keys above by name and ignores what it does not know, so
+        # adding to this payload cannot break a build that is already
+        # shipped.
+        "view": getattr(row, "view", None),
+        "period_id": getattr(row, "period_id", None),
+        "capture_protocol": getattr(row, "capture_protocol", None),
+        "lighting": getattr(row, "lighting", None),
+        "distance_cm": getattr(row, "distance_cm", None),
+        # A reference to the canonical observation. The `bodyweight` float
+        # above stays as display context — §26.1: the legacy snapshot is
+        # never an automatic authoritative weight ingestion.
+        "bodyweight_observation_id": getattr(
+            row, "bodyweight_observation_id", None,
+        ),
+        "consent_analysis": bool(getattr(row, "consent_analysis", False)),
+        "analysis_status": getattr(row, "analysis_status", None),
     }
 
 
-def _process_image(image_bytes: bytes) -> tuple[bytes, Optional[bytes], Optional[int], Optional[int]]:
-    """Normalize the upload to JPEG and derive a small thumbnail.
-
-    Returns (full_jpeg_bytes, thumb_jpeg_bytes, width, height). Falls back to the
-    original bytes with no thumbnail if Pillow is unavailable or decoding fails
-    (e.g. an unusual HEIC without pillow-heif) — the feature still works, just
-    without a downscaled grid image.
-    """
-    try:
-        from PIL import Image, ImageOps
-
-        img = Image.open(io.BytesIO(image_bytes))
-        img = ImageOps.exif_transpose(img)  # honor iPhone orientation
-        if img.mode not in ("RGB", "L"):
-            img = img.convert("RGB")
-        width, height = img.size
-
-        # Normalize full image to JPEG (caps very large phone photos at 2048px)
-        full_img = img
-        long_edge = max(width, height)
-        if long_edge > 2048:
-            scale = 2048 / long_edge
-            full_img = img.resize((int(width * scale), int(height * scale)), Image.LANCZOS)
-        full_buf = io.BytesIO()
-        full_img.save(full_buf, format="JPEG", quality=88, optimize=True)
-
-        # Thumbnail for the grid
-        thumb = img.copy()
-        thumb.thumbnail((500, 500), Image.LANCZOS)
-        thumb_buf = io.BytesIO()
-        thumb.save(thumb_buf, format="JPEG", quality=80, optimize=True)
-
-        return full_buf.getvalue(), thumb_buf.getvalue(), width, height
-    except Exception as e:
-        logger.warning(f"Progress photo image processing failed, storing original: {e}")
-        return image_bytes, None, None, None
+# `_process_image` was here. It caught every decode error and stored the
+# ORIGINAL bytes with `mime_type="image/jpeg"` — which lied about the content
+# type and, worse, preserved the EXIF GPS tag, so a photo taken at home
+# shipped its coordinates into object storage. Step 26 moved the real
+# processing into `services/fitness/photos.py`, where an undecodable upload
+# is REFUSED: "it still works, just without a thumbnail" is not worth a
+# location leak.
 
 
 @router.post("")
@@ -104,51 +108,123 @@ async def upload_progress_photo(
     bodyweight: Optional[float] = Form(None),
     bodyweight_unit: Optional[str] = Form(None),
     taken_at: Optional[str] = Form(None),
+    # Step 26 capture metadata. All optional, so an iOS build that predates
+    # them keeps working unchanged.
+    view: Optional[str] = Form(None),
+    period_id: Optional[str] = Form(None),
+    capture_protocol: Optional[str] = Form(None),
+    lighting: Optional[str] = Form(None),
+    distance_cm: Optional[int] = Form(None),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Upload a progress photo. Stored in MinIO; a thumbnail is derived server-side."""
-    raw = await file.read()
-    if not raw:
-        raise HTTPException(status_code=400, detail="Empty file")
+    """Upload a progress photo. Bounded, sanitised, and refused if unreadable.
 
-    full_bytes, thumb_bytes, width, height = _process_image(raw)
+    Step 26 hardening, in order:
 
+    1. the body is read in chunks with a hard byte cap, so an oversized
+       upload never lands in memory whole;
+    2. the declared pixel count is checked BEFORE decoding, because a 20 KB
+       PNG can claim 50,000 x 50,000;
+    3. the image is re-encoded from pixels, which is what actually removes
+       the EXIF GPS tag, and the output is checked for metadata rather than
+       trusted to be clean;
+    4. an undecodable or non-image upload is REFUSED, never stored under a
+       guessed content type;
+    5. if the row cannot be written, the stored blobs are deleted — an
+       upload that fails to commit must not leave private bytes behind.
+    """
     from app.services.docs_ingest import DocumentProcessor
+    from app.services.fitness import photos as photo_service
 
-    processor = DocumentProcessor()
-    storage_key = await processor.store_file(full_bytes, "progress.jpg", "image/jpeg")
-    thumbnail_key = None
-    if thumb_bytes:
-        try:
-            thumbnail_key = await processor.store_file(thumb_bytes, "progress_thumb.jpg", "image/jpeg")
-        except Exception as e:
-            logger.warning(f"Thumbnail store failed (non-fatal): {e}")
+    try:
+        raw = await photo_service.read_bounded(file)
+        image = photo_service.process_image(
+            raw, declared_mime=file.content_type,
+        )
+        view = photo_service.normalise_view(view)
+        photo_service.assert_period_owned(db, current_user.id, period_id)
+    except photo_service.PhotoRejected as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except LookupError:
+        # A foreign or missing period id. 404, never 403: confirming it
+        # exists to someone who does not own it is itself a disclosure.
+        raise HTTPException(status_code=404, detail="Capture period not found")
 
     taken_dt = None
     if taken_at:
         try:
             taken_dt = datetime.fromisoformat(taken_at.replace("Z", "+00:00"))
         except ValueError:
-            logger.warning(f"Ignoring unparseable taken_at: {taken_at!r}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"taken_at is not an ISO timestamp: {taken_at!r}",
+            )
+
+    processor = DocumentProcessor()
+    keys = await photo_service.store_image_async(processor, image)
 
     row = ProgressPhoto(
         user_id=current_user.id,
-        storage_key=storage_key,
-        thumbnail_key=thumbnail_key,
+        storage_key=keys.storage_key,
+        thumbnail_key=keys.thumbnail_key,
         original_filename=file.filename,
         mime_type="image/jpeg",
-        file_size=len(full_bytes),
-        width=width,
-        height=height,
+        file_size=len(image.full_bytes),
+        width=image.width,
+        height=image.height,
         taken_at=taken_dt,
         notes=notes,
+        # Display context only. `bodyweight_observation_id`, set below, is
+        # the reference a reader should trust.
         bodyweight=bodyweight,
         bodyweight_unit=bodyweight_unit or "lbs",
     )
-    db.add(row)
-    db.commit()
-    db.refresh(row)
+    for attribute, value in (
+        ("view", view), ("period_id", period_id),
+        ("capture_protocol", capture_protocol), ("lighting", lighting),
+        ("distance_cm", distance_cm), ("content_sha256", image.sha256),
+    ):
+        if hasattr(row, attribute):
+            setattr(row, attribute, value)
+
+    try:
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+    except Exception as exc:
+        # The row failed. Remove the bytes rather than orphaning them —
+        # these are somebody's body, sitting in object storage with nothing
+        # pointing at them and nothing recording that they exist.
+        db.rollback()
+        photo_service.discard_stored(processor, keys, why="row insert failed")
+        logger.error(
+            "progress photo row not written (%s): %s", type(exc).__name__, exc,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Could not save that photo. Nothing was kept.",
+        )
+
+    # Link the day's canonical weight observation, if there is one. A
+    # reference, not a copy: `health_metric` has a recorded time, a source
+    # and the ability to be corrected, none of which a float on this row has.
+    try:
+        if taken_dt or row.created_at:
+            from app.services.fitness.photos import link_bodyweight_observation
+            link_bodyweight_observation(
+                db, current_user.id, row.id,
+                on_date=(taken_dt or row.created_at).date(),
+            )
+            db.commit()
+            db.refresh(row)
+    except Exception as exc:
+        db.rollback()
+        logger.debug(
+            "no weight observation linked to photo %s (%s)",
+            row.id, type(exc).__name__,
+        )
+
     return _to_summary(row)
 
 
@@ -159,11 +235,19 @@ async def list_progress_photos(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """List the user's progress photos, newest first (metadata only)."""
+    """List the user's progress photos, newest first (metadata only).
+
+    Soft-deleted rows are excluded. A row kept because its blob delete
+    failed must not keep appearing in the gallery: the athlete asked for the
+    photo to be gone, and the row exists only so the bytes can be retried.
+    """
+    query = db.query(ProgressPhoto).filter(
+        ProgressPhoto.user_id == current_user.id,
+    )
+    if hasattr(ProgressPhoto, "deleted_at"):
+        query = query.filter(ProgressPhoto.deleted_at.is_(None))
     rows = (
-        db.query(ProgressPhoto)
-        .filter(ProgressPhoto.user_id == current_user.id)
-        .order_by(ProgressPhoto.created_at.desc())
+        query.order_by(ProgressPhoto.created_at.desc())
         .offset(offset)
         .limit(limit)
         .all()
@@ -172,11 +256,17 @@ async def list_progress_photos(
 
 
 def _get_owned(photo_id: str, user_id: str, db: Session) -> ProgressPhoto:
-    row = (
-        db.query(ProgressPhoto)
-        .filter(ProgressPhoto.id == photo_id, ProgressPhoto.user_id == user_id)
-        .first()
+    """The owner check every read, critique and delete goes through.
+
+    A soft-deleted row is treated as absent: its bytes are pending removal
+    and serving them would be serving a photo the athlete deleted.
+    """
+    query = db.query(ProgressPhoto).filter(
+        ProgressPhoto.id == photo_id, ProgressPhoto.user_id == user_id,
     )
+    if hasattr(ProgressPhoto, "deleted_at"):
+        query = query.filter(ProgressPhoto.deleted_at.is_(None))
+    row = query.first()
     if not row:
         raise HTTPException(status_code=404, detail="Photo not found")
     return row
@@ -263,19 +353,110 @@ async def delete_progress_photo(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Delete a progress photo and its MinIO objects."""
-    row = _get_owned(photo_id, current_user.id, db)
+    """Delete a progress photo, and say "deleted" only if the bytes are gone.
+
+    The old path logged a failed blob delete and removed the row anyway,
+    which left private bytes in object storage with nothing recording that
+    they exist — the athlete believes the photo is gone and it is still
+    there. Now the row is marked `pending_cleanup` and an hourly sweep
+    retries, and the response says which happened.
+    """
+    from app.services.docs_ingest import DocumentProcessor
+    from app.services.fitness import photos as photo_service
 
     try:
-        from app.services.docs_ingest import DocumentProcessor
+        result = photo_service.delete_photo(
+            db, current_user.id, photo_id, DocumentProcessor(),
+        )
+        db.commit()
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Progress photo not found")
+    except Exception as exc:
+        db.rollback()
+        logger.error(
+            "progress photo delete failed for %s (%s): %s",
+            photo_id, type(exc).__name__, exc,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Could not delete that photo. It is unchanged.",
+        )
+    return result
 
-        processor = DocumentProcessor()
-        processor.delete_file(row.storage_key)
-        if row.thumbnail_key:
-            processor.delete_file(row.thumbnail_key)
-    except Exception as e:
-        logger.warning(f"Failed to delete progress photo blobs from MinIO: {e}")
 
-    db.delete(row)
-    db.commit()
-    return {"message": "Deleted", "id": photo_id}
+@router.post("/{photo_id}/analysis-consent")
+async def set_photo_analysis_consent(
+    photo_id: str,
+    consented: bool = Form(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Explicit consent to run a vision model over this photo.
+
+    Separate from having uploaded it, and default false. An upload is a
+    record the athlete wanted kept; it is not permission for a model to look
+    at their body. Step 27's analysis is gated on this.
+    """
+    from app.services.fitness import photos as photo_service
+
+    try:
+        result = photo_service.set_analysis_consent(
+            db, current_user.id, photo_id, consented,
+        )
+        db.commit()
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Progress photo not found")
+    return result
+
+
+@router.get("/periods/{period_id}/comparable")
+async def check_comparable(
+    period_id: str,
+    against_period_id: str = Query(...),
+    view: str = Query("front"),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Whether two capture sessions can honestly be compared, and why not.
+
+    No model involved. Photo-to-photo difference is dominated by lighting,
+    distance and pose: a front shot against a side shot is not a change in
+    the athlete, and two shots under different lighting differ visibly with
+    no change at all.
+    """
+    from app.services.fitness import photos as photo_service
+
+    try:
+        photo_service.assert_period_owned(db, current_user.id, period_id)
+        photo_service.assert_period_owned(
+            db, current_user.id, against_period_id,
+        )
+        normalised = photo_service.normalise_view(view)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Capture period not found")
+    except photo_service.PhotoRejected as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    def _one(pid: str):
+        row = db.execute(_sql("""
+            SELECT id, view, lighting, distance_cm, capture_protocol, taken_at
+            FROM progress_photo
+            WHERE user_id = :uid AND period_id = :pid AND view = :view
+              AND deleted_at IS NULL
+            ORDER BY created_at DESC LIMIT 1
+        """), {"uid": current_user.id, "pid": pid, "view": normalised}).fetchone()
+        return dict(row._mapping) if row else None
+
+    first, second = _one(period_id), _one(against_period_id)
+    if first is None or second is None:
+        return {
+            "comparable": False,
+            "reason": f"one of the sessions has no {normalised} photo",
+            "photos": [],
+        }
+    ok, reason = photo_service.comparable(first, second)
+    return {
+        "comparable": ok,
+        "reason": reason,
+        "photos": [first["id"], second["id"]],
+    }

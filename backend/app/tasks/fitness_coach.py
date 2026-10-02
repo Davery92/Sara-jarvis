@@ -520,3 +520,37 @@ def run_photo_nudge(db, user_id: str, run_id: str, context) -> Dict[str, Any]:
         db, user_id, run_id, candidate_id=f"fitness_gap:{day}:photos",
     )
     return {"status": "completed", "asked_about": "photos"}
+
+
+@celery_app.task(
+    bind=True, name="app.tasks.fitness_coach.retry_photo_cleanup",
+    time_limit=300,
+)
+def retry_photo_cleanup_task(self, limit: int = 50) -> Dict[str, Any]:
+    """Retry the object-storage deletes that failed for deleted photos.
+
+    These are private bytes somebody asked to have removed, so the sweep is
+    hourly rather than nightly: a photo sitting in storage for a working day
+    after the athlete deleted it is the failure, not the retry.
+
+    Global, like the other sweeps — its job is to find outstanding privacy
+    debt across everybody, and it returns counts, never bytes or metadata.
+    """
+    from app.db.session import SessionLocal
+    from app.services.docs_ingest import DocumentProcessor
+    from app.services.fitness.photos import retry_pending_cleanup
+
+    db = SessionLocal()
+    try:
+        result = retry_pending_cleanup(db, DocumentProcessor(), limit=limit)
+        db.commit()
+        if result["still_failing"] or result["orphaned"]:
+            logger.warning(
+                "[fitness-photos] cleanup retry: %s", result,
+            )
+        return result
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()

@@ -795,3 +795,67 @@ export interface CoachingRun {
   noop_reason: string | null
   completed_at: string | null
 }
+
+// ── Progress photos (Step 26) ─────────────────────────────────────────────
+
+export type PhotoView = 'front' | 'side' | 'back' | 'other'
+
+export type PhotoCleanupState = 'pending_cleanup' | 'cleaned' | 'orphaned'
+
+export interface ProgressPhoto {
+  id: string
+  original_filename: string | null
+  mime_type: string | null
+  file_size: number | null
+  width: number | null
+  height: number | null
+  taken_at: string | null
+  notes: string | null
+  /**
+   * Display context only. `bodyweight_observation_id` is the reference a
+   * reader should trust — the backend never ingests this float as a body
+   * measurement.
+   */
+  bodyweight: number | null
+  bodyweight_unit: string | null
+  critique: string | null
+  critique_model: string | null
+  critiqued_at: string | null
+  has_critique: boolean
+  created_at: string | null
+  view: PhotoView | null
+  period_id: string | null
+  capture_protocol: string | null
+  lighting: string | null
+  distance_cm: number | null
+  bodyweight_observation_id: string | null
+  /** Explicit, and separate from having uploaded the photo. */
+  consent_analysis: boolean
+  analysis_status: string | null
+}
+
+export interface PhotoUploadInput {
+  file: File
+  view?: PhotoView
+  periodId?: string
+  notes?: string
+  takenAt?: string
+  capture_protocol?: string
+  lighting?: string
+  distanceCm?: number
+}
+
+export interface PhotoDeleteResult {
+  id: string
+  /** False when the stored bytes could not be removed yet. */
+  deleted: boolean
+  cleanup_state: PhotoCleanupState | null
+  message: string
+}
+
+export interface PhotoComparability {
+  comparable: boolean
+  /** Why not — lighting, distance, or a mismatched view. */
+  reason: string | null
+  photos: string[]
+}

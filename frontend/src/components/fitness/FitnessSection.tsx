@@ -15,6 +15,7 @@ import DailyCheckIn from './DailyCheckIn'
 import Measurements from './Measurements'
 import CoachOverview from './CoachOverview'
 import CoachReviews from './CoachReviews'
+import ProgressPhotos from './ProgressPhotos'
 import { Upload } from 'lucide-react'
 import { APP_CONFIG } from '../../config'
 import { getLocalDateString } from '../../utils/dateUtils'
@@ -28,7 +29,7 @@ import { getLocalDateString } from '../../utils/dateUtils'
 // capsule, the weekly report or a coach review. It sits FIRST, ahead of the
 // legacy dashboard, because the legacy dashboard computes some of its own
 // numbers and the two will differ until Step 18's follow-on retires it.
-type FitnessView = 'overview' | 'coach' | 'dashboard' | 'food' | 'workout' | 'notes' | 'templates' | 'recovery' | 'programs' | 'plan' | 'nutrition' | 'cardio' | 'settings' | 'today' | 'measurements'
+type FitnessView = 'overview' | 'coach' | 'dashboard' | 'food' | 'workout' | 'notes' | 'templates' | 'recovery' | 'programs' | 'plan' | 'nutrition' | 'cardio' | 'settings' | 'today' | 'measurements' | 'photos'
 
 export default function FitnessSection() {
   const [currentView, setCurrentView] = useState<FitnessView>('overview')
@@ -74,6 +75,7 @@ export default function FitnessSection() {
     { id: 'workout' as FitnessView, label: 'Workouts' },
     { id: 'notes' as FitnessView, label: 'Notes' },
     { id: 'measurements' as FitnessView, label: 'Measurements' },
+    { id: 'photos' as FitnessView, label: 'Photos' },
     { id: 'settings' as FitnessView, label: 'Settings' },
   ]
 
@@ -153,6 +155,7 @@ export default function FitnessSection() {
           <DailyCheckIn onOpenFoodLog={() => handleViewChange('food')} />
         )}
         {currentView === 'measurements' && <Measurements />}
+        {currentView === 'photos' && <ProgressPhotos />}
         {currentView === 'settings' && <AthleteSettings />}
       </div>
 
