@@ -7232,6 +7232,19 @@ try:
 except Exception as e:
     logger.error(f"❌ Fitness routes failed to load: {e}")
 
+# ── Fitness Coach (/api/fitness/coach) ────────────────────────────────────
+#
+# FITNESS_COACH_IMPLEMENTATION_PLAN Step 6. Registered OUTSIDE any
+# try/except, deliberately, per CLAUDE.md gotcha 3: a swallowed ImportError
+# drops an entire router and the failure mode is "the feature quietly does
+# not exist" — no 500, no log line anyone reads, just 404s. The older
+# registrations above are wrapped; new ones must fail visibly at startup.
+from app.routes.fitness_coach import router as fitness_coach_router
+app.include_router(
+    fitness_coach_router, prefix="/api/fitness/coach", tags=["Fitness Coach"]
+)
+logger.info("Fitness Coach routes registered at /api/fitness/coach")
+
 # Include versioned cross-device workout routes (Apple Watch + iPhone).
 # Separate module from fitness.py so the Watch contract stays reviewable on its
 # own; it shares the same auth dependency and command service.

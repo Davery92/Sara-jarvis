@@ -147,6 +147,28 @@ def _insert_phase_row(db: Session, user_id: str, program_id: str, *, phase_id: s
         "steps": nutrition.get("daily_steps_target"), "tdpw": nutrition.get("training_days_per_week"),
     })
 
+    # FITNESS_COACH_IMPLEMENTATION_PLAN Step 6: a phase created here enters
+    # the dated target history, dated from its own start_date — the date its
+    # macros provably began applying.
+    #
+    # This matters most for the split/copy paths. Splitting a block produces
+    # two phases that each carried a target for a real stretch of time; if
+    # only the current one were recorded, adherence for the earlier half
+    # would be computed against targets that never applied to it. The
+    # revision is written in the caller's transaction, so a rolled-back
+    # phase leaves no orphan revision behind.
+    try:
+        from app.services.fitness.targets import seed_phase_revision
+        seed_phase_revision(
+            db, user_id, phase_id, nutrition,
+            start_date=start, end_date=end, source="plan_adjust",
+        )
+    except Exception as exc:
+        logger.warning(
+            "phase %s was created but its initial target revision was not "
+            "recorded: %s", phase_id, exc
+        )
+
 
 def insert_phase_block(
     db: Session,

@@ -240,9 +240,9 @@ class WorkoutSessionService:
                        set_kind, parent_set_id, set_group_id, group_sequence,
                        counts_toward_target, voided_at, void_reason, is_pr
                 FROM workout_log
-                WHERE active_session_id = :session_id
+                WHERE active_session_id = :session_id AND user_id = :user_id
                 ORDER BY created_at ASC, group_sequence ASC
-            """), {"session_id": session["id"]}).fetchall()
+            """), {"session_id": session["id"], "user_id": user_id}).fetchall()
 
             session["sets_logged"] = []
             for s in sets_logged:

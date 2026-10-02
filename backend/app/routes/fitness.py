@@ -18,6 +18,8 @@ import json
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from app.db.session import get_db
+from app.core.deps import get_current_user
+from app.models.user import User
 from app.core.config import settings as app_settings
 import httpx
 import io
@@ -364,11 +366,26 @@ class RecipeResponse(BaseModel):
     updated_at: str
 
 
-def get_current_user_id() -> str:
-    """Get current user ID (simplified for now)"""
-    # In production, this would come from JWT token
-    import os
-    return os.getenv("SOLO_USER_ID", "default-user")
+def get_current_user_id(current_user: User = Depends(get_current_user)) -> str:
+    """The authenticated requester's own user id.
+
+    FITNESS_COACH_IMPLEMENTATION_PLAN Step 2. This used to return
+    ``os.getenv("SOLO_USER_ID", "default-user")`` — a solo-owner stub that
+    ignored the requester entirely. Every fitness route, `workout_v2.py` and
+    `cardio.py` take this as a FastAPI dependency, so one athlete's
+    credentials selected another athlete's rows (or, with SOLO_USER_ID
+    unset, a literal `default-user` that owns nothing).
+
+    `get_current_user` accepts a cookie, a Bearer token, or a registered
+    `X-Device-Token` (the iOS app's path) and checks durable revocation. That
+    device-token scope is deliberate here: the phone and Watch reach these
+    same endpoints. There is no empty/missing-identity fallback — an
+    unauthenticated request now gets 401 rather than another athlete's data.
+
+    Ownership is still enforced per-operation inside the handlers: an FK to a
+    UUID does not prove the parent row belongs to this user.
+    """
+    return current_user.id
 
 
 # ============================================================================
@@ -2298,13 +2315,39 @@ async def log_workout_set(
     if not result.success:
         raise HTTPException(status_code=400, detail=result.message)
 
-    # Update the workout_log entry with template_exercise_id if provided
-    if log.template_exercise_id and result.data and result.data.get("set_id"):
-        db.execute(text("""
-            UPDATE workout_log SET template_exercise_id = :template_exercise_id
-            WHERE id = :set_id
-        """), {"template_exercise_id": log.template_exercise_id, "set_id": result.data["set_id"]})
-        db.commit()
+    # Update the workout_log entry with template_exercise_id if provided.
+    #
+    # Step 2 ownership audit: both sides are owner-scoped. The set row must be
+    # this user's (the tool created it for this user, but the UPDATE says so
+    # explicitly rather than trusting that), and the caller-supplied
+    # template_exercise_id must belong to a template this user owns —
+    # otherwise a client could attach its set to someone else's prescription.
+    #
+    # The guard reads `result.data["log_id"]`. It used to read `"set_id"`,
+    # which `WorkoutLogCreateTool` has never returned — so this whole block
+    # was unreachable and every `template_exercise_id` a client sent was
+    # silently dropped. The ownership check runs whenever the field is
+    # supplied, not only when the write is reachable, so a foreign reference
+    # is refused rather than ignored.
+    if log.template_exercise_id:
+        owns_te = db.execute(text("""
+            SELECT 1 FROM template_exercise te
+            JOIN fitness_template t ON t.id = te.template_id
+            WHERE te.id = :te_id AND t.user_id = :uid
+        """), {"te_id": log.template_exercise_id, "uid": user_id}).fetchone()
+        if not owns_te:
+            raise HTTPException(status_code=404, detail="Template exercise not found")
+        set_id = (result.data or {}).get("log_id")
+        if set_id:
+            db.execute(text("""
+                UPDATE workout_log SET template_exercise_id = :template_exercise_id
+                WHERE id = :set_id AND user_id = :uid
+            """), {
+                "template_exercise_id": log.template_exercise_id,
+                "set_id": set_id,
+                "uid": user_id,
+            })
+            db.commit()
 
     # Check for PR if we have weight and reps
     pr_result = None
@@ -3495,8 +3538,18 @@ class TTSRequest(BaseModel):
     voice: str = "alloy"  # Default OpenAI-compatible voice (alloy, echo, fable, onyx, nova, shimmer)
 
 @router.post("/tts")
-async def text_to_speech(request: TTSRequest):
-    """Convert text to speech using Wyoming/Piper TTS"""
+async def text_to_speech(
+    request: TTSRequest,
+    _user_id: str = Depends(get_current_user_id),
+):
+    """Convert text to speech using Wyoming/Piper TTS.
+
+    Step 2: this was the one fitness route with no identity dependency at
+    all — an unauthenticated relay that would synthesize arbitrary text
+    through the GPU host for anyone who could reach the API. It does not
+    need to know *which* athlete is calling, but it does need to know that
+    somebody authenticated is.
+    """
     try:
         TTS_URL = "http://10.185.1.8:9000/v1/audio/speech"
 
@@ -3915,9 +3968,46 @@ async def create_phase(phase: PhaseCreate, user_id: str = Depends(get_current_us
             "status": "planned",
             "notes": phase.notes
         })
+
+        # FITNESS_COACH_IMPLEMENTATION_PLAN Step 6: the new phase's macros
+        # enter the dated target history, dated from the phase's own
+        # start_date — that is the date they provably begin applying, unlike
+        # an edit (which takes effect today so it cannot rewrite adherence
+        # for weeks already lived). Inside the same transaction, so a
+        # rolled-back phase leaves no orphan revision.
+        if phase.start_date:
+            try:
+                from app.services.fitness.targets import seed_phase_revision
+                seed_phase_revision(
+                    db, user_id, phase_id,
+                    {
+                        "calories_target": phase.calories_target,
+                        "protein_target": phase.protein_target,
+                        "carbs_target": phase.carbs_target,
+                        "fat_target": phase.fat_target,
+                        "calories_training_day": phase.calories_training_day,
+                        "calories_rest_day": phase.calories_rest_day,
+                        "carbs_training_day": phase.carbs_training_day,
+                        "carbs_rest_day": phase.carbs_rest_day,
+                        "fat_training_day": phase.fat_training_day,
+                        "fat_rest_day": phase.fat_rest_day,
+                        "daily_steps_target": phase.daily_steps_target,
+                    },
+                    start_date=phase.start_date,
+                    end_date=phase.end_date,
+                    source="phase_create_api",
+                )
+            except Exception as exc:
+                logger.warning(
+                    "phase %s created without an initial target revision: %s",
+                    phase_id, exc
+                )
+
         db.commit()
 
         return {"success": True, "phase_id": phase_id, "message": "Phase created successfully"}
+    except HTTPException:
+        raise
     except Exception as e:
         db.rollback()
         logger.error(f"Failed to create phase: {e}")
@@ -4004,11 +4094,85 @@ async def update_phase(phase_id: str, phase: PhaseUpdate, user_id: str = Depends
             db.execute(text(sql), params)
             db.commit()
 
+            # FITNESS_COACH_IMPLEMENTATION_PLAN Step 6: a phase-macro edit
+            # enters the dated target history. These columns are mutable, so
+            # without this the answer to "what was my protein target on 14
+            # February" silently becomes "whatever the row says now" — and
+            # historical adherence computed against it is not adherence.
+            #
+            # The legacy columns above remain the CURRENT projection and are
+            # written first, so every existing reader (dashboard, voice,
+            # world brief, iOS) is unaffected. The revision records what
+            # changed and from when, effective today rather than
+            # retroactively.
+            _record_phase_target_revision(db, user_id, phase_id, phase)
+
         return {"success": True, "message": "Phase updated successfully"}
+    except HTTPException:
+        raise
     except Exception as e:
         db.rollback()
         logger.error(f"Failed to update phase: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def _record_phase_target_revision(
+    db: Session, user_id: str, phase_id: str, phase
+) -> None:
+    """Mirror a phase-macro edit into `fitness_target_revision`.
+
+    Never raises into the caller. The phase edit itself has already
+    committed and is the behaviour the user asked for; a tangled revision
+    history (overlapping approved ranges, say) must not turn a successful
+    edit into a 500. The failure is logged and the conflict stays visible in
+    `/api/fitness/coach/targets`, which reports provenance.
+    """
+    macro_fields = (
+        "calories_target", "protein_target", "carbs_target", "fat_target",
+        "calories_training_day", "calories_rest_day", "carbs_training_day",
+        "carbs_rest_day", "fat_training_day", "fat_rest_day",
+        "daily_steps_target",
+    )
+    if not any(getattr(phase, f, None) is not None for f in macro_fields):
+        return
+    try:
+        from app.schemas.fitness_coach import TargetValues
+        from app.services.fitness.targets import record_phase_edit
+
+        row = db.execute(text("""
+            SELECT calories_target, protein_target, carbs_target, fat_target,
+                   calories_training_day, calories_rest_day,
+                   carbs_training_day, carbs_rest_day,
+                   fat_training_day, fat_rest_day, daily_steps_target
+            FROM fitness_phase WHERE id = :pid AND user_id = :uid
+        """), {"pid": phase_id, "uid": user_id}).fetchone()
+        if row is None:
+            return
+        m = dict(row._mapping)
+        training = TargetValues(
+            calories=m.get("calories_training_day") or m.get("calories_target"),
+            protein_g=m.get("protein_target"),
+            carbs_g=m.get("carbs_training_day") or m.get("carbs_target"),
+            fat_g=m.get("fat_training_day") or m.get("fat_target"),
+            steps=m.get("daily_steps_target"),
+        )
+        rest = None
+        if any(m.get(k) is not None for k in
+               ("calories_rest_day", "carbs_rest_day", "fat_rest_day")):
+            rest = TargetValues(
+                calories=m.get("calories_rest_day"),
+                protein_g=m.get("protein_target"),
+                carbs_g=m.get("carbs_rest_day"),
+                fat_g=m.get("fat_rest_day"),
+                steps=m.get("daily_steps_target"),
+            )
+        record_phase_edit(db, user_id, phase_id, training, rest=rest,
+                          source="phase_edit_api")
+    except Exception as exc:
+        logger.warning(
+            "phase %s macro edit was applied but not recorded as a target "
+            "revision: %s", phase_id, exc
+        )
 
 @router.delete("/phases/{phase_id}")
 async def delete_phase(phase_id: str, user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
@@ -4662,9 +4826,22 @@ async def get_today_template(user_id: str = Depends(get_current_user_id), db: Se
 
 @router.patch("/templates/{template_id}")
 async def update_template(template_id: str, template: TemplateUpdate, user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
-    """Update a template"""
+    """Update a template.
+
+    Step 2 ownership audit: the UPDATE was already owner-scoped, so a foreign
+    id had no side effect — but the handler answered 200 "Template updated
+    successfully" regardless of whether any row matched. That confirms the
+    row exists to a caller who does not own it, and tells the owner's own
+    client a failed edit succeeded. A foreign or missing id is now a 404.
+    """
     try:
         import json
+        owned = db.execute(text(
+            "SELECT 1 FROM fitness_template WHERE id = :template_id AND user_id = :user_id"
+        ), {"template_id": template_id, "user_id": user_id}).fetchone()
+        if not owned:
+            raise HTTPException(status_code=404, detail="Template not found")
+
         updates = []
         params = {"template_id": template_id, "user_id": user_id}
 
@@ -4691,6 +4868,8 @@ async def update_template(template_id: str, template: TemplateUpdate, user_id: s
             db.commit()
 
         return {"success": True, "message": "Template updated successfully"}
+    except HTTPException:
+        raise
     except Exception as e:
         db.rollback()
         logger.error(f"Failed to update template: {e}")
@@ -4698,13 +4877,23 @@ async def update_template(template_id: str, template: TemplateUpdate, user_id: s
 
 @router.delete("/templates/{template_id}")
 async def delete_template(template_id: str, user_id: str = Depends(get_current_user_id), db: Session = Depends(get_db)):
-    """Delete a template"""
+    """Delete a template.
+
+    Step 2 ownership audit: as with PATCH, the DELETE was owner-scoped but
+    reported success for a row it never touched. `rowcount` is what actually
+    happened, so that is what the response reflects.
+    """
     try:
-        db.execute(text("""
+        result = db.execute(text("""
             DELETE FROM fitness_template WHERE id = :template_id AND user_id = :user_id
         """), {"template_id": template_id, "user_id": user_id})
+        if result.rowcount == 0:
+            db.rollback()
+            raise HTTPException(status_code=404, detail="Template not found")
         db.commit()
         return {"success": True, "message": "Template deleted successfully"}
+    except HTTPException:
+        raise
     except Exception as e:
         db.rollback()
         logger.error(f"Failed to delete template: {e}")
@@ -4777,7 +4966,7 @@ def _exercise_row_to_json(row_mapping: dict) -> dict:
     }
 
 
-def _sync_template_exercises_json(db: Session, template_id: str) -> None:
+def _sync_template_exercises_json(db: Session, template_id: str, user_id: str) -> None:
     """Rebuild fitness_template.exercises JSON from the relational template_exercise rows.
     Called after every create/update/delete/reorder of a template_exercise so the JSON
     (which the live workout view reads from) stays in sync with the relational data.
@@ -4785,10 +4974,19 @@ def _sync_template_exercises_json(db: Session, template_id: str) -> None:
     The relational `template_exercise` table has no `set_plan` column, so a
     naive rebuild would silently strip the top/backoff loading table off any
     plan-driven AM lift the first time its template was touched through this
-    route. Carry it forward from the current JSON, matched by exercise name."""
+    route. Carry it forward from the current JSON, matched by exercise name.
+
+    Step 2 ownership audit: ``user_id`` is required, not optional. Callers
+    already verify the template before mutating its children, but a writer
+    that rebuilds a whole JSON column should not be able to address a row by
+    id alone — that is the shape a later caller gets wrong.
+    """
     import json as _json
     existing_row = db.execute(text(
-        "SELECT exercises FROM fitness_template WHERE id = :tid"), {"tid": template_id}).fetchone()
+        "SELECT exercises FROM fitness_template WHERE id = :tid AND user_id = :uid"),
+        {"tid": template_id, "uid": user_id}).fetchone()
+    if existing_row is None:
+        raise HTTPException(status_code=404, detail="Template not found")
     existing = existing_row.exercises if existing_row else None
     existing = _json.loads(existing) if isinstance(existing, str) else (existing or [])
     set_plans_by_name = {e.get("name"): e.get("set_plan") for e in existing if e.get("set_plan")}
@@ -4797,10 +4995,12 @@ def _sync_template_exercises_json(db: Session, template_id: str) -> None:
         SELECT exercise_name, order_index, target_sets, rep_range_low, rep_range_high,
                target_rpe, rest_seconds, progression_rule, notes,
                metric_type, is_per_side, superset_group, set_technique
-        FROM template_exercise
-        WHERE template_id = :tid
-        ORDER BY order_index ASC, created_at ASC
-    """), {"tid": template_id}).fetchall()
+        FROM template_exercise te
+        WHERE te.template_id = :tid
+          AND EXISTS (SELECT 1 FROM fitness_template t
+                      WHERE t.id = te.template_id AND t.user_id = :uid)
+        ORDER BY te.order_index ASC, te.created_at ASC
+    """), {"tid": template_id, "uid": user_id}).fetchall()
     exercises_json = [_exercise_row_to_json(dict(r._mapping)) for r in rows]
     for ex in exercises_json:
         carried = set_plans_by_name.get(ex.get("name"))
@@ -4809,8 +5009,8 @@ def _sync_template_exercises_json(db: Session, template_id: str) -> None:
     db.execute(text("""
         UPDATE fitness_template
         SET exercises = :ex, updated_at = CURRENT_TIMESTAMP
-        WHERE id = :tid
-    """), {"ex": _json.dumps(exercises_json), "tid": template_id})
+        WHERE id = :tid AND user_id = :uid
+    """), {"ex": _json.dumps(exercises_json), "tid": template_id, "uid": user_id})
 
 
 @router.get("/templates/{template_id}/exercises")
@@ -4896,7 +5096,7 @@ async def create_template_exercise(
             "superset_group": exercise.superset_group,
             "set_technique": exercise.set_technique,
         })
-        _sync_template_exercises_json(db, template_id)
+        _sync_template_exercises_json(db, template_id, user_id)
         db.commit()
 
         return {"success": True, "exercise_id": exercise_id, "message": "Exercise added to template"}
@@ -4974,7 +5174,7 @@ async def update_template_exercise(
             updates.append("updated_at = CURRENT_TIMESTAMP")
             sql = f"UPDATE template_exercise SET {', '.join(updates)} WHERE id = :exercise_id AND template_id = :template_id"
             db.execute(text(sql), params)
-            _sync_template_exercises_json(db, template_id)
+            _sync_template_exercises_json(db, template_id, user_id)
             db.commit()
 
         return {"success": True, "message": "Exercise updated successfully"}
@@ -5007,7 +5207,7 @@ async def delete_template_exercise(
             DELETE FROM template_exercise
             WHERE id = :exercise_id AND template_id = :template_id
         """), {"exercise_id": exercise_id, "template_id": template_id})
-        _sync_template_exercises_json(db, template_id)
+        _sync_template_exercises_json(db, template_id, user_id)
         db.commit()
 
         return {"success": True, "message": "Exercise removed from template"}
@@ -5044,7 +5244,7 @@ async def reorder_template_exercises(
                 WHERE id = :exercise_id AND template_id = :template_id
             """), {"order_index": idx, "exercise_id": exercise_id, "template_id": template_id})
 
-        _sync_template_exercises_json(db, template_id)
+        _sync_template_exercises_json(db, template_id, user_id)
         db.commit()
         return {"success": True, "message": "Exercises reordered successfully"}
     except HTTPException:
@@ -6049,20 +6249,29 @@ async def get_workout_session(
                        set_kind, set_group_id, group_sequence, parent_set_id,
                        COALESCE(session_time, created_at) AS logged_at
                 FROM workout_log
-                WHERE active_session_id = :active_session_id AND voided_at IS NULL
+                WHERE active_session_id = :active_session_id
+                  AND user_id = :uid
+                  AND voided_at IS NULL
                 ORDER BY COALESCE(session_time, created_at), group_sequence
             """)
-            logged_sets = db.execute(sets_query, {"active_session_id": session_dict['active_session_id']}).fetchall()
+            logged_sets = db.execute(sets_query, {
+                "active_session_id": session_dict['active_session_id'],
+                "uid": user_id,
+            }).fetchall()
         else:
             sets_query = text("""
                 SELECT id, exercise_id, set_index, weight, reps, rpe, notes,
                        set_kind, set_group_id, group_sequence, parent_set_id,
                        COALESCE(session_time, created_at) AS logged_at
                 FROM workout_log
-                WHERE session_id = :session_id AND voided_at IS NULL
+                WHERE session_id = :session_id
+                  AND user_id = :uid
+                  AND voided_at IS NULL
                 ORDER BY COALESCE(session_time, created_at), group_sequence
             """)
-            logged_sets = db.execute(sets_query, {"session_id": session_id}).fetchall()
+            logged_sets = db.execute(sets_query, {
+                "session_id": session_id, "uid": user_id,
+            }).fetchall()
         session_dict['logged_sets'] = [dict(row._mapping) for row in logged_sets]
 
         # Morning recovery snapshot (frozen at the AM sync — not intraday).
@@ -6089,8 +6298,8 @@ async def get_workout_session(
                        fat_training_day, fat_rest_day,
                        daily_steps_target
                 FROM fitness_phase
-                WHERE id = :pid
-            """), {"pid": session_dict['phase_id']}).fetchone()
+                WHERE id = :pid AND user_id = :uid
+            """), {"pid": session_dict['phase_id'], "uid": user_id}).fetchone()
             session_dict['phase_nutrition'] = dict(phase_nut._mapping) if phase_nut else None
         else:
             session_dict['phase_nutrition'] = None

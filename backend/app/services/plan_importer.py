@@ -363,6 +363,25 @@ def apply_imported_plan(db: Session, user_id: str, parsed: Dict[str, Any],
                 "carb_t": nut.get("carbs_training_day"), "carb_r": nut.get("carbs_rest_day"),
                 "fat_t": nut.get("fat_training_day"), "fat_r": nut.get("fat_rest_day"),
             })
+
+            # FITNESS_COACH_IMPLEMENTATION_PLAN Step 6: an imported plan's
+            # phases each get their initial target revision, dated from the
+            # phase's own start. Without this, importing a 16-week program
+            # would create four blocks whose macros have no recorded history,
+            # so week-3 adherence would later be judged against whatever the
+            # phase row says at review time.
+            try:
+                from app.services.fitness.targets import seed_phase_revision
+                seed_phase_revision(
+                    db, user_id, phase_id, nut,
+                    start_date=p_start, end_date=p_end, source="plan_import",
+                )
+            except Exception as exc:
+                logger.warning(
+                    "imported phase %s has no initial target revision: %s",
+                    phase_id, exc
+                )
+
             # the weekly workouts run in every phase → copy each template under it
             for t in templates:
                 db.execute(text("""

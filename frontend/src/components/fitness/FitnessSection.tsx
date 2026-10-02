@@ -10,11 +10,16 @@ import PlanView from './PlanView'
 import NutritionGuide from './NutritionGuide'
 import PlanImporter from './PlanImporter'
 import CardioSection from './CardioSection'
+import AthleteSettings from './AthleteSettings'
 import { Upload } from 'lucide-react'
 import { APP_CONFIG } from '../../config'
 import { getLocalDateString } from '../../utils/dateUtils'
 
-type FitnessView = 'dashboard' | 'food' | 'workout' | 'notes' | 'templates' | 'recovery' | 'programs' | 'plan' | 'nutrition' | 'cardio'
+// 'settings' is the Fitness Coach's athlete settings (profile, goal history,
+// target history, limitations) — FITNESS_COACH_IMPLEMENTATION_PLAN Step 7.
+// Added as a subview inside this existing surface rather than a new
+// top-level view, per §7: no second app shell, no second router.
+type FitnessView = 'dashboard' | 'food' | 'workout' | 'notes' | 'templates' | 'recovery' | 'programs' | 'plan' | 'nutrition' | 'cardio' | 'settings'
 
 export default function FitnessSection() {
   const [currentView, setCurrentView] = useState<FitnessView>('dashboard')
@@ -56,6 +61,7 @@ export default function FitnessSection() {
     { id: 'food' as FitnessView, label: 'Food Log' },
     { id: 'workout' as FitnessView, label: 'Workouts' },
     { id: 'notes' as FitnessView, label: 'Notes' },
+    { id: 'settings' as FitnessView, label: 'Settings' },
   ]
 
   return (
@@ -120,6 +126,7 @@ export default function FitnessSection() {
         )}
         {currentView === 'workout' && <WorkoutLog />}
         {currentView === 'notes' && <FitnessNotes />}
+        {currentView === 'settings' && <AthleteSettings />}
       </div>
 
       {showImporter && (

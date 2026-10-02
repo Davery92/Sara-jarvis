@@ -1922,11 +1922,18 @@ class WorkoutCommandService:
                 ttl_seconds=None,
             )
 
-    def _apply_permanent_set_count(self, db: Session, scope: Dict[str, Any], proposed: Dict[str, Any]) -> bool:
+    def _apply_permanent_set_count(
+        self, db: Session, user_id: str, scope: Dict[str, Any], proposed: Dict[str, Any]
+    ) -> bool:
         """Write an approved set count back into the template.
 
         The only place in this service that edits a `fitness_template`, and it
         is reachable only through an explicit post-workout approval.
+
+        FITNESS_COACH plan Step 2: ``user_id`` is required and both statements
+        are owner-scoped. The ``template_id`` comes out of the proposal's
+        ``scope`` JSON — the service wrote it, but it is still a UUID in a
+        JSON blob, and "an FK to a UUID alone does not enforce ownership".
         """
         template_id, name = scope.get("template_id"), scope.get("exercise")
         sets = proposed.get("sets")
@@ -1934,8 +1941,8 @@ class WorkoutCommandService:
             return False
 
         row = db.execute(text(
-            "SELECT exercises FROM fitness_template WHERE id = :tid"
-        ), {"tid": template_id}).fetchone()
+            "SELECT exercises FROM fitness_template WHERE id = :tid AND user_id = :uid"
+        ), {"tid": template_id, "uid": user_id}).fetchone()
         if not row:
             raise WorkoutConflict("proposal_stale", "That workout template no longer exists.")
 
@@ -1951,8 +1958,8 @@ class WorkoutCommandService:
 
         db.execute(text("""
             UPDATE fitness_template SET exercises = CAST(:ex AS jsonb), updated_at = NOW()
-            WHERE id = :tid
-        """), {"ex": json.dumps(specs), "tid": template_id})
+            WHERE id = :tid AND user_id = :uid
+        """), {"ex": json.dumps(specs), "tid": template_id, "uid": user_id})
         return True
 
     def _apply_resolve_proposal(
@@ -1987,7 +1994,7 @@ class WorkoutCommandService:
             """), {"id": pid, "dev": origin, "cid": command_id})
             return {"proposal": {"proposal_id": pid, "status": "rejected"}, "applied": False}
 
-        applied = self._apply_proposed_value(db, session, row)
+        applied = self._apply_proposed_value(db, session, row, user_id)
 
         db.execute(text("""
             UPDATE workout_adjustment_proposal
@@ -1996,7 +2003,9 @@ class WorkoutCommandService:
         """), {"id": pid, "dev": origin, "cid": command_id})
         return {"proposal": {"proposal_id": pid, "status": "approved"}, "applied": applied}
 
-    def _apply_proposed_value(self, db: Session, session: Optional[Dict[str, Any]], row) -> bool:
+    def _apply_proposed_value(
+        self, db: Session, session: Optional[Dict[str, Any]], row, user_id: str
+    ) -> bool:
         """Write exactly the proposed value, nothing adjacent to it (§11.3)."""
         scope = row.scope if isinstance(row.scope, dict) else json.loads(row.scope or "{}")
         proposed = row.proposed_value if isinstance(row.proposed_value, dict) else json.loads(row.proposed_value or "{}")
@@ -2049,7 +2058,7 @@ class WorkoutCommandService:
         if row.kind == "template_set_count":
             # The one proposal here that outlives the session: it edits the
             # program. Deliberately unreachable from any in-session control.
-            return self._apply_permanent_set_count(db, scope, proposed)
+            return self._apply_permanent_set_count(db, user_id, scope, proposed)
 
         if row.kind == "perform_drop_set":
             # Sara cannot perform a drop set; approving one is consent to be
