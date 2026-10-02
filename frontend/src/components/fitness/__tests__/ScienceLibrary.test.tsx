@@ -130,6 +130,13 @@ function stubFetch() {
         event_id: 'e1', affected_review_ids: [],
       })
     }
+    if (url.includes('/science/records/upload') && method === 'POST') {
+      return json(registerStatus, registerBody ?? {
+        record_id: 'r3', revision: 1, status: 'unreviewed',
+        extraction_state: 'embedded', chunk_count: 41,
+        duplicate_of: null, detail: null,
+      })
+    }
     if (url.includes('/science/records') && method === 'POST') {
       return json(registerStatus, registerBody ?? {
         record_id: 'r2', revision: 1, status: 'unreviewed',
@@ -219,6 +226,83 @@ describe('accepted versus new', () => {
     ).toBe(true))
     const text = screen.getByTestId('science-library').textContent ?? ''
     expect(text).toContain('Nothing can cite it until you accept it')
+  })
+
+  it('registers a PDF through the upload door, as multipart', async () => {
+    // A file and a URL are the same act; only the transport differs. The
+    // upload route takes multipart because image and document bytes never
+    // go in a JSON body.
+    wrap(<ScienceLibrary />)
+    await waitFor(() => expect(screen.getByTestId('record-file')).toBeTruthy())
+
+    const file = new File([new Uint8Array([37, 80, 68, 70])], 'volume.pdf', {
+      type: 'application/pdf',
+    })
+    await userEvent.upload(screen.getByTestId('record-file'), file)
+    await userEvent.type(screen.getByTestId('record-title'), 'A real paper')
+    await userEvent.type(screen.getByTestId('record-doi'), '10.1234/real')
+    await userEvent.click(screen.getByTestId('register'))
+
+    await waitFor(() => expect(
+      calls.some((call) => call.url.includes('/records/upload')),
+    ).toBe(true))
+    const posted = calls.find((call) => call.url.includes('/records/upload'))
+    expect(posted?.method).toBe('POST')
+    // FormData, not JSON: the stub records multipart entries as an object.
+    expect(posted?.body).toMatchObject({
+      title: 'A real paper',
+      doi: '10.1234/real',
+      source_type: 'rct',
+      topics: 'hypertrophy',
+    })
+    // And the same "unreviewed" message, from the same mutation.
+    await waitFor(() => expect(
+      (screen.getByTestId('science-library').textContent ?? '')
+        .includes('Registered as unreviewed'),
+    ).toBe(true))
+  })
+
+  it('uses the URL door when no file is picked', async () => {
+    wrap(<ScienceLibrary />)
+    await waitFor(() => expect(screen.getByTestId('register')).toBeTruthy())
+    await userEvent.type(screen.getByTestId('record-title'), 'A paper')
+    await userEvent.type(screen.getByTestId('record-url'), 'https://x.invalid/p')
+    await userEvent.click(screen.getByTestId('register'))
+
+    await waitFor(() => expect(
+      calls.some((call) =>
+        call.url.endsWith('/science/records') && call.method === 'POST'),
+    ).toBe(true))
+    expect(calls.some((call) => call.url.includes('/upload'))).toBe(false)
+  })
+
+  it('still requires a DOI or URL alongside a file', async () => {
+    // A file on somebody's disk is not something a reader can check, so it
+    // does not substitute for the identifier a citation points at.
+    wrap(<ScienceLibrary />)
+    await waitFor(() => expect(screen.getByTestId('record-file')).toBeTruthy())
+    const file = new File([new Uint8Array([37, 80, 68, 70])], 'p.pdf', {
+      type: 'application/pdf',
+    })
+    await userEvent.upload(screen.getByTestId('record-file'), file)
+    await userEvent.type(screen.getByTestId('record-title'), 'A paper')
+    expect(screen.getByTestId('register')).toBeDisabled()
+  })
+
+  it('says which door it will use', async () => {
+    wrap(<ScienceLibrary />)
+    await waitFor(() => expect(screen.getByTestId('record-file')).toBeTruthy())
+    expect(screen.getByTestId('science-library').textContent)
+      .toContain('without one, the URL below is fetched server-side')
+
+    const file = new File([new Uint8Array([37])], 'volume.pdf', {
+      type: 'application/pdf',
+    })
+    await userEvent.upload(screen.getByTestId('record-file'), file)
+    await waitFor(() => expect(
+      (screen.getByTestId('science-library').textContent ?? '')
+        .includes('Reading volume.pdf'),
+    ).toBe(true))
   })
 
   it('reports a duplicate as a duplicate', async () => {

@@ -21,8 +21,13 @@
  *    failure the whole step exists to prevent.
  * 5. **A refresh reports attempts, not just successes.** A run that failed
  *    shows as failed with its reason, beside the ones that worked.
+ * 6. **A PDF and a URL are the same act.** One form, one mutation, one set
+ *    of success and duplicate handling — the bytes differ only in where
+ *    they come from. A DOI or URL is required either way, because that is
+ *    what a citation points a reader at and a file on your disk is not
+ *    something anyone else can check.
  */
-import React, { useMemo, useState } from 'react'
+import React, { useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   AlertTriangle, BookOpen, Check, Search, X,
@@ -235,6 +240,9 @@ export default function ScienceLibrary() {
   const [topics, setTopics] = useState<ScienceTopic[]>(['hypertrophy'])
   const [population, setPopulation] = useState('')
 
+  const [fileName, setFileName] = useState<string | null>(null)
+  const fileInput = useRef<HTMLInputElement>(null)
+
   const [query, setQuery] = useState('')
   const [hits, setHits] = useState<ScienceHit[] | null>(null)
 
@@ -254,8 +262,16 @@ export default function ScienceLibrary() {
     enabled: Boolean(athleteId),
   })
 
+  // One mutation for both doors — a PDF and a URL differ only in where the
+  // bytes come from, and two mutations would let the success and duplicate
+  // handling drift apart.
   const register = useMutation({
-    mutationFn: (input: RegisterInput) => scienceApi.register(input),
+    mutationFn: (input: RegisterInput) => {
+      const file = fileInput.current?.files?.[0]
+      return file
+        ? scienceApi.upload(file, input)
+        : scienceApi.register(input)
+    },
     onSuccess: (result) => {
       void client.invalidateQueries({ queryKey: ['science', athleteId] })
       if (result.duplicate_of) {
@@ -266,6 +282,8 @@ export default function ScienceLibrary() {
       setUrl('')
       setDoi('')
       setPopulation('')
+      if (fileInput.current) fileInput.current.value = ''
+      setFileName(null)
       // The word matters: "added" would imply the coach can cite it.
       setNotice(
         `Registered as unreviewed (${result.chunk_count} passages). ` +
@@ -365,6 +383,27 @@ export default function ScienceLibrary() {
             placeholder="Title, as published"
             data-testid="record-title"
           />
+          <div>
+            <input
+              ref={fileInput}
+              type="file"
+              accept=".pdf,.txt,.md,.html,.docx,application/pdf,text/plain,text/markdown,text/html"
+              onChange={(event) =>
+                setFileName(event.target.files?.[0]?.name ?? null)}
+              className="text-[13px] text-slate-400 file:mr-3 file:py-1.5
+                file:px-3 file:rounded-lg file:border-0 file:text-sm
+                file:bg-white/[0.06] file:text-slate-200
+                hover:file:bg-white/[0.1]"
+              data-testid="record-file"
+            />
+            <p className="text-[10px] text-slate-600 mt-1">
+              {fileName
+                ? `Reading ${fileName}. The DOI or URL below is still `
+                  + `required — it is what a citation points a reader at.`
+                : 'Optional. With a file, the text is extracted from it; '
+                  + 'without one, the URL below is fetched server-side.'}
+            </p>
+          </div>
           <div className="grid grid-cols-2 gap-2">
             <input
               className={FIELD}
@@ -440,7 +479,9 @@ export default function ScienceLibrary() {
             data-testid="register"
           >
             <BookOpen className="w-3.5 h-3.5 inline mr-1" />
-            {register.isPending ? 'Fetching…' : 'Register as unreviewed'}
+            {register.isPending
+              ? (fileName ? 'Reading the file…' : 'Fetching…')
+              : 'Register as unreviewed'}
           </button>
           <p className="text-[10px] text-slate-600">
             A DOI or a URL is required — without one there is nothing to cite
