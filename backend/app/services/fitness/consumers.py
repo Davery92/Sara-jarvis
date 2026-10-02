@@ -112,7 +112,18 @@ def nutrition_day(
     # eaten" from "fat was never logged". Summing NULLs to zero and then
     # subtracting is how a day with unknown fat reports the full fat budget
     # still available.
-    known = dict(food.known_fields) if food else {}
+    #
+    # Re-keyed to the OUTPUT names. `load_food_days` counts under the
+    # `food_log` column names (`fats`), while everything above the data layer
+    # uses `fat` — so a caller checking `known["fat"]` got nothing and a
+    # logged fat value rendered as unknown. Both keys are kept so a consumer
+    # written against either one works.
+    raw_known = dict(food.known_fields) if food else {}
+    known = dict(raw_known)
+    for column, field_name in (("fats", "fat"), ("protein", "protein_g"),
+                               ("carbs", "carbs_g")):
+        if column in raw_known:
+            known.setdefault(field_name, raw_known[column])
 
     remaining = {
         key: (round(target[key] - eaten[key]) if target.get(key) else None)

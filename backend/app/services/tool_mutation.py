@@ -79,9 +79,30 @@ def _tokens(name: str) -> set:
     return set(_TOKEN_RE.findall(name.lower()))
 
 
+# Names the token rules get WRONG, listed explicitly so the correction is a
+# visible edit rather than a token added to a shared set.
+#
+# `fitness_coach_review_request` carries "review" and "coach", both read
+# tokens, and no mutating one — so it classified read-only. It creates a
+# durable `fitness_coach_review` row and queues a model call. Adding
+# "request" to MUTATING_TOKENS instead would reclassify every future
+# `*_request` name sight unseen, including read-only ones.
+EXPLICIT_MUTATING = {
+    "fitness_coach_review_request",
+}
+
+# And the reverse: names that carry a mutating token but only ever read.
+EXPLICIT_READ_ONLY: set = set()
+
+
 def is_mutating_tool(name: str) -> bool:
     """Conservative name-pattern classification: unrecognized -> mutating."""
-    toks = _tokens(name or "")
+    key = (name or "").strip()
+    if key in EXPLICIT_MUTATING:
+        return True
+    if key in EXPLICIT_READ_ONLY:
+        return False
+    toks = _tokens(key)
     if toks & MUTATING_TOKENS:
         return True
     if toks & READ_TOKENS:

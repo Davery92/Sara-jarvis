@@ -113,10 +113,30 @@ class ContextRouter:
         'how much', 'portion', 'serving',
         'workout', 'training', 'gym', 'exercise', 'lift', 'cardio',
         'recovery', 'rest day', 'training day', 'phase', 'deload',
+        # Added with the Fitness Coach (Step 23). "How's my weight
+        # trending?" is among the most common questions Sara gets about
+        # fitness and matched none of the above, so the block carrying the
+        # goal, the targets and the limitations was absent for it.
+        'weight', 'weigh', 'weighed', 'weighing', 'bodyweight',
+        'lbs', 'kilos', 'kg', 'leaner', 'bulk', 'cut', 'cutting',
+        'sore', 'soreness', 'reps', 'sets', 'pr', 'squat', 'bench',
+        'deadlift', 'press', 'macro', 'hydration', 'steps',
     ]
 
     # Intents that benefit from fitness context
     FITNESS_INTENTS = ['FITNESS', 'HEALTH']
+
+    # Word-boundary matching, compiled once.
+    #
+    # A bare `kw in message_lower` matched 'eat' inside "weather", so "What's
+    # the weather like?" injected a nutrition block — budget spent on an
+    # unrelated turn, and a macro remainder in front of the model on a
+    # weather question. The same substring bug reaches "great", "repeat",
+    # "feature", "defeat" and "theater". Multi-word phrases work unchanged:
+    # \b applies at the ends of the phrase.
+    _FITNESS_KEYWORD_RE = re.compile(
+        r"\b(?:" + "|".join(re.escape(kw) for kw in FITNESS_KEYWORDS) + r")\b"
+    )
 
     def decide(
         self,
@@ -405,7 +425,7 @@ class ContextRouter:
         """
         if intent in self.FITNESS_INTENTS:
             return True
-        return any(kw in message_lower for kw in self.FITNESS_KEYWORDS)
+        return bool(self._FITNESS_KEYWORD_RE.search(message_lower))
 
 
 # ---------------------------------------------------------------------------

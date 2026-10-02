@@ -98,20 +98,73 @@ MEASURED_HEALTH_METRICS = {
 # anyway, it dies within two days rather than becoming permanent.
 MEASURED_HEALTH_TTL_HOURS = 48
 
-# "80", "7.5 hours", "54 ms", "~62 bpm", "7-8 hrs", "12,431 steps"
+# "80", "7.5 hours", "54 ms", "~62 bpm", "7-8 hrs", "12,431 steps", "200g",
+# "-0.4", "102 kg"
+#
+# The sign and the gram/length units were added with the Fitness Coach
+# (Step 23): "200g" (a protein target) and "-0.4" (a weekly rate) are bare
+# measurements and were passing through as qualitative text.
 _NUMERIC_HEALTH_VALUE_RE = re.compile(
-    r"^\s*[~<>≈]?\s*\d[\d,]*(?:\.\d+)?"
+    r"^\s*[~<>≈]?\s*[-+]?\s*\d[\d,]*(?:\.\d+)?"
     r"(?:\s*[-–—/]\s*\d[\d,]*(?:\.\d+)?)?"
-    r"\s*(?:%|hours?|hrs?|h|minutes?|mins?|bpm|ms|lbs?|pounds?|kgs?|"
+    r"\s*(?:%|hours?|hrs?|h|minutes?|mins?|bpm|ms|lbs?|pounds?|kgs?|kg|"
+    r"g|grams?|cm|mm|in|inch(?:es)?|"
     r"steps?|kcal|cals?|calories|/\s*10|/\s*100)?\s*$",
     re.IGNORECASE,
 )
 
 
-# A number David *chose* is not a number his body *produced*. "daily calorie
-# target: 2760" and "goal weight: 225" are intentions with no other home and no
-# expiry — they stay. Only readings are refused.
+# A number David *chose* is not a number his body *produced*. An intention
+# with no other home and no expiry — "aim: upper-body thickness" — stays.
 _INTENTION_METRIC_TOKENS = ("target", "goal", "aim", "plan", "limit", "budget")
+
+# ── Targets have a home now (FITNESS_COACH_IMPLEMENTATION_PLAN §23.5) ─────
+#
+# The exemption above was written when a chosen number had nowhere else to
+# live. `fitness_target_revision` and `fitness_athlete_goal` now own them,
+# dated, with a revision history and a provenance — so a PKG copy of "daily
+# calorie target: 2760" is a SECOND authority that never expires and cannot
+# be reconciled against the first. That is the same shape as the 2026-08-31
+# fabrication loop, one table over: a stale copy re-injected into context
+# where it looks exactly like evidence, while the resolver says 2900.
+#
+# So a NUMERIC value under one of these metric names is refused. A
+# qualitative one is not: "goal: upper-body thickness" has no numeric home
+# and is exactly the kind of rationale §8.4 wants preserved — the structured
+# goal keeps the original phrase, and the memory keeps the provenance.
+OWNED_TARGET_METRICS = {
+    "calorie target", "calories target", "daily calorie target",
+    "daily calories", "calorie goal", "calorie budget", "kcal target",
+    "protein target", "daily protein", "protein goal",
+    "carb target", "carbs target", "carbohydrate target",
+    "fat target", "fats target",
+    "macro targets", "macros",
+    "sleep target", "sleep goal", "sleep hours target",
+    "water target", "water goal", "hydration target",
+    "step target", "steps target", "daily step goal", "step goal",
+    "goal weight", "target weight", "weight goal", "weight target",
+    "target body fat", "body fat goal",
+    "rate of loss", "rate of gain", "weekly rate", "target rate",
+}
+
+
+def is_owned_target_metric(metric) -> bool:
+    """True when a dated table owns this target's number.
+
+    Matched on the normalized name, plus a token pair fallback so
+    "weekly protein target" lands with "protein target" rather than needing
+    every phrasing enumerated.
+    """
+    normalized = _normalize_metric(metric)
+    if normalized in OWNED_TARGET_METRICS:
+        return True
+    if any(token in normalized for token in _INTENTION_METRIC_TOKENS):
+        for subject in ("calorie", "kcal", "protein", "carb", "fat", "macro",
+                        "sleep", "water", "hydration", "step", "weight",
+                        "body fat", "rate"):
+            if subject in normalized:
+                return True
+    return False
 
 
 def _normalize_metric(metric) -> str:
@@ -142,10 +195,26 @@ def is_intention_metric(metric) -> bool:
 
 
 def is_authoritative_health_copy(metric, value) -> bool:
-    """True when a Health fact is a *copy of a measurement* rather than a
-    durable attribute — either it names a metric `health_metric` owns, or its
-    value is a bare number. Such facts are refused at mint time; the read path
-    goes to `health_metric`, which carries a `recorded_at` and can be absent."""
+    """True when a Health fact is a *copy of an owned number* rather than a
+    durable attribute.
+
+    Three ways to be a copy:
+
+    * it names a metric `health_metric` owns (a reading off his body);
+    * its value is a bare number under any health metric name;
+    * it names a TARGET whose number `fitness_target_revision` or
+      `fitness_athlete_goal` now owns, and carries a numeric value (§23.5).
+
+    Refused at mint time. The read path goes to the owning table, which
+    carries a date, a revision and the ability to be absent — none of which a
+    graph node has.
+
+    A qualitative intention still passes: "goal: upper-body thickness" has no
+    numeric home, and it is the rationale a structured goal is supposed to
+    preserve.
+    """
+    if is_owned_target_metric(metric) and is_numeric_health_value(value):
+        return True
     if is_intention_metric(metric):
         return False
     return is_measured_health_metric(metric) or is_numeric_health_value(value)

@@ -8616,7 +8616,14 @@ You are now in workspace mode. The user is working on their Windows PC with the 
                 voice_budget.add("personality", _v_safe(v_personality), priority=1)
                 voice_budget.add("daily_brief", _v_safe(v_brief), priority=2)
                 voice_budget.add("pkg", _v_safe(v_pkg), priority=2)
-                voice_budget.add("fitness", _v_safe(v_fitness), priority=2)
+                # Priority 1 on a fitness turn, and this block only exists on
+                # a fitness turn (`context_decision.inject_fitness` gates the
+                # fetch). FITNESS_COACH_IMPLEMENTATION_PLAN §23.2: an active
+                # workout and a reported limitation must not be clipped into
+                # irrelevance on the very turn they matter. The fragment is
+                # ordered so that if it IS truncated, the limitation and the
+                # live-session lines are what survive.
+                voice_budget.add("fitness", _v_safe(v_fitness), priority=1)
                 voice_budget.add("journal", _v_safe(v_journal), priority=3)
                 voice_budget.add("autonomous", _v_safe(v_autonomous), priority=3)
                 voice_budget.add("device", _v_safe(v_device), priority=4)

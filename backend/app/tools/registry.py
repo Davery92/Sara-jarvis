@@ -81,6 +81,16 @@ from app.tools.fitness.program_tools import (
 from app.tools.fitness.training_schedule import TrainingScheduleTool
 from app.tools.fitness.workout_suggest import WorkoutSuggestTool
 from app.tools.fitness.summary import FitnessSummaryTool
+from app.tools.fitness.coach import (
+    FitnessAnalyticsGetTool,
+    FitnessCheckinUpdateTool,
+    FitnessCoachReviewGetTool,
+    FitnessCoachReviewRequestTool,
+    FitnessMeasurementLogTool,
+    FitnessMeasurementsGetTool,
+    FitnessProfileGetTool,
+    FitnessRecommendationDecideTool,
+)
 from app.tools.fitness.workout_mode import (
     WorkoutModeLogTool,
     WorkoutModeStartTool,
@@ -268,6 +278,12 @@ class ToolRegistry:
                 'training_schedule',
                 'workout_suggest',
                 'start_workout', 'end_workout', 'workout_mode_log', 'workout_history',
+                # Fitness Coach (Step 23). Read tools first; the writes are
+                # all user-origin.
+                'fitness_profile_get', 'fitness_analytics_get',
+                'fitness_measurements_get', 'fitness_coach_review_get',
+                'fitness_checkin_update', 'fitness_measurement_log',
+                'fitness_coach_review_request', 'fitness_recommendation_decide',
             ]
         },
         'chess': {
@@ -641,6 +657,24 @@ class ToolRegistry:
 
             # Fitness Summary (for regular Sara)
             FitnessSummaryTool(),
+
+            # Fitness Coach (FITNESS_COACH_IMPLEMENTATION_PLAN Step 23).
+            # Consolidated deliberately: `fitness_analytics_get` takes a
+            # `section` parameter rather than being seven per-section tools,
+            # because `tool_retrieval.MAX_TOOLS_PER_CALL = 35` caps the
+            # per-turn menu and six extra slots would come out of the rest of
+            # Sara's capability on a fitness turn.
+            FitnessProfileGetTool(),
+            FitnessAnalyticsGetTool(),
+            FitnessMeasurementsGetTool(),
+            FitnessCoachReviewGetTool(),
+            # Writes. Every one is `requires_user_origin = True`, so the
+            # autonomous loop cannot log a measurement or decide a coaching
+            # change on its own.
+            FitnessCheckinUpdateTool(),
+            FitnessMeasurementLogTool(),
+            FitnessCoachReviewRequestTool(),
+            FitnessRecommendationDecideTool(),
 
             # Workout Mode Tools (real-time coaching during active workout)
             WorkoutModeLogTool(),

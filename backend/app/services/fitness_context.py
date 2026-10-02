@@ -47,7 +47,13 @@ async def get_fitness_context(user_id: str, db: Session) -> Optional[str]:
         remaining = day["remaining"]
         known = day["known_fields"]
 
-        if not any(target.values()) and not day["meal_count"]:
+        if not any(target.values()) and not day["meal_count"] \
+                and not _has_safety_context(db, user_id, day["date"]):
+            # Nothing to say. A fragment saying only "no data" costs prompt
+            # budget and tells Sara nothing she cannot see from the absence.
+            # But a limitation or a live session IS something to say, even
+            # with no targets and nothing logged — that is the turn where
+            # getting it wrong matters most.
             return None
 
         lines = ["## David's Nutrition Plan (Today)"]
@@ -95,6 +101,45 @@ async def get_fitness_context(user_id: str, db: Session) -> Optional[str]:
         elif day["target_provenance"] == "unknown":
             lines.append("  (no target is recorded for today)")
 
+        # Active limitations, ABOVE the intake numbers.
+        #
+        # §23.2: a safety limitation must not be clipped into irrelevance on a
+        # fitness turn. A shoulder that hurts changes what Sara should
+        # suggest; a macro remainder does not, so the limitation goes first
+        # and survives any truncation of what follows.
+        try:
+            from datetime import date as _d
+            from app.services.fitness.profile import get_limitations
+            limitations = get_limitations(db, user_id, _d.fromisoformat(day["date"]))
+        except Exception as e:
+            logger.warning(
+                f"Failed to read limitations ({type(e).__name__}): {e}"
+            )
+            limitations = []
+        if limitations:
+            described = "; ".join(
+                limitation.area
+                + (f" ({limitation.severity_flag})" if limitation.severity_flag else "")
+                for limitation in limitations[:4]
+            )
+            lines.append(f"**Working around:** {described}")
+            excluded = [
+                eid for limitation in limitations
+                for eid in (limitation.excluded_exercise_ids or [])
+            ]
+            if excluded:
+                lines.append(
+                    f"  ({len(excluded)} exercise(s) excluded — check before "
+                    f"suggesting movements)"
+                )
+
+        # A workout happening RIGHT NOW. Without this Sara answers a
+        # mid-session question as though David were at his desk, and "what's
+        # next" means something different with a bar in his hands.
+        live = _active_session_line(db, user_id)
+        if live:
+            lines.append(live)
+
         if day["meal_count"] > 0:
             lines.append(
                 f"**Eaten so far:** {_fmt(eaten['calories'], known, 'calories')} cal | "
@@ -124,6 +169,51 @@ async def get_fitness_context(user_id: str, db: Session) -> Optional[str]:
     except Exception as e:
         logger.warning(f"Failed to build fitness context: {e}")
         return None
+
+
+def _has_safety_context(db: Session, user_id: str, on_date: str) -> bool:
+    """Whether there is a limitation or a live session worth the budget."""
+    try:
+        from datetime import date as _d
+        from app.services.fitness.profile import get_limitations
+        if get_limitations(db, user_id, _d.fromisoformat(on_date)):
+            return True
+    except Exception:
+        pass
+    return _active_session_line(db, user_id) is not None
+
+
+def _active_session_line(db: Session, user_id: str) -> Optional[str]:
+    """One line about an in-progress workout, or None.
+
+    Read directly rather than through the state so a mid-session turn costs
+    one small query: the deterministic state is a window over completed days
+    and deliberately does not know about a session that started ten minutes
+    ago.
+    """
+    try:
+        from sqlalchemy import text
+        row = db.execute(text("""
+            SELECT a.id, a.status, a.total_sets_completed, a.started_at,
+                   t.name AS template_name
+            FROM active_workout_session a
+            LEFT JOIN fitness_template t ON t.id = a.template_id
+            WHERE a.user_id = :uid AND a.status IN ('active', 'in_progress')
+            ORDER BY a.started_at DESC
+            LIMIT 1
+        """), {"uid": user_id}).fetchone()
+    except Exception as e:
+        logger.warning(
+            f"Failed to read the active session ({type(e).__name__}): {e}"
+        )
+        return None
+    if row is None:
+        return None
+    name = row.template_name or "a session"
+    return (
+        f"**Training right now:** {name}, "
+        f"{row.total_sets_completed or 0} sets logged so far."
+    )
 
 
 def _fmt(val, known=None, field: Optional[str] = None) -> str:

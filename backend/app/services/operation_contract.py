@@ -922,6 +922,13 @@ _EXPLICIT_KIND: Dict[str, OperationKind] = {
     # Inserting a block brings a new training period into being rather than
     # editing a field of an existing one.
     "phase_insert_block": OperationKind.CREATE,
+    # Requesting a review creates a durable row and queues a model call, so
+    # it is a CREATE — not the READ its name's "review"/"coach" tokens would
+    # otherwise give it.
+    "fitness_coach_review_request": OperationKind.CREATE,
+    # Deciding a recommendation applies a target change the athlete eats
+    # against. CONFIRMATION or an explicit instruction, never a correction.
+    "fitness_recommendation_decide": OperationKind.RECURRING,
 }
 
 #: `notes_edit`-shaped tools: the kind depends on WHICH argument was passed.
