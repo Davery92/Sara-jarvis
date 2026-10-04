@@ -258,9 +258,21 @@ PY
   fi
 
   head_ "disposable stacks must stay stopped"
+  # Keyed off the compose PROJECT LABEL and the name shapes that
+  # backend/scripts/disposable_compose.sh actually enforces — sara-*-test,
+  # sara-*-study, sara-disposable-* — plus the older ad-hoc names. It used
+  # to grep container names against a hand-listed set, which silently
+  # stopped covering anything created after it was written: on 2026-10-04
+  # `sara-fitness-test` had two containers up and this check said "none
+  # running". A guard whose list cannot drift from the thing it guards is
+  # the only kind worth having.
   local stray
-  stray=$(docker ps --format '{{.Names}}' | grep -cE 'sara-disposable-test|sara-reliable-validation|incident-|rehearsal-' || true)
-  [ "${stray:-0}" = 0 ] && ok "none running" || bad "$stray disposable container(s) running — stop them"
+  stray=$(docker ps --format '{{.Label "com.docker.compose.project"}}' \
+    | grep -vx "$PROJECT" \
+    | grep -E '^(sara-.*-test|sara-.*-study|sara-disposable-.*|sara-reliable-validation.*|incident-.*|rehearsal-.*)$' \
+    | sort -u | paste -sd' ' || true)
+  [ -z "${stray:-}" ] && ok "none running" \
+    || bad "disposable stack(s) still up: $stray — stop them (disposable_compose.sh <project> ... down -v)"
 
   printf '\n'
   if [ "$FAIL" = 0 ]; then printf '\033[32mVERIFIED\033[0m — configuration matches the pinned artifact\n'; return 0; fi
