@@ -3,6 +3,7 @@ import type { FormEvent } from 'react'
 import { APP_CONFIG } from '../config'
 import type { AppView } from '../navigation/views'
 import { viewForPath } from '../navigation/views'
+import { useAuthStore } from '../stores/authStore'
 
 interface UseShellAuthOptions {
   locationPathname: string
@@ -32,6 +33,15 @@ export function useShellAuth({
 
       const userData = await response.json()
       setUser(userData)
+      // The Fitness Coach surface reads the athlete id from `authStore`, not
+      // from this hook's local state, and gates every query on it
+      // (`enabled: Boolean(athleteId)`). Nothing populated that store after
+      // the shell refactor, so the id was permanently null and every Coach
+      // query was permanently disabled: Overview showed its read-failure
+      // branch, Today never stopped loading, and the Science Library showed
+      // an empty review queue over 50 stored papers. Component tests mock the
+      // store, so none of them could see it.
+      useAuthStore.getState().setUser(userData)
       setIsAuthenticated(true)
       onSessionStart(
         locationPathname === '/login' ? 'dashboard' : viewForPath(locationPathname),
@@ -62,6 +72,7 @@ export function useShellAuth({
       if (response.ok) {
         const userData = await response.json()
         setUser(userData)
+        useAuthStore.getState().setUser(userData)
         setIsAuthenticated(true)
         setMessage('')
         onSessionStart('dashboard', { resetChat: true })
@@ -88,6 +99,7 @@ export function useShellAuth({
 
     setIsAuthenticated(false)
     setUser(null)
+    useAuthStore.getState().setUser(null)
     onSessionEnd()
   }, [onSessionEnd])
 

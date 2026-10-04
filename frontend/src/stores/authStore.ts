@@ -118,10 +118,14 @@ export const useAuthStore = create<AuthState>()(
     }),
     {
       name: 'auth-storage',
-      partialize: (state) => ({
-        user: state.user,
-        isAuthenticated: state.isAuthenticated
-      }),
+      // Nothing about the identity is persisted. The cookie IS the session,
+      // so a `user` kept in localStorage is a second source of truth that
+      // can disagree with it — a stale id would namespace the react-query
+      // cache under the wrong athlete while the server, which scopes by
+      // cookie, served the right one. The store is populated only by a
+      // server-confirmed session (`useShellAuth` -> /auth/me), and starts
+      // empty on every load.
+      partialize: () => ({}),
     }
   )
 );
