@@ -798,3 +798,100 @@ def test_the_compacted_state_drops_chart_series_but_keeps_pain_denominators():
     # And the owner never goes into the prompt: the model has no use for it
     # and it is the one field that identifies whose body this is.
     assert "user_id" not in payload
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# What the first production review taught (2026-10-04)
+# ─────────────────────────────────────────────────────────────────────────
+
+class TestOrdinaryCoachingLanguageIsNotTreatmentAdvice:
+    """`TREATMENT_TERMS` held the bare verb "prescribe", and the first real
+    production review was refused for using it in its ordinary sense.
+
+    That is the third time this list has produced the same false positive:
+    "take a" rejected "take a deload" on the first live model run, and a
+    draft smoke script's own copy flagged "rotator cuff health". A check
+    that fires on the vocabulary of the domain it polices is not a safety
+    control, it is an outage with a moral.
+    """
+
+    @pytest.mark.parametrize("text", [
+        "The plan prescribes four sets at RPE 8.",
+        "Volume prescribed for week three is higher than week two.",
+        "I would prescribe a deload here rather than pushing on.",
+        "The prescribed rep range is 5-8.",
+        "This exercise prescription suits three sessions a week.",
+        "Prescribing more volume while sleep is this short would be a guess.",
+    ])
+    def test_programming_language_passes(self, text):
+        from app.services.fitness.safety import check_text
+
+        findings = check_text("rationale", text)
+        treatment = [f for f in findings if f.code == "treatment_advice"]
+        assert treatment == [], [f.message for f in treatment]
+
+    @pytest.mark.parametrize("text", [
+        "I'd prescribe you some ibuprofen for the shoulder.",
+        "Ask your doctor to prescribe an anti-inflammatory.",
+        "Go and get a prescription for that.",
+        "Take 400 mg before training.",
+        "A cortisone injection would settle it down.",
+    ])
+    def test_actual_treatment_advice_is_still_refused(self, text):
+        from app.services.fitness.safety import check_text
+
+        findings = check_text("rationale", text)
+        assert [f for f in findings if f.code == "treatment_advice"], text
+
+    def test_the_list_holds_no_bare_verbs(self):
+        """The rule, enforced rather than written in a comment: a substance
+        name cannot be innocent in this context, and a verb usually is."""
+        from app.services.fitness.safety import TREATMENT_TERMS
+
+        for term in TREATMENT_TERMS:
+            assert not term.endswith(("e", "ing")) or " " in term or term in (
+                "ibuprofen", "naproxen", "nsaid", "acetaminophen",
+                "paracetamol", "cortisone", "corticosteroid", "prednisone",
+            ), f"{term!r} looks like a verb; put the medical shape in TREATMENT_PATTERNS"
+
+
+class TestCitationCheckKnowsWhetherALibraryIsAttached:
+    """The check exists because a citation with no corpus behind it is
+    invented. It was unconditional, so it would have started refusing
+    legitimate reviews the moment the science library stopped being empty —
+    a defect that could only surface after somebody accepted their first
+    paper, which is the worst possible time to find it.
+    """
+
+    @pytest.mark.parametrize("text", [
+        "A meta-analysis found higher volume helped.",
+        "Research shows protein above 1.6 g/kg adds little.",
+        "Schoenfeld et al. reported the same.",
+    ])
+    def test_refused_when_no_evidence_was_supplied(self, text):
+        from app.services.fitness.safety import check_text
+
+        findings = check_text("summary", text)
+        assert [f for f in findings if f.code == "fabricated_citation"], text
+
+    @pytest.mark.parametrize("text", [
+        "A meta-analysis found higher volume helped.",
+        "Research shows protein above 1.6 g/kg adds little.",
+    ])
+    def test_allowed_when_accepted_passages_were_attached(self, text):
+        """`validate_references` separately checks that every cited id was
+        actually offered, so the prose does not also have to be silent."""
+        from app.services.fitness.safety import check_text
+
+        findings = check_text("summary", text, evidence_attached=True)
+        assert [f for f in findings if f.code == "fabricated_citation"] == []
+
+    def test_a_diagnosis_is_still_refused_with_evidence_attached(self):
+        """Attaching a library relaxes the citation rule and nothing else."""
+        from app.services.fitness.safety import check_text
+
+        findings = check_text(
+            "summary", "The shoulder pain is impingement.",
+            evidence_attached=True,
+        )
+        assert [f for f in findings if f.code == "diagnosis"]

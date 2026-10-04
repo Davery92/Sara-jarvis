@@ -372,7 +372,9 @@ async def generate(
         db.commit()
         return GenerationResult(review=failed, notes=errors)
 
-    report = safety.validate_output(parsed, state)
+    report = safety.validate_output(
+        parsed, state, evidence_attached=bool(evidence),
+    )
     if report.rejected:
         failed = review_audit.mark_failed(
             db, uid, review_id,

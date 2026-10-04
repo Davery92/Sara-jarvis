@@ -131,9 +131,23 @@ DIAGNOSTIC_ASSERTIONS = (
 #: rest day" and "take a week lighter" — the real model's very first output
 #: on the live lane was refused for "take a deload". A check that fires on
 #: ordinary coaching language is not a safety control, it is an outage.
+# NAMED SUBSTANCES ONLY. No bare verbs, ever — that is now a rule rather
+# than a preference, because this list has produced the same false positive
+# three times:
+#
+#   "take a"     rejected "take a deload" on the first live model run
+#   "prescribe"  rejected the FIRST production review, 2026-10-04, for
+#                ordinary programming language. "Prescribe" is the central
+#                verb of strength coaching: it and its variants appear ~69
+#                times in this subsystem's own code, and the typed schema
+#                classes are literally named PrescribedSet, PrescribedSlot
+#                and PrescribedSession.
+#
+# A substance name cannot be innocent in this context. A verb usually is,
+# so a verb needs the medical SHAPE around it — see TREATMENT_PATTERNS.
 TREATMENT_TERMS = (
     "ibuprofen", "naproxen", "nsaid", "acetaminophen", "paracetamol",
-    "cortisone", "corticosteroid", "prednisone", "prescribe",
+    "cortisone", "corticosteroid", "prednisone",
     "cortisone injection", "physical therapy protocol",
 )
 
@@ -146,6 +160,22 @@ TREATMENT_PATTERNS = (
     # Telling them what to take.
     re.compile(r"\btake\s+(?:some\s+|an?\s+)?(?:anti-?inflammator|painkiller|"
                r"ibuprofen|advil|tylenol|supplement for)", re.I),
+    # Prescribing in the MEDICAL sense, which needs either a person being
+    # prescribed to or a substance being prescribed. "The plan prescribes
+    # four sets at RPE 8" is the ordinary meaning and must pass.
+    re.compile(r"\bprescrib\w*\s+(?:you|him|her|them)\b", re.I),
+    re.compile(
+        r"\bprescrib\w*\s+(?:a\s+|an\s+|some\s+)?"
+        r"(?:medication|medicine|drug|antibiotic|steroid|painkiller|"
+        r"anti-?inflammator|cortisone|ibuprofen|nsaid)", re.I,
+    ),
+    # A prescription you GET or are WRITTEN is medical. A bare
+    # "prescription" is not: "exercise prescription" is a term of art in
+    # strength and conditioning.
+    re.compile(
+        r"\b(?:get|getting|need|needs|write|writing|fill)\s+(?:you\s+)?"
+        r"(?:a\s+)?prescription\b", re.I,
+    ),
 )
 
 #: A citation with no corpus behind it is invented.
@@ -319,7 +349,9 @@ def _review_text(output: CoachReviewOutputV1) -> List[Tuple[str, str]]:
     return parts
 
 
-def check_text(where: str, text: str) -> List[Finding]:
+def check_text(
+    where: str, text: str, *, evidence_attached: bool = False,
+) -> List[Finding]:
     """Every language rule, over one piece of free text.
 
     Extracted from `check_language` so the program-draft path can reuse it
@@ -377,16 +409,25 @@ def check_text(where: str, text: str) -> List[Finding]:
                     f"({match.group(0).strip()!r})."
                 ),
             ))
-    for pattern in CITATION_PATTERNS:
-        if pattern.search(text):
-            findings.append(Finding(
-                code="fabricated_citation", severity="reject", path=where,
-                message=(
-                    f"{where} cites research. No curated library is "
-                    f"attached, so the citation is invented — and an "
-                    f"invented one reads exactly like a real one."
-                ),
-            ))
+    # Only when nothing real was supplied. With accepted passages attached,
+    # discussing "a meta-analysis" is the review doing its job, and
+    # `validate_references` already checks that every cited id was actually
+    # offered. Unconditional, this would have started refusing legitimate
+    # reviews the moment the science library stopped being empty — a defect
+    # that could only appear after somebody accepted their first paper,
+    # which is the worst time to discover it.
+    if not evidence_attached:
+        for pattern in CITATION_PATTERNS:
+            if pattern.search(text):
+                findings.append(Finding(
+                    code="fabricated_citation", severity="reject", path=where,
+                    message=(
+                        f"{where} cites research. No curated library is "
+                        f"attached to this review, so the citation is "
+                        f"invented — and an invented one reads exactly like "
+                        f"a real one."
+                    ),
+                ))
     for pattern in OVERCLAIM_PATTERNS:
         if pattern.search(text):
             findings.append(Finding(
@@ -400,7 +441,9 @@ def check_text(where: str, text: str) -> List[Finding]:
     return findings
 
 
-def check_language(output: CoachReviewOutputV1) -> List[Finding]:
+def check_language(
+    output: CoachReviewOutputV1, *, evidence_attached: bool = False,
+) -> List[Finding]:
     """Reject medical claims, prescriptions and fabricated citations.
 
     Rejected rather than downgraded. A sentence containing a diagnosis cannot
@@ -410,7 +453,9 @@ def check_language(output: CoachReviewOutputV1) -> List[Finding]:
     """
     findings: List[Finding] = []
     for where, text in _review_text(output):
-        findings.extend(check_text(where, text))
+        findings.extend(check_text(
+            where, text, evidence_attached=evidence_attached,
+        ))
     return findings
 
 
@@ -735,6 +780,7 @@ def validate_output(
     state: FitnessStateV1,
     *,
     known_evidence_ids: Optional[Set[str]] = None,
+    evidence_attached: bool = False,
 ) -> SafetyReport:
     """Run every check. Returns the shipping output, or a rejection.
 
@@ -746,7 +792,9 @@ def validate_output(
     report.findings.extend(validate_references(
         output, state, known_evidence_ids=known_evidence_ids,
     ))
-    report.findings.extend(check_language(output))
+    report.findings.extend(check_language(
+        output, evidence_attached=evidence_attached,
+    ))
     report.findings.extend(check_proposed_targets(output, state))
     report.findings.extend(check_confidence(output, state))
     report.findings.extend(require_concern_for_severe_pain(output, state))
