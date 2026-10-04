@@ -33,6 +33,23 @@ set -uo pipefail
 
 # ── the pinned pair. Change these only with a new verified artifact. ──────────
 #
+# GENERATION 6 — cut 2026-10-04 from committed git (feat/sara-mind-v2,
+# 0b4c1f2e-ish; see `git log scripts/sara-prod`). One fix, found by trying
+# to ingest a real paper: `embed_chunks` fanned every chunk out at once, so
+# a 56-chunk paper sent 56 simultaneous requests at a single CPU-bound
+# embedding container and every one blew the 60s read timeout. The PDF
+# upload door was therefore unusable for any document worth ingesting.
+# Bounded to EMBED_CONCURRENCY=4. Same schema (174).
+#
+# Rolling back to generation 5 is source-only, but the science ingestion
+# path does not work there — use it only for an unrelated problem:
+#
+#   SARA_PROD_IMAGE=sara-coach-candidate:20261004
+#   SARA_PROD_IMAGE_ID=sha256:0a355b2aee08f2ca3aea5812f66673329675a6155388cdc8c4f1ce98c53138f3
+#   SARA_PROD_FROZEN=/home/david/sara-candidate-20261004-coach2
+#   SARA_PROD_MANIFEST_HASH=e239a470cd61187eb6ade6cfe657c35e88d6fe83f0217f87a65e282fd6187899
+#   SARA_PROD_SCHEMA=174_fitness_automation
+#
 # GENERATION 5 — cut 2026-10-04 from committed git (feat/sara-mind-v2,
 # 3c606c77). One fix, found by turning generation 4 on: the FIRST production
 # coach review was refused by our own safety gate because TREATMENT_TERMS
@@ -113,10 +130,10 @@ set -uo pipefail
 # so a rollback either edits that file too or passes both as environment
 # overrides to the compose invocation. `cutover`, not `up`: `up` gates on the
 # running containers already matching, which a generation change does not.
-EXPECT_IMAGE="${SARA_PROD_IMAGE:-sara-coach-candidate:20261004}"
-EXPECT_IMAGE_ID="${SARA_PROD_IMAGE_ID:-sha256:0a355b2aee08f2ca3aea5812f66673329675a6155388cdc8c4f1ce98c53138f3}"
-FROZEN="${SARA_PROD_FROZEN:-/home/david/sara-candidate-20261004-coach2}"
-EXPECT_MANIFEST_HASH="${SARA_PROD_MANIFEST_HASH:-e239a470cd61187eb6ade6cfe657c35e88d6fe83f0217f87a65e282fd6187899}"
+EXPECT_IMAGE="${SARA_PROD_IMAGE:-sara-coach-candidate:20261004b}"
+EXPECT_IMAGE_ID="${SARA_PROD_IMAGE_ID:-sha256:6782c4ba82af6bc35c649907e1ec0120b54838c5bf5ab73276e7aba23a1f8da5}"
+FROZEN="${SARA_PROD_FROZEN:-/home/david/sara-candidate-20261004-coach3}"
+EXPECT_MANIFEST_HASH="${SARA_PROD_MANIFEST_HASH:-fa9c8d1a0be7a88f8c32ee6610c6279b91686a84b5b1ccea2fab053eada101f8}"
 EXPECT_SCHEMA="${SARA_PROD_SCHEMA:-174_fitness_automation}"
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
