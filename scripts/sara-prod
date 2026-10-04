@@ -33,6 +33,39 @@ set -uo pipefail
 
 # ── the pinned pair. Change these only with a new verified artifact. ──────────
 #
+# GENERATION 4 — cut 2026-10-02 from committed git (feat/sara-mind-v2, c8188c8d):
+# the Fitness Coach plan, all 31 steps. Gated by
+# backend/scripts/rehearse_reliable_release.sh — REHEARSAL PASSED, release path
+# and recovery destination both exercised, readiness probe all four
+# capabilities. 964 files. The image's own import check now covers all 20
+# modules this work added, route and task modules included: a file count
+# proves the bytes shipped, not that they run, and 13 imports were lost
+# exactly that way once before.
+#
+# THIS IS THE FIRST GENERATION TO ADVANCE THE SCHEMA — 158 -> 174 — so the
+# "rolling back is source-only" line below no longer describes the present.
+# Two rollback routes now exist, and the cheap one was proven before cutover:
+#
+#   * SOURCE-ONLY, back to generation 3, leaving the schema at 174. Gen 3's
+#     image was started against a 174 database on a disposable copy and
+#     imports and serves all 932 of its routes. All sixteen migrations are
+#     additive, which is why that works. Proven rather than assumed, because
+#     the schema had never moved before and nothing had established it.
+#
+#   * FULL RESTORE from /home/david/sara_hub_pre174_20261002.dump (224M,
+#     pg_dump -Fc, taken immediately before the migration). Needed only if
+#     something in 159-174 corrupted data rather than merely adding to it.
+#     `alembic downgrade` is NOT a third option: it is an outage, not a
+#     rollback.
+#
+# To return to generation 3, set these and run `sara-prod cutover`:
+#
+#   SARA_PROD_IMAGE=sara-cleanup-candidate:20260930c
+#   SARA_PROD_IMAGE_ID=sha256:3392120f0d9ae1f34a38d745b8c4d51a83bc9497a118e3b64710a8499238aa9e
+#   SARA_PROD_FROZEN=/home/david/sara-candidate-20261001-fix
+#   SARA_PROD_MANIFEST_HASH=5fa0da0cc448fe7205a8f8439daa7a398f320fc4c7e33fb98a14dafa15702f9a
+#   SARA_PROD_SCHEMA=174_fitness_automation
+#
 # GENERATION 3 — cut 2026-09-30 from committed git (feat/sara-mind-v2, 34c68408),
 # after the codebase cleanup. Gated by backend/scripts/rehearse_reliable_release.sh
 # (release path + recovery destination + readiness probe READY) on disposable
@@ -58,11 +91,11 @@ set -uo pipefail
 # so a rollback either edits that file too or passes both as environment
 # overrides to the compose invocation. `cutover`, not `up`: `up` gates on the
 # running containers already matching, which a generation change does not.
-EXPECT_IMAGE="${SARA_PROD_IMAGE:-sara-cleanup-candidate:20260930c}"
-EXPECT_IMAGE_ID="${SARA_PROD_IMAGE_ID:-sha256:3392120f0d9ae1f34a38d745b8c4d51a83bc9497a118e3b64710a8499238aa9e}"
-FROZEN="${SARA_PROD_FROZEN:-/home/david/sara-candidate-20261001-fix}"
-EXPECT_MANIFEST_HASH="${SARA_PROD_MANIFEST_HASH:-5fa0da0cc448fe7205a8f8439daa7a398f320fc4c7e33fb98a14dafa15702f9a}"
-EXPECT_SCHEMA="${SARA_PROD_SCHEMA:-158_reminder_delivery_state}"
+EXPECT_IMAGE="${SARA_PROD_IMAGE:-sara-coach-candidate:20261002}"
+EXPECT_IMAGE_ID="${SARA_PROD_IMAGE_ID:-sha256:c61e0f370bdd90933c712d8e2fabfc4ad148b8073a87c42ed0c982e1761a5e5c}"
+FROZEN="${SARA_PROD_FROZEN:-/home/david/sara-candidate-20261002-coach}"
+EXPECT_MANIFEST_HASH="${SARA_PROD_MANIFEST_HASH:-bd8b0aebf5ff3a0d14ffafd12fc4ee9366dd83f317624e28455de5d337a79cf6}"
+EXPECT_SCHEMA="${SARA_PROD_SCHEMA:-174_fitness_automation}"
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BASE="$REPO/docker-compose.dev.yml"

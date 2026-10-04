@@ -64,18 +64,18 @@
 ##   docker compose -f docker-compose.dev.yml -f docker-compose.incident-recovery.yml up -d <svc>
 services:
   backend:
-    image: sara-cleanup-candidate:20260930c
+    image: sara-coach-candidate:20261002
     volumes:
       # Replaces `./backend:/app`. The application code now comes from the
       # image; nothing maps the working tree over it any more.
-      - /home/david/sara-candidate-20261001-fix/backend/app:/app/app:ro
-      - /home/david/sara-candidate-20261001-fix/backend/alembic:/app/alembic:ro
+      - /home/david/sara-candidate-20261002-coach/backend/app:/app/app:ro
+      - /home/david/sara-candidate-20261002-coach/backend/alembic:/app/alembic:ro
 
   celery-worker: &pinned
-    image: sara-cleanup-candidate:20260930c
+    image: sara-coach-candidate:20261002
     volumes:
-      - /home/david/sara-candidate-20261001-fix/backend/app:/app/app:ro
-      - /home/david/sara-candidate-20261001-fix/backend/alembic:/app/alembic:ro
+      - /home/david/sara-candidate-20261002-coach/backend/app:/app/app:ro
+      - /home/david/sara-candidate-20261002-coach/backend/alembic:/app/alembic:ro
 
   celery-critical: *pinned
   celery-david-priority: *pinned

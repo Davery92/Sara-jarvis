@@ -30,6 +30,18 @@
 set -uo pipefail
 
 IMAGE="${1:-sara-reliable-candidate:20260929}"
+# The revision this release is MEANT to land on. Hardcoded as 158 until
+# 2026-10-02, which was correct for generations 1-3 — they all shipped the
+# same schema, so the literal and the intent agreed and nobody noticed they
+# were the same line. The Fitness Coach release is the first to advance the
+# schema, and the check failed the whole rehearsal on its own staleness
+# while every substantive step passed.
+#
+# Parameterised rather than bumped, because bumping a literal leaves the
+# next schema-advancing release to rediscover this. The check still has to
+# be an EXPECTATION: asserting "the head is whatever the image says" would
+# pass for any revision, including one nobody meant to ship.
+EXPECT_HEAD="${2:-174_fitness_automation}"
 REPO_BACKEND="$(cd "$(dirname "$0")/.." && pwd)"
 NET="sara-release-rehearsal"
 DB="rehearsal-db"
@@ -130,7 +142,7 @@ else
   bad "dump is empty"
 fi
 
-say "3. the release: 155-158 from the candidate image's own alembic"
+say "3. the release: up to $EXPECT_HEAD from the candidate image's own alembic"
 if run_in_candidate 'cd /app && alembic upgrade head 2>&1 | tail -6'; then
   ok "upgraded to head"
 else
@@ -139,8 +151,8 @@ fi
 AT=$(run_in_candidate 'cd /app && alembic current 2>/dev/null | tail -1')
 printf '  at: %s\n' "$AT"
 case "$AT" in
-  *158*) ok "head is 158_reminder_delivery_state" ;;
-  *)     bad "head is not 158: $AT" ;;
+  *"$EXPECT_HEAD"*) ok "head is $EXPECT_HEAD" ;;
+  *) bad "head is not $EXPECT_HEAD: $AT" ;;
 esac
 
 say "4. the four tables the release needs actually exist"
