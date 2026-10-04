@@ -374,19 +374,43 @@ def chunk_sections(body: str) -> List[Chunk]:
     return chunks
 
 
+#: Embedding calls in flight at once.
+#:
+#: `get_embeddings_batch` fans every text out with `asyncio.gather`, which is
+#: right for its original callers — a handful of texts per chat turn. A paper
+#: is not a chat turn: the first real ingest sent all 56 chunks of the ACSM
+#: position stand at a single CPU-bound embedding container simultaneously,
+#: every request blew the 60-second read timeout, and the whole ingest failed
+#: with "the embedding backend returned no vector". Both lanes answer one
+#: call in well under a second; it was the fan-out that broke them.
+#:
+#: Four at a time, because this runs on the background lane precisely so it
+#: cannot crowd out presence work (§9), and 400 concurrent requests at the
+#: MAX_CHUNKS ceiling would crowd out everything.
+EMBED_CONCURRENCY = 4
+
+
 async def embed_chunks(chunks: Sequence[Chunk]) -> List[List[float]]:
     """Embeddings for every chunk, or a categorised failure.
 
     §28.1: never fabricate or pad. A vector of the wrong width that got
     padded is still searchable, so the search keeps working and the results
     stop meaning anything — which is strictly worse than an error.
+
+    Fanned out `EMBED_CONCURRENCY` at a time rather than all at once. See
+    that constant: the unbounded version made this path unusable for any
+    document long enough to be worth ingesting.
     """
     from app.services.embeddings import EmbeddingUnavailable, get_embeddings_batch
 
     try:
-        vectors = await get_embeddings_batch(
-            [chunk.text for chunk in chunks], capability=EMBEDDING_CAPABILITY,
-        )
+        vectors: List[List[float]] = []
+        for start in range(0, len(chunks), EMBED_CONCURRENCY):
+            group = chunks[start:start + EMBED_CONCURRENCY]
+            vectors.extend(await get_embeddings_batch(
+                [chunk.text for chunk in group],
+                capability=EMBEDDING_CAPABILITY,
+            ))
     except EmbeddingUnavailable as exc:
         raise ScienceError(
             f"The embedding backend returned no vector: {exc}. The record is "

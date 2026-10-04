@@ -1679,3 +1679,43 @@ def _insert_review(pg, user_id):
     })
     pg.commit()
     return review_id
+
+
+def test_embedding_fan_out_is_bounded():
+    """The first real paper ingest in production failed because
+    `get_embeddings_batch` gathers every text at once: 56 chunks became 56
+    concurrent requests at a single CPU-bound container, all of which blew
+    the 60-second read timeout.
+
+    Both lanes answer one call in well under a second, so the fan-out was
+    the whole defect — and it made the PDF upload door unusable for any
+    document long enough to be worth ingesting.
+    """
+    import asyncio
+
+    from app.services import embeddings as facade
+    from app.services.fitness import science
+
+    in_flight = {"now": 0, "peak": 0}
+
+    async def watched(texts, capability="embedding"):
+        in_flight["now"] += len(texts)
+        in_flight["peak"] = max(in_flight["peak"], in_flight["now"])
+        await asyncio.sleep(0)
+        in_flight["now"] -= len(texts)
+        return [_vector() for _ in texts]
+
+    chunks = [
+        science.Chunk(idx=i, text=f"passage {i}", section="Results",
+                      char_start=i * 10, char_end=i * 10 + 9)
+        for i in range(57)
+    ]
+    import unittest.mock as mock
+    with mock.patch.object(facade, "get_embeddings_batch", watched):
+        vectors = asyncio.run(science.embed_chunks(chunks))
+
+    assert len(vectors) == 57
+    assert in_flight["peak"] <= science.EMBED_CONCURRENCY, (
+        f"peaked at {in_flight['peak']} concurrent embedding calls; the "
+        f"bound is {science.EMBED_CONCURRENCY}"
+    )
