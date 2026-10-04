@@ -437,3 +437,91 @@ Three things a release would need that this verification does not supply:
 | 10 Advanced | done — scoped consented automation with bounds/receipts/revocation, qualified longitudinal summaries, narrow source contract, export and deletion |
 
 No phase is enabled for a user by this verification.
+
+---
+
+## 8. Deployed — and what deploying taught
+
+**Generation 4**, cut 2026-10-02 from `c8188c8d`. REHEARSAL PASSED, cutover
+VERIFIED on all six services, readiness probe READY. First generation to
+advance the schema (158 -> 174); the source-only rollback to generation 3 was
+proven against a 174 database *before* cutting over, and
+`/home/david/sara_hub_pre174_20261002.dump` (224M) is the full-restore route.
+`alembic downgrade` is not a third option.
+
+**Generation 5**, cut 2026-10-04 from `3c606c77`, same schema — because
+turning generation 4 on found two defects in the review path within minutes,
+and neither was reachable by any test or by the draft smoke script:
+
+| Defect | Why nothing caught it |
+|---|---|
+| `TREATMENT_TERMS` held the bare verb **"prescribe"** — the central verb of strength programming, ~69 uses in this subsystem's own code, with the typed schema classes literally named `PrescribedSet`/`PrescribedSlot`/`PrescribedSession`. The first production review was refused as "treatment advice", and every review discussing prescribed volume would have been. | The unit tests assert that specific forbidden terms ARE caught; none asserted that ordinary coaching language passes. A list of banned words is only half a specification. |
+| The fabricated-citation check was **unconditional**. Correct while no corpus is attached, wrong the instant one is. | It could only surface after somebody accepted their first paper — reviews suddenly refused for citing the library they had just built. The library is empty, so no test exercised the other branch. |
+
+Both fixed. `check_text`, `check_language` and `validate_output` now take
+`evidence_attached`, which `reviews.generate` passes from the retrieval it
+already performs. Attaching a library relaxes the citation rule and nothing
+else: a diagnosis is still refused.
+
+"Prescribe" was the **third** instance of one bug class, after `"take a"`
+(which rejected "take a deload" on the first live model run) and
+`"rotator cuff"` (a smoke script's own copy flagging "rotator cuff health").
+The rule is now enforced in the list itself — NAMED SUBSTANCES ONLY, no bare
+verbs — with a test asserting it, because a comment did not stop the third
+one.
+
+### The gap in this checklist
+
+Every pre-cutover gate above is rigorous about transport, schema, recovery
+and whether the pinned pair *starts*. **None of them asked whether the thing
+produces usable output for the person who uses it.** The draft smoke
+exercises the draft prompt; nothing exercised the REVIEW prompt against real
+data until it was run by hand, after the cutover. That is how an unusable
+review path shipped in generation 4, and it cost an extra generation.
+
+A review smoke cannot simply be added to `rehearse_reliable_release.sh`:
+that script's network is deliberately `internal: true` and cannot reach the
+inference hosts, which is the property making it safe to run. So it belongs
+beside the vision and draft probes as an explicit pre-cutover step, on the
+host network, against the real athlete — request a review for a period that
+has no row yet, generate it, and require `status == complete`.
+
+One trap worth recording for whoever writes it: `force=True` is NOT enough
+to get a fresh review. It only applies when the data has MOVED since an
+existing review, so on unchanged data `generate` short-circuits on its
+"already answered" path and returns the previous verdict without calling the
+model at all. During this release that looked exactly like a second failure
+and was not one — the giveaway was `notes: this review was already
+complete`. Use a distinct period instead.
+
+### Final production state
+
+    GENERATION 5   sara-coach-candidate:20261004
+                   frozen /home/david/sara-candidate-20261004-coach2
+                   manifest e239a470 | schema 174_fitness_automation
+    VERIFIED       six services, /app/app read-only
+    READY          schema | authenticates | writes a note | reads it back
+    FLAGS          FITNESS_COACH_REVIEW=on  FITNESS_COACH_PROACTIVE=on
+    SECOND GATES   cadences 0 | automation policies 0 | science records 0
+
+Both flags on does not mean Sara starts talking. Proactive coaching needs a
+cadence opt-in per kind and there are none; automation needs a policy with
+numeric bounds, a rate limit, a coverage floor and an expiry, and there are
+none. Those bounds are the athlete's consent expressed as numbers, and
+nothing here will invent them.
+
+### The first production review, for the record
+
+Period 2026-09-04 to 2026-10-02, `complete`, confidence moderate:
+
+> Priority: establish consistent nutrition logging to validate the recomp
+> target, as current weight stability cannot be attributed to dietary
+> adherence without data.
+
+240.0 lb stable across 23 of 28 days, training adherence 73.9% (17 of 23
+sessions), nutrition 0 of 28 days logged, sleep 7.37h over 16 nights with
+1.20h variability. Three recommendations, two of them proposing no change.
+It volunteered that weight stability cannot be attributed to anything
+without intake data — which is the whole point of the coverage contract:
+stable weight with no food logs is precisely where a worse system says the
+recomp is working.
