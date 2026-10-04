@@ -304,7 +304,7 @@ four steps is live without somebody turning it on.
 | Proactive coaching questions | **off** | per-kind cadence, opt-in per athlete |
 | Photo analysis | **off** | per-photo consent **and** a probed vision endpoint |
 | Science refresh discovery | **not wired** | no discovery source is configured; §28.7 — this plan is not a supplied corpus |
-| Science library | **empty** | nothing is accepted until a curator accepts it with a reason |
+| Science library | **50 papers, 0 accepted** | nothing is RETRIEVABLE until a curator accepts it with a reason; ingesting is not endorsement (§9) |
 | Program draft activation | **manual only** | owner-origin acceptance; a model-attributed one is refused by service and database |
 | Automation policies | **none exist** | `enabled` defaults FALSE, `expires_at` is required, one policy per action |
 | Source adapters | **registered, disabled** | HealthKit is described but not enabled; the existing ingest path is untouched |
@@ -355,11 +355,13 @@ Three things a release would need that this verification does not supply:
 
 ## 6. Known gaps and honest caveats
 
-* **The science library is empty.** §28.7 is explicit that the plan is not a
-  corpus, and seeding one with invented DOIs would be worse than nothing.
-  Retrieval, curation, citation and refresh are built and tested; evidence
-  coverage is zero until a human ingests papers and accepts them. Every
-  surface says so rather than implying otherwise.
+* **The science library holds 50 papers and none is accepted.** It was
+  empty at release — §28.7 is explicit that the plan is not a corpus, and
+  seeding one with invented DOIs would be worse than nothing. A real corpus
+  arrived on 2026-10-04 (§9). Evidence coverage is still effectively zero,
+  because `science.search` returns accepted records only and acceptance
+  needs a reason and a limitations note per paper. Every surface says so
+  rather than implying otherwise.
 * **No discovery source for the monthly refresh.** It records an attempt and
   explains why it did nothing. That is deliberate, and the test
   `test_no_discovery_source_is_an_honest_no_op` pins it.
@@ -432,7 +434,7 @@ Three things a release would need that this verification does not supply:
 | 5 Weekly Coach | done — queued request, validated local output, audit, results UI, receipts; flag-gated |
 | 6 Proactive | done — opt-in cadences, occurrence ledger, existing delivery policies |
 | 7 Photos/Vision | done — hardened storage, probed opt-in vision, structured uncertainty, no composition claims |
-| 8 Science | **built, empty** — retrieval/curation/citation/refresh tested; corpus is a human task |
+| 8 Science | done — retrieval/curation/citation/refresh tested; 50-paper corpus ingested 2026-10-04, **0 accepted**, so nothing is retrievable yet |
 | 9 Programs | done — typed versioned plans, one writer, inspectable drafts, explicit activation, deterministic progression, unchanged past |
 | 10 Advanced | done — scoped consented automation with bounds/receipts/revocation, qualified longitudinal summaries, narrow source contract, export and deletion |
 
@@ -502,7 +504,7 @@ complete`. Use a distinct period instead.
     VERIFIED       six services, /app/app read-only
     READY          schema | authenticates | writes a note | reads it back
     FLAGS          FITNESS_COACH_REVIEW=on  FITNESS_COACH_PROACTIVE=on
-    SECOND GATES   cadences 0 | automation policies 0 | science records 0
+    SECOND GATES   cadences 0 | automation policies 0 | science records ACCEPTED 0
 
 Both flags on does not mean Sara starts talking. Proactive coaching needs a
 cadence opt-in per kind and there are none; automation needs a policy with
@@ -525,3 +527,89 @@ It volunteered that weight stability cannot be attributed to anything
 without intake data — which is the whole point of the coverage contract:
 stable weight with no food logs is precisely where a worse system says the
 recomp is working.
+
+---
+
+## 9. The founding corpus — 50 papers, 2026-10-04
+
+§28.7 says the plan is not a corpus, and the library shipped empty for that
+reason. A real one arrived the same day the coach went live: 50 papers,
+given as a list of links, covering load and failure proximity, volume and
+frequency, periodisation and autoregulation, concurrent training,
+nutrition, supplements, sleep, mobility and body-composition assessment.
+
+**All 50 are stored. None is accepted, so none is retrievable.** That is not
+a backlog, it is the contract: `science.search` filters to accepted records
+and `coverage` reports accepted totals, so the corpus is inert until a
+curator accepts each paper with a reason and a limitations note. Searching
+`"weekly set volume for hypertrophy"` against the loaded library returns
+**0 hits**, and that is the gate working, not a failure.
+
+| | |
+|---|---|
+| records | 50, every one `unreviewed` |
+| chunks stored | 2,367 |
+| chunks retrievable | **0** |
+| accepted | **0** |
+| failed / duplicate / skipped | 0 / 0 / 0 |
+| needed DOI resolution | 4 (#24, #39, #41, #43) — first refused as non-full-text |
+| distinct DOIs / titles | 50 / 50 — nothing double-registered |
+
+### What ingesting a real corpus taught
+
+**A PMC article page is mostly not the article.** Fed whole, a page yields
+250-400 chunks of navigation, affiliations, figure captions and — worst —
+the reference list. A bibliography is dense, well-formed, retrievable prose
+that says nothing, so `science.search` would have been able to return a
+numbered citation as support for a programming claim. Keeping the abstract
+and body section and dropping the ref-list section cut a typical paper to
+25-110 chunks of actual argument.
+
+**`source_type` cannot be inferred from body text.** The first pass matched
+`position stand|consensus` against the title plus the opening 1,500
+characters, and a systematic review whose introduction says "there is
+consensus that…" was filed as a position stand. Three of 46 were wrong this
+way. A title-only re-derivation corrected 3, confirmed 38 and left 5
+inconclusive. `source_type` feeds `TYPE_WEIGHT`, the ranking fallback used
+before a curator grades a paper, so a wrong one quietly mis-ranks rather
+than breaking — which is why nothing caught it.
+
+**A closed-looking link is not a closed paper.** Four of the 50 were refused
+on the first pass as non-full-text: three Springer pages and one PubMed
+abstract. All four had open full text. Resolving their DOIs through the NCBI
+id converter found PMC mirrors for three; Unpaywall found the fourth open
+access at an institutional repository, where the file turned out to be the
+published BMJ version of record despite being labelled a submitted version.
+Refusing the *page* was right; concluding the *paper* was unreachable was
+not, and "I could not get it" needed one more question asked of it.
+
+**Reference-stripping does not generalise from HTML to PDF.** The BJSM
+consensus arrived as a 139,806-character PDF with *three* `REFERENCES`
+headings — the article's own at 51%, then supplementary material with two
+more. Cutting at the last would have dropped 1,300 characters and kept two
+bibliographies as retrievable chunks. It is cut at the first instead, which
+keeps the complete 13-page article and discards the bibliography and the
+supplement together; the record's `notes` says so, because a curator needs
+to know the supplement is not behind it.
+
+**Embedding is the bottleneck and it had to be bounded.** The first real
+paper exposed the defect that cut generation 6: `embed_chunks` fired every
+chunk at once, 56 concurrent requests at a service that is fast for one, and
+every request timed out at 60s with nothing stored. Four in flight is the
+cap. Cost at that cap: 56-273 seconds per paper, ~2.2 hours for 50.
+
+**Tooling is committed, not improvised.** The ingest ran from a script that
+existed only in a scratchpad. It is now
+`backend/scripts/ingest_science_corpus.py`, with the corpus itself at
+`backend/scripts/corpora/fitness_core_50.tsv` — identifiers rather than
+links, since three of the original links were the wrong door to the right
+paper. `--resolve` prints the plan and registers nothing.
+
+**One UI claim went stale the moment the corpus landed.** With records
+stored and none accepted, the Science Library said "The library is empty, so
+there was nothing to search" — true of acceptance, false of the library, and
+it reads as though the upload failed. The page now distinguishes stored from
+accepted in both places, and a test pins the state production is actually in
+(50 stored, 0 accepted) rather than only the empty and the populated cases
+it had before. Forbidden-word lists are half a specification; so are empty
+states.

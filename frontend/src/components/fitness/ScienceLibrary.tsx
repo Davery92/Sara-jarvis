@@ -318,6 +318,11 @@ export default function ScienceLibrary() {
   }
 
   const accepted = coverage.data?.accepted_total ?? 0
+  //: Every record, whatever its status. Distinct from `accepted` on purpose:
+  //: a full library with nothing accepted is NOT an empty library, and
+  //: saying "empty" after an ingest reads as though the upload failed.
+  const stored = Object.values(coverage.data?.by_status ?? {})
+    .reduce((sum, count) => sum + (count ?? 0), 0)
 
   return (
     <div className="p-6 space-y-8 max-w-[900px]" data-testid="science-library">
@@ -329,7 +334,11 @@ export default function ScienceLibrary() {
             <p className="text-sm text-slate-500">Loading…</p>
           ) : accepted === 0 ? (
             <Note message={
-              'No accepted papers yet. Until you accept something, Sara has '
+              (stored === 0
+                ? 'No accepted papers yet. '
+                : `${stored} ${stored === 1 ? 'paper' : 'papers'} stored, none `
+                  + 'accepted yet. ')
+              + 'Until you accept something, Sara has '
               + 'no library to cite and will say so rather than answering '
               + 'from memory.'
             } />
@@ -565,7 +574,11 @@ export default function ScienceLibrary() {
           {hits !== null && hits.length === 0 && (
             <Note message={
               accepted === 0
-                ? 'The library is empty, so there was nothing to search.'
+                ? (stored === 0
+                    ? 'The library is empty, so there was nothing to search.'
+                    : `Nothing is accepted yet, so there was nothing to `
+                      + `search. ${stored} ${stored === 1 ? 'paper is' : 'papers are'} `
+                      + `stored and waiting on review.`)
                 : `Nothing in the ${accepted} accepted papers matches that.`
             } />
           )}

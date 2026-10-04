@@ -1,0 +1,73 @@
+# The founding science corpus: 50 papers, ingested 2026-10-04.
+#
+# Numbering is the order they were given in. All 50 have open full text;
+# the four that at first looked closed (24, 39, 41 Springer-hosted, 43 a
+# PubMed abstract page) all resolved to open versions, which is why this
+# file records identifiers rather than the original links — resolve the
+# DOI before believing a paper is unreachable.
+#
+# Ingesting is not accepting. Every record lands `unreviewed` and is
+# therefore NOT retrievable; search_evidence returns accepted records only.
+#
+#   docker exec -w /app -e PYTHONPATH=/app jarvis-backend-1 python -u \
+#     scripts/ingest_science_corpus.py --corpus scripts/corpora/fitness_core_50.tsv
+#
+# ---- programming: load, failure proximity, volume, ROM ------------------
+PMC12965823	hypertrophy,strength	# 1 ACSM resistance-training position stand
+PMC10579494	strength,hypertrophy	# 2 RT prescription: strength & hypertrophy
+PMC9302196	hypertrophy	# 3 RT variables for hypertrophy
+PMC10818109	hypertrophy,strength	# 4 RT prescription umbrella review
+PMC8126497	hypertrophy,strength	# 5 training loads
+PMC8582674	hypertrophy,strength	# 6 loads in trained/untrained men
+PMC9068575	hypertrophy	# 7 failure vs non-failure
+PMC9935748	hypertrophy	# 8 proximity to failure
+PMC11127506	strength,hypertrophy	# 9 repetitions-in-reserve scales
+PMC11349676	hypertrophy,recovery	# 10 inter-set rest
+PMC6977096	hypertrophy	# 11 range of motion
+PMC12869050	hypertrophy	# 12 long-muscle-length training
+PMC7068252	hypertrophy	# 13 whole-body muscle growth
+PMC6950543	hypertrophy	# 14 advanced techniques
+PMC8363540	hypertrophy,strength	# 15 frequency in trained populations
+PMC6081873	strength	# 16 weekly frequency & strength
+# ---- periodisation and autoregulation -----------------------------------
+PMC5571788	strength	# 17 linear vs daily undulating
+PMC6351492	strength,hypertrophy	# 18 periodized RT
+PMC12336695	strength	# 19 autoregulated RT
+PMC7706636	strength,recovery	# 20 regulating & monitoring RT
+PMC7575491	strength	# 21 autoregulation
+PMC8601436	strength	# 22 velocity- vs percentage-based
+PMC12870409	strength	# 23 VBT in trained athletes
+10.1007/s40279-025-02305-3	strength	# 24 powerlifting sport science (-> PMC12559058)
+PMC8891239	cardio,strength	# 25 concurrent training
+PMC9474354	cardio,hypertrophy	# 26 concurrent training & fibre hypertrophy
+# ---- nutrition ----------------------------------------------------------
+PMC5477153	nutrition	# 27 ISSN protein & exercise
+PMC5867436	nutrition,hypertrophy	# 28 protein supplementation meta-analysis
+PMC5470183	nutrition	# 29 ISSN diets & body composition
+PMC6710320	nutrition,hypertrophy	# 30 energy surplus & hypertrophy
+PMC5786199	nutrition	# 31 overfeeding & body composition
+PMC4033492	nutrition	# 32 natural bodybuilding contest prep
+PMC7052702	nutrition	# 33 physique athlete recommendations
+PMC5596471	nutrition	# 34 ISSN nutrient timing
+# ---- supplements --------------------------------------------------------
+PMC5469049	supplements	# 35 ISSN creatine
+PMC11268231	supplements,nutrition	# 36 creatine & body composition
+PMC11547435	supplements,strength	# 37 creatine + RT strength
+PMC10180745	supplements,hypertrophy	# 38 creatine & regional hypertrophy
+10.1186/s12970-020-00383-4	supplements	# 39 ISSN caffeine (-> PMC7777221)
+PMC4501114	supplements	# 40 ISSN beta-alanine
+10.1186/s12970-021-00458-w	supplements	# 41 ISSN sodium bicarbonate (-> PMC8427947)
+PMC3568064	supplements	# 42 ISSN HMB
+# ---- sleep and recovery -------------------------------------------------
+# 43 BJSM sleep consensus (10.1136/bjsports-2020-102025) is open access but
+# NOT in PMC: bronze OA, published-version PDF at bjsm.bmj.com. It was
+# ingested from that PDF with the reference list cut off the tail, which
+# this PMC-shaped script does not do. Re-ingesting it needs that handling.
+PMC10354314	sleep	# 44 sleep interventions & performance
+PMC9584849	sleep	# 45 acute sleep loss
+PMC11824781	sleep	# 46 sleep interventions in elite sport
+# ---- mobility, assessment, exercise selection ---------------------------
+PMC9935664	hypertrophy,injury	# 47 RT & range of motion
+PMC11026323	hypertrophy,injury	# 48 chronic static stretching
+PMC8150618	nutrition	# 49 body composition assessment
+PMC13619985	hypertrophy	# 50 lower-extremity exercise selection

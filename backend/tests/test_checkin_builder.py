@@ -109,17 +109,26 @@ class TestChangesCheckin:
 
 
 class TestLearningReviewCheckin:
-    def test_learning_reviews_checkin(self, make_snapshot_ctx):
-        snap = make_snapshot_ctx(hours_since_last_chat=3.0, learning_reviews_due=2)
-        result = build_checkin(snap, changes=[])
-        assert result is not None
-        assert "learning review" in result["message"].lower()
+    """Learning reviews no longer cause a check-in, deliberately.
 
-    def test_many_reviews_piling_up(self, make_snapshot_ctx):
+    `build_checkin` hard-codes `has_reviews = False`: due reviews are not a
+    reason to interrupt, because "you have N things waiting" is the shape of
+    nag that gets re-sent every cycle until it is acted on. These tests used
+    to assert the opposite and had been failing silently ever since the
+    branch was switched off — a red test nobody reads hides the next real
+    regression, so they now pin the intent instead of the old behaviour.
+
+    If reviews are ever meant to speak again, the message-building code is
+    still there below the flag; re-enable it and invert these two.
+    """
+
+    def test_due_reviews_alone_do_not_interrupt(self, make_snapshot_ctx):
+        snap = make_snapshot_ctx(hours_since_last_chat=3.0, learning_reviews_due=2)
+        assert build_checkin(snap, changes=[]) is None
+
+    def test_many_reviews_piling_up_still_do_not_interrupt(self, make_snapshot_ctx):
         snap = make_snapshot_ctx(hours_since_last_chat=3.0, learning_reviews_due=8)
-        result = build_checkin(snap, changes=[])
-        assert result is not None
-        assert "piling up" in result["message"]
+        assert build_checkin(snap, changes=[]) is None
 
 
 class TestActiveProjectCheckin:
@@ -158,8 +167,11 @@ class TestTitleBuilding:
 
 class TestReturnFormat:
     def test_returns_dict_format(self, make_snapshot_ctx):
-        snap = make_snapshot_ctx(hours_since_last_chat=3.0, learning_reviews_due=2)
-        result = build_checkin(snap, changes=[])
+        # `changes`, not `learning_reviews_due`: due reviews no longer trigger
+        # a check-in, so the original snapshot produced None and this asserted
+        # the shape of nothing.
+        snap = make_snapshot_ctx(hours_since_last_chat=3.0)
+        result = build_checkin(snap, changes=["A thing happened"])
         assert result is not None
         assert "title" in result
         assert "message" in result

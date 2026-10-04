@@ -160,7 +160,7 @@ All services use systemd with:
 - Environment variables for database and LLM access
 
 <!-- BEGIN GENERATED -->
-_Regenerated 2026-10-02 by truth-maintenance._
+_Regenerated 2026-10-04 by truth-maintenance._
 
 ## Scheduled Jobs
 
@@ -216,6 +216,9 @@ These are the jobs actually enabled in `scheduled_job` right now — not a remem
 | **daily-brief-context-update** | `0 23 * * *` | cognitive | Daily 11 PM context-layer update |
 | **daily-brief-weekly-synthesis** | `0 3 * * 0` | cognitive | Sunday 3 AM weekly synthesis of the stable layer |
 | **email-sync** | `every 3 min` | low_priority | Fetches new emails from MS Graph every 3 minutes |
+| **fitness_coaching_due_sweep** | `every 5 min` | health | Claims due per-athlete coaching occurrences and enqueues them |
+| **fitness_photo_cleanup_retry** | `20 * * * *` | maintenance | Retries object-storage deletes for photos whose rows are marked pending_cleanup |
+| **fitness_recommendation_expiry** | `15 4 * * *` | maintenance | Marks passed-deadline coaching proposals expired |
 | **buffer-cleanup** | `every 5 min` | maintenance | Removes expired entries from the raw observation buffer (TTL enforcement) |
 | **consolidation-watcher** | `every 1 min` | critical | Checks every minute if a quiet period has been reached, then triggers consolidation |
 | **context-refresh** | `every 1 min` | critical | Refreshes the working memory context window every minute |

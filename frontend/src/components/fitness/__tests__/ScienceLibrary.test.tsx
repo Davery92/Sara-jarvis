@@ -184,6 +184,22 @@ describe('accepted versus new', () => {
       .toContain('will say so rather than answering')
   })
 
+  it('distinguishes a full unreviewed library from an empty one', async () => {
+    // The state production was actually in on 2026-10-04: 50 papers
+    // ingested, none accepted. The copy used to say "the library is empty"
+    // for this, which reads as though the upload failed. Both numbers have
+    // to be visible — stored is not accepted, and neither is zero here.
+    coverageBody = coverage({ by_status: { unreviewed: 50, accepted: 0 } })
+    wrap(<ScienceLibrary />)
+    await waitFor(() => expect(
+      (screen.getByTestId('coverage').textContent ?? '')
+        .includes('50 papers stored, none accepted yet'),
+    ).toBe(true))
+    const text = screen.getByTestId('coverage').textContent ?? ''
+    expect(text).toContain('no library to cite')
+    expect(text).not.toContain('No accepted papers yet')
+  })
+
   it('names the topics with no accepted evidence', async () => {
     coverageBody = coverage({
       accepted_total: 2,

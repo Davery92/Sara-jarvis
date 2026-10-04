@@ -296,7 +296,7 @@ All tools are defined in `backend/app/tools/` and registered in `backend/app/too
 **Total Tools: 107+** across 19 categories
 
 <!-- BEGIN GENERATED -->
-_Regenerated 2026-10-02 by truth-maintenance._
+_Regenerated 2026-10-04 by truth-maintenance._
 
 ## Tools You Actually Have
 
@@ -365,7 +365,7 @@ Search, read, and get summaries of emails from synced mailboxes, and file their 
 ### fitness
 Track and manage fitness, nutrition, workouts, recovery, training programs and phases
 
-`fitness_summary`, `fitness_note_create`, `fitness_note_search`, `fitness_note_edit`, `food_search_and_log`, `food_log_create`, `food_log_correct`, `food_log_search`, `food_log_summary`, `workout_list`, `workout_log_create`, `workout_log_correct`, `workout_details`, `workout_stats`, `recovery_log_create`, `recovery_log_get`, `recovery_log_recent`, `template_list`, `template_get`, `template_create`, `template_update`, `template_delete`, `program_list`, `program_get`, `program_create`, `program_update`, `program_activate`, `program_delete`, `phase_list`, `phase_get`, `phase_create`, `phase_update`, `phase_activate`, `phase_delete`, `training_schedule`, `workout_suggest`, `start_workout`, `end_workout`, `workout_mode_log`, `workout_history`
+`fitness_summary`, `fitness_note_create`, `fitness_note_search`, `fitness_note_edit`, `food_search_and_log`, `food_log_create`, `food_log_correct`, `food_log_search`, `food_log_summary`, `workout_list`, `workout_log_create`, `workout_log_correct`, `workout_details`, `workout_stats`, `recovery_log_create`, `recovery_log_get`, `recovery_log_recent`, `template_list`, `template_get`, `template_create`, `template_update`, `template_delete`, `program_list`, `program_get`, `program_create`, `program_update`, `program_activate`, `program_delete`, `phase_list`, `phase_get`, `phase_create`, `phase_update`, `phase_activate`, `phase_delete`, `training_schedule`, `workout_suggest`, `start_workout`, `end_workout`, `workout_mode_log`, `workout_history`, `fitness_profile_get`, `fitness_analytics_get`, `fitness_measurements_get`, `fitness_coach_review_get`, `fitness_checkin_update`, `fitness_measurement_log`, `fitness_coach_review_request`, `fitness_recommendation_decide`, `fitness_science_search`
 
 ### fleet
 Check the health of David's machines (his fleet) and run read-only diagnostics on any agent-equipped box — CPU/memory/disk/temp, open alerts, and safe commands like df/journalctl/top
